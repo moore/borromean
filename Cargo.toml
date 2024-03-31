@@ -2,6 +2,12 @@
 name = "borromean"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
+description = "Efficient multi-collection storage for flash devices."
+homepage = "https://github.com/moore/borromean"
+repository = "https://github.com/moore/borromean"
+readme = "README.md"
+keywords = ["embeded", "nostd", "storage", "flash", "collections"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
