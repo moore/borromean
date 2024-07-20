@@ -12,3 +12,5 @@ keywords = ["embeded", "nostd", "storage", "flash", "collections"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+rkyv = { version = "0.7.44", features = ["validation"] }
+
