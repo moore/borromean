@@ -18,6 +18,9 @@ use rkyv::{
     AlignedBytes,
 };
 
+#[cfg(test)]
+mod tests;
+
 mod io;
 
 pub struct Storage<const MAX_HEADS: usize> {
@@ -123,9 +126,3 @@ struct Head {
 struct FreePointer {
     next: u64,
 }
-
-
-
-
-#[cfg(test)]
-mod tests;
