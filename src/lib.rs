@@ -37,6 +37,7 @@ pub struct Storage<const MAX_HEADS: usize> {
 #[archive_attr(derive(Debug))]
 struct StorageMeta {
     format_version: u32,
+    first_region_offset: u32,
     page_size: u32,
     erase_size: u32,
     region_size:u32,
@@ -47,7 +48,10 @@ struct StorageMeta {
 pub enum StorageError {
     EraseNotPageAligned,
     RegionNotPageAligned,
+    RegionAlignmentError,
     SerializerError(BufferSerializerError),
+    ArithmeticOverflow,
+    InternalError,
 }
 
 impl From<BufferSerializerError> for StorageError {
@@ -58,6 +62,7 @@ impl From<BufferSerializerError> for StorageError {
 
 impl StorageMeta {
     pub fn new(
+        first_region_offset: u32,
         page_size: u32,
         erase_size: u32,
         region_size:u32,
@@ -72,10 +77,15 @@ impl StorageMeta {
             return Err(StorageError::RegionNotPageAligned)
         }
 
+        if first_region_offset % erase_size != 0 {
+            return Err(StorageError::RegionAlignmentError)
+        }
+
         let format_version = 0;
 
         Ok(StorageMeta {
             format_version,
+            first_region_offset,
             page_size,
             erase_size,
             region_size,
