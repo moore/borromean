@@ -43,14 +43,18 @@ The information in the head is the type of data stored in the region, the id for
 
 ## Storage Metadata
 
-```alloy 
+```alloy
 one sig StorageMetadata {
 	storage_version: int,
 	region_size: int,
 	region_count: int,
 }
 ```
+
+The `StorageMetadata` struct describes the version of the storage as well as the size of each region in bytes and the number of regions in the database.
+
 ## Region
+
 The core type of the ring is the `Region`. The available storage space is divided up into
 equal size regions that are ease block aligned. 
 
@@ -84,13 +88,20 @@ fact {
 }
 ```
 
+Each `region` has a `header` that both describes the contents of the region as well lists the current head of each collection.
+
+## Free Pointer
+
 ```alloy
 sig FreePointer {
 	next_tail: lone Region,
 }
 ```
+
 The `next_tail` points to the region  added to the free list after this one. It is therefor written not when the region containing the free pointer is written but when the next region is freed.
 
+
+## Header
 
 ```alloy
 sig Header {

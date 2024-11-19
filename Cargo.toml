@@ -12,6 +12,7 @@ keywords = ["embeded", "nostd", "storage", "flash", "collections"]
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-heapless = "0.8.0"
-rkyv = { version = "0.7.44", features = ["validation"] }
+heapless = { version = "0.8.0", features = ["serde"] }
+postcard = "1.0.8"
+serde = "1.0.204"
 

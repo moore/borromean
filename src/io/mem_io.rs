@@ -3,9 +3,10 @@ extern crate alloc;
 use alloc::{vec, vec::Vec};
 use core::mem::size_of;
 
-use rkyv::{
-    archived_value,
-};
+use serde::{Serialize, Deserialize};
+use postcard::{from_bytes, to_slice};
+
+use heapless::vec;
 
 use crate::{
     StorageError, 
@@ -108,4 +109,99 @@ impl<const MAX_HEADS: usize> Io<MAX_HEADS> for MemIo {
     fn get_region<'a>(&'a self, index: u64) -> Result<Region<'a, MAX_HEADS>, IoError> {
         unimplemented!()
     }
+}
+
+
+pub struct Region<'a, const MAX_HEADS: usize> {
+    pub index: u64,
+    pub header: &'a Header<MAX_HEADS>,
+    pub data: &'a [u8],
+    pub free_pointer: &'a FreePointer,
+}
+
+
+#[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
+struct StorageMetaStruct {
+    format_version: u32,
+    first_region_offset: u32,
+    page_size: u32,
+    erase_size: u32,
+    region_size:u32,
+    region_count:u64,
+}
+
+
+
+impl From<postcard::Error> for StorageError {
+    fn from(value: postcard::Error) -> Self {
+        return StorageError::SerializerError(value)
+    }
+}
+
+impl StorageMeta {
+    pub fn new(
+        first_region_offset: u32,
+        page_size: u32,
+        erase_size: u32,
+        region_size:u32,
+        region_count:u64,
+    ) -> Result<Self, StorageError> {
+
+        if (erase_size != 1) && (erase_size % page_size != 0) {
+            return Err(StorageError::EraseNotPageAligned);
+        }
+
+        if region_size % page_size != 0 {
+            return Err(StorageError::RegionNotPageAligned)
+        }
+
+        if first_region_offset % erase_size != 0 {
+            return Err(StorageError::RegionAlignmentError)
+        }
+
+        let format_version = 0;
+
+        Ok(StorageMeta {
+            format_version,
+            first_region_offset,
+            page_size,
+            erase_size,
+            region_size,
+            region_count,
+        })
+    }
+
+    pub fn write(&self, buffer: &mut [u8], offset: usize) -> Result<usize, StorageError> {
+
+        let used = to_slice(&self, &mut buffer[offset..])?;
+        
+        let Some(new_offset) = offset.checked_add(used.len()) else {
+            return Err(StorageError::ArithmeticOverflow);
+        };
+
+        Ok(new_offset)
+       
+    }
+}
+
+
+#[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
+struct Header<const MAX_HEADS: usize> {
+    sequence: u64,
+    collection_id: u32,
+    heads: Vec<Head, MAX_HEADS>,
+    free_list_head: u64,
+    free_list_tail: u64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
+struct Head {
+    collection_id: u32,
+    region: u64,
+}
+
+
+#[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
+struct FreePointer {
+    next: u64,
 }
