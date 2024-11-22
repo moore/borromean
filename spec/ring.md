@@ -4,28 +4,51 @@ title: Low Level Storage
 
 ## Motivation
 
-When using the built in flash storage on small microcontrollers some sort of database or file system is needed. This both allows the management of multiple objects in flash but also preforms ware leveling on the flash to increase longevity of the storage.
+When using the built in flash storage on small microcontrollers some
+sort of database or file system is needed. This both allows the
+management of multiple objects in flash but also preforms ware
+leveling on the flash to increase longevity of the storage.
 
-Some RTOSes include a file systems, and there embedded databases such as
-[ekv](https://github.com/embassy-rs/ekv), [tickv](https://github.com/tock/tock/tree/master/libraries/tickv), and [sequential-storage](https://github.com/tweedegolf/sequential-storage), but none of these options fit the needs of [finder](https://github.com/moore/finder).
+Some RTOSes include a file systems, and there embedded databases such
+as [ekv](https://github.com/embassy-rs/ekv),
+[tickv](https://github.com/tock/tock/tree/master/libraries/tickv), and
+[sequential-storage](https://github.com/tweedegolf/sequential-storage),
+but none of these options fit the needs of
+[finder](https://github.com/moore/finder).
 
-For finder we need to support many different instances of many types of collections: maps, queues, set, logs, etc. For each of these types we require efficient query, allocation and truncations.
+For finder we need to support many different instances of many types
+of collections: maps, queues, set, logs, etc. For each of these types
+we require efficient query, allocation and truncations.
 
 If we used an RTOS this might be achievable using a file system but in
 finder we plan on using embassy/bare metal approach without this option.
 
 ## Overview
 
-To solve these challenges borromean works by dividing the flash up 
-into equal size regions. Each collection is implemented as a append only data structure where new writes are added to the head region and data can only be freed by truncating the tail. For each collection stored in the borromean database there is a current head region, and a collection id which is tracked by the storage system. The use of the data in each region is left to the implantation of the specific collection type.
+To solve these challenges borromean works by dividing the flash up
+into equal size regions. Each collection is implemented as a append
+only data structure where new writes are added to the head region and
+data can only be freed by truncating the tail. For each collection
+stored in the borromean database there is a current head region, and a
+collection id which is tracked by the storage system. The use of the
+data in each region is left to the implantation of the specific
+collection type.
 
-The storage system also keeps a free list of regions that are available to satisfy new allocations. This list is a FIFO (First In First Out) list which provides for ware leveling.
+The storage system also keeps a free list of regions that are
+available to satisfy new allocations. This list is a FIFO (First In
+First Out) list which provides for ware leveling.
 
 ### Storage Structure
 
-The storage on disk starts with a static storage meta region that describes the version and other configuration parameters of the storage that can not be changed after initialization.
+The storage on disk starts with a static storage meta region that
+describes the version and other configuration parameters of the
+storage that can not be changed after initialization.
 
-The rest of the database is made of of regions. Each region has a header, user data, and a free pointer. The header describes the region as well as contains pointers to the free list and heads of other collections. The free pointer us used to store the location of the next free region in each region that has been freed.
+The rest of the database is made of of regions. Each region has a
+header, user data, and a free pointer. The header describes the region
+as well as contains pointers to the free list and heads of other
+collections. The free pointer us used to store the location of the
+next free region in each region that has been freed.
 
 ```mermaid
 block-beta
@@ -53,36 +76,32 @@ block-beta
 
 ### Challenges
 
-The core design constraint is that we can not have any stable locations that get repeatedly rewritten or those regions of the flash will fail before the rest of the device. This leads to two main conclusions:
+The core design constraint is that we can not have any stable
+locations that get repeatedly rewritten or those regions of the flash
+will fail before the rest of the device. This leads to two main
+conclusions:
 
  1. We should alway attempt to free the oldest regions first.
  2. All data structures should be log structured/append only.
 
-Freeing the oldest first will have to be preformed on a per collection basis as each collection is responsible for it's own data and is opaque to borromean.
+Freeing the oldest first will have to be preformed on a per collection
+basis as each collection is responsible for it's own data and is
+opaque to borromean.
 
-The requirement that data structures be append only implicates not just the implementation of collection types but also the management of:
+The requirement that data structures be append only implicates not
+just the implementation of collection types but also the management
+of:
 
  1. The current heads of each collection instance.
  2. The tracking of free regions.
  3. The tracking of the root of the database.
 
-========
-
-The goal is to build a system that given a linear range of storage can store multiple collections of data with different types (list, map, log, etc) in a way were allocation are fast and writes are preformed with ware leveling so it can be used with flash backed storage.
-
-This approach will divide the problem up in to two levels. The management of a set of regions, and the implementation collections types on top of the regions.
-
-Free regions are maintained in a linked list, but because all allocation are for a fixed size region the head of the list can always satisfy an allocation request making allocation fast.
-
-The meta data about the storage is stored in each region when it is allocated. This includes the head of the free list as well as the most recently allocated region for each collection. Along with this whole storage level information the each region stores the id and type of the data contained in it.
-
-When the database is opened if the head is not known that all regions must be scanned looking in for the one with the larges sequence number.
-
-
-The idea is that we divide up the available storage in to equal sized `Region`s each of which has a header which describes the over all state of storage when it was written and the type of data held in the `Region`. The last page of the `Region` hold a pointer to the next free `Region`. The next free pointer page in written when the following `Region` is freed so that when the current `Region` is reused that `Region` becomes the head.
-
-The information in the head is the type of data stored in the region, the id for the data set stored in the region and a list of the head regions for each data set stored in the storage by id.
-
+Each of these are solved by tracking this information in the head of
+thne most reasently written region. Each time the data base is opend
+all regions must be scanned to find the newest headder. The age of
+thhe header is tracked in a monotonic 64 bit counter which can not
+overflow.
+ 
 ## Storage Metadata
 
 ```alloy
@@ -93,12 +112,14 @@ one sig StorageMetadata {
 }
 ```
 
-The `StorageMetadata` struct describes the version of the storage as well as the size of each region in bytes and the number of regions in the database.
+The `StorageMetadata` struct describes the version of the storage as
+well as the size of each region in bytes and the number of regions in
+the database.
 
 ## Region
 
-The core type of the ring is the `Region`. The available storage space is divided up into
-equal size regions that are ease block aligned. 
+The core type of the database is the `Region`. The available storage space
+is divided up into equal size regions that are ease block aligned.
 
 ```alloy
 sig Region {
@@ -130,13 +151,25 @@ fact {
 }
 ```
 
-Each `region` has a `header` that both describes the contents of the region as well lists the current head of each collection.
+Each `region` has a `header` that both describes the contents of the
+region as well lists the current head of each collection. Every region leaves he last page empty to leave space for the free pointer.
 
 ## Free Pointer
 
+<!-- could | use the freepointer combinded as a doubbly linked
+skiplist to mak finding the curent head fast?  -->
+
+```rust
+struct FreePointer {
+   header_hash: [u8; 32]
+   next_tail: u32,
+}
+```
+
 ```alloy
 sig FreePointer {
-	next_tail: lone Region,
+    header_hash: lone headder,
+    next_tail: lone Region,
 }
 ```
 
@@ -145,10 +178,35 @@ The `next_tail` points to the region  added to the free list after this one. It 
 
 ## Header
 
+```rust
+struct Header {
+   sequance: u64,
+   collection_id: u64,
+   collection_type: CollectionType,
+   free_list_head: u64,
+   free_list_tail: u64,
+   heads: Vec<u64>,
+}
+```
+
+The `Header` is the first data in the region.
+
+The `sequance` filed is a monotonic sequance that is used to fine the
+newest header when the database is opned.
+
+The `colliction_id` defines which collection this region belongs to,
+and the `collection_type` the type of the collection.
+
+The `free_list_head` and `free_list_tail` point to the first and last
+entry of the free list.
+
+The `heads` vec contains a pointer to the crrent head of each collection.
+
 ```alloy
 sig Header {
 	sequence: one Sequence,
 	collection_id: one Collection,
+	collection_type: one CollectionType,
 	heads: some Head,
 	free_list_head: lone Region,
 	free_list_tail: lone Region,
@@ -167,6 +225,17 @@ fact region_rules {
 	all h: Header | one r: Region | r.header = h
 }
 ```
+
+## Oppperations
+
+### Init
+
+When the database is initilized the metadata is written. All but the
+first region have a dummy headder written and there free pointers set
+to build a list containing all but the first region. The first reagion
+is initlized with a WAL collection type and a sequance of zero.
+
+
 
 ## Sequence
 
@@ -187,13 +256,6 @@ fact sequence_rules {
 
 ```alloy
 sig Collection {}
-```
-
-```alloy
-sig Head {
-	collection_id: one Collection,
-	region: one Region,
-}
 ```
 
 
