@@ -6,7 +6,7 @@ title: Low Level Storage
 
 When using the built in flash storage on small microcontrollers some
 sort of database or file system is needed. This both allows the
-management of multiple objects in flash but also preforms ware
+management of multiple objects in flash but also performs ware
 leveling on the flash to increase longevity of the storage.
 
 Some RTOSes include a file systems, and there embedded databases such
@@ -26,12 +26,12 @@ finder we plan on using embassy/bare metal approach without this option.
 ## Overview
 
 To solve these challenges borromean works by dividing the flash up
-into equal size regions. Each collection is implemented as a append
+into equal size regions. Each collection is implemented as an append
 only data structure where new writes are added to the head region and
 data can only be freed by truncating the tail. For each collection
 stored in the borromean database there is a current head region, and a
 collection id which is tracked by the storage system. The use of the
-data in each region is left to the implantation of the specific
+data in each region is left to the implementation of the specific
 collection type.
 
 The storage system also keeps a free list of regions that are
@@ -44,34 +44,34 @@ The storage on disk starts with a static storage meta region that
 describes the version and other configuration parameters of the
 storage that can not be changed after initialization.
 
-The rest of the database is made of of regions. Each region has a
+The rest of the database is made up of regions. Each region has a
 header, user data, and a free pointer. The header describes the region
 as well as contains pointers to the free list and heads of other
-collections. The free pointer us used to store the location of the
+collections. The free pointer is used to store the location of the
 next free region in each region that has been freed.
 
 ```mermaid
 block-beta
-	columns 4
-	Storage["Allocated Storage"]:4
-	Meta["Storage Metadata"]
-	R1["First Region"]
-	e1["..."]
-	R2["Last Region"]
-	space:4
-	block:exp:4
-		h1["Header"]
-		d1["User Data"]
-		a1["Free Pointer"]
-	end
-	space:4
-	block:header:4
-		s1["Sequence Number"]
-		cid["Collection Id"]
-		Heads
-	end
-	R1 --> exp
-	h1 --> header
+ columns 4
+ Storage["Allocated Storage"]:4
+ Meta["Storage Metadata"]
+ R1["First Region"]
+ e1["..."]
+ R2["Last Region"]
+ space:4
+ block:exp:4
+  h1["Header"]
+  d1["User Data"]
+  a1["Free Pointer"]
+ end
+ space:4
+ block:header:4
+  s1["Sequence Number"]
+  cid["Collection Id"]
+  Heads
+ end
+ R1 --> exp
+ h1 --> header
 ```
 
 ### Challenges
@@ -81,7 +81,7 @@ locations that get repeatedly rewritten or those regions of the flash
 will fail before the rest of the device. This leads to two main
 conclusions:
 
- 1. We should alway attempt to free the oldest regions first.
+ 1. We should always attempt to free the oldest regions first.
  2. All data structures should be log structured/append only.
 
 Freeing the oldest first will have to be preformed on a per collection
@@ -97,18 +97,18 @@ of:
  3. The tracking of the root of the database.
 
 Each of these are solved by tracking this information in the head of
-thne most reasently written region. Each time the data base is opend
-all regions must be scanned to find the newest headder. The age of
-thhe header is tracked in a monotonic 64 bit counter which can not
+the most recently written region. Each time the database is opened
+all regions must be scanned to find the newest header. The age of
+the header is tracked in a monotonic 64 bit counter which can not
 overflow.
- 
+
 ## Storage Metadata
 
 ```alloy
 one sig StorageMetadata {
-	storage_version: int,
-	region_size: int,
-	region_count: int,
+ storage_version: Int,
+ region_size: Int,
+ region_count: Int,
 }
 ```
 
@@ -123,30 +123,25 @@ is divided up into equal size regions that are ease block aligned.
 
 ```alloy
 sig Region {
-	header: one Header,
-	// ...User data...
-	free_pointer: lone FreePointer,
+ header: one Header,
+ // ...User data...
+ free_pointer: lone FreePointer,
 }
 
 fact {
-	all r: Region | {
-		r.header.free_list_head != r
-		r.header.free_list_tail != r
-		one h: Head | {
-	 		h in r.header.heads
-			h.collection_id = r.header.collection_id
-			h.region = r
-		}
-	}
+ all r: Region | {
+  r.header.free_list_head != r
+  r.header.free_list_tail != r
+ }
 
-	// A header belongs on a single
-	// region.
-	all r1, r2: Region, h1, h2: Header | {
-		r1 != r2
-		r1.header = h1
-		r2.header = h2
-		h1 = h2
-	} implies r1 = r2
+ // A header belongs on a single
+ // region.
+ all r1, r2: Region, h1, h2: Header | {
+  r1 != r2
+  r1.header = h1
+  r2.header = h2
+  h1 = h2
+ } implies r1 = r2
 
 }
 ```
@@ -156,7 +151,7 @@ region as well lists the current head of each collection. Every region leaves he
 
 ## Free Pointer
 
-<!-- could | use the freepointer combinded as a doubbly linked
+<!-- could | use the freepointer combinded as a doubly linked
 skiplist to mak finding the curent head fast?  -->
 
 ```rust
@@ -168,19 +163,18 @@ struct FreePointer {
 
 ```alloy
 sig FreePointer {
-    header_hash: lone headder,
+    header_hash: lone Header,
     next_tail: lone Region,
 }
 ```
 
 The `next_tail` points to the region  added to the free list after this one. It is therefor written not when the region containing the free pointer is written but when the next region is freed.
 
-
 ## Header
 
 ```rust
 struct Header {
-   sequance: u64,
+   sequence: u64,
    collection_id: u64,
    collection_type: CollectionType,
    free_list_head: u64,
@@ -191,73 +185,72 @@ struct Header {
 
 The `Header` is the first data in the region.
 
-The `sequance` filed is a monotonic sequance that is used to fine the
-newest header when the database is opned.
+The `sequence` filed is a monotonic sequence that is used to find the
+newest header when the database is opened.
 
-The `colliction_id` defines which collection this region belongs to,
+The `collection_id` defines which collection this region belongs to,
 and the `collection_type` the type of the collection.
 
 The `free_list_head` and `free_list_tail` point to the first and last
 entry of the free list.
 
-The `heads` vec contains a pointer to the crrent head of each collection.
+The `heads` vec contains a pointer to the current head of each collection.
 
 ```alloy
 sig Header {
-	sequence: one Sequence,
-	collection_id: one Collection,
-	collection_type: one CollectionType,
-	heads: some Head,
-	free_list_head: lone Region,
-	free_list_tail: lone Region,
+ sequence: one Sequence,
+ collection_id: one Collection,
+ collection_type: one CollectionType,
+ heads: some Region,
+ free_list_head: lone Region,
+ free_list_tail: lone Region,
 }
 
 fact region_rules {
-	// All header belong to a single
-	// region
-	all s1, s2: Sequence, h1, h2: Header | {
-		h1 = h2
-		h1.sequence = s1
-		h2.sequence = s2
-	} implies s1 = s2
+ // All header belong to a single
+ // region
+ all s1, s2: Sequence, h1, h2: Header | {
+  h1 = h2
+  h1.sequence = s1
+  h2.sequence = s2
+ } implies s1 = s2
 
-	// All headers belong to a regin.
-	all h: Header | one r: Region | r.header = h
+ // All headers belong to a regin.
+ all h: Header | one r: Region | r.header = h
 }
 ```
 
-## Oppperations
+## Operations
 
 ### Init
 
-When the database is initilized the metadata is written. All but the
-first region have a dummy headder written and there free pointers set
-to build a list containing all but the first region. The first reagion
-is initlized with a WAL collection type and a sequance of zero.
-
-
+When the database is initialized the metadata is written. All but the
+first region have a dummy header written and their free pointers set
+to build a list containing all but the first region. The first region
+is initialized with a WAL collection type and a sequence of zero.
 
 ## Sequence
 
 ```alloy
 sig Sequence {
-	parent: lone Sequence,
+ parent: lone Sequence,
 }
 
 fact sequence_rules {
-	one s: Sequence | no s.parent
-	all s: Sequence | s not in s.^parent
-	all s1, s2: Sequence | s1 != s2 implies {
-		s1 in s2.^parent || s2 in s1.^parent
-	}
+ one s: Sequence | no s.parent
+ all s: Sequence | s not in s.^parent
+ all s1, s2: Sequence | s1 != s2 implies {
+  s1 in s2.^parent || s2 in s1.^parent
+ }
 
 }
 ```
 
 ```alloy
 sig Collection {}
-```
 
+sig CollectionType {}
+```
 
 ```alloy
 pred show_region {}

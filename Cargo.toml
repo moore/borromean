@@ -14,5 +14,5 @@ keywords = ["embeded", "nostd", "storage", "flash", "collections"]
 [dependencies]
 heapless = { version = "0.8.0", features = ["serde"] }
 postcard = "1.0.8"
-serde = "1.0.204"
+serde = { version = "1.0", default-features = false, features = ["derive"] }
 

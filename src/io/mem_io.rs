@@ -1,207 +1,182 @@
-
 extern crate alloc;
-use alloc::{vec, vec::Vec};
-use core::mem::size_of;
-
-use serde::{Serialize, Deserialize};
-use postcard::{from_bytes, to_slice};
-
-use heapless::vec;
+use heapless::Vec;
 
 use crate::{
-    StorageError, 
-    StorageMeta, 
-    io::{
-        Io,
-        Region,
-        IoError,
-    }
+    StorageError,
+    StorageMeta,
+    RegionHeader,
+    CollectionId,
+    CollectionType,
+    io::IoBackend,
+    io::IoError,
 };
 
-
-pub struct MemIo {
-    data: Vec<u8>,
+#[derive(Debug, Clone)]
+pub enum MemIoError {
+    InvalidAddress,
 }
 
-impl MemIo {
-    pub fn new(
-        page_size: u32, 
-        erase_size: u32, 
-        region_size: u32, 
-        region_count: u64
-    ) -> Result<MemIo, StorageError> {
+#[derive(Debug)]
+pub struct MemStorageMeta {
+    region_size: usize,
+    region_count: usize,
+}
 
-        let region_size_usize: usize = safe_cast(region_size)?;
-        let region_count_usize: usize = safe_cast(region_count)?;
-
-        let size: usize = 
-              (region_size_usize)
-            * (region_count_usize) // not safe as it can over flow!
-            + size_of::<StorageMeta>() 
-            ;
-
-        let Ok(erase_size_usize) = erase_size.try_into() else {
-            return Err(StorageError::ArithmeticOverflow);
-        };
-
-        let first_region = round_up_to_next_multiple(size, erase_size_usize)?;
-        let first_region_u32 = safe_cast(first_region)?;
-
-        let mut data = vec![0; size];
-
-        let storage_meta = StorageMeta::new(
-            first_region_u32,
-            page_size, 
-            erase_size,
-            region_size,
-            region_count
-        )?;
-
-        let offset = storage_meta.write(&mut data, 0)?;
-
-        if offset > first_region {
-            return Err(StorageError::InternalError);
-        }
-
-        Ok(MemIo {
-            data,
-        })
+impl MemStorageMeta {
+    pub fn new(region_size: usize, region_count: usize) -> Self {
+        Self { region_size, region_count }
     }
+}
 
+impl<'a> StorageMeta for &'a MemStorageMeta {
+    fn storage_version(&self) -> u32 { 0 }
+    fn region_count(&self) -> usize { self.region_count }
+    fn region_size(&self) -> usize { self.region_size }
+}
+
+type RegionAddress = usize;
+type Sequence = u64;
+
+#[derive(Debug, Clone)]
+pub struct MemRegionHeader<const MAX_HEADS: usize> {
+    sequence: Sequence,
+    collection_id: CollectionId,
+    collection_type: CollectionType,
+    free_list_head: RegionAddress,
+    free_list_tail: RegionAddress,
+    heads: Vec<RegionAddress, MAX_HEADS>,
+}
+
+impl<'a, const MAX_HEADS: usize> RegionHeader for &'a MemRegionHeader<MAX_HEADS> {
+    type RegionAddress = RegionAddress;
+    type Sequence = Sequence;
     
+    fn sequence(&self) -> Sequence { self.sequence }
+    fn collection_id(&self) -> CollectionId { self.collection_id }
+    fn collection_type(&self) -> CollectionType { self.collection_type }
+    fn free_list_head(&self) -> RegionAddress { self.free_list_head }
+    fn free_list_tail(&self) -> RegionAddress { self.free_list_tail }
+    fn heads(&self) -> &[RegionAddress] { &self.heads }
 }
 
+#[derive(Debug, Clone)]
+pub struct MemFreePointer(u32);
 
-const fn round_up_to_next_multiple(i: usize, a: usize) -> Result<usize, StorageError> {
-    if a <= 1 { 
-        Ok(i) // Short 
-    } else {
-        // ((i + a - 1) / a) * a
+#[derive(Debug, Clone)]
+pub struct MemRegion<const DATA_SIZE: usize, const MAX_HEADS: usize> {
+    header: MemRegionHeader<MAX_HEADS>,
+    data: Vec<u8, DATA_SIZE>,
+    free_pointer: Option<RegionAddress>,
+}
 
-        // a - 1 is safe as we checked that a != 0.
-        let Some(next) = i.checked_add(a - 1) else {
-            return Err(StorageError::ArithmeticOverflow);
-        };
-        
-        // safe as a > 0;
-        let count = next / a;
+/* 
+impl<'a, const DATA_SIZE: usize, const MAX_HEADS: usize, const REGION_COUNT: usize> 
+    Region<MemIo<DATA_SIZE, MAX_HEADS, REGION_COUNT>> for &'a mut MemRegion<DATA_SIZE, MAX_HEADS> {
+    type Header<'b> = &'b MemRegionHeader<MAX_HEADS> where Self: 'b;
+    type RegionAddress = RegionAddress;
 
-        // safe as result can not be larger then next.
-        let result = a * count;
+    fn header<'b>(&'b self) -> Result<Self::Header<'b>, StorageError<MemIo<DATA_SIZE, MAX_HEADS, REGION_COUNT>>> {
+        Ok(&self.header)
+    }
 
-        Ok(result)
+    fn user_data(&self) -> &[u8] {
+        &self.data
+    }
+
+    fn user_data_mut<'b>(&'b mut self) -> &'b mut [u8] {
+        self.data.as_mut_slice()
+    }
+
+    fn free_pointer(&self) -> Result<Option<Self::RegionAddress>, StorageError<MemIo<DATA_SIZE, MAX_HEADS, REGION_COUNT>>> {
+       Ok(self.free_pointer)
+    }
+
+    fn write_free_pointer(&mut self, pointer: Self::RegionAddress) -> Result<(), StorageError<MemIo<DATA_SIZE, MAX_HEADS, REGION_COUNT>>> {
+        self.free_pointer = Some(pointer);
+        Ok(())  
+    }
+}
+*/
+
+#[derive(Debug)]
+pub struct MemIo<
+    const DATA_SIZE: usize, 
+    const MAX_HEADS: usize,
+    const REGION_COUNT: usize,
+> {
+    meta: MemStorageMeta,
+    regions: Vec<MemRegion<DATA_SIZE, MAX_HEADS>, REGION_COUNT>,
+}
+
+impl<
+    const DATA_SIZE: usize, 
+    const MAX_HEADS: usize, 
+    const REGION_COUNT: usize
+> MemIo<DATA_SIZE, MAX_HEADS, REGION_COUNT> {
+    pub fn new() -> Result<Self, StorageError<MemIo<DATA_SIZE, MAX_HEADS, REGION_COUNT>>> {
+        let meta = MemStorageMeta::new(DATA_SIZE, REGION_COUNT);
+        let regions = Vec::new();
+
+        Ok(Self { meta, regions })
     }
 }
 
-
-fn safe_cast<V: TryInto<T>,T>(v: V) -> Result<T, StorageError> {
-    let Ok(v_t): Result<T, _> = v.try_into() else {
-        return Err(StorageError::ArithmeticOverflow);
-    };
-
-    Ok(v_t)
-}
-
-impl<const MAX_HEADS: usize> Io<MAX_HEADS> for MemIo {
-    fn get_meta<'a>(&'a self) -> &'a StorageMeta {
-        unimplemented!()
+impl<
+    const DATA_SIZE: usize, 
+    const MAX_HEADS: usize, 
+    const REGION_COUNT: usize
+> IoBackend for MemIo<DATA_SIZE, MAX_HEADS, REGION_COUNT> {
+    type StorageMeta<'a> = &'a MemStorageMeta where Self: 'a;
+    type RegionAddress = RegionAddress;
+    type BackingError = MemIoError;
+    type RegionHeader<'a> = &'a MemRegionHeader<MAX_HEADS> where Self: 'a;
+    
+    fn is_initialized(&mut self) -> Result<bool, IoError<Self::BackingError>> {
+        Ok(!self.regions.is_empty())
     }
-    fn get_region<'a>(&'a self, index: u64) -> Result<Region<'a, MAX_HEADS>, IoError> {
-        unimplemented!()
+
+    fn write_meta(&mut self, region_size: usize, region_count: usize) -> Result<(), IoError<Self::BackingError>> {
+        self.meta = MemStorageMeta::new(region_size, region_count);
+        Ok(())
     }
-}
 
-
-pub struct Region<'a, const MAX_HEADS: usize> {
-    pub index: u64,
-    pub header: &'a Header<MAX_HEADS>,
-    pub data: &'a [u8],
-    pub free_pointer: &'a FreePointer,
-}
-
-
-#[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
-struct StorageMetaStruct {
-    format_version: u32,
-    first_region_offset: u32,
-    page_size: u32,
-    erase_size: u32,
-    region_size:u32,
-    region_count:u64,
-}
-
-
-
-impl From<postcard::Error> for StorageError {
-    fn from(value: postcard::Error) -> Self {
-        return StorageError::SerializerError(value)
+    fn get_meta<'a>(&'a mut self) -> Result<Self::StorageMeta<'a>, IoError<Self::BackingError>> {
+        Ok(&self.meta)
     }
-}
 
-impl StorageMeta {
-    pub fn new(
-        first_region_offset: u32,
-        page_size: u32,
-        erase_size: u32,
-        region_size:u32,
-        region_count:u64,
-    ) -> Result<Self, StorageError> {
+    fn get_region_header<'a>(&'a mut self, index: Self::RegionAddress) -> Result<Self::RegionHeader<'a>, IoError<Self::BackingError>> {
+        Ok(&self.regions[index].header)
+    } 
 
-        if (erase_size != 1) && (erase_size % page_size != 0) {
-            return Err(StorageError::EraseNotPageAligned);
+    fn write_region_header<'a>(&mut self, index: Self::RegionAddress, header: Self::RegionHeader<'a>) -> Result<(), IoError<Self::BackingError>> {
+        self.regions[index].header = header.clone();
+        Ok(())
+    }
+
+    fn get_region_data<'a>(&'a mut self, index: Self::RegionAddress, offset: usize, len: usize) -> Result<&'a [u8], IoError<Self::BackingError>> {
+
+        if offset + len > DATA_SIZE {
+            return Err(IoError::OutOfBounds);
         }
 
-        if region_size % page_size != 0 {
-            return Err(StorageError::RegionNotPageAligned)
+        Ok(&self.regions[index].data[offset..offset + len])
+    } 
+
+    fn write_region_data(&mut self, index: Self::RegionAddress, offset: usize, data: &[u8]) -> Result<(), IoError<Self::BackingError>> {
+        if offset + data.len() > DATA_SIZE {
+            return Err(IoError::OutOfBounds);
         }
 
-        if first_region_offset % erase_size != 0 {
-            return Err(StorageError::RegionAlignmentError)
-        }
+        self.regions[index].data[offset..offset + data.len()].copy_from_slice(data);
+        Ok(())
+    }   
 
-        let format_version = 0;
+    fn get_region_free_pointer(&mut self, index: Self::RegionAddress) -> Result<Option<Self::RegionAddress>, IoError<Self::BackingError>> {
+        Ok(self.regions[index].free_pointer.clone())
+    }   
 
-        Ok(StorageMeta {
-            format_version,
-            first_region_offset,
-            page_size,
-            erase_size,
-            region_size,
-            region_count,
-        })
-    }
-
-    pub fn write(&self, buffer: &mut [u8], offset: usize) -> Result<usize, StorageError> {
-
-        let used = to_slice(&self, &mut buffer[offset..])?;
-        
-        let Some(new_offset) = offset.checked_add(used.len()) else {
-            return Err(StorageError::ArithmeticOverflow);
-        };
-
-        Ok(new_offset)
-       
-    }
-}
-
-
-#[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
-struct Header<const MAX_HEADS: usize> {
-    sequence: u64,
-    collection_id: u32,
-    heads: Vec<Head, MAX_HEADS>,
-    free_list_head: u64,
-    free_list_tail: u64,
-}
-
-#[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
-struct Head {
-    collection_id: u32,
-    region: u64,
-}
-
-
-#[derive(Serialize, Deserialize, Debug, Eq, PartialEq)]
-struct FreePointer {
-    next: u64,
+    fn write_region_free_pointer(&mut self, index: Self::RegionAddress, pointer: Self::RegionAddress) -> Result<(), IoError<Self::BackingError>> {
+        self.regions[index].free_pointer = Some(pointer);
+        Ok(())
+    }       
 }
