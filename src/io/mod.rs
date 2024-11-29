@@ -20,12 +20,14 @@ impl<BackingError> From<BackingError> for IoError<BackingError> {
     }
 }
 
-pub struct Io<B: IoBackend> {
-    backing: B,
+pub struct Io<'a, B: IoBackend> {
+    backing: &'a mut B,
 }
 
-impl<B: IoBackend> Io<B> {
-    pub fn init(mut backing: B, region_size: usize, region_count: usize) -> Result<Self, IoError<B::BackingError>> {
+impl<'a, B: IoBackend> Io<'a, B> {
+    pub fn init(backing: &'a mut B, region_size: usize, region_count: usize) 
+    -> Result<Self, IoError<B::BackingError>> 
+    {
         if backing.is_initialized()? {
             return Err(IoError::AlreadyInitialized);
         }
@@ -34,10 +36,10 @@ impl<B: IoBackend> Io<B> {
         Ok(Self { backing })
     }
 
-    pub fn open(mut backing: B) -> Result<Self, IoError<B::BackingError>> {
+    pub fn open(backing: &'a mut B) -> Result<Self, IoError<B::BackingError>> {
         if !backing.is_initialized()? {
             return Err(IoError::NotInitialized);
-        }
+        } 
 
         Ok(Self { backing })
     }

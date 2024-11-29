@@ -69,35 +69,6 @@ pub struct MemRegion<const DATA_SIZE: usize, const MAX_HEADS: usize> {
     free_pointer: Option<RegionAddress>,
 }
 
-/* 
-impl<'a, const DATA_SIZE: usize, const MAX_HEADS: usize, const REGION_COUNT: usize> 
-    Region<MemIo<DATA_SIZE, MAX_HEADS, REGION_COUNT>> for &'a mut MemRegion<DATA_SIZE, MAX_HEADS> {
-    type Header<'b> = &'b MemRegionHeader<MAX_HEADS> where Self: 'b;
-    type RegionAddress = RegionAddress;
-
-    fn header<'b>(&'b self) -> Result<Self::Header<'b>, StorageError<MemIo<DATA_SIZE, MAX_HEADS, REGION_COUNT>>> {
-        Ok(&self.header)
-    }
-
-    fn user_data(&self) -> &[u8] {
-        &self.data
-    }
-
-    fn user_data_mut<'b>(&'b mut self) -> &'b mut [u8] {
-        self.data.as_mut_slice()
-    }
-
-    fn free_pointer(&self) -> Result<Option<Self::RegionAddress>, StorageError<MemIo<DATA_SIZE, MAX_HEADS, REGION_COUNT>>> {
-       Ok(self.free_pointer)
-    }
-
-    fn write_free_pointer(&mut self, pointer: Self::RegionAddress) -> Result<(), StorageError<MemIo<DATA_SIZE, MAX_HEADS, REGION_COUNT>>> {
-        self.free_pointer = Some(pointer);
-        Ok(())  
-    }
-}
-*/
-
 #[derive(Debug)]
 pub struct MemIo<
     const DATA_SIZE: usize, 

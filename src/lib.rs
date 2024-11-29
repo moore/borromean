@@ -68,16 +68,16 @@ pub trait Collection {
     fn collection_type(&self) -> CollectionType;
 }
 
-pub struct Storage<B: IoBackend> {
-    io: Io<B>
+pub struct Storage<'a, B: IoBackend> {
+    io: Io<'a, B>
 }
 
-impl<B> Storage<B> 
+impl<'a, B> Storage<'a, B> 
     where 
     B: IoBackend,
     StorageError<B>: From<IoError<<B as IoBackend>::BackingError>>
     {
-    pub fn init(mut backing: B, region_size: usize, region_count: usize) -> Result<Self, StorageError<B>> {
+    pub fn init(backing: &'a mut B, region_size: usize, region_count: usize) -> Result<Self, StorageError<B>> {
         
         if backing.is_initialized()? {
             return Err(StorageError::AlreadyInitialized);
@@ -87,7 +87,7 @@ impl<B> Storage<B>
         Ok(Self { io })
     }
 
-    pub fn open(mut backing: B) -> Result<Self, StorageError<B>> {
+    pub fn open(backing: &'a mut B) -> Result<Self, StorageError<B>> {
         if !backing.is_initialized()? {
             return Err(StorageError::NotInitialized);
         }
@@ -97,13 +97,13 @@ impl<B> Storage<B>
         
       Ok(Self { io })
     }
-    pub fn get_collection_mut<'a, C: Collection>(&'a mut self, id: CollectionId) 
-        -> Result<&'a mut C, StorageError<B>> {
+    pub fn get_collection_mut<'b, C: Collection>(&'b mut self, id: CollectionId) 
+        -> Result<&'b mut C, StorageError<B>> {
             unimplemented!()
 
         }
-    pub fn get_collection<'a, C: Collection>(&'a self, id: CollectionId) 
-        -> Result<&'a C, StorageError<B>> {
+    pub fn get_collection<'b, C: Collection>(&'b self, id: CollectionId) 
+        -> Result<&'b C, StorageError<B>> {
             unimplemented!()
         }
 }
