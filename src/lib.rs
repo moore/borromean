@@ -10,22 +10,28 @@ use serde::{Serialize, Deserialize};
 
 #[derive(Debug)]
 pub enum StorageError<B: IoBackend> {
-    ArithmeticOverflow,
+    ArithmeticOverflow, // TODO: Remove 
     NoFreeRegions,
     AlreadyInitialized,
     NotInitialized,
-    InvalidAddress,
+    InvalidAddress(B::RegionAddress),
+    InvalidHeads,
     OutOfBounds,
+    InvalidRegionSize,
+    InvalidRegionCount,
     BackingError(B::BackingError),
 }
 
-impl<B: IoBackend> From<IoError<B::BackingError>> for StorageError<B> {
-    fn from(error: IoError<B::BackingError>) -> Self {
+impl<B: IoBackend> From<IoError<B::BackingError, B::RegionAddress>> for StorageError<B> {
+    fn from(error: IoError<B::BackingError, B::RegionAddress>) -> Self {
         match error {
             IoError::AlreadyInitialized => StorageError::AlreadyInitialized,
             IoError::NotInitialized => StorageError::NotInitialized,
-            IoError::InvalidAddress => StorageError::InvalidAddress,
+            IoError::InvalidAddress(address) => StorageError::InvalidAddress(address),
             IoError::OutOfBounds => StorageError::OutOfBounds,
+            IoError::InvalidRegionSize => StorageError::InvalidRegionSize,
+            IoError::InvalidRegionCount => StorageError::InvalidRegionCount,
+            IoError::InvalidHeads => StorageError::InvalidHeads,
             IoError::Backing(e ) => StorageError::BackingError(e),
         }
     }
@@ -38,30 +44,14 @@ pub struct CollectionId(pub(crate) u16);
 /// Represents different types of collections that can be stored
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CollectionType {
+    Uninitialized,
     Free,   // Used for free regions
     Wal,    // Write-ahead log
     Channel, // FIFO queue
     Map,    // Key-value store
 }
 
-/// Represents the header of a region
-pub(crate) trait RegionHeader {
-    type RegionAddress;
-    type Sequence;
-    fn sequence(&self) -> Self::Sequence;
-    fn collection_id(&self) -> CollectionId;
-    fn collection_type(&self) -> CollectionType;
-    fn free_list_head(&self) -> Self::RegionAddress;
-    fn free_list_tail(&self) -> Self::RegionAddress;
-    fn heads(&self) -> &[Self::RegionAddress];
-}
 
-/// Represents the storage metadata for the database
-pub(crate) trait StorageMeta {
-    fn storage_version(&self) -> u32;
-    fn region_size(&self) -> usize;
-    fn region_count(&self) -> usize;
-}
 
 pub trait Collection {
     fn id(&self) -> CollectionId;
@@ -75,7 +65,7 @@ pub struct Storage<'a, B: IoBackend> {
 impl<'a, B> Storage<'a, B> 
     where 
     B: IoBackend,
-    StorageError<B>: From<IoError<<B as IoBackend>::BackingError>>
+    StorageError<B>: From<IoError<B::BackingError, B::RegionAddress>>
     {
     pub fn init(backing: &'a mut B, region_size: usize, region_count: usize) -> Result<Self, StorageError<B>> {
         

@@ -10,7 +10,7 @@ fn new_storage_meta() {
     const MAX_HEADS: usize = 8;
     const REGION_COUNT: usize = 4;
 
-    let mem_io = MemIo::<DATA_SIZE, MAX_HEADS, REGION_COUNT>::new()
+    let _mem_io = MemIo::<DATA_SIZE, MAX_HEADS, REGION_COUNT>::new()
         .expect("Failed to create MemIo");
 }
 
@@ -23,6 +23,6 @@ fn init_io() {
     let mut mem_io = MemIo::<DATA_SIZE, MAX_HEADS, REGION_COUNT>::new()
         .expect("Failed to create MemIo");
 
-    let io = Io::init(&mut mem_io, DATA_SIZE, REGION_COUNT)
+    let _io = Io::init(&mut mem_io, DATA_SIZE, REGION_COUNT)
         .expect("Failed to initialize Io");
 }
