@@ -96,7 +96,7 @@ pub struct MemFreePointer(u32);
 #[derive(Debug, Clone)]
 pub struct MemRegion<const DATA_SIZE: usize, const MAX_HEADS: usize> {
     header: MemRegionHeader<MAX_HEADS>,
-    data: Vec<u8, DATA_SIZE>,
+    data: [u8; DATA_SIZE],
     free_pointer: Option<RegionAddress>,
 }
 
@@ -121,7 +121,7 @@ impl<const DATA_SIZE: usize, const MAX_HEADS: usize, const REGION_COUNT: usize>
                 free_list_tail: 0,
                 heads: Vec::new(),
             },
-            data: Vec::new(),
+            data: [0u8; DATA_SIZE],
             free_pointer: None,
         });
 
