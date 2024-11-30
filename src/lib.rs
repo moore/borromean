@@ -6,11 +6,11 @@ mod tests;
 mod io;
 pub use io::*;
 
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug)]
 pub enum StorageError<B: IoBackend> {
-    ArithmeticOverflow, // TODO: Remove 
+    ArithmeticOverflow, // TODO: Remove
     NoFreeRegions,
     AlreadyInitialized,
     NotInitialized,
@@ -32,7 +32,7 @@ impl<B: IoBackend> From<IoError<B::BackingError, B::RegionAddress>> for StorageE
             IoError::InvalidRegionSize => StorageError::InvalidRegionSize,
             IoError::InvalidRegionCount => StorageError::InvalidRegionCount,
             IoError::InvalidHeads => StorageError::InvalidHeads,
-            IoError::Backing(e ) => StorageError::BackingError(e),
+            IoError::Backing(e) => StorageError::BackingError(e),
         }
     }
 }
@@ -45,13 +45,11 @@ pub struct CollectionId(pub(crate) u16);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CollectionType {
     Uninitialized,
-    Free,   // Used for free regions
-    Wal,    // Write-ahead log
+    Free,    // Used for free regions
+    Wal,     // Write-ahead log
     Channel, // FIFO queue
-    Map,    // Key-value store
+    Map,     // Key-value store
 }
-
-
 
 pub trait Collection {
     fn id(&self) -> CollectionId;
@@ -59,16 +57,19 @@ pub trait Collection {
 }
 
 pub struct Storage<'a, B: IoBackend> {
-    io: Io<'a, B>
+    io: Io<'a, B>,
 }
 
-impl<'a, B> Storage<'a, B> 
-    where 
+impl<'a, B> Storage<'a, B>
+where
     B: IoBackend,
-    StorageError<B>: From<IoError<B::BackingError, B::RegionAddress>>
-    {
-    pub fn init(backing: &'a mut B, region_size: usize, region_count: usize) -> Result<Self, StorageError<B>> {
-        
+    StorageError<B>: From<IoError<B::BackingError, B::RegionAddress>>,
+{
+    pub fn init(
+        backing: &'a mut B,
+        region_size: usize,
+        region_count: usize,
+    ) -> Result<Self, StorageError<B>> {
         if backing.is_initialized()? {
             return Err(StorageError::AlreadyInitialized);
         }
@@ -82,18 +83,20 @@ impl<'a, B> Storage<'a, B>
             return Err(StorageError::NotInitialized);
         }
 
-
         let io = Io::open(backing)?;
-        
-      Ok(Self { io })
-    }
-    pub fn get_collection_mut<'b, C: Collection>(&'b mut self, id: CollectionId) 
-        -> Result<&'b mut C, StorageError<B>> {
-            unimplemented!()
 
-        }
-    pub fn get_collection<'b, C: Collection>(&'b self, id: CollectionId) 
-        -> Result<&'b C, StorageError<B>> {
-            unimplemented!()
-        }
+        Ok(Self { io })
+    }
+    pub fn get_collection_mut<'b, C: Collection>(
+        &'b mut self,
+        id: CollectionId,
+    ) -> Result<&'b mut C, StorageError<B>> {
+        unimplemented!()
+    }
+    pub fn get_collection<'b, C: Collection>(
+        &'b self,
+        id: CollectionId,
+    ) -> Result<&'b C, StorageError<B>> {
+        unimplemented!()
+    }
 }
