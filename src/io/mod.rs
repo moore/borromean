@@ -23,6 +23,10 @@ impl<BackingError, RegionAddress> From<BackingError> for IoError<BackingError, R
     }
 }
 
+pub trait RegionAddress: Copy + Eq + PartialEq + Debug {
+    fn zero() -> Self;
+}
+
 /// Represents the header of a region
 pub(crate) trait RegionHeader<B: IoBackend> {
     fn sequence(&self) -> B::Sequence;
@@ -133,7 +137,7 @@ pub trait IoBackend: Sized + Debug {
     type StorageMeta<'a>: StorageMeta
     where
         Self: 'a;
-    type RegionAddress: Copy + Eq + PartialEq + Debug;
+    type RegionAddress: RegionAddress;
     type BackingError: Debug;
     type Sequence: FirstSequence + Eq + PartialEq + Ord + PartialOrd + Debug;
     type RegionHeader<'a>: RegionHeader<Self>

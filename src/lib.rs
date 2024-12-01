@@ -6,6 +6,9 @@ mod tests;
 mod io;
 pub use io::*;
 
+mod collections;
+pub use collections::*;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug)]
@@ -87,12 +90,21 @@ where
 
         Ok(Self { io })
     }
+
+    pub fn new_collection(
+        &mut self,
+        collection_type: CollectionType,
+    ) -> Result<CollectionId, StorageError<B>> {
+        unimplemented!()
+    }
+
     pub fn get_collection_mut<'b, C: Collection>(
         &'b mut self,
         id: CollectionId,
     ) -> Result<&'b mut C, StorageError<B>> {
         unimplemented!()
     }
+
     pub fn get_collection<'b, C: Collection>(
         &'b self,
         id: CollectionId,

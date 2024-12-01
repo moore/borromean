@@ -2,8 +2,8 @@ extern crate alloc;
 use heapless::Vec;
 
 use crate::{
-    io::IoBackend, io::IoError, CollectionId, CollectionType, FirstSequence, RegionHeader,
-    StorageError, StorageMeta,
+    io::{IoBackend, IoError, RegionAddress},
+    CollectionId, CollectionType, FirstSequence, RegionHeader, StorageError, StorageMeta,
 };
 
 #[derive(Debug, Clone)]
@@ -38,7 +38,14 @@ impl<'a> StorageMeta for &'a MemStorageMeta {
     }
 }
 
-type RegionAddress = usize;
+type MemRegionAddress = usize;
+
+impl RegionAddress for MemRegionAddress {
+    fn zero() -> Self {
+        0
+    }
+}
+
 type Sequence = u64;
 
 impl FirstSequence for Sequence {
@@ -52,10 +59,10 @@ pub struct MemRegionHeader<const MAX_HEADS: usize> {
     sequence: Sequence,
     collection_id: CollectionId,
     collection_type: CollectionType,
-    wal_address: RegionAddress,
-    free_list_head: RegionAddress,
-    free_list_tail: RegionAddress,
-    heads: Vec<RegionAddress, MAX_HEADS>,
+    wal_address: MemRegionAddress,
+    free_list_head: MemRegionAddress,
+    free_list_tail: MemRegionAddress,
+    heads: Vec<MemRegionAddress, MAX_HEADS>,
 }
 
 impl<'a, const DATA_SIZE: usize, const MAX_HEADS: usize, const REGION_COUNT: usize>
@@ -97,7 +104,7 @@ pub struct MemFreePointer(u32);
 pub struct MemRegion<const DATA_SIZE: usize, const MAX_HEADS: usize> {
     header: MemRegionHeader<MAX_HEADS>,
     data: [u8; DATA_SIZE],
-    free_pointer: Option<RegionAddress>,
+    free_pointer: Option<MemRegionAddress>,
 }
 
 #[derive(Debug)]
@@ -134,7 +141,7 @@ impl<const DATA_SIZE: usize, const MAX_HEADS: usize, const REGION_COUNT: usize> 
 {
     type StorageMeta<'a> = &'a MemStorageMeta where Self: 'a;
     type Sequence = Sequence;
-    type RegionAddress = RegionAddress;
+    type RegionAddress = MemRegionAddress;
     type BackingError = MemIoError;
     type RegionHeader<'a> = &'a MemRegionHeader<MAX_HEADS> where Self: 'a;
 
