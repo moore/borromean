@@ -23,7 +23,7 @@ impl<BackingError, RegionAddress> From<BackingError> for IoError<BackingError, R
     }
 }
 
-pub trait RegionAddress: Copy + Eq + PartialEq + Debug {
+pub trait RegionAddress: Sized + Copy + Eq + PartialEq + Debug {
     fn zero() -> Self;
 }
 
@@ -32,6 +32,7 @@ pub(crate) trait RegionHeader<B: IoBackend> {
     fn sequence(&self) -> B::Sequence;
     fn collection_id(&self) -> CollectionId;
     fn collection_type(&self) -> CollectionType;
+    fn collection_sequence(&self) -> B::Sequence;
     fn wal_address(&self) -> B::RegionAddress;
     fn free_list_head(&self) -> B::RegionAddress;
     fn free_list_tail(&self) -> B::RegionAddress;
@@ -80,12 +81,13 @@ impl<'a, B: IoBackend> Io<'a, B> {
         let sequence = <B as IoBackend>::Sequence::first();
         let collection_id = CollectionId(0);
         let collection_type = CollectionType::Wal;
-
+        let collection_sequence = <B as IoBackend>::Sequence::first();
         backing.write_region_header(
             wal_address,
             sequence,
             collection_id,
             collection_type,
+            collection_sequence,
             wal_address,
             first_free_address,
             last_free_address,
@@ -139,7 +141,7 @@ pub trait IoBackend: Sized + Debug {
         Self: 'a;
     type RegionAddress: RegionAddress;
     type BackingError: Debug;
-    type Sequence: FirstSequence + Eq + PartialEq + Ord + PartialOrd + Debug;
+    type Sequence: Sized + FirstSequence + Eq + PartialEq + Ord + PartialOrd + Debug;
     type RegionHeader<'a>: RegionHeader<Self>
     where
         Self: 'a;
@@ -178,6 +180,7 @@ pub trait IoBackend: Sized + Debug {
         sequence: Self::Sequence,
         collection_id: CollectionId,
         collection_type: CollectionType,
+        collection_sequence: Self::Sequence,
         wal_address: Self::RegionAddress,
         free_list_head: Self::RegionAddress,
         free_list_tail: Self::RegionAddress,

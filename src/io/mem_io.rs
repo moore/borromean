@@ -59,6 +59,7 @@ pub struct MemRegionHeader<const MAX_HEADS: usize> {
     sequence: Sequence,
     collection_id: CollectionId,
     collection_type: CollectionType,
+    collection_sequence: Sequence,
     wal_address: MemRegionAddress,
     free_list_head: MemRegionAddress,
     free_list_tail: MemRegionAddress,
@@ -76,6 +77,9 @@ impl<'a, const DATA_SIZE: usize, const MAX_HEADS: usize, const REGION_COUNT: usi
     }
     fn collection_type(&self) -> CollectionType {
         self.collection_type
+    }
+    fn collection_sequence(&self) -> Sequence {
+        self.collection_sequence
     }
     fn wal_address(
         &self,
@@ -123,6 +127,7 @@ impl<const DATA_SIZE: usize, const MAX_HEADS: usize, const REGION_COUNT: usize>
                 sequence: Sequence::first(),
                 collection_id: CollectionId(0),
                 collection_type: CollectionType::Uninitialized,
+                collection_sequence: Sequence::first(),
                 wal_address: 0,
                 free_list_head: 0,
                 free_list_tail: 0,
@@ -195,6 +200,7 @@ impl<const DATA_SIZE: usize, const MAX_HEADS: usize, const REGION_COUNT: usize> 
         sequence: Self::Sequence,
         collection_id: CollectionId,
         collection_type: CollectionType,
+        collection_sequence: Self::Sequence,
         wal_address: Self::RegionAddress,
         free_list_head: Self::RegionAddress,
         free_list_tail: Self::RegionAddress,
@@ -211,6 +217,7 @@ impl<const DATA_SIZE: usize, const MAX_HEADS: usize, const REGION_COUNT: usize> 
             sequence,
             collection_id,
             collection_type,
+            collection_sequence,
             wal_address,
             free_list_head,
             free_list_tail,
