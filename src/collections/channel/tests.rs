@@ -17,7 +17,7 @@ fn test_new_channel() {
     let mut updates_data = [MemberId { id: 0 }; 1024];
     let mut updates = VecLikeSlice::new(&mut updates_data);
 
-    let mut pending_data: [_; 1024]  = core::array::from_fn(|_| AddCommand::<MemRegionAddress, 8> {
+    let mut pending_data: [_; 1024] = core::array::from_fn(|_| AddCommand::<MemRegionAddress, 8> {
         prior: CommandAddress::zero(),
         sender_last: ChannelSequence(0),
         sequence: ChannelSequence(0),
@@ -27,13 +27,8 @@ fn test_new_channel() {
     });
     let mut pending = VecLikeSlice::new(&mut pending_data);
 
-    let channel = Channel::<_, _, _, _, 8, 1>::new(
-        id, 
-        member,
-        &mut pending,
-        &mut members,
-        &mut updates,
-    );
+    let channel =
+        Channel::<_, _, _, _, 8, 1>::new(id, member, &mut pending, &mut members, &mut updates);
     assert!(channel.is_ok());
 
     let channel = channel.unwrap();
@@ -41,7 +36,10 @@ fn test_new_channel() {
     assert_eq!(channel.next_sequence, ChannelSequence(0));
     assert_eq!(channel.members.len(), 1);
     assert_eq!(channel.members.get(0).unwrap().member, member);
-    assert_eq!(channel.members.get(0).unwrap().last_sequence, ChannelSequence(0));
+    assert_eq!(
+        channel.members.get(0).unwrap().last_sequence,
+        ChannelSequence(0)
+    );
 }
 
 #[test]
@@ -75,7 +73,8 @@ fn test_add_member() {
         &mut pending,
         &mut members,
         &mut updates,
-    ).unwrap();
+    )
+    .unwrap();
 
     let result = channel.add_member(new_member);
     assert!(result.is_ok());
@@ -115,7 +114,8 @@ fn test_add_member_limit() {
         &mut pending,
         &mut members,
         &mut updates,
-    ).unwrap();
+    )
+    .unwrap();
 
     // Add one member should succeed
     let result = channel.add_member(MemberId { id: 2 });
@@ -156,7 +156,8 @@ fn test_get_last_sequence() {
         &mut pending,
         &mut members,
         &mut updates,
-    ).unwrap();
+    )
+    .unwrap();
 
     // Initial sequence should be 0
     let seq = channel.get_last_sequence(&initial_member);
@@ -199,7 +200,8 @@ fn test_get_next_sequence() {
         &mut pending,
         &mut members,
         &mut updates,
-    ).unwrap();
+    )
+    .unwrap();
 
     // First call should return 0 and increment internal counter
     assert_eq!(channel.get_next_sequence(), ChannelSequence(0));
@@ -234,13 +236,9 @@ fn test_duplicate_member_add() {
     }; 1];
     let mut pending = VecLikeSlice::new(&mut pending_data);
 
-    let mut channel = Channel::<_, _, _, _, 8, 1>::new(
-        id,
-        member,
-        &mut pending,
-        &mut members,
-        &mut updates,
-    ).unwrap();
+    let mut channel =
+        Channel::<_, _, _, _, 8, 1>::new(id, member, &mut pending, &mut members, &mut updates)
+            .unwrap();
 
     // Adding same member again should succeed but not create duplicate
     let result = channel.add_member(member);

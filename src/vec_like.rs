@@ -1,4 +1,3 @@
-
 pub trait VecLike<T> {
     fn push(&mut self, item: T) -> Result<(), T>;
     fn get(&self, index: usize) -> Option<&T>;
@@ -59,7 +58,7 @@ impl<'a, T, const N: usize> VecLike<T> for VecLikeSlice<'a, T, N> {
     }
 
     fn iter_mut(&mut self) -> core::slice::IterMut<'_, T> {
-        self.items[..self.len].iter_mut() 
+        self.items[..self.len].iter_mut()
     }
 
     fn as_slice(&self) -> &[T] {

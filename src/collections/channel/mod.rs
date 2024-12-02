@@ -3,8 +3,8 @@ use core::marker::PhantomData;
 use heapless::Vec;
 
 use crate::io::RegionAddress;
-use crate::CollectionId;
 use crate::vec_like::VecLike;
+use crate::CollectionId;
 #[cfg(test)]
 mod tests;
 
@@ -13,6 +13,7 @@ pub enum ChannelError {
     UserLimitReached,
     MemberNotFound(MemberId),
     PendingLimitReached,
+    NeedsCheckpoint,
 }
 
 ///////////// basic types /////////////
@@ -168,16 +169,32 @@ impl<A: RegionAddress, const MEMBER_LIMIT: usize> CheckPointCommand<A, MEMBER_LI
 
 ///////////// Channel State /////////////
 
+/// The channel is represented by an ordered set of regions. Each region has a pointer
+/// the next and previous region in the channel. The header of the next region is not 
+/// written until if is full at which point it becomes the head region of the channel. 
+/// Because the header of then next channel is not written prior to becoming the head
+/// It will have a lower region sequence number than the current head region and so what ever
+/// stale information it contains will be ignored. To track how much of the next region is
+/// used the current head also references a WAL to track updates to the next region.
+/// 
+/// We wright commands in to the next segment instead of the WAL so that they have a
+/// stable address.
 pub struct Channel<
-    'a, 'b, 'c, 
-    A: RegionAddress, 
-    M: VecLike<MemberSequence>, 
-    U: VecLike<MemberId>, 
-    P: VecLike<AddCommand<A, PAYLOAD_MAX>>, 
+    'a,
+    'b,
+    'c,
+    A: RegionAddress,
+    M: VecLike<MemberSequence>,
+    U: VecLike<MemberId>,
+    P: VecLike<AddCommand<A, PAYLOAD_MAX>>,
     const PAYLOAD_MAX: usize,
     const CHECKPOINT_MAX: usize,
 > {
     id: CollectionId,
+    //next_region: A,
+    //previous_region: Option<A>,
+    //wal: A,
+    //next_wal: Option<A>,
     next_sequence: ChannelSequence,
     members: &'a mut M,
     checkpoint: CommandAddress<A>,
@@ -185,15 +202,17 @@ pub struct Channel<
     pending: &'c mut P,
 }
 
-impl<'a, 'b, 'c,
-A: RegionAddress, 
-M: VecLike<MemberSequence>, 
-U: VecLike<MemberId>, 
-P: VecLike<AddCommand<A, PAYLOAD_MAX>>, 
-const PAYLOAD_MAX: usize,
-const CHECKPOINT_MAX: usize,
->
-    Channel<'a, 'b, 'c, A, M, U, P, PAYLOAD_MAX, CHECKPOINT_MAX>
+impl<
+        'a,
+        'b,
+        'c,
+        A: RegionAddress,
+        M: VecLike<MemberSequence>,
+        U: VecLike<MemberId>,
+        P: VecLike<AddCommand<A, PAYLOAD_MAX>>,
+        const PAYLOAD_MAX: usize,
+        const CHECKPOINT_MAX: usize,
+    > Channel<'a, 'b, 'c, A, M, U, P, PAYLOAD_MAX, CHECKPOINT_MAX>
 {
     pub fn new(
         id: CollectionId,
@@ -239,7 +258,6 @@ const CHECKPOINT_MAX: usize,
     ) -> Result<ChannelCommand<A, PAYLOAD_MAX, CHECKPOINT_MAX>, ChannelError> {
         let sender_last = self.get_last_sequence(&author)?;
         let sequence = self.get_next_sequence();
-
         let command = AddCommand::new(prior, sender_last, sequence, author, message_id, payload);
         self.apply_command(&command)?;
 
@@ -252,7 +270,6 @@ const CHECKPOINT_MAX: usize,
     ) -> Result<(), ChannelError> {
         match command {
             ChannelCommand::AddMemberCommand(command) => {
-                
                 if !self.members.iter().any(|m| m.member == command.member) {
                     let member_sequence = MemberSequence {
                         member: command.member,
@@ -262,10 +279,15 @@ const CHECKPOINT_MAX: usize,
                         return Err(ChannelError::UserLimitReached);
                     };
                 }
-                
+
                 Ok(())
             }
             ChannelCommand::AddCommand(command) => {
+
+                // TODO: check that all the sequences and such are valid.
+
+
+                
                 let pending_command = command.clone();
                 let Ok(_) = self.pending.push(pending_command) else {
                     return Err(ChannelError::PendingLimitReached);
@@ -286,6 +308,24 @@ const CHECKPOINT_MAX: usize,
         } else {
             Err(ChannelError::MemberNotFound(*member))
         }
+    }
+
+    fn use_sequence(&mut self, member: &MemberId, sequence: ChannelSequence) -> Result<(), ChannelError> {
+        let member_sequence = self.members.iter_mut().find(|m| m.member == *member);
+        let Some(member_sequence) = member_sequence else {
+            return Err(ChannelError::MemberNotFound(*member));
+        };
+        member_sequence.last_sequence = sequence;
+
+        let member_in_updates = self.updates.iter().any(|m| m == member);
+
+        if !member_in_updates {
+            let Ok(_) = self.updates.push(*member) else {
+                return Err(ChannelError::NeedsCheckpoint);
+            };
+        }
+
+        Ok(())
     }
 
     fn get_next_sequence(&mut self) -> ChannelSequence {
