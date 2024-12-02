@@ -4,8 +4,8 @@ pub use wal::*;
 pub mod channel;
 pub use channel::*;
 
-use crate::io::IoBackend;
+use crate::io::RegionAddress;
 
-enum Commands<B: IoBackend, const PAYLOAD_MAX: usize, const MEMBER_LIMIT: usize> {
-    Channel(ChannelCommand<B, PAYLOAD_MAX, MEMBER_LIMIT>),
+enum Commands<A: RegionAddress, const PAYLOAD_MAX: usize, const MEMBER_LIMIT: usize> {
+    Channel(ChannelCommand<A, PAYLOAD_MAX, MEMBER_LIMIT>),
 }

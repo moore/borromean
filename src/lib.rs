@@ -9,6 +9,9 @@ pub use io::*;
 mod collections;
 pub use collections::*;
 
+pub mod vec_like;
+pub use vec_like::*;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug)]

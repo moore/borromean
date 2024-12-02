@@ -2,9 +2,9 @@ use core::marker::PhantomData;
 
 use heapless::Vec;
 
-use crate::io::{IoBackend, RegionAddress};
+use crate::io::RegionAddress;
 use crate::CollectionId;
-
+use crate::vec_like::VecLike;
 #[cfg(test)]
 mod tests;
 
@@ -12,6 +12,7 @@ mod tests;
 pub enum ChannelError {
     UserLimitReached,
     MemberNotFound(MemberId),
+    PendingLimitReached,
 }
 
 ///////////// basic types /////////////
@@ -29,21 +30,21 @@ pub struct MessageId {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CommandAddress<B: IoBackend> {
-    pub region: B::RegionAddress,
+pub struct CommandAddress<A: RegionAddress> {
+    pub region: A,
     pub offset: usize,
 }
 
-impl<B: IoBackend> CommandAddress<B> {
+impl<A: RegionAddress> CommandAddress<A> {
     pub fn zero() -> Self {
         Self {
-            region: B::RegionAddress::zero(),
+            region: A::zero(),
             offset: 0,
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Copy)]
 pub struct MemberSequence {
     member: MemberId,
     last_sequence: ChannelSequence,
@@ -51,10 +52,10 @@ pub struct MemberSequence {
 
 ///////////// Protocol /////////////
 
-pub enum ChannelCommand<B: IoBackend, const PAYLOAD_MAX: usize, const MEMBER_LIMIT: usize> {
-    AddCommand(AddCommand<B, PAYLOAD_MAX>),
-    AddMemberCommand(AddMemberCommand<B>),
-    CheckPointCommand(CheckPointCommand<B, MEMBER_LIMIT>),
+pub enum ChannelCommand<A: RegionAddress, const PAYLOAD_MAX: usize, const CHECKPOINT_MAX: usize> {
+    AddCommand(AddCommand<A, PAYLOAD_MAX>),
+    AddMemberCommand(AddMemberCommand<A>),
+    CheckPointCommand(CheckPointCommand<A, CHECKPOINT_MAX>),
 }
 
 ///////////// Add Command /////////////
@@ -72,12 +73,13 @@ pub enum ChannelCommand<B: IoBackend, const PAYLOAD_MAX: usize, const MEMBER_LIM
 /// that this command dose not fallow as an approach to add stronger
 /// ordering to the whole channel but I am not sure what problem
 // doing so would solve so I am leaving it out for now.
-pub struct AddCommand<B: IoBackend, const PAYLOAD_MAX: usize> {
+#[derive(Debug, Clone)]
+pub struct AddCommand<A: RegionAddress, const PAYLOAD_MAX: usize> {
     /// A command with a sequence one less than
     /// the sequence of this command. It should
     /// be equal to the largest sequence that the
     /// sender has seen.
-    prior: CommandAddress<B>,
+    prior: CommandAddress<A>,
     /// The last sequence used by the sender.
     /// This is used to detect if we are missing
     /// any commands from the sender.
@@ -95,15 +97,15 @@ pub struct AddCommand<B: IoBackend, const PAYLOAD_MAX: usize> {
     payload: Vec<u8, PAYLOAD_MAX>,
 }
 
-impl<B: IoBackend, const PAYLOAD_MAX: usize> AddCommand<B, PAYLOAD_MAX> {
+impl<A: RegionAddress, const PAYLOAD_MAX: usize> AddCommand<A, PAYLOAD_MAX> {
     pub fn new<const MEMBER_LIMIT: usize>(
-        prior: CommandAddress<B>,
+        prior: CommandAddress<A>,
         sender_last: ChannelSequence,
         sequence: ChannelSequence,
         author: MemberId,
         message_id: MessageId,
         payload: Vec<u8, PAYLOAD_MAX>,
-    ) -> ChannelCommand<B, PAYLOAD_MAX, MEMBER_LIMIT> {
+    ) -> ChannelCommand<A, PAYLOAD_MAX, MEMBER_LIMIT> {
         ChannelCommand::AddCommand(Self {
             prior,
             sender_last,
@@ -116,15 +118,15 @@ impl<B: IoBackend, const PAYLOAD_MAX: usize> AddCommand<B, PAYLOAD_MAX> {
 }
 
 ///////////// Add Member Command /////////////
-pub struct AddMemberCommand<B: IoBackend> {
+pub struct AddMemberCommand<A: RegionAddress> {
     member: MemberId,
-    phantom: PhantomData<B>,
+    phantom: PhantomData<A>,
 }
 
-impl<B: IoBackend> AddMemberCommand<B> {
+impl<A: RegionAddress> AddMemberCommand<A> {
     pub fn new<const PAYLOAD_MAX: usize, const MEMBER_LIMIT: usize>(
         member: MemberId,
-    ) -> ChannelCommand<B, PAYLOAD_MAX, MEMBER_LIMIT> {
+    ) -> ChannelCommand<A, PAYLOAD_MAX, MEMBER_LIMIT> {
         ChannelCommand::AddMemberCommand(Self {
             member,
             phantom: PhantomData,
@@ -137,9 +139,9 @@ impl<B: IoBackend> AddMemberCommand<B> {
 /// A check point is used when a one needs to talk about which devices
 /// have sent which commands in a way that allow only describing recent
 /// changes.
-pub struct CheckPointCommand<B: IoBackend, const USER_LIMIT: usize> {
+pub struct CheckPointCommand<A: RegionAddress, const USER_LIMIT: usize> {
     /// The checkpoint that this builds on
-    previous_checkpoint: CommandAddress<B>,
+    previous_checkpoint: CommandAddress<A>,
     /// This is the total number of commands in the channel on this
     /// device up to this checkpoint.
     command_count: u64,
@@ -150,12 +152,12 @@ pub struct CheckPointCommand<B: IoBackend, const USER_LIMIT: usize> {
     sequences: Vec<MemberSequence, USER_LIMIT>,
 }
 
-impl<B: IoBackend, const MEMBER_LIMIT: usize> CheckPointCommand<B, MEMBER_LIMIT> {
+impl<A: RegionAddress, const MEMBER_LIMIT: usize> CheckPointCommand<A, MEMBER_LIMIT> {
     pub fn new<const PAYLOAD_MAX: usize>(
-        previous_checkpoint: CommandAddress<B>,
+        previous_checkpoint: CommandAddress<A>,
         command_count: u64,
         sequences: &Vec<MemberSequence, MEMBER_LIMIT>,
-    ) -> ChannelCommand<B, PAYLOAD_MAX, MEMBER_LIMIT> {
+    ) -> ChannelCommand<A, PAYLOAD_MAX, MEMBER_LIMIT> {
         ChannelCommand::CheckPointCommand(Self {
             previous_checkpoint,
             command_count,
@@ -166,20 +168,40 @@ impl<B: IoBackend, const MEMBER_LIMIT: usize> CheckPointCommand<B, MEMBER_LIMIT>
 
 ///////////// Channel State /////////////
 
-pub struct Channel<B: IoBackend, const PAYLOAD_MAX: usize, const MEMBER_LIMIT: usize> {
+pub struct Channel<
+    'a, 'b, 'c, 
+    A: RegionAddress, 
+    M: VecLike<MemberSequence>, 
+    U: VecLike<MemberId>, 
+    P: VecLike<AddCommand<A, PAYLOAD_MAX>>, 
+    const PAYLOAD_MAX: usize,
+    const CHECKPOINT_MAX: usize,
+> {
     id: CollectionId,
     next_sequence: ChannelSequence,
-    members: Vec<MemberSequence, MEMBER_LIMIT>,
-    checkpoint: CommandAddress<B>,
-    updates: Vec<MemberSequence, MEMBER_LIMIT>,
-    phantom: PhantomData<B>,
+    members: &'a mut M,
+    checkpoint: CommandAddress<A>,
+    updates: &'b mut U,
+    pending: &'c mut P,
 }
 
-impl<B: IoBackend, const PAYLOAD_MAX: usize, const MEMBER_LIMIT: usize>
-    Channel<B, PAYLOAD_MAX, MEMBER_LIMIT>
+impl<'a, 'b, 'c,
+A: RegionAddress, 
+M: VecLike<MemberSequence>, 
+U: VecLike<MemberId>, 
+P: VecLike<AddCommand<A, PAYLOAD_MAX>>, 
+const PAYLOAD_MAX: usize,
+const CHECKPOINT_MAX: usize,
+>
+    Channel<'a, 'b, 'c, A, M, U, P, PAYLOAD_MAX, CHECKPOINT_MAX>
 {
-    pub fn new(id: CollectionId, initial_member: MemberId) -> Result<Self, ChannelError> {
-        let mut members = Vec::new();
+    pub fn new(
+        id: CollectionId,
+        initial_member: MemberId,
+        pending: &'c mut P,
+        members: &'a mut M,
+        updates: &'b mut U,
+    ) -> Result<Self, ChannelError> {
         let member_sequence = MemberSequence {
             member: initial_member,
             last_sequence: ChannelSequence(0),
@@ -191,17 +213,17 @@ impl<B: IoBackend, const PAYLOAD_MAX: usize, const MEMBER_LIMIT: usize>
         Ok(Self {
             id,
             next_sequence: ChannelSequence(0),
-            members: members.clone(),
+            members,
             checkpoint: CommandAddress::zero(),
-            updates: Vec::new(),
-            phantom: PhantomData,
+            updates,
+            pending,
         })
     }
 
     pub fn add_member(
         &mut self,
         member: MemberId,
-    ) -> Result<ChannelCommand<B, PAYLOAD_MAX, MEMBER_LIMIT>, ChannelError> {
+    ) -> Result<ChannelCommand<A, PAYLOAD_MAX, CHECKPOINT_MAX>, ChannelError> {
         let command = AddMemberCommand::new(member);
         self.apply_command(&command)?;
 
@@ -210,11 +232,11 @@ impl<B: IoBackend, const PAYLOAD_MAX: usize, const MEMBER_LIMIT: usize>
 
     pub fn add_command(
         &mut self,
-        prior: CommandAddress<B>,
+        prior: CommandAddress<A>,
         author: MemberId,
         message_id: MessageId,
         payload: Vec<u8, PAYLOAD_MAX>,
-    ) -> Result<ChannelCommand<B, PAYLOAD_MAX, MEMBER_LIMIT>, ChannelError> {
+    ) -> Result<ChannelCommand<A, PAYLOAD_MAX, CHECKPOINT_MAX>, ChannelError> {
         let sender_last = self.get_last_sequence(&author)?;
         let sequence = self.get_next_sequence();
 
@@ -226,10 +248,11 @@ impl<B: IoBackend, const PAYLOAD_MAX: usize, const MEMBER_LIMIT: usize>
 
     pub(crate) fn apply_command(
         &mut self,
-        command: &ChannelCommand<B, PAYLOAD_MAX, MEMBER_LIMIT>,
+        command: &ChannelCommand<A, PAYLOAD_MAX, CHECKPOINT_MAX>,
     ) -> Result<(), ChannelError> {
         match command {
             ChannelCommand::AddMemberCommand(command) => {
+                
                 if !self.members.iter().any(|m| m.member == command.member) {
                     let member_sequence = MemberSequence {
                         member: command.member,
@@ -239,11 +262,16 @@ impl<B: IoBackend, const PAYLOAD_MAX: usize, const MEMBER_LIMIT: usize>
                         return Err(ChannelError::UserLimitReached);
                     };
                 }
-
+                
                 Ok(())
             }
             ChannelCommand::AddCommand(command) => {
-                unimplemented!()
+                let pending_command = command.clone();
+                let Ok(_) = self.pending.push(pending_command) else {
+                    return Err(ChannelError::PendingLimitReached);
+                };
+
+                Ok(())
             }
             ChannelCommand::CheckPointCommand(command) => {
                 unimplemented!()

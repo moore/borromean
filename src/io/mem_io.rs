@@ -38,7 +38,7 @@ impl<'a> StorageMeta for &'a MemStorageMeta {
     }
 }
 
-type MemRegionAddress = usize;
+pub(crate) type MemRegionAddress = usize;
 
 impl RegionAddress for MemRegionAddress {
     fn zero() -> Self {
