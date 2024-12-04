@@ -148,7 +148,10 @@ impl<'a, B: IoBackend> Io<'a, B> {
         })
     }
 
-    pub fn allocate_region(&mut self, collection_id: CollectionId) -> Result<B::RegionAddress, IoError<B::BackingError, B::RegionAddress>> {
+    pub fn allocate_region(
+        &mut self,
+        collection_id: CollectionId,
+    ) -> Result<B::RegionAddress, IoError<B::BackingError, B::RegionAddress>> {
         let Some(address) = self.free_list_head else {
             return Err(IoError::StorageFull);
         };
@@ -158,32 +161,30 @@ impl<'a, B: IoBackend> Io<'a, B> {
     }
 
     pub fn write_region_header(
-        &mut self, 
-        region: B::RegionAddress, 
-        collection_id: CollectionId, 
-        collection_type: CollectionType, 
-        collection_sequence: B::Sequence
+        &mut self,
+        region: B::RegionAddress,
+        collection_id: CollectionId,
+        collection_type: CollectionType,
+        collection_sequence: B::Sequence,
     ) -> Result<(), IoError<B::BackingError, B::RegionAddress>> {
-
         // Make the barrow checker happy
         let storage_sequence = self.storage_sequence.increment();
         self.storage_sequence = storage_sequence;
 
         self.backing.write_region_header(
-            region, 
-            storage_sequence, 
-            collection_id, 
-            collection_type, 
-            collection_sequence, 
-            self.wal_address, 
-            self.free_list_head, 
-            self.free_list_tail, 
-            &[]
+            region,
+            storage_sequence,
+            collection_id,
+            collection_type,
+            collection_sequence,
+            self.wal_address,
+            self.free_list_head,
+            self.free_list_tail,
+            &[],
         )?;
         Ok(())
     }
 }
-
 
 pub trait RegionSequence: Sized + Eq + PartialEq + Ord + PartialOrd + Debug + Copy {
     fn first() -> Self;

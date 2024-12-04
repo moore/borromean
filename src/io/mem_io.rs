@@ -3,7 +3,7 @@ use heapless::Vec;
 
 use crate::{
     io::{IoBackend, IoError, RegionAddress},
-    CollectionId, CollectionType, RegionSequence, RegionHeader, StorageError, StorageMeta,
+    CollectionId, CollectionType, RegionHeader, RegionSequence, StorageError, StorageMeta,
 };
 
 #[derive(Debug, Clone)]

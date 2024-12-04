@@ -170,13 +170,13 @@ impl<A: RegionAddress, const MEMBER_LIMIT: usize> CheckPointCommand<A, MEMBER_LI
 ///////////// Channel State /////////////
 
 /// The channel is represented by an ordered set of regions. Each region has a pointer
-/// the next and previous region in the channel. The header of the next region is not 
-/// written until if is full at which point it becomes the head region of the channel. 
+/// the next and previous region in the channel. The header of the next region is not
+/// written until if is full at which point it becomes the head region of the channel.
 /// Because the header of then next channel is not written prior to becoming the head
 /// It will have a lower region sequence number than the current head region and so what ever
 /// stale information it contains will be ignored. To track how much of the next region is
 /// used the current head also references a WAL to track updates to the next region.
-/// 
+///
 /// We wright commands in to the next segment instead of the WAL so that they have a
 /// stable address.
 pub struct Channel<
@@ -283,11 +283,8 @@ impl<
                 Ok(())
             }
             ChannelCommand::AddCommand(command) => {
-
                 // TODO: check that all the sequences and such are valid.
 
-
-                
                 let pending_command = command.clone();
                 let Ok(_) = self.pending.push(pending_command) else {
                     return Err(ChannelError::PendingLimitReached);
@@ -310,7 +307,11 @@ impl<
         }
     }
 
-    fn use_sequence(&mut self, member: &MemberId, sequence: ChannelSequence) -> Result<(), ChannelError> {
+    fn use_sequence(
+        &mut self,
+        member: &MemberId,
+        sequence: ChannelSequence,
+    ) -> Result<(), ChannelError> {
         let member_sequence = self.members.iter_mut().find(|m| m.member == *member);
         let Some(member_sequence) = member_sequence else {
             return Err(ChannelError::MemberNotFound(*member));
