@@ -68,6 +68,10 @@ impl<'a, B: IoBackend> Io<'a, B> {
             return Err(IoError::AlreadyInitialized);
         }
 
+        if region_count < 2 {
+            return Err(IoError::InvalidRegionCount);
+        }
+
         // Write the meta block.
         backing.write_meta(region_size, region_count)?;
 
@@ -148,7 +152,7 @@ impl<'a, B: IoBackend> Io<'a, B> {
         })
     }
 
-    pub fn allocate_region(
+    pub(crate) fn allocate_region(
         &mut self,
         collection_id: CollectionId,
     ) -> Result<B::RegionAddress, IoError<B::BackingError, B::RegionAddress>> {
@@ -160,7 +164,7 @@ impl<'a, B: IoBackend> Io<'a, B> {
         Ok(address)
     }
 
-    pub fn write_region_header(
+    pub(crate) fn write_region_header(
         &mut self,
         region: B::RegionAddress,
         collection_id: CollectionId,

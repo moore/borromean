@@ -1,6 +1,10 @@
 use crate::io::{Io, IoBackend, IoError, RegionSequence};
 use crate::{CollectionId, CollectionType};
 
+
+#[cfg(test)]
+mod tests;
+
 // NOTE: We want to keep using the same wall until it is full so that we don't
 // ware down the head of the region more then the tail. (This is not just true
 // of WALs but of all collections)
@@ -21,12 +25,8 @@ impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
         let collection_type = CollectionType::Wal;
 
         let region = io.allocate_region(collection_id)?;
-
-        // next write wall header so that it is committed. Should we rename write header to commit?
-        // we need to be carful with the allocate commit pattern as it's possible to leak
-        // regions.
-
         io.write_region_header(region, collection_id, collection_type, B::Sequence::first())?;
+        
         Ok(Self {
             region,
             collection_id,

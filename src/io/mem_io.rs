@@ -60,14 +60,14 @@ impl RegionSequence for Sequence {
 
 #[derive(Debug, Clone)]
 pub struct MemRegionHeader<const MAX_HEADS: usize> {
-    sequence: Sequence,
-    collection_id: CollectionId,
-    collection_type: CollectionType,
-    collection_sequence: Sequence,
-    wal_address: MemRegionAddress,
-    free_list_head: Option<MemRegionAddress>,
-    free_list_tail: Option<MemRegionAddress>,
-    heads: Vec<MemRegionAddress, MAX_HEADS>,
+    pub(crate) sequence: Sequence,
+    pub(crate) collection_id: CollectionId,
+    pub(crate) collection_type: CollectionType,
+    pub(crate) collection_sequence: Sequence,
+    pub(crate) wal_address: MemRegionAddress,
+    pub(crate) free_list_head: Option<MemRegionAddress>,
+    pub(crate) free_list_tail: Option<MemRegionAddress>,
+    pub(crate) heads: Vec<MemRegionAddress, MAX_HEADS>,
 }
 
 impl<'a, const DATA_SIZE: usize, const MAX_HEADS: usize, const REGION_COUNT: usize>
@@ -104,6 +104,7 @@ impl<'a, const DATA_SIZE: usize, const MAX_HEADS: usize, const REGION_COUNT: usi
         &self.heads
     }
 }
+
 
 #[derive(Debug, Clone)]
 pub struct MemFreePointer(u32);

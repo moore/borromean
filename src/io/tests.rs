@@ -167,37 +167,17 @@ fn test_write_region_header() {
     io.write_region_header(region, collection_id, collection_type, collection_sequence)
         .expect("Failed to write header");
 
+    let storage_sequence = io.storage_sequence;
     // Verify header was written correctly
     let header = mem_io
         .get_region_header(region)
         .expect("Failed to get header");
-    assert_eq!(
-        <&MemRegionHeader<8> as RegionHeader<MemIo<DATA_SIZE, 8, REGION_COUNT>>>::collection_id(
-            &header
-        ),
-        collection_id
-    );
-    assert_eq!(
-        <&MemRegionHeader<8> as RegionHeader<MemIo<DATA_SIZE, 8, REGION_COUNT>>>::collection_type(
-            &header
-        ),
-        collection_type
-    );
-    assert_eq!(<&MemRegionHeader<8> as RegionHeader<MemIo<DATA_SIZE, 8, REGION_COUNT>>>::collection_sequence(&header), collection_sequence);
-    assert_eq!(
-        <&MemRegionHeader<8> as RegionHeader<MemIo<DATA_SIZE, 8, REGION_COUNT>>>::sequence(&header),
-        1
-    ); // First write should have sequence 1
-    assert_eq!(
-        <&MemRegionHeader<8> as RegionHeader<MemIo<DATA_SIZE, 8, REGION_COUNT>>>::wal_address(
-            &header
-        ),
-        0
-    ); // WAL address should be 0
-    assert!(
-        <&MemRegionHeader<8> as RegionHeader<MemIo<DATA_SIZE, 8, REGION_COUNT>>>::heads(&header)
-            .is_empty()
-    ); // No heads initially
+    assert_eq!(header.collection_id, collection_id);
+    assert_eq!(header.collection_type, collection_type);    
+    assert_eq!(header.collection_sequence, collection_sequence);
+    assert_eq!(header.sequence, storage_sequence);
+    assert_eq!(header.wal_address, 0); // WAL address should be 0
+    assert!(header.heads.is_empty()); // No heads initially
 }
 
 #[test]
@@ -225,14 +205,6 @@ fn test_write_region_header_sequence_increments() {
             .backing
             .get_region_header(region)
             .expect("Failed to get header");
-        //assert_eq!(header.sequence(), expected_sequence);
-        // I don't know why the compiler needs this type annotation.
-        // it tells me to add it so why can't it figure it out itself?
-        assert_eq!(
-            <&MemRegionHeader<8> as RegionHeader<MemIo<DATA_SIZE, 8, REGION_COUNT>>>::sequence(
-                &header
-            ),
-            expected_sequence
-        );
+        assert_eq!(header.sequence, expected_sequence);
     }
 }
