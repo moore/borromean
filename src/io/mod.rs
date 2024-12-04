@@ -47,6 +47,7 @@ pub(crate) trait StorageMeta {
     fn region_count(&self) -> usize;
 }
 
+#[derive(Debug)]
 pub struct Io<'a, B: IoBackend> {
     storage_head: B::RegionAddress,
     storage_sequence: B::Sequence,
