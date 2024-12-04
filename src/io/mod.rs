@@ -14,6 +14,7 @@ pub enum IoError<BackingError, RegionAddress> {
     InvalidAddress(RegionAddress),
     InvalidHeads,
     OutOfBounds,
+    StorageFull,
     Backing(BackingError),
 }
 
@@ -34,8 +35,8 @@ pub(crate) trait RegionHeader<B: IoBackend> {
     fn collection_type(&self) -> CollectionType;
     fn collection_sequence(&self) -> B::Sequence;
     fn wal_address(&self) -> B::RegionAddress;
-    fn free_list_head(&self) -> B::RegionAddress;
-    fn free_list_tail(&self) -> B::RegionAddress;
+    fn free_list_head(&self) -> Option<B::RegionAddress>;
+    fn free_list_tail(&self) -> Option<B::RegionAddress>;
     fn heads(&self) -> &[B::RegionAddress];
 }
 
@@ -47,6 +48,10 @@ pub(crate) trait StorageMeta {
 }
 
 pub struct Io<'a, B: IoBackend> {
+    storage_head: B::RegionAddress,
+    storage_sequence: B::Sequence,
+    free_list_head: Option<B::RegionAddress>,
+    free_list_tail: Option<B::RegionAddress>,
     backing: &'a mut B,
     wal_address: B::RegionAddress,
     wal_offset: usize,
@@ -89,12 +94,16 @@ impl<'a, B: IoBackend> Io<'a, B> {
             collection_type,
             collection_sequence,
             wal_address,
-            first_free_address,
-            last_free_address,
+            Some(first_free_address),
+            Some(last_free_address),
             &[],
         )?;
 
         Ok(Self {
+            storage_head: wal_address,
+            storage_sequence: sequence,
+            free_list_head: Some(first_free_address),
+            free_list_tail: Some(last_free_address),
             backing,
             wal_address,
             wal_offset: 0,
@@ -108,6 +117,8 @@ impl<'a, B: IoBackend> Io<'a, B> {
 
         let mut storage_head = backing.get_region_address(0)?;
         let mut storage_sequence = backing.get_region_header(storage_head)?.sequence();
+        let mut free_list_head = None;
+        let mut free_list_tail = None;
 
         let region_count = backing.get_meta()?.region_count();
         for i in 1..region_count {
@@ -117,6 +128,8 @@ impl<'a, B: IoBackend> Io<'a, B> {
             if this_sequence > storage_sequence {
                 storage_head = address;
                 storage_sequence = this_sequence;
+                free_list_head = header.free_list_head();
+                free_list_tail = header.free_list_tail();
             }
         }
 
@@ -124,15 +137,56 @@ impl<'a, B: IoBackend> Io<'a, B> {
         let wal_offset = 0; // BOOG scan wall to work this out
 
         Ok(Self {
+            storage_head,
+            storage_sequence,
+            free_list_head,
+            free_list_tail,
             backing,
             wal_address,
             wal_offset,
         })
     }
+
+    pub fn allocate_region(&mut self, collection_id: CollectionId) -> Result<B::RegionAddress, IoError<B::BackingError, B::RegionAddress>> {
+        let Some(address) = self.free_list_head else {
+            return Err(IoError::StorageFull);
+        };
+        let free_list_head = self.backing.get_region_free_pointer(address)?;
+        self.free_list_head = free_list_head;
+        Ok(address)
+    }
+
+    pub fn write_region_header(
+        &mut self, 
+        region: B::RegionAddress, 
+        collection_id: CollectionId, 
+        collection_type: CollectionType, 
+        collection_sequence: B::Sequence
+    ) -> Result<(), IoError<B::BackingError, B::RegionAddress>> {
+
+        // Make the barrow checker happy
+        let storage_sequence = self.storage_sequence.increment();
+        self.storage_sequence = storage_sequence;
+
+        self.backing.write_region_header(
+            region, 
+            storage_sequence, 
+            collection_id, 
+            collection_type, 
+            collection_sequence, 
+            self.wal_address, 
+            self.free_list_head, 
+            self.free_list_tail, 
+            &[]
+        )?;
+        Ok(())
+    }
 }
 
-pub trait FirstSequence {
+
+pub trait RegionSequence: Sized + Eq + PartialEq + Ord + PartialOrd + Debug + Copy {
     fn first() -> Self;
+    fn increment(&self) -> Self;
 }
 
 pub trait IoBackend: Sized + Debug {
@@ -141,7 +195,7 @@ pub trait IoBackend: Sized + Debug {
         Self: 'a;
     type RegionAddress: RegionAddress;
     type BackingError: Debug;
-    type Sequence: Sized + FirstSequence + Eq + PartialEq + Ord + PartialOrd + Debug;
+    type Sequence: RegionSequence;
     type RegionHeader<'a>: RegionHeader<Self>
     where
         Self: 'a;
@@ -176,14 +230,14 @@ pub trait IoBackend: Sized + Debug {
     /// Writes the region header.
     fn write_region_header<'a>(
         &mut self,
-        index: Self::RegionAddress,
-        sequence: Self::Sequence,
+        address: Self::RegionAddress,
+        storage_sequence: Self::Sequence,
         collection_id: CollectionId,
         collection_type: CollectionType,
         collection_sequence: Self::Sequence,
         wal_address: Self::RegionAddress,
-        free_list_head: Self::RegionAddress,
-        free_list_tail: Self::RegionAddress,
+        free_list_head: Option<Self::RegionAddress>,
+        free_list_tail: Option<Self::RegionAddress>,
         addresses: &[Self::RegionAddress],
     ) -> Result<(), IoError<Self::BackingError, Self::RegionAddress>>;
 

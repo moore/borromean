@@ -3,7 +3,7 @@ use heapless::Vec;
 
 use crate::{
     io::{IoBackend, IoError, RegionAddress},
-    CollectionId, CollectionType, FirstSequence, RegionHeader, StorageError, StorageMeta,
+    CollectionId, CollectionType, RegionSequence, RegionHeader, StorageError, StorageMeta,
 };
 
 #[derive(Debug, Clone)]
@@ -48,9 +48,13 @@ impl RegionAddress for MemRegionAddress {
 
 type Sequence = u64;
 
-impl FirstSequence for Sequence {
+impl RegionSequence for Sequence {
     fn first() -> Self {
         0
+    }
+
+    fn increment(&self) -> Self {
+        self + 1
     }
 }
 
@@ -61,8 +65,8 @@ pub struct MemRegionHeader<const MAX_HEADS: usize> {
     collection_type: CollectionType,
     collection_sequence: Sequence,
     wal_address: MemRegionAddress,
-    free_list_head: MemRegionAddress,
-    free_list_tail: MemRegionAddress,
+    free_list_head: Option<MemRegionAddress>,
+    free_list_tail: Option<MemRegionAddress>,
     heads: Vec<MemRegionAddress, MAX_HEADS>,
 }
 
@@ -88,12 +92,12 @@ impl<'a, const DATA_SIZE: usize, const MAX_HEADS: usize, const REGION_COUNT: usi
     }
     fn free_list_head(
         &self,
-    ) -> <MemIo<DATA_SIZE, MAX_HEADS, REGION_COUNT> as IoBackend>::RegionAddress {
+    ) -> Option<<MemIo<DATA_SIZE, MAX_HEADS, REGION_COUNT> as IoBackend>::RegionAddress> {
         self.free_list_head
     }
     fn free_list_tail(
         &self,
-    ) -> <MemIo<DATA_SIZE, MAX_HEADS, REGION_COUNT> as IoBackend>::RegionAddress {
+    ) -> Option<<MemIo<DATA_SIZE, MAX_HEADS, REGION_COUNT> as IoBackend>::RegionAddress> {
         self.free_list_tail
     }
     fn heads(&self) -> &[<MemIo<DATA_SIZE, MAX_HEADS, REGION_COUNT> as IoBackend>::RegionAddress] {
@@ -129,8 +133,8 @@ impl<const DATA_SIZE: usize, const MAX_HEADS: usize, const REGION_COUNT: usize>
                 collection_type: CollectionType::Uninitialized,
                 collection_sequence: Sequence::first(),
                 wal_address: 0,
-                free_list_head: 0,
-                free_list_tail: 0,
+                free_list_head: None,
+                free_list_tail: None,
                 heads: Vec::new(),
             },
             data: [0u8; DATA_SIZE],
@@ -202,8 +206,8 @@ impl<const DATA_SIZE: usize, const MAX_HEADS: usize, const REGION_COUNT: usize> 
         collection_type: CollectionType,
         collection_sequence: Self::Sequence,
         wal_address: Self::RegionAddress,
-        free_list_head: Self::RegionAddress,
-        free_list_tail: Self::RegionAddress,
+        free_list_head: Option<Self::RegionAddress>,
+        free_list_tail: Option<Self::RegionAddress>,
         addresses: &[Self::RegionAddress],
     ) -> Result<(), IoError<Self::BackingError, Self::RegionAddress>> {
         let region = self

@@ -25,12 +25,14 @@ pub enum StorageError<B: IoBackend> {
     OutOfBounds,
     InvalidRegionSize,
     InvalidRegionCount,
+    StorageFull,
     BackingError(B::BackingError),
 }
 
 impl<B: IoBackend> From<IoError<B::BackingError, B::RegionAddress>> for StorageError<B> {
     fn from(error: IoError<B::BackingError, B::RegionAddress>) -> Self {
         match error {
+            IoError::StorageFull => StorageError::StorageFull,
             IoError::AlreadyInitialized => StorageError::AlreadyInitialized,
             IoError::NotInitialized => StorageError::NotInitialized,
             IoError::InvalidAddress(address) => StorageError::InvalidAddress(address),
