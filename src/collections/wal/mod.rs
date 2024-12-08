@@ -49,7 +49,7 @@ pub struct WalCursor<A: RegionAddress> {
 pub struct Wal<const SIZE: usize, B: IoBackend> {
     region: B::RegionAddress,
     collection_id: CollectionId,
-    collection_sequence: B::StorageSequence,
+    collection_sequence: B::CollectionSequence,
     head: B::RegionAddress,
     next_entry: usize,
 }
@@ -77,19 +77,20 @@ impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
         collection_id: CollectionId,
     ) -> Result<Self, IoError<B::BackingError, B::RegionAddress>> {
         let collection_type = CollectionType::Wal;
+        let collection_sequence = B::CollectionSequence::first();
 
         let region = io.allocate_region(collection_id)?;
         io.write_region_header(
             region,
             collection_id,
             collection_type,
-            B::CollectionSequence::first(),
+            collection_sequence,
         )?;
 
         Ok(Self {
             region,
             collection_id,
-            collection_sequence: B::StorageSequence::first(),
+            collection_sequence,
             head: region,
             next_entry: 0,
         })
@@ -102,7 +103,7 @@ impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
         data: &[u8],
         buffer: &mut [u8],
     ) -> Result<(), IoError<B::BackingError, B::RegionAddress>> {
-        let entry = Entry::<B::StorageSequence, B::RegionAddress> {
+        let entry = Entry::<B::CollectionSequence, B::RegionAddress> {
             collection_id: self.collection_id,
             collection_sequence: self.collection_sequence,
             record: EntryRecord::Data(DataRecord {
@@ -177,7 +178,7 @@ impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
         // TODO: handle the case where we get to the end of the region
         io.get_region_data(region, offset, record_len, buffer)?;
 
-        let entry: Entry<'b, B::StorageSequence, B::RegionAddress> =
+        let entry: Entry<'b, B::CollectionSequence, B::RegionAddress> =
             match from_bytes_crc32(buffer, CRC.digest()) {
                 Ok(entry) => entry,
                 Err(_e) => {
