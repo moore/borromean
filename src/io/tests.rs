@@ -173,7 +173,7 @@ fn test_write_region_header() {
         .get_region_header(region)
         .expect("Failed to get header");
     assert_eq!(header.collection_id, collection_id);
-    assert_eq!(header.collection_type, collection_type);    
+    assert_eq!(header.collection_type, collection_type);
     assert_eq!(header.collection_sequence, collection_sequence);
     assert_eq!(header.sequence, storage_sequence);
     assert_eq!(header.wal_address, 0); // WAL address should be 0

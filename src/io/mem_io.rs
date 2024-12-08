@@ -105,7 +105,6 @@ impl<'a, const DATA_SIZE: usize, const MAX_HEADS: usize, const REGION_COUNT: usi
     }
 }
 
-
 #[derive(Debug, Clone)]
 pub struct MemFreePointer(u32);
 
@@ -232,19 +231,33 @@ impl<const DATA_SIZE: usize, const MAX_HEADS: usize, const REGION_COUNT: usize> 
     }
 
     fn get_region_data<'a>(
-        &'a mut self,
+        &mut self,
         index: Self::RegionAddress,
         offset: usize,
         len: usize,
-    ) -> Result<&'a [u8], IoError<Self::BackingError, Self::RegionAddress>> {
+        buffer: &'a mut [u8],
+    ) -> Result<(), IoError<Self::BackingError, Self::RegionAddress>> {
         if offset + len > DATA_SIZE {
             return Err(IoError::OutOfBounds);
         }
 
-        self.regions
+        if buffer.len() < len {
+            return Err(IoError::OutOfBounds);
+        }
+
+        let source = self
+            .regions
             .get(index)
             .ok_or(IoError::InvalidAddress(index))
-            .map(|region| &region.data[offset..offset + len])
+            .map(|region| &region.data[offset..offset + len])?;
+
+        let Some((target, _)) = buffer.split_at_mut_checked(source.len()) else {
+            return Err(IoError::BufferTooSmall(source.len()));
+        };
+
+        target.copy_from_slice(source);
+
+        Ok(())
     }
 
     fn write_region_data(

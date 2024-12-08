@@ -27,6 +27,7 @@ pub enum StorageError<B: IoBackend> {
     InvalidRegionCount,
     StorageFull,
     BackingError(B::BackingError),
+    SerializationError,
 }
 
 impl<B: IoBackend> From<IoError<B::BackingError, B::RegionAddress>> for StorageError<B> {
@@ -41,6 +42,9 @@ impl<B: IoBackend> From<IoError<B::BackingError, B::RegionAddress>> for StorageE
             IoError::InvalidRegionCount => StorageError::InvalidRegionCount,
             IoError::InvalidHeads => StorageError::InvalidHeads,
             IoError::Backing(e) => StorageError::BackingError(e),
+            IoError::RegionNotFound(address) => StorageError::InvalidAddress(address),
+            IoError::SerializationError => StorageError::SerializationError,
+            IoError::BufferTooSmall(_) => StorageError::OutOfBounds,
         }
     }
 }

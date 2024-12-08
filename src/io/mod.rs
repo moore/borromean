@@ -2,6 +2,8 @@ pub mod mem_io;
 use crate::{CollectionId, CollectionType};
 use core::fmt::Debug;
 
+use serde::{Deserialize, Serialize};
+
 #[cfg(test)]
 mod tests;
 
@@ -16,6 +18,9 @@ pub enum IoError<BackingError, RegionAddress> {
     OutOfBounds,
     StorageFull,
     Backing(BackingError),
+    RegionNotFound(RegionAddress),
+    SerializationError,
+    BufferTooSmall(usize),
 }
 
 impl<BackingError, RegionAddress> From<BackingError> for IoError<BackingError, RegionAddress> {
@@ -28,6 +33,10 @@ pub trait RegionAddress: Sized + Copy + Eq + PartialEq + Debug {
     fn zero() -> Self;
 }
 
+pub trait RegionSequence: Sized + Eq + PartialEq + Ord + PartialOrd + Debug + Copy {
+    fn first() -> Self;
+    fn increment(&self) -> Self;
+}
 /// Represents the header of a region
 pub(crate) trait RegionHeader<B: IoBackend> {
     fn sequence(&self) -> B::Sequence;
@@ -188,20 +197,41 @@ impl<'a, B: IoBackend> Io<'a, B> {
         )?;
         Ok(())
     }
-}
 
-pub trait RegionSequence: Sized + Eq + PartialEq + Ord + PartialOrd + Debug + Copy {
-    fn first() -> Self;
-    fn increment(&self) -> Self;
+    pub(crate) fn write_region_data(
+        &mut self,
+        region: B::RegionAddress,
+        data: &[u8],
+        offset: usize,
+    ) -> Result<(), IoError<B::BackingError, B::RegionAddress>> {
+        self.backing.write_region_data(region, offset, data)
+    }
+
+    pub fn get_region_data(
+        &mut self,
+        region: B::RegionAddress,
+        offset: usize,
+        len: usize,
+        buffer: &mut [u8],
+    ) -> Result<(), IoError<B::BackingError, B::RegionAddress>> {
+        self.backing.get_region_data(region, offset, len, buffer)
+    }
+
+    pub fn get_region_header<'b>(
+        &'b mut self,
+        region: B::RegionAddress,
+    ) -> Result<B::RegionHeader<'b>, IoError<B::BackingError, B::RegionAddress>> {
+        self.backing.get_region_header(region)
+    }
 }
 
 pub trait IoBackend: Sized + Debug {
     type StorageMeta<'a>: StorageMeta
     where
         Self: 'a;
-    type RegionAddress: RegionAddress;
+    type RegionAddress: RegionAddress + Serialize + for<'a> Deserialize<'a>;
     type BackingError: Debug;
-    type Sequence: RegionSequence;
+    type Sequence: RegionSequence + Serialize + for<'a> Deserialize<'a>;
     type RegionHeader<'a>: RegionHeader<Self>
     where
         Self: 'a;
@@ -248,17 +278,18 @@ pub trait IoBackend: Sized + Debug {
     ) -> Result<(), IoError<Self::BackingError, Self::RegionAddress>>;
 
     /// Gets data from region at offset.
-    fn get_region_data<'a>(
-        &'a mut self,
-        index: Self::RegionAddress,
+    fn get_region_data(
+        &mut self,
+        region: Self::RegionAddress,
         offset: usize,
         len: usize,
-    ) -> Result<&'a [u8], IoError<Self::BackingError, Self::RegionAddress>>;
+        buffer: &mut [u8],
+    ) -> Result<(), IoError<Self::BackingError, Self::RegionAddress>>;
 
     /// Writes data to region at offset.
     fn write_region_data(
         &mut self,
-        index: Self::RegionAddress,
+        region: Self::RegionAddress,
         offset: usize,
         data: &[u8],
     ) -> Result<(), IoError<Self::BackingError, Self::RegionAddress>>;
@@ -266,13 +297,13 @@ pub trait IoBackend: Sized + Debug {
     /// Gets the region free pointer.
     fn get_region_free_pointer(
         &mut self,
-        index: Self::RegionAddress,
+        region: Self::RegionAddress,
     ) -> Result<Option<Self::RegionAddress>, IoError<Self::BackingError, Self::RegionAddress>>;
 
     /// Writes the region free pointer.
     fn write_region_free_pointer(
         &mut self,
-        index: Self::RegionAddress,
+        region: Self::RegionAddress,
         pointer: Self::RegionAddress,
     ) -> Result<(), IoError<Self::BackingError, Self::RegionAddress>>;
 }
