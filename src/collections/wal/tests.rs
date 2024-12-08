@@ -90,12 +90,13 @@ fn test_wal_write_read_single_region() {
 
     // Read it back
     let cursor = wal.get_cursor();
-    let (cursor, result) = wal
+    let WalRead::Record { next, record } = wal
         .read(&mut io, cursor, &mut read_buffer)
         .expect("Failed to read data")
-        .expect("No data found");
+    else {
+        panic!("No Record Found")
+    };
 
-    let record = result.expect("No data found");
     assert_eq!(record.collection_type, CollectionType::Wal);
     assert_eq!(record.data, test_data);
 }
@@ -138,23 +139,26 @@ fn test_wal_write_read_multiple_regions() {
     // Read back all entries
     let mut cursor = wal.get_cursor();
     for expected_data in &test_data {
-        let (next_cursor, result) = wal
+        let WalRead::Record { next, record } = wal
             .read(&mut io, cursor, &mut read_buffer)
             .expect("Failed to read data")
-            .expect("No data found");
+        else {
+            panic!("No data found");
+        };
 
-        let record = result.expect("No data found");
         assert_eq!(record.collection_type, CollectionType::Wal);
         assert_eq!(record.data, *expected_data);
 
-        cursor = next_cursor;
+        cursor = next;
     }
 
     // Verify we've read everything
-    let result = wal
-        .read(&mut io, cursor, &mut read_buffer)
-        .expect("Failed to read data");
-    assert!(result.is_none(), "Found unexpected data at end of WAL");
+    match wal.read(&mut io, cursor, &mut read_buffer).unwrap() {
+        WalRead::Commit { next } => panic!("Got unexpected Commit"),
+        WalRead::EndOfRegion { next } => panic!("Unexpected EndOfRegion"),
+        WalRead::Record { next, record } => panic!("Got unexpected Record"),
+        WalRead::EndOfWAL => (), // Expeceted
+    }
 }
 
 #[test]

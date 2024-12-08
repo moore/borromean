@@ -11,7 +11,6 @@ use heapless::Vec;
 #[cfg(test)]
 mod tests;
 
-
 // NOTE: We want to keep using the same wall until it is full so that we don't
 // ware down the head of the region more then the tail. (This is not just true
 // of WALs but of all collections)
@@ -44,7 +43,7 @@ struct DataRecord<'a> {
     data: &'a [u8],
 }
 
-struct WallCursor<A: RegionAddress> {
+struct WalCursor<A: RegionAddress> {
     region: A,
     offset: usize,
 }
@@ -57,12 +56,23 @@ struct Wal<const SIZE: usize, B: IoBackend> {
     next_entry: usize,
 }
 
+pub enum WalRead<'a, A: RegionAddress> {
+    Record {
+        next: WalCursor<A>,
+        record: DataRecord<'a>,
+    },
+    Commit {
+        next: WalCursor<A>,
+    },
+    EndOfRegion {
+        next: WalCursor<A>,
+    },
+    EndOfWAL,
+}
 
 impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
-
     const LEN_BYTES: usize = size_of::<u32>();
     const CRC: Crc<u32> = Crc::<u32>::new(&CRC_32_ISCSI);
-
 
     pub fn new<'a>(
         io: &mut Io<'a, B>,
@@ -81,8 +91,6 @@ impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
             next_entry: 0,
         })
     }
-
-
 
     pub fn write<'a>(
         &mut self,
@@ -132,8 +140,8 @@ impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
         Ok(())
     }
 
-    pub fn get_cursor(&self) -> WallCursor<B::RegionAddress> {
-        WallCursor {
+    pub fn get_cursor(&self) -> WalCursor<B::RegionAddress> {
+        WalCursor {
             region: self.region,
             offset: 0,
         }
@@ -142,17 +150,14 @@ impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
     pub fn read<'a, 'b>(
         &mut self,
         io: &mut Io<'a, B>,
-        cursor: WallCursor<B::RegionAddress>,
+        cursor: WalCursor<B::RegionAddress>,
         buffer: &'b mut [u8],
-    ) -> Result<
-        Option<(WallCursor<B::RegionAddress>, Option<DataRecord<'b>>)>,
-        IoError<B::BackingError, B::RegionAddress>,
-    > {
+    ) -> Result<WalRead<'b, B::RegionAddress>, IoError<B::BackingError, B::RegionAddress>> {
         let mut region = cursor.region;
         let mut offset = cursor.offset;
 
         if offset + Self::LEN_BYTES > SIZE {
-            return Ok(None);
+            return Ok(WalRead::EndOfWAL);
         }
 
         let mut len_bytes = [0u8; Self::LEN_BYTES];
@@ -181,22 +186,34 @@ impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
         if entry.collection_id != self.collection_id
             || entry.collection_sequence != self.collection_sequence
         {
-            return Ok(None);
+            return Ok(WalRead::EndOfWAL);
         }
 
-        let (region, offset, data_record) = match entry.record {
+        let result: WalRead<'b, <B as IoBackend>::RegionAddress> = match entry.record {
             EntryRecord::Data(data_record) => {
-                (cursor.region, offset + record_len, Some(data_record))
+                let region = cursor.region;
+                let offset = offset + record_len;
+                WalRead::Record {
+                    next: WalCursor { region, offset },
+                    record: data_record,
+                }
             }
             EntryRecord::Commit => {
-                // BUG? I don't think in this code path we should
-                // see a commit record. So we might want to return
-                // an error here.
-                (cursor.region, offset + record_len, None)
+                let region = cursor.region;
+                let offset = offset + record_len;
+                WalRead::Commit {
+                    next: WalCursor { region, offset },
+                }
             }
-            EntryRecord::NextRegion(next_region) => (next_region, 0, None),
+            EntryRecord::NextRegion(next_region) => {
+                let region = next_region;
+                let offset = 0;
+                WalRead::EndOfRegion {
+                    next: WalCursor { region, offset },
+                }
+            }
         };
 
-        Ok(Some((WallCursor { region, offset }, data_record)))
+        Ok(result)
     }
 }
