@@ -192,6 +192,5 @@ fn test_wal_write_fails_when_full() {
 
     // Verify we get storage full error
     let result = wal.write(&mut io, CollectionType::Wal, test_data, &mut write_buffer);
-    dbg!("result {:?}", &result);
     assert!(matches!(result, Err(IoError::StorageFull)));
 }
