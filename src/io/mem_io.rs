@@ -1,5 +1,6 @@
 extern crate alloc;
 use heapless::Vec;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     io::{IoBackend, IoError, RegionAddress},
@@ -38,32 +39,47 @@ impl<'a> StorageMeta for &'a MemStorageMeta {
     }
 }
 
-pub(crate) type MemRegionAddress = usize;
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Serialize, Deserialize)]
+pub struct MemRegionAddress(pub(crate) usize);
 
 impl RegionAddress for MemRegionAddress {
     fn zero() -> Self {
-        0
+        MemRegionAddress(0)
     }
 }
 
-type Sequence = u64;
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Serialize, Deserialize, PartialOrd, Ord)]
+pub struct MemCollectionSequence(u64);
 
-impl RegionSequence for Sequence {
+impl RegionSequence for MemCollectionSequence {
     fn first() -> Self {
-        0
+        MemCollectionSequence(0)
     }
 
     fn increment(&self) -> Self {
-        self + 1
+        MemCollectionSequence(self.0 + 1)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Clone, Copy, Serialize, Deserialize, PartialOrd, Ord)]
+pub struct MemStorageSequence(pub(crate) u64);
+
+impl RegionSequence for MemStorageSequence {
+    fn first() -> Self {
+        MemStorageSequence(0)
+    }
+
+    fn increment(&self) -> Self {
+        MemStorageSequence(self.0 + 1)
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct MemRegionHeader<const MAX_HEADS: usize> {
-    pub(crate) sequence: Sequence,
+    pub(crate) sequence: MemStorageSequence,
     pub(crate) collection_id: CollectionId,
     pub(crate) collection_type: CollectionType,
-    pub(crate) collection_sequence: Sequence,
+    pub(crate) collection_sequence: MemCollectionSequence,
     pub(crate) wal_address: MemRegionAddress,
     pub(crate) free_list_head: Option<MemRegionAddress>,
     pub(crate) free_list_tail: Option<MemRegionAddress>,
@@ -73,7 +89,7 @@ pub struct MemRegionHeader<const MAX_HEADS: usize> {
 impl<'a, const DATA_SIZE: usize, const MAX_HEADS: usize, const REGION_COUNT: usize>
     RegionHeader<MemIo<DATA_SIZE, MAX_HEADS, REGION_COUNT>> for &'a MemRegionHeader<MAX_HEADS>
 {
-    fn sequence(&self) -> Sequence {
+    fn sequence(&self) -> MemStorageSequence {
         self.sequence
     }
     fn collection_id(&self) -> CollectionId {
@@ -82,7 +98,7 @@ impl<'a, const DATA_SIZE: usize, const MAX_HEADS: usize, const REGION_COUNT: usi
     fn collection_type(&self) -> CollectionType {
         self.collection_type
     }
-    fn collection_sequence(&self) -> Sequence {
+    fn collection_sequence(&self) -> MemCollectionSequence {
         self.collection_sequence
     }
     fn wal_address(
@@ -128,11 +144,11 @@ impl<const DATA_SIZE: usize, const MAX_HEADS: usize, const REGION_COUNT: usize>
         let meta = MemStorageMeta::new(DATA_SIZE, REGION_COUNT);
         let regions = core::array::from_fn(|_| MemRegion {
             header: MemRegionHeader {
-                sequence: Sequence::first(),
+                sequence: MemStorageSequence::first(),
                 collection_id: CollectionId(0),
                 collection_type: CollectionType::Uninitialized,
-                collection_sequence: Sequence::first(),
-                wal_address: 0,
+                collection_sequence: MemCollectionSequence::first(),
+                wal_address: MemRegionAddress::zero(),
                 free_list_head: None,
                 free_list_tail: None,
                 heads: Vec::new(),
@@ -149,7 +165,8 @@ impl<const DATA_SIZE: usize, const MAX_HEADS: usize, const REGION_COUNT: usize> 
     for MemIo<DATA_SIZE, MAX_HEADS, REGION_COUNT>
 {
     type StorageMeta<'a> = &'a MemStorageMeta where Self: 'a;
-    type Sequence = Sequence;
+    type StorageSequence = MemStorageSequence;
+    type CollectionSequence = MemCollectionSequence;
     type RegionAddress = MemRegionAddress;
     type BackingError = MemIoError;
     type RegionHeader<'a> = &'a MemRegionHeader<MAX_HEADS> where Self: 'a;
@@ -179,7 +196,7 @@ impl<const DATA_SIZE: usize, const MAX_HEADS: usize, const REGION_COUNT: usize> 
         &mut self,
         index: usize,
     ) -> Result<Self::RegionAddress, IoError<Self::BackingError, Self::RegionAddress>> {
-        Ok(index)
+        Ok(MemRegionAddress(index))
     }
 
     fn get_meta<'a>(
@@ -193,7 +210,7 @@ impl<const DATA_SIZE: usize, const MAX_HEADS: usize, const REGION_COUNT: usize> 
         index: Self::RegionAddress,
     ) -> Result<Self::RegionHeader<'a>, IoError<Self::BackingError, Self::RegionAddress>> {
         self.regions
-            .get(index)
+            .get(index.0)
             .ok_or(IoError::InvalidAddress(index))
             .map(|region| &region.header)
     }
@@ -201,10 +218,10 @@ impl<const DATA_SIZE: usize, const MAX_HEADS: usize, const REGION_COUNT: usize> 
     fn write_region_header<'a>(
         &mut self,
         index: Self::RegionAddress,
-        sequence: Self::Sequence,
+        sequence: Self::StorageSequence,
         collection_id: CollectionId,
         collection_type: CollectionType,
-        collection_sequence: Self::Sequence,
+        collection_sequence: Self::CollectionSequence,
         wal_address: Self::RegionAddress,
         free_list_head: Option<Self::RegionAddress>,
         free_list_tail: Option<Self::RegionAddress>,
@@ -212,7 +229,7 @@ impl<const DATA_SIZE: usize, const MAX_HEADS: usize, const REGION_COUNT: usize> 
     ) -> Result<(), IoError<Self::BackingError, Self::RegionAddress>> {
         let region = self
             .regions
-            .get_mut(index)
+            .get_mut(index.0)
             .ok_or(IoError::InvalidAddress(index))?;
 
         let heads = Vec::from_slice(addresses).map_err(|_| IoError::InvalidHeads)?;
@@ -247,7 +264,7 @@ impl<const DATA_SIZE: usize, const MAX_HEADS: usize, const REGION_COUNT: usize> 
 
         let source = self
             .regions
-            .get(index)
+            .get(index.0)
             .ok_or(IoError::InvalidAddress(index))
             .map(|region| &region.data[offset..offset + len])?;
 
@@ -272,7 +289,7 @@ impl<const DATA_SIZE: usize, const MAX_HEADS: usize, const REGION_COUNT: usize> 
 
         let region = self
             .regions
-            .get_mut(index)
+            .get_mut(index.0)
             .ok_or(IoError::InvalidAddress(index))?;
 
         region.data[offset..offset + data.len()].copy_from_slice(data);
@@ -284,7 +301,7 @@ impl<const DATA_SIZE: usize, const MAX_HEADS: usize, const REGION_COUNT: usize> 
         index: Self::RegionAddress,
     ) -> Result<Option<Self::RegionAddress>, IoError<Self::BackingError, Self::RegionAddress>> {
         self.regions
-            .get(index)
+            .get(index.0)
             .ok_or(IoError::InvalidAddress(index))
             .map(|region| region.free_pointer)
     }
@@ -296,7 +313,7 @@ impl<const DATA_SIZE: usize, const MAX_HEADS: usize, const REGION_COUNT: usize> 
     ) -> Result<(), IoError<Self::BackingError, Self::RegionAddress>> {
         let region = self
             .regions
-            .get_mut(index)
+            .get_mut(index.0)
             .ok_or(IoError::InvalidAddress(index))?;
 
         region.free_pointer = Some(pointer);

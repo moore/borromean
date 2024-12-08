@@ -1,7 +1,7 @@
 use super::*;
 extern crate alloc;
 
-use mem_io::{MemIo, MemRegionHeader};
+use mem_io::{MemCollectionSequence, MemIo, MemRegionAddress, MemStorageSequence};
 
 #[test]
 fn new_storage_meta() {
@@ -123,19 +123,19 @@ fn test_allocate_region() {
     let region1 = io
         .allocate_region(collection_id)
         .expect("Failed to allocate first region");
-    assert_eq!(region1, 1); // First region after root at 0
+    assert_eq!(region1, MemRegionAddress(1)); // First region after root at 0
 
     // Should be able to allocate second region
     let region2 = io
         .allocate_region(collection_id)
         .expect("Failed to allocate second region");
-    assert_eq!(region2, 2);
+    assert_eq!(region2, MemRegionAddress(2));
 
     // Should be able to allocate third region
     let region3 = io
         .allocate_region(collection_id)
         .expect("Failed to allocate third region");
-    assert_eq!(region3, 3);
+    assert_eq!(region3, MemRegionAddress(3));
 
     // Should fail when storage is full
     assert!(matches!(
@@ -163,7 +163,7 @@ fn test_write_region_header() {
 
     // Write header
     let collection_type = CollectionType::Channel;
-    let collection_sequence = 0u64;
+    let collection_sequence = MemCollectionSequence::first();
     io.write_region_header(region, collection_id, collection_type, collection_sequence)
         .expect("Failed to write header");
 
@@ -176,7 +176,7 @@ fn test_write_region_header() {
     assert_eq!(header.collection_type, collection_type);
     assert_eq!(header.collection_sequence, collection_sequence);
     assert_eq!(header.sequence, storage_sequence);
-    assert_eq!(header.wal_address, 0); // WAL address should be 0
+    assert_eq!(header.wal_address, MemRegionAddress(0)); // WAL address should be 0
     assert!(header.heads.is_empty()); // No heads initially
 }
 
@@ -198,13 +198,19 @@ fn test_write_region_header_sequence_increments() {
 
     // Write header multiple times and verify sequence increments
     for expected_sequence in 1..4 {
-        io.write_region_header(region, collection_id, CollectionType::Channel, 0 as u64)
-            .expect("Failed to write header");
+        let collection_sequence = MemCollectionSequence::first();
+        io.write_region_header(
+            region,
+            collection_id,
+            CollectionType::Channel,
+            collection_sequence,
+        )
+        .expect("Failed to write header");
 
         let header = io
             .backing
             .get_region_header(region)
             .expect("Failed to get header");
-        assert_eq!(header.sequence, expected_sequence);
+        assert_eq!(header.sequence, MemStorageSequence(expected_sequence));
     }
 }

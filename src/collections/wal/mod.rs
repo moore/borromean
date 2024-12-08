@@ -49,7 +49,7 @@ pub struct WalCursor<A: RegionAddress> {
 pub struct Wal<const SIZE: usize, B: IoBackend> {
     region: B::RegionAddress,
     collection_id: CollectionId,
-    collection_sequence: B::Sequence,
+    collection_sequence: B::StorageSequence,
     head: B::RegionAddress,
     next_entry: usize,
 }
@@ -72,8 +72,6 @@ const LEN_BYTES: usize = size_of::<u32>();
 const CRC: Crc<u32> = Crc::<u32>::new(&CRC_32_ISCSI);
 
 impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
-
-
     pub fn new<'a>(
         io: &mut Io<'a, B>,
         collection_id: CollectionId,
@@ -81,12 +79,17 @@ impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
         let collection_type = CollectionType::Wal;
 
         let region = io.allocate_region(collection_id)?;
-        io.write_region_header(region, collection_id, collection_type, B::Sequence::first())?;
+        io.write_region_header(
+            region,
+            collection_id,
+            collection_type,
+            B::CollectionSequence::first(),
+        )?;
 
         Ok(Self {
             region,
             collection_id,
-            collection_sequence: B::Sequence::first(),
+            collection_sequence: B::StorageSequence::first(),
             head: region,
             next_entry: 0,
         })
@@ -99,7 +102,7 @@ impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
         data: &[u8],
         buffer: &mut [u8],
     ) -> Result<(), IoError<B::BackingError, B::RegionAddress>> {
-        let entry = Entry::<B::Sequence, B::RegionAddress> {
+        let entry = Entry::<B::StorageSequence, B::RegionAddress> {
             collection_id: self.collection_id,
             collection_sequence: self.collection_sequence,
             record: EntryRecord::Data(DataRecord {
@@ -174,7 +177,7 @@ impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
         // TODO: handle the case where we get to the end of the region
         io.get_region_data(region, offset, record_len, buffer)?;
 
-        let entry: Entry<'b, B::Sequence, B::RegionAddress> =
+        let entry: Entry<'b, B::StorageSequence, B::RegionAddress> =
             match from_bytes_crc32(buffer, CRC.digest()) {
                 Ok(entry) => entry,
                 Err(_e) => {

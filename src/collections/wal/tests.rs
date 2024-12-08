@@ -25,7 +25,7 @@ fn test_wal_creation() {
     assert_eq!(wal.head, wal.region);
     assert_eq!(
         wal.collection_sequence,
-        <MemIo<DATA_SIZE, MAX_HEADS, REGION_COUNT> as IoBackend>::Sequence::first()
+        <MemIo<DATA_SIZE, MAX_HEADS, REGION_COUNT> as IoBackend>::StorageSequence::first()
     );
 
     // Verify the region was allocated and header written correctly
@@ -36,7 +36,7 @@ fn test_wal_creation() {
     assert_eq!(header.collection_type, CollectionType::Wal);
     assert_eq!(
         header.collection_sequence,
-        <MemIo<DATA_SIZE, MAX_HEADS, REGION_COUNT> as IoBackend>::Sequence::first()
+        <MemIo<DATA_SIZE, MAX_HEADS, REGION_COUNT> as IoBackend>::CollectionSequence::first()
     );
 }
 
