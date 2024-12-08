@@ -1,12 +1,10 @@
-use crate::io::{Io, IoBackend, IoError, RegionAddress, RegionHeader, RegionSequence};
+use crate::io::{Io, IoBackend, IoError, RegionAddress, RegionSequence};
 use crate::{CollectionId, CollectionType};
 
-use core::ops::Deref;
 use postcard::{from_bytes_crc32, to_slice_crc32};
 use serde::{Deserialize, Serialize};
 
 use crc::{Crc, CRC_32_ISCSI};
-use heapless::Vec;
 
 #[cfg(test)]
 mod tests;
@@ -37,22 +35,22 @@ enum EntryRecord<'a, A: RegionAddress> {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-struct DataRecord<'a> {
+pub struct DataRecord<'a> {
     collection_type: CollectionType,
     #[serde(borrow)]
     data: &'a [u8],
 }
 
-struct WalCursor<A: RegionAddress> {
+pub struct WalCursor<A: RegionAddress> {
     region: A,
     offset: usize,
 }
 
-struct Wal<const SIZE: usize, B: IoBackend> {
+pub struct Wal<const SIZE: usize, B: IoBackend> {
     region: B::RegionAddress,
     collection_id: CollectionId,
     collection_sequence: B::Sequence,
-    next_region: Option<B::RegionAddress>,
+    head: B::RegionAddress,
     next_entry: usize,
 }
 
@@ -70,9 +68,11 @@ pub enum WalRead<'a, A: RegionAddress> {
     EndOfWAL,
 }
 
+const LEN_BYTES: usize = size_of::<u32>();
+const CRC: Crc<u32> = Crc::<u32>::new(&CRC_32_ISCSI);
+
 impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
-    const LEN_BYTES: usize = size_of::<u32>();
-    const CRC: Crc<u32> = Crc::<u32>::new(&CRC_32_ISCSI);
+
 
     pub fn new<'a>(
         io: &mut Io<'a, B>,
@@ -87,7 +87,7 @@ impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
             region,
             collection_id,
             collection_sequence: B::Sequence::first(),
-            next_region: None,
+            head: region,
             next_entry: 0,
         })
     }
@@ -108,13 +108,13 @@ impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
             }),
         };
 
-        let Ok(used) = to_slice_crc32(&entry, buffer, Self::CRC.digest()) else {
+        let Ok(used) = to_slice_crc32(&entry, buffer, CRC.digest()) else {
             // TODO: Log error details
             return Err(IoError::SerializationError);
         };
 
         let offset = self.next_entry;
-        let len: usize = used.len() + Self::LEN_BYTES;
+        let len: usize = used.len() + LEN_BYTES;
 
         if offset + len > SIZE {
             return Err(IoError::StorageFull);
@@ -142,7 +142,7 @@ impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
 
     pub fn get_cursor(&self) -> WalCursor<B::RegionAddress> {
         WalCursor {
-            region: self.region,
+            region: self.head,
             offset: 0,
         }
     }
@@ -153,16 +153,16 @@ impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
         cursor: WalCursor<B::RegionAddress>,
         buffer: &'b mut [u8],
     ) -> Result<WalRead<'b, B::RegionAddress>, IoError<B::BackingError, B::RegionAddress>> {
-        let mut region = cursor.region;
-        let mut offset = cursor.offset;
+        let region = cursor.region;
+        let offset = cursor.offset;
 
-        if offset + Self::LEN_BYTES > SIZE {
+        if offset + LEN_BYTES > SIZE {
             return Ok(WalRead::EndOfWAL);
         }
 
-        let mut len_bytes = [0u8; Self::LEN_BYTES];
+        let mut len_bytes = [0u8; LEN_BYTES];
 
-        io.get_region_data(region, offset, Self::LEN_BYTES, len_bytes.as_mut_slice())?;
+        io.get_region_data(region, offset, LEN_BYTES, len_bytes.as_mut_slice())?;
         let len: u32 = u32::from_le_bytes(len_bytes);
 
         let Ok(len): Result<usize, _> = len.try_into() else {
@@ -175,9 +175,10 @@ impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
         io.get_region_data(region, offset, record_len, buffer)?;
 
         let entry: Entry<'b, B::Sequence, B::RegionAddress> =
-            match from_bytes_crc32(buffer, Self::CRC.digest()) {
+            match from_bytes_crc32(buffer, CRC.digest()) {
                 Ok(entry) => entry,
-                Err(e) => {
+                Err(_e) => {
+                    // TODO: Log error
                     return Err(IoError::SerializationError);
                 }
             };

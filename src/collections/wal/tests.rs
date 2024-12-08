@@ -1,7 +1,6 @@
 use super::*;
-use crate::io::mem_io::{MemIo, MemRegionHeader};
-use crate::io::{Io, IoError, RegionHeader};
-use crate::RegionAddress;
+use crate::io::mem_io::MemIo;
+use crate::io::{Io, IoError};
 
 #[test]
 fn test_wal_creation() {
@@ -23,7 +22,7 @@ fn test_wal_creation() {
 
     assert_eq!(wal.collection_id, collection_id);
     assert_eq!(wal.next_entry, 0);
-    assert_eq!(wal.next_region, None);
+    assert_eq!(wal.head, wal.region);
     assert_eq!(
         wal.collection_sequence,
         <MemIo<DATA_SIZE, MAX_HEADS, REGION_COUNT> as IoBackend>::Sequence::first()
@@ -90,7 +89,7 @@ fn test_wal_write_read_single_region() {
 
     // Read it back
     let cursor = wal.get_cursor();
-    let WalRead::Record { next, record } = wal
+    let WalRead::Record { next: _, record } = wal
         .read(&mut io, cursor, &mut read_buffer)
         .expect("Failed to read data")
     else {
@@ -154,9 +153,9 @@ fn test_wal_write_read_multiple_regions() {
 
     // Verify we've read everything
     match wal.read(&mut io, cursor, &mut read_buffer).unwrap() {
-        WalRead::Commit { next } => panic!("Got unexpected Commit"),
-        WalRead::EndOfRegion { next } => panic!("Unexpected EndOfRegion"),
-        WalRead::Record { next, record } => panic!("Got unexpected Record"),
+        WalRead::Commit { next: _ } => panic!("Got unexpected Commit"),
+        WalRead::EndOfRegion { next: _ } => panic!("Unexpected EndOfRegion"),
+        WalRead::Record { next: _, record: _ } => panic!("Got unexpected Record"),
         WalRead::EndOfWAL => (), // Expeceted
     }
 }
