@@ -21,6 +21,7 @@ pub enum IoError<BackingError, RegionAddress> {
     RegionNotFound(RegionAddress),
     SerializationError,
     BufferTooSmall(usize),
+    RecordTooLarge(usize),
 }
 
 impl<BackingError, RegionAddress> From<BackingError> for IoError<BackingError, RegionAddress> {
@@ -35,6 +36,7 @@ pub trait RegionAddress: Sized + Copy + Eq + PartialEq + Debug {
 
 pub trait RegionSequence: Sized + Eq + PartialEq + Ord + PartialOrd + Debug + Copy {
     fn first() -> Self;
+    // TODO: should return result as increment could overflow.
     fn increment(&self) -> Self;
 }
 /// Represents the header of a region

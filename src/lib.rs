@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug)]
 pub enum StorageError<B: IoBackend> {
+    RecordTooLarge(usize),
     ArithmeticOverflow, // TODO: Remove
     NoFreeRegions,
     AlreadyInitialized,
@@ -33,6 +34,7 @@ pub enum StorageError<B: IoBackend> {
 impl<B: IoBackend> From<IoError<B::BackingError, B::RegionAddress>> for StorageError<B> {
     fn from(error: IoError<B::BackingError, B::RegionAddress>) -> Self {
         match error {
+            IoError::RecordTooLarge(len) => StorageError::RecordTooLarge(len),
             IoError::StorageFull => StorageError::StorageFull,
             IoError::AlreadyInitialized => StorageError::AlreadyInitialized,
             IoError::NotInitialized => StorageError::NotInitialized,
