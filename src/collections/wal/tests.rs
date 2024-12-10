@@ -163,7 +163,6 @@ fn test_wal_write_read_multiple_regions() {
         }
     }
 
-
     // Verify we've read everything
     match wal.read(&mut io, cursor, &mut read_buffer).unwrap() {
         WalRead::Commit { next: _ } => panic!("Got unexpected Commit"),
@@ -171,7 +170,6 @@ fn test_wal_write_read_multiple_regions() {
         WalRead::Record { next: _, record: _ } => panic!("Got unexpected Record"),
         WalRead::EndOfWAL => (), // Expeceted
     }
-    
 }
 
 #[test]

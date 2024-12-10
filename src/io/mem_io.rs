@@ -40,12 +40,24 @@ impl<'a> StorageMeta for &'a MemStorageMeta {
     }
 }
 
+type MemRegionAddressValue = usize;
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Serialize, Deserialize)]
-pub struct MemRegionAddress(pub(crate) usize);
+pub struct MemRegionAddress(pub(crate) MemRegionAddressValue);
 
 impl RegionAddress for MemRegionAddress {
     fn zero() -> Self {
         MemRegionAddress(0)
+    }
+
+    fn postcard_max_len() -> usize {
+        // This is per the docs
+        // https://github.com/jamesmunns/postcard/blob/main/spec/src/wire-format.md
+        const {
+            const bits_per_byte: usize = 8;
+            const enc_bits_per_byte: usize = 7;
+            (size_of::<MemRegionAddressValue>() * bits_per_byte).div_ceil(enc_bits_per_byte)
+        }
     }
 }
 
@@ -67,7 +79,6 @@ impl RegionSequence for MemCollectionSequence {
         self.0.to_be_bytes()
     }
 }
-
 
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Serialize, Deserialize, PartialOrd, Ord)]
 pub struct MemStorageSequence(pub(crate) SequenceLen);

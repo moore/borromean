@@ -1,11 +1,10 @@
-
 use crate::io::{Io, IoBackend, IoError, RegionAddress, RegionSequence};
 use crate::{CollectionId, CollectionType};
 
 use postcard::{from_bytes_crc32, to_slice_crc32};
 use serde::{Deserialize, Serialize};
 
-use crc::{Crc, CRC_32_ISCSI, CRC_16_IBM_SDLC};
+use crc::{Crc, CRC_16_IBM_SDLC, CRC_32_ISCSI};
 
 #[cfg(test)]
 mod tests;
@@ -19,6 +18,12 @@ enum EntryRecord<'a, A: RegionAddress> {
     Data(#[serde(borrow)] DataRecord<'a>),
     Commit,
     NextRegion(A),
+}
+
+impl<'a, A: RegionAddress> EntryRecord<'a, A> {
+    pub fn postcard_max_len() -> usize {
+        A::postcard_max_len() + 1
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -104,7 +109,7 @@ impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
     ) -> Result<(), IoError<B::BackingError, B::RegionAddress>> {
         let collection_id = self.collection_id;
 
-        let entry =  EntryRecord::Data(DataRecord {
+        let entry = EntryRecord::Data(DataRecord {
             collection_type,
             data,
         });
@@ -116,7 +121,7 @@ impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
             WriteResult::RegionFull => {
                 let region = io.allocate_region(collection_id)?;
 
-                let next_entry =  EntryRecord::NextRegion(region);
+                let next_entry = EntryRecord::NextRegion(region);
 
                 let WriteResult::Wrote(_len) = self.write_worker(io, &next_entry, buffer)? else {
                     // Should not happens as this is a new region.
@@ -151,9 +156,8 @@ impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
         }
     }
 
-
     /// Formant is [record len][record len crc][record]
-    /// The crc of the record len is computed over the 
+    /// The crc of the record len is computed over the
     /// length itself as well as the collection_sequence
     /// and the collection_id. Adding this in ensures
     /// that a record will only be read if it is current
@@ -174,7 +178,7 @@ impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
         let len: usize = used.len() + LEN_BYTES;
         // BOOG: This is not really correct as this is the in memory size and
         // not the serialized size.
-        let next_command_len = size_of::<EntryRecord<B::RegionAddress>>() + LEN_BYTES;
+        let next_command_len = EntryRecord::<B::RegionAddress>::postcard_max_len() + LEN_BYTES;
 
         if offset + len + next_command_len > SIZE {
             if len + next_command_len > SIZE {
@@ -250,7 +254,7 @@ impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
         let mut len_bytes = [0u8; LEN_RECORD_BYTES];
         io.get_region_data(region, offset, LEN_RECORD_BYTES, len_bytes.as_mut_slice())?;
         let len = RecordLength::from_le_bytes(len_bytes);
-        
+
         let offset = offset + len_bytes.len();
 
         let mut crc_bytes = [0u8; LEN_CRC_BYTES];
@@ -288,14 +292,14 @@ impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
         let record_len: usize = len - (len_bytes.len() + crc_bytes.len());
         io.get_region_data(region, offset, record_len, buffer)?;
 
-        let entry: EntryRecord<'b, B::RegionAddress> =
-            match from_bytes_crc32(buffer, CRC.digest()) {
-                Ok(entry) => entry,
-                Err(_e) => {
-                    // TODO: Log error
-                    return Err(IoError::SerializationError);
-                }
-            };
+        let entry: EntryRecord<'b, B::RegionAddress> = match from_bytes_crc32(buffer, CRC.digest())
+        {
+            Ok(entry) => entry,
+            Err(_e) => {
+                // TODO: Log error
+                return Err(IoError::SerializationError);
+            }
+        };
 
         let result: WalRead<
             'b,

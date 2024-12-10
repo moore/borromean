@@ -32,18 +32,17 @@ impl<BackingError, RegionAddress> From<BackingError> for IoError<BackingError, R
 
 pub trait RegionAddress: Sized + Copy + Eq + PartialEq + Debug {
     fn zero() -> Self;
+    fn postcard_max_len() -> usize;
 }
 
 const REGION_SEQUENCE_BYTES_LEN: usize = size_of::<u64>();
 pub trait RegionSequence: Sized + Eq + PartialEq + Ord + PartialOrd + Debug + Copy {
-
     fn first() -> Self;
     // TODO: should return result as increment could overflow.
     fn increment(&self) -> Self;
 
     /// Return the sequence as a byte array.
     fn to_le_bytes(&self) -> [u8; REGION_SEQUENCE_BYTES_LEN];
-
 }
 /// Represents the header of a region
 pub(crate) trait RegionHeader<B: IoBackend> {
