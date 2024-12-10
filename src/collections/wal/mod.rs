@@ -82,8 +82,8 @@ const CRC: Crc<u32> = Crc::<u32>::new(&CRC_32_ISCSI);
 const LEN_CRC: Crc<LenCrc> = Crc::<LenCrc>::new(&CRC_16_IBM_SDLC);
 
 impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
-    pub fn new<'a>(
-        io: &mut Io<'a, B>,
+    pub fn new(
+        io: &mut Io<B>,
         collection_id: CollectionId,
     ) -> Result<Self, IoError<B::BackingError, B::RegionAddress>> {
         let collection_type = CollectionType::Wal;
@@ -102,9 +102,9 @@ impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
         })
     }
 
-    pub fn write<'a>(
+    pub fn write(
         &mut self,
-        io: &mut Io<'a, B>,
+        io: &mut Io<B>,
         collection_type: CollectionType,
         data: &[u8],
         buffer: &mut [u8],
@@ -165,9 +165,9 @@ impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
     /// that a record will only be read if it is current
     /// and we will reject stale data left from a previous
     /// use of the region.
-    pub fn write_worker<'a>(
+    pub fn write_worker(
         &mut self,
-        io: &mut Io<'a, B>,
+        io: &mut Io<B>,
         entry: &EntryRecord<B::RegionAddress>,
         buffer: &mut [u8],
     ) -> Result<WriteResult, IoError<B::BackingError, B::RegionAddress>> {
@@ -239,9 +239,9 @@ impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
         }
     }
 
-    fn read<'a, 'b>(
+    fn read<'b>(
         &mut self,
-        io: &mut Io<'a, B>,
+        io: &mut Io<B>,
         cursor: WalCursor<B::RegionAddress, B::CollectionSequence>,
         buffer: &'b mut [u8],
     ) -> Result<
