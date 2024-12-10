@@ -14,20 +14,6 @@ mod tests;
 // ware down the head of the region more then the tail. (This is not just true
 // of WALs but of all collections)
 
-/// This holds a record and its type. We include the collection id and sequence
-/// so that we can't be confused with old data that might be contained in a
-/// region after it has been reused.
-// TODO: A fancier approach would be to include the collection id and sequence in the
-// checksum but not the record as we know the values for each segment of the WAL
-// when reading it. (each record is checksumed with a CRC)
-#[derive(Serialize, Deserialize, Debug)]
-struct Entry<'a, S: RegionSequence, A: RegionAddress> {
-    collection_id: CollectionId,
-    collection_sequence: S,
-    #[serde(borrow)]
-    record: EntryRecord<'a, A>,
-}
-
 #[derive(Serialize, Deserialize, Debug)]
 enum EntryRecord<'a, A: RegionAddress> {
     Data(#[serde(borrow)] DataRecord<'a>),
@@ -119,14 +105,10 @@ impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
         let collection_id = self.collection_id;
         let collection_sequence = self.collection_sequence;
 
-        let entry = Entry::<B::CollectionSequence, B::RegionAddress> {
-            collection_id,
-            collection_sequence,
-            record: EntryRecord::Data(DataRecord {
-                collection_type,
-                data,
-            }),
-        };
+        let entry =  EntryRecord::Data(DataRecord {
+            collection_type,
+            data,
+        });
 
         let result = self.write_worker(io, entry, buffer)?;
 
@@ -135,11 +117,7 @@ impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
             WriteResult::RegionFull => {
                 let region = io.allocate_region(collection_id)?;
 
-                let entry = Entry::<B::CollectionSequence, B::RegionAddress> {
-                    collection_id,
-                    collection_sequence,
-                    record: EntryRecord::NextRegion(region),
-                };
+                let entry =  EntryRecord::NextRegion(region);
 
                 let WriteResult::Wrote(_len) = self.write_worker(io, entry, buffer)? else {
                     // Should not happens as this is a new region.
@@ -161,14 +139,10 @@ impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
                 self.next_entry = 0;
 
                 // Ok lets try that again wit the new region!
-                let entry = Entry::<B::CollectionSequence, B::RegionAddress> {
-                    collection_id,
-                    collection_sequence,
-                    record: EntryRecord::Data(DataRecord {
-                        collection_type,
-                        data,
-                    }),
-                };
+                let entry =  EntryRecord::Data(DataRecord {
+                    collection_type,
+                    data,
+                });
 
                 let result = self.write_worker(io, entry, buffer)?;
 
@@ -195,7 +169,7 @@ impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
     pub fn write_worker<'a>(
         &mut self,
         io: &mut Io<'a, B>,
-        entry: Entry<B::CollectionSequence, B::RegionAddress>,
+        entry: EntryRecord<B::RegionAddress>,
         buffer: &mut [u8],
     ) -> Result<WriteResult, IoError<B::BackingError, B::RegionAddress>> {
         let Ok(used) = to_slice_crc32(&entry, buffer, CRC.digest()) else {
@@ -321,7 +295,7 @@ impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
         let record_len: usize = len - (len_bytes.len() + crc_bytes.len());
         io.get_region_data(region, offset, record_len, buffer)?;
 
-        let entry: Entry<'b, B::CollectionSequence, B::RegionAddress> =
+        let entry: EntryRecord<'b, B::RegionAddress> =
             match from_bytes_crc32(buffer, CRC.digest()) {
                 Ok(entry) => entry,
                 Err(_e) => {
@@ -334,7 +308,7 @@ impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
             'b,
             <B as IoBackend>::RegionAddress,
             <B as IoBackend>::CollectionSequence,
-        > = match entry.record {
+        > = match entry {
             EntryRecord::Data(data_record) => {
                 let region = cursor.region;
                 let offset = offset + record_len;
