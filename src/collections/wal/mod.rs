@@ -22,6 +22,8 @@ enum EntryRecord<'a, A: RegionAddress> {
 
 impl<'a, A: RegionAddress> EntryRecord<'a, A> {
     pub fn postcard_max_len() -> usize {
+        // we add one because the discriminant will
+        // fit in a single byte with 3 variants
         A::postcard_max_len() + 1
     }
 }
@@ -176,8 +178,10 @@ impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
 
         let offset = self.next_entry;
         let len: usize = used.len() + LEN_BYTES;
-        // BOOG: This is not really correct as this is the in memory size and
-        // not the serialized size.
+
+        // We need our own postcard_max_len because the
+        // the built in feature is experimental and can't
+        // be depended on.
         let next_command_len = EntryRecord::<B::RegionAddress>::postcard_max_len() + LEN_BYTES;
 
         if offset + len + next_command_len > SIZE {
