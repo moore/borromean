@@ -103,23 +103,22 @@ impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
         buffer: &mut [u8],
     ) -> Result<(), IoError<B::BackingError, B::RegionAddress>> {
         let collection_id = self.collection_id;
-        let collection_sequence = self.collection_sequence;
 
         let entry =  EntryRecord::Data(DataRecord {
             collection_type,
             data,
         });
 
-        let result = self.write_worker(io, entry, buffer)?;
+        let result = self.write_worker(io, &entry, buffer)?;
 
         match result {
             WriteResult::Wrote(_len) => Ok(()),
             WriteResult::RegionFull => {
                 let region = io.allocate_region(collection_id)?;
 
-                let entry =  EntryRecord::NextRegion(region);
+                let next_entry =  EntryRecord::NextRegion(region);
 
-                let WriteResult::Wrote(_len) = self.write_worker(io, entry, buffer)? else {
+                let WriteResult::Wrote(_len) = self.write_worker(io, &next_entry, buffer)? else {
                     // Should not happens as this is a new region.
                     // TODO: Log error
                     return Err(IoError::SerializationError);
@@ -138,13 +137,7 @@ impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
                 self.region = region;
                 self.next_entry = 0;
 
-                // Ok lets try that again wit the new region!
-                let entry =  EntryRecord::Data(DataRecord {
-                    collection_type,
-                    data,
-                });
-
-                let result = self.write_worker(io, entry, buffer)?;
+                let result = self.write_worker(io, &entry, buffer)?;
 
                 match result {
                     WriteResult::Wrote(_len) => Ok(()),
@@ -169,7 +162,7 @@ impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
     pub fn write_worker<'a>(
         &mut self,
         io: &mut Io<'a, B>,
-        entry: EntryRecord<B::RegionAddress>,
+        entry: &EntryRecord<B::RegionAddress>,
         buffer: &mut [u8],
     ) -> Result<WriteResult, IoError<B::BackingError, B::RegionAddress>> {
         let Ok(used) = to_slice_crc32(&entry, buffer, CRC.digest()) else {
