@@ -51,9 +51,17 @@ impl<B: IoBackend> From<IoError<B::BackingError, B::RegionAddress>> for StorageE
     }
 }
 
+type CollectionIdCounter = u16;
+
 /// Newtype for collection identifiers
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CollectionId(pub(crate) u16);
+pub struct CollectionId(pub(crate) CollectionIdCounter);
+
+impl CollectionId {
+    pub fn to_le_bytes(&self) -> [u8; size_of::<CollectionIdCounter>()] {
+        self.0.to_be_bytes()
+    }
+}
 
 /// Represents different types of collections that can be stored
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

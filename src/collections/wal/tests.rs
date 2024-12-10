@@ -137,6 +137,7 @@ fn test_wal_write_read_multiple_regions() {
 
     // Read back all entries
     let mut cursor = wal.get_cursor();
+
     for expected_data in &test_data {
         loop {
             match wal
@@ -162,7 +163,6 @@ fn test_wal_write_read_multiple_regions() {
         }
     }
 
-    /* TODO: we need to put a checksum on offsets so garbage dose not read as offset
 
     // Verify we've read everything
     match wal.read(&mut io, cursor, &mut read_buffer).unwrap() {
@@ -171,7 +171,7 @@ fn test_wal_write_read_multiple_regions() {
         WalRead::Record { next: _, record: _ } => panic!("Got unexpected Record"),
         WalRead::EndOfWAL => (), // Expeceted
     }
-    */
+    
 }
 
 #[test]

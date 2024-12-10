@@ -1,4 +1,3 @@
-extern crate alloc;
 use heapless::Vec;
 use serde::{Deserialize, Serialize};
 
@@ -6,6 +5,8 @@ use crate::{
     io::{IoBackend, IoError, RegionAddress},
     CollectionId, CollectionType, RegionHeader, RegionSequence, StorageError, StorageMeta,
 };
+
+use super::REGION_SEQUENCE_BYTES_LEN;
 
 #[derive(Debug, Clone)]
 pub enum MemIoError {
@@ -48,8 +49,10 @@ impl RegionAddress for MemRegionAddress {
     }
 }
 
+type SequenceLen = u64;
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Serialize, Deserialize, PartialOrd, Ord)]
-pub struct MemCollectionSequence(u64);
+pub struct MemCollectionSequence(SequenceLen);
 
 impl RegionSequence for MemCollectionSequence {
     fn first() -> Self {
@@ -59,10 +62,15 @@ impl RegionSequence for MemCollectionSequence {
     fn increment(&self) -> Self {
         MemCollectionSequence(self.0 + 1)
     }
+
+    fn to_le_bytes(&self) -> [u8; REGION_SEQUENCE_BYTES_LEN] {
+        self.0.to_be_bytes()
+    }
 }
 
+
 #[derive(Debug, PartialEq, Eq, Clone, Copy, Serialize, Deserialize, PartialOrd, Ord)]
-pub struct MemStorageSequence(pub(crate) u64);
+pub struct MemStorageSequence(pub(crate) SequenceLen);
 
 impl RegionSequence for MemStorageSequence {
     fn first() -> Self {
@@ -71,6 +79,10 @@ impl RegionSequence for MemStorageSequence {
 
     fn increment(&self) -> Self {
         MemStorageSequence(self.0 + 1)
+    }
+
+    fn to_le_bytes(&self) -> [u8; REGION_SEQUENCE_BYTES_LEN] {
+        self.0.to_be_bytes()
     }
 }
 

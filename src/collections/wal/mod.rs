@@ -1,10 +1,11 @@
+
 use crate::io::{Io, IoBackend, IoError, RegionAddress, RegionSequence};
-use crate::{CollectionId, CollectionType, RegionHeader};
+use crate::{CollectionId, CollectionType};
 
 use postcard::{from_bytes_crc32, to_slice_crc32};
 use serde::{Deserialize, Serialize};
 
-use crc::{Crc, CRC_32_ISCSI};
+use crc::{Crc, CRC_32_ISCSI, CRC_16_IBM_SDLC};
 
 #[cfg(test)]
 mod tests;
@@ -76,9 +77,16 @@ enum WriteResult {
     RegionFull,
 }
 
-type RecordLength = u32;
-const LEN_BYTES: usize = size_of::<RecordLength>();
+type RecordLength = u16;
+const LEN_RECORD_BYTES: usize = size_of::<RecordLength>();
+
+type LenCrc = u16;
+const LEN_CRC_BYTES: usize = size_of::<LenCrc>();
+
+const LEN_BYTES: usize = LEN_RECORD_BYTES + LEN_CRC_BYTES;
+
 const CRC: Crc<u32> = Crc::<u32>::new(&CRC_32_ISCSI);
+const LEN_CRC: Crc<LenCrc> = Crc::<LenCrc>::new(&CRC_16_IBM_SDLC);
 
 impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
     pub fn new<'a>(
@@ -123,7 +131,7 @@ impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
         let result = self.write_worker(io, entry, buffer)?;
 
         match result {
-            WriteResult::Wrote(len) => Ok(()),
+            WriteResult::Wrote(_len) => Ok(()),
             WriteResult::RegionFull => {
                 let region = io.allocate_region(collection_id)?;
 
@@ -176,6 +184,14 @@ impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
         }
     }
 
+
+    /// Formant is [record len][record len crc][record]
+    /// The crc of the record len is computed over the 
+    /// length itself as well as the collection_sequence
+    /// and the collection_id. Adding this in ensures
+    /// that a record will only be read if it is current
+    /// and we will reject stale data left from a previous
+    /// use of the region.
     pub fn write_worker<'a>(
         &mut self,
         io: &mut Io<'a, B>,
@@ -189,6 +205,8 @@ impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
 
         let offset = self.next_entry;
         let len: usize = used.len() + LEN_BYTES;
+        // BOOG: This is not really correct as this is the in memory size and
+        // not the serialized size.
         let next_command_len = size_of::<EntryRecord<B::RegionAddress>>() + LEN_BYTES;
 
         if offset + len + next_command_len > SIZE {
@@ -205,10 +223,26 @@ impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
             return Err(IoError::SerializationError);
         };
 
-        let len_bytes = len.to_le_bytes();
-        io.write_region_data(self.region, &len_bytes, offset)?;
+        let len_record_bytes = len.to_le_bytes();
+        io.write_region_data(self.region, &len_record_bytes, offset)?;
 
-        let offset = offset + len_bytes.len();
+        let offset = offset + len_record_bytes.len();
+
+        let sequence_bytes = self.collection_sequence.to_le_bytes();
+        let collection_id_bytes = self.collection_id.to_le_bytes();
+
+        let mut digest = LEN_CRC.digest();
+        digest.update(&len_record_bytes);
+        digest.update(&sequence_bytes);
+        digest.update(&collection_id_bytes);
+
+        let len_crc = digest.finalize();
+        let len_crc_bytes = len_crc.to_le_bytes();
+
+        io.write_region_data(self.region, &len_crc_bytes, offset)?;
+
+        let offset = offset + len_crc_bytes.len();
+
         io.write_region_data(self.region, used, offset)?;
 
         // This should never fail but we check anyway to catch
@@ -246,10 +280,33 @@ impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
             return Ok(WalRead::EndOfWAL);
         }
 
-        let mut len_bytes = [0u8; LEN_BYTES];
+        let mut len_bytes = [0u8; LEN_RECORD_BYTES];
+        io.get_region_data(region, offset, LEN_RECORD_BYTES, len_bytes.as_mut_slice())?;
+        let len = RecordLength::from_le_bytes(len_bytes);
+        
+        let offset = offset + len_bytes.len();
 
-        io.get_region_data(region, offset, LEN_BYTES, len_bytes.as_mut_slice())?;
-        let len: u32 = u32::from_le_bytes(len_bytes);
+        let mut crc_bytes = [0u8; LEN_CRC_BYTES];
+        io.get_region_data(region, offset, LEN_CRC_BYTES, crc_bytes.as_mut_slice())?;
+        let read_crc = RecordLength::from_le_bytes(crc_bytes);
+
+        let offset = offset + crc_bytes.len();
+
+        let sequence_bytes = cursor.collection_sequence.to_le_bytes();
+        let collection_id_bytes = self.collection_id.to_le_bytes();
+
+        let mut digest = LEN_CRC.digest();
+        digest.update(&len_bytes);
+        digest.update(&sequence_bytes);
+        digest.update(&collection_id_bytes);
+
+        let len_crc = digest.finalize();
+
+        // Assume it's not corruption and that this is the end of
+        // current wall.
+        if len_crc != read_crc {
+            return Ok(WalRead::EndOfWAL);
+        }
 
         let Ok(len): Result<usize, _> = len.try_into() else {
             return Err(IoError::SerializationError);
@@ -261,9 +318,7 @@ impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
             return Err(IoError::SerializationError);
         }
 
-        let offset = offset + len_bytes.len();
-        let record_len: usize = len - len_bytes.len();
-
+        let record_len: usize = len - (len_bytes.len() + crc_bytes.len());
         io.get_region_data(region, offset, record_len, buffer)?;
 
         let entry: Entry<'b, B::CollectionSequence, B::RegionAddress> =
@@ -274,13 +329,6 @@ impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
                     return Err(IoError::SerializationError);
                 }
             };
-
-        // Assume not a bug and that this is due to old stale data.
-        if entry.collection_id != self.collection_id
-            || entry.collection_sequence != cursor.collection_sequence
-        {
-            return Ok(WalRead::EndOfWAL);
-        }
 
         let result: WalRead<
             'b,
