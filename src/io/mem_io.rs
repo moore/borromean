@@ -103,10 +103,9 @@ pub struct MemRegionHeader<const MAX_HEADS: usize> {
     pub(crate) collection_id: CollectionId,
     pub(crate) collection_type: CollectionType,
     pub(crate) collection_sequence: MemCollectionSequence,
-    pub(crate) wal_address: MemRegionAddress,
     pub(crate) free_list_head: Option<MemRegionAddress>,
     pub(crate) free_list_tail: Option<MemRegionAddress>,
-    pub(crate) heads: Vec<MemRegionAddress, MAX_HEADS>,
+    pub(crate) heads: Vec<(CollectionId, MemRegionAddress), MAX_HEADS>,
 }
 
 impl<'a, const DATA_SIZE: usize, const MAX_HEADS: usize, const REGION_COUNT: usize>
@@ -124,11 +123,6 @@ impl<'a, const DATA_SIZE: usize, const MAX_HEADS: usize, const REGION_COUNT: usi
     fn collection_sequence(&self) -> MemCollectionSequence {
         self.collection_sequence
     }
-    fn wal_address(
-        &self,
-    ) -> <MemIo<DATA_SIZE, MAX_HEADS, REGION_COUNT> as IoBackend>::RegionAddress {
-        self.wal_address
-    }
     fn free_list_head(
         &self,
     ) -> Option<<MemIo<DATA_SIZE, MAX_HEADS, REGION_COUNT> as IoBackend>::RegionAddress> {
@@ -139,7 +133,7 @@ impl<'a, const DATA_SIZE: usize, const MAX_HEADS: usize, const REGION_COUNT: usi
     ) -> Option<<MemIo<DATA_SIZE, MAX_HEADS, REGION_COUNT> as IoBackend>::RegionAddress> {
         self.free_list_tail
     }
-    fn heads(&self) -> &[<MemIo<DATA_SIZE, MAX_HEADS, REGION_COUNT> as IoBackend>::RegionAddress] {
+    fn heads(&self) -> &[(CollectionId, <MemIo<DATA_SIZE, MAX_HEADS, REGION_COUNT> as IoBackend>::RegionAddress)] {
         &self.heads
     }
 }
@@ -171,7 +165,6 @@ impl<const DATA_SIZE: usize, const MAX_HEADS: usize, const REGION_COUNT: usize>
                 collection_id: CollectionId(0),
                 collection_type: CollectionType::Uninitialized,
                 collection_sequence: MemCollectionSequence::first(),
-                wal_address: MemRegionAddress::zero(),
                 free_list_head: None,
                 free_list_tail: None,
                 heads: Vec::new(),
@@ -222,6 +215,10 @@ impl<const DATA_SIZE: usize, const MAX_HEADS: usize, const REGION_COUNT: usize> 
         Ok(MemRegionAddress(index))
     }
 
+    fn get_region_size(&self) -> usize {
+        DATA_SIZE
+    }
+
     fn get_meta<'a>(
         &'a mut self,
     ) -> Result<Self::StorageMeta<'a>, IoError<Self::BackingError, Self::RegionAddress>> {
@@ -245,10 +242,9 @@ impl<const DATA_SIZE: usize, const MAX_HEADS: usize, const REGION_COUNT: usize> 
         collection_id: CollectionId,
         collection_type: CollectionType,
         collection_sequence: Self::CollectionSequence,
-        wal_address: Self::RegionAddress,
         free_list_head: Option<Self::RegionAddress>,
         free_list_tail: Option<Self::RegionAddress>,
-        addresses: &[Self::RegionAddress],
+        addresses: &[(CollectionId, Self::RegionAddress)],
     ) -> Result<(), IoError<Self::BackingError, Self::RegionAddress>> {
         let region = self
             .regions
@@ -262,7 +258,6 @@ impl<const DATA_SIZE: usize, const MAX_HEADS: usize, const REGION_COUNT: usize> 
             collection_id,
             collection_type,
             collection_sequence,
-            wal_address,
             free_list_head,
             free_list_tail,
             heads,

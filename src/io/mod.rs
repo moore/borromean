@@ -1,14 +1,17 @@
 pub mod mem_io;
-use crate::{CollectionId, CollectionType};
-use core::fmt::Debug;
+use crate::{CollectionId, CollectionType, Wal};
+use core::{any::Any, fmt::Debug};
 
 use serde::{Deserialize, Serialize};
+
+use heapless::Vec;
 
 #[cfg(test)]
 mod tests;
 
 #[derive(Debug)]
 pub enum IoError<BackingError, RegionAddress> {
+    Unreachable,
     AlreadyInitialized,
     NotInitialized,
     InvalidRegionSize,
@@ -50,10 +53,9 @@ pub(crate) trait RegionHeader<B: IoBackend> {
     fn collection_id(&self) -> CollectionId;
     fn collection_type(&self) -> CollectionType;
     fn collection_sequence(&self) -> B::CollectionSequence;
-    fn wal_address(&self) -> B::RegionAddress;
     fn free_list_head(&self) -> Option<B::RegionAddress>;
     fn free_list_tail(&self) -> Option<B::RegionAddress>;
-    fn heads(&self) -> &[B::RegionAddress];
+    fn heads(&self) -> &[(CollectionId, B::RegionAddress)];
 }
 
 /// Represents the storage metadata for the database
@@ -63,18 +65,16 @@ pub(crate) trait StorageMeta {
     fn region_count(&self) -> usize;
 }
 
-#[derive(Debug)]
-pub struct Io<'a, B: IoBackend> {
+pub struct Io<'a, B: IoBackend, const MAX_HEADS: usize> {
     storage_head: B::RegionAddress,
     storage_sequence: B::StorageSequence,
     free_list_head: Option<B::RegionAddress>,
     free_list_tail: Option<B::RegionAddress>,
     backing: &'a mut B,
-    wal_address: B::RegionAddress,
-    wal_offset: usize,
+    heads: Vec<(CollectionId, B::RegionAddress), MAX_HEADS>,
 }
 
-impl<'a, B: IoBackend> Io<'a, B> {
+impl<'a, B: IoBackend, const MAX_HEADS: usize> Io<'a, B, MAX_HEADS> {
     pub fn init(
         backing: &'a mut B,
         region_size: usize,
@@ -93,10 +93,10 @@ impl<'a, B: IoBackend> Io<'a, B> {
 
         // Write the free list. Put every region but the first
         // one in the free list.
-        let first_free_address = backing.get_region_address(1)?;
+        let first_free_address = backing.get_region_address(0)?;
 
         let mut last_free_address = first_free_address;
-        for i in 2..region_count {
+        for i in 1..region_count {
             let address = backing.get_region_address(i)?;
             backing.write_region_free_pointer(last_free_address, address)?;
             last_free_address = address;
@@ -106,29 +106,26 @@ impl<'a, B: IoBackend> Io<'a, B> {
 
         let sequence = <B as IoBackend>::StorageSequence::first();
         let collection_id = CollectionId(0);
-        let collection_type = CollectionType::Wal;
-        let collection_sequence = <B as IoBackend>::CollectionSequence::first();
-        backing.write_region_header(
-            wal_address,
-            sequence,
-            collection_id,
-            collection_type,
-            collection_sequence,
-            wal_address,
-            Some(first_free_address),
-            Some(last_free_address),
-            &[],
-        )?;
+        
+        let mut heads = Vec::new();
 
-        Ok(Self {
+        // Should only error if heads is 0
+        let _ = heads.push((collection_id, wal_address)) else {
+            return Err(IoError::OutOfBounds);
+        };
+
+        let mut this = Self {
             storage_head: wal_address,
             storage_sequence: sequence,
             free_list_head: Some(first_free_address),
             free_list_tail: Some(last_free_address),
             backing,
-            wal_address,
-            wal_offset: 0,
-        })
+            heads,
+        };
+
+        let wal = Wal::new(&mut this, collection_id)?;
+
+        Ok(this)
     }
 
     pub fn open(backing: &'a mut B) -> Result<Self, IoError<B::BackingError, B::RegionAddress>> {
@@ -154,18 +151,29 @@ impl<'a, B: IoBackend> Io<'a, B> {
             }
         }
 
-        let wal_address = storage_head;
-        let wal_offset = 0; // BOOG scan wall to work this out
 
-        Ok(Self {
+        let mut heads = Vec::new();
+
+        // BOOG read heads from storage head
+
+        let mut this = Self {
             storage_head,
             storage_sequence,
             free_list_head,
             free_list_tail,
             backing,
-            wal_address,
-            wal_offset,
-        })
+            heads,
+        };
+
+        // BOOG implement this!
+        // let wall = Wall::open(&mut this, wall_address)?;
+        // this.wal = Some(wal);
+
+        Ok(this)
+    }
+
+    pub(crate) fn region_size(&self) -> usize {
+        self.backing.get_region_size()
     }
 
     pub(crate) fn allocate_region(
@@ -191,16 +199,28 @@ impl<'a, B: IoBackend> Io<'a, B> {
         let storage_sequence = self.storage_sequence.increment();
         self.storage_sequence = storage_sequence;
 
+        match self.heads.binary_search_by_key(&collection_id, |k| k.0) {
+            Ok(index) => {
+                if let Some(entry) = self.heads.get_mut(index) {
+                    entry.1 = region;
+                } else {
+                    return Err(IoError::Unreachable);
+                }
+            }
+            Err(index) => {
+                self.heads.insert(index, (collection_id, region));
+            }
+        }
+
         self.backing.write_region_header(
             region,
             storage_sequence,
             collection_id,
             collection_type,
             collection_sequence,
-            self.wal_address,
             self.free_list_head,
             self.free_list_tail,
-            &[],
+            self.heads.as_slice(),
         )?;
         Ok(())
     }
@@ -265,6 +285,9 @@ pub trait IoBackend: Sized + Debug {
         index: usize,
     ) -> Result<Self::RegionAddress, IoError<Self::BackingError, Self::RegionAddress>>;
 
+    /// Gets the size of the user writable portion of a region.
+    fn get_region_size(&self) -> usize;
+
     /// Gets the region header.
     fn get_region_header<'a>(
         &'a mut self,
@@ -279,10 +302,9 @@ pub trait IoBackend: Sized + Debug {
         collection_id: CollectionId,
         collection_type: CollectionType,
         collection_sequence: Self::CollectionSequence,
-        wal_address: Self::RegionAddress,
         free_list_head: Option<Self::RegionAddress>,
         free_list_tail: Option<Self::RegionAddress>,
-        addresses: &[Self::RegionAddress],
+        addresses: &[(CollectionId, Self::RegionAddress)],
     ) -> Result<(), IoError<Self::BackingError, Self::RegionAddress>>;
 
     /// Gets data from region at offset.

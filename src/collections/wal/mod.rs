@@ -42,7 +42,7 @@ pub struct WalCursor<A: RegionAddress, S: RegionSequence> {
     collection_sequence: S,
 }
 
-pub struct Wal<const SIZE: usize, B: IoBackend> {
+pub struct Wal<B: IoBackend> {
     region: B::RegionAddress,
     collection_id: CollectionId,
     collection_sequence: B::CollectionSequence,
@@ -81,9 +81,9 @@ const LEN_BYTES: usize = LEN_RECORD_BYTES + LEN_CRC_BYTES;
 const CRC: Crc<u32> = Crc::<u32>::new(&CRC_32_ISCSI);
 const LEN_CRC: Crc<LenCrc> = Crc::<LenCrc>::new(&CRC_16_IBM_SDLC);
 
-impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
-    pub fn new(
-        io: &mut Io<B>,
+impl<B: IoBackend> Wal<B> {
+    pub fn new<const MAX_HEADS: usize>(
+        io: &mut Io<B, MAX_HEADS>,
         collection_id: CollectionId,
     ) -> Result<Self, IoError<B::BackingError, B::RegionAddress>> {
         let collection_type = CollectionType::Wal;
@@ -102,9 +102,13 @@ impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
         })
     }
 
-    pub fn write(
+    pub fn region(&self) -> B::RegionAddress {
+        self.region
+    }
+
+    pub fn write<const MAX_HEADS: usize>(
         &mut self,
-        io: &mut Io<B>,
+        io: &mut Io<B, MAX_HEADS>,
         collection_type: CollectionType,
         data: &[u8],
         buffer: &mut [u8],
@@ -165,9 +169,9 @@ impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
     /// that a record will only be read if it is current
     /// and we will reject stale data left from a previous
     /// use of the region.
-    pub fn write_worker(
+    pub fn write_worker<const MAX_HEADS: usize>(
         &mut self,
-        io: &mut Io<B>,
+        io: &mut Io<B, MAX_HEADS>,
         entry: &EntryRecord<B::RegionAddress>,
         buffer: &mut [u8],
     ) -> Result<WriteResult, IoError<B::BackingError, B::RegionAddress>> {
@@ -183,9 +187,9 @@ impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
         // the built in feature is experimental and can't
         // be depended on.
         let next_command_len = EntryRecord::<B::RegionAddress>::postcard_max_len() + LEN_BYTES;
-
-        if offset + len + next_command_len > SIZE {
-            if len + next_command_len > SIZE {
+        let size = io.region_size();
+        if offset + len + next_command_len > size {
+            if len + next_command_len > size {
                 return Err(IoError::RecordTooLarge(len));
             } else {
                 return Ok(WriteResult::RegionFull);
@@ -239,9 +243,9 @@ impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
         }
     }
 
-    fn read<'b>(
+    fn read<'b, const MAX_HEADS: usize>(
         &mut self,
-        io: &mut Io<B>,
+        io: &mut Io<B, MAX_HEADS>,
         cursor: WalCursor<B::RegionAddress, B::CollectionSequence>,
         buffer: &'b mut [u8],
     ) -> Result<
@@ -250,8 +254,8 @@ impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
     > {
         let region = cursor.region;
         let offset = cursor.offset;
-
-        if offset + LEN_BYTES > SIZE {
+        let size = io.region_size();
+        if offset + LEN_BYTES > size {
             return Ok(WalRead::EndOfWAL);
         }
 
@@ -287,7 +291,7 @@ impl<const SIZE: usize, B: IoBackend> Wal<SIZE, B> {
             return Err(IoError::SerializationError);
         };
 
-        if len + offset > SIZE {
+        if len + offset > size {
             // This should not be possible.
             // TODO: Log error case
             return Err(IoError::SerializationError);

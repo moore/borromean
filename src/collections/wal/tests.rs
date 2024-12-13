@@ -17,7 +17,7 @@ fn test_wal_creation() {
 
     // Should be able to create a new WAL
     let wal =
-        Wal::<DATA_SIZE, MemIo<DATA_SIZE, MAX_HEADS, REGION_COUNT>>::new(&mut io, collection_id)
+        Wal::<MemIo<DATA_SIZE, MAX_HEADS, REGION_COUNT>>::new::<MAX_HEADS>(&mut io, collection_id)
             .expect("Failed to create WAL");
 
     assert_eq!(wal.collection_id, collection_id);
@@ -55,9 +55,9 @@ fn test_wal_creation_fails_when_storage_full() {
 
     // Should fail to create WAL when no space
     let _result =
-        Wal::<DATA_SIZE, MemIo<DATA_SIZE, MAX_HEADS, REGION_COUNT>>::new(&mut io, collection_id);
+        Wal::<MemIo<DATA_SIZE, MAX_HEADS, REGION_COUNT>>::new::<MAX_HEADS>(&mut io, collection_id);
     let result =
-        Wal::<DATA_SIZE, MemIo<DATA_SIZE, MAX_HEADS, REGION_COUNT>>::new(&mut io, collection_id);
+        Wal::<MemIo<DATA_SIZE, MAX_HEADS, REGION_COUNT>>::new::<MAX_HEADS>(&mut io, collection_id);
     assert!(matches!(result, Err(IoError::StorageFull)));
 }
 
@@ -76,7 +76,7 @@ fn test_wal_write_read_single_region() {
     let collection_id = CollectionId(1);
 
     let mut wal =
-        Wal::<DATA_SIZE, MemIo<DATA_SIZE, MAX_HEADS, REGION_COUNT>>::new(&mut io, collection_id)
+        Wal::<MemIo<DATA_SIZE, MAX_HEADS, REGION_COUNT>>::new::<MAX_HEADS>(&mut io, collection_id)
             .expect("Failed to create WAL");
 
     let mut write_buffer = [0u8; BUFFER_SIZE];
@@ -115,7 +115,7 @@ fn test_wal_write_read_multiple_regions() {
     let collection_id = CollectionId(1);
 
     let mut wal =
-        Wal::<DATA_SIZE, MemIo<DATA_SIZE, MAX_HEADS, REGION_COUNT>>::new(&mut io, collection_id)
+        Wal::<MemIo<DATA_SIZE, MAX_HEADS, REGION_COUNT>>::new::<MAX_HEADS>(&mut io, collection_id)
             .expect("Failed to create WAL");
 
     let mut write_buffer = [0u8; BUFFER_SIZE];
@@ -187,7 +187,7 @@ fn test_wal_write_fails_when_full() {
     let collection_id = CollectionId(1);
 
     let mut wal =
-        Wal::<DATA_SIZE, MemIo<DATA_SIZE, MAX_HEADS, REGION_COUNT>>::new(&mut io, collection_id)
+        Wal::<MemIo<DATA_SIZE, MAX_HEADS, REGION_COUNT>>::new::<MAX_HEADS>(&mut io, collection_id)
             .expect("Failed to create WAL");
 
     let mut write_buffer = [0u8; BUFFER_SIZE];

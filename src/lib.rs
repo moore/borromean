@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug)]
 pub enum StorageError<B: IoBackend> {
+    Unreachable,
     RecordTooLarge(usize),
     ArithmeticOverflow, // TODO: Remove
     NoFreeRegions,
@@ -34,6 +35,7 @@ pub enum StorageError<B: IoBackend> {
 impl<B: IoBackend> From<IoError<B::BackingError, B::RegionAddress>> for StorageError<B> {
     fn from(error: IoError<B::BackingError, B::RegionAddress>) -> Self {
         match error {
+            IoError::Unreachable => StorageError::Unreachable,
             IoError::RecordTooLarge(len) => StorageError::RecordTooLarge(len),
             IoError::StorageFull => StorageError::StorageFull,
             IoError::AlreadyInitialized => StorageError::AlreadyInitialized,
@@ -54,7 +56,7 @@ impl<B: IoBackend> From<IoError<B::BackingError, B::RegionAddress>> for StorageE
 type CollectionIdCounter = u16;
 
 /// Newtype for collection identifiers
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord)]
 pub struct CollectionId(pub(crate) CollectionIdCounter);
 
 impl CollectionId {
@@ -78,11 +80,11 @@ pub trait Collection {
     fn collection_type(&self) -> CollectionType;
 }
 
-pub struct Storage<'a, B: IoBackend> {
-    io: Io<'a, B>,
+pub struct Storage<'a, B: IoBackend, const MAX_HEADS: usize> {
+    io: Io<'a, B, MAX_HEADS>,
 }
 
-impl<'a, B> Storage<'a, B>
+impl<'a, B, const MAX_HEADS: usize> Storage<'a, B, MAX_HEADS>
 where
     B: IoBackend,
     StorageError<B>: From<IoError<B::BackingError, B::RegionAddress>>,

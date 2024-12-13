@@ -12,6 +12,6 @@ fn new_storage() {
     let mut mem_io =
         MemIo::<DATA_SIZE, MAX_HEADS, REGION_COUNT>::new().expect("Failed to create MemIo");
 
-    let _storage =
+    let _storage: Storage<'_, MemIo<1024, 8, 4>, MAX_HEADS> =
         Storage::init(&mut mem_io, DATA_SIZE, REGION_COUNT).expect("Failed to initialize storage");
 }
