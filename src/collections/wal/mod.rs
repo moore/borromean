@@ -185,6 +185,21 @@ impl<B: IoBackend> Wal<B> {
         self.region
     }
 
+    pub fn commit<const MAX_HEADS: usize>(
+        &mut self,
+        io: &mut Io<B, MAX_HEADS>,
+        cursor: WalCursor<B::RegionAddress, B::CollectionSequence>,
+        buffer: &mut [u8],
+    ) -> Result<(), IoError<B::BackingError, B::RegionAddress>> {
+        let entry = EntryRecord::Commit {
+            to_region: cursor.region,
+            to_offset: cursor.offset,
+            to_sequence: cursor.collection_sequence,
+        };
+
+        self.write_entry(io, entry, buffer)
+    }
+
     pub fn write<const MAX_HEADS: usize>(
         &mut self,
         io: &mut Io<B, MAX_HEADS>,
@@ -192,12 +207,21 @@ impl<B: IoBackend> Wal<B> {
         data: &[u8],
         buffer: &mut [u8],
     ) -> Result<(), IoError<B::BackingError, B::RegionAddress>> {
-        let collection_id = self.collection_id;
-
         let entry = EntryRecord::Data(DataRecord {
             collection_type,
             data,
         });
+
+        self.write_entry(io, entry, buffer)
+    }
+
+    fn write_entry<const MAX_HEADS: usize>(
+        &mut self,
+        io: &mut Io<B, MAX_HEADS>,
+        entry: EntryRecord<B::RegionAddress, B::CollectionSequence>,
+        buffer: &mut [u8],
+    ) -> Result<(), IoError<B::BackingError, B::RegionAddress>> {
+        let collection_id = self.collection_id;
 
         let result = self.write_worker(io, &entry, buffer)?;
 
@@ -218,7 +242,7 @@ impl<B: IoBackend> Wal<B> {
                 io.write_region_header(
                     region,
                     collection_id,
-                    collection_type,
+                    CollectionType::Wal,
                     collection_sequence,
                 )?;
 
