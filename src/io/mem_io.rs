@@ -133,7 +133,12 @@ impl<'a, const DATA_SIZE: usize, const MAX_HEADS: usize, const REGION_COUNT: usi
     ) -> Option<<MemIo<DATA_SIZE, MAX_HEADS, REGION_COUNT> as IoBackend>::RegionAddress> {
         self.free_list_tail
     }
-    fn heads(&self) -> &[(CollectionId, <MemIo<DATA_SIZE, MAX_HEADS, REGION_COUNT> as IoBackend>::RegionAddress)] {
+    fn heads(
+        &self,
+    ) -> &[(
+        CollectionId,
+        <MemIo<DATA_SIZE, MAX_HEADS, REGION_COUNT> as IoBackend>::RegionAddress,
+    )] {
         &self.heads
     }
 }

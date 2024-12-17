@@ -1,5 +1,5 @@
 use crate::io::{Io, IoBackend, IoError, RegionAddress, RegionSequence};
-use crate::{CollectionId, CollectionType};
+use crate::{CollectionId, CollectionType, RegionHeader};
 
 use postcard::{from_bytes_crc32, to_slice_crc32};
 use serde::{Deserialize, Serialize};
@@ -14,13 +14,17 @@ mod tests;
 // of WALs but of all collections)
 
 #[derive(Serialize, Deserialize, Debug)]
-enum EntryRecord<'a, A: RegionAddress> {
+enum EntryRecord<'a, A: RegionAddress, S: RegionSequence> {
     Data(#[serde(borrow)] DataRecord<'a>),
-    Commit,
+    Commit {
+        to_region: A,
+        to_offset: usize,
+        to_sequence: S,
+    },
     NextRegion(A),
 }
 
-impl<'a, A: RegionAddress> EntryRecord<'a, A> {
+impl<'a, A: RegionAddress, S: RegionSequence> EntryRecord<'a, A, S> {
     pub fn postcard_max_len() -> usize {
         // we add one because the discriminant will
         // fit in a single byte with 3 variants
@@ -44,10 +48,11 @@ pub struct WalCursor<A: RegionAddress, S: RegionSequence> {
 
 pub struct Wal<B: IoBackend> {
     region: B::RegionAddress,
+    region_start: usize,
     collection_id: CollectionId,
     collection_sequence: B::CollectionSequence,
     head: B::RegionAddress,
-    head__sequence: B::CollectionSequence,
+    head_sequence: B::CollectionSequence,
     next_entry: usize,
 }
 
@@ -57,6 +62,9 @@ pub enum WalRead<'a, A: RegionAddress, S: RegionSequence> {
         record: DataRecord<'a>,
     },
     Commit {
+        to_region: A,
+        to_offset: usize,
+        to_sequence: S,
         next: WalCursor<A, S>,
     },
     EndOfRegion {
@@ -94,12 +102,83 @@ impl<B: IoBackend> Wal<B> {
 
         Ok(Self {
             region,
+            region_start: 0,
             collection_id,
             collection_sequence,
             head: region,
-            head__sequence: collection_sequence,
+            head_sequence: collection_sequence,
             next_entry: 0,
         })
+    }
+
+    pub fn open<'b, const MAX_HEADS: usize>(
+        io: &mut Io<B, MAX_HEADS>,
+        region: B::RegionAddress,
+        buffer: &'b mut [u8],
+    ) -> Result<Self, IoError<B::BackingError, B::RegionAddress>> {
+        // Make sure io barrow from get_region_header ends.
+        let (collection_id, mut collection_sequence) = {
+            let header: <B as IoBackend>::RegionHeader<'_> = io.get_region_header(region)?;
+            let collection_id = header.collection_id();
+            let collection_sequence = header.collection_sequence();
+            (collection_id, collection_sequence)
+        };
+
+        let mut region = region;
+        let mut region_start = 0;
+        let mut head = region;
+        let mut head_sequence = collection_sequence;
+        let mut next_entry = 0;
+
+        let mut this = Self {
+            region,
+            region_start,
+            collection_id,
+            collection_sequence,
+            head,
+            head_sequence,
+            next_entry,
+        };
+
+        let mut cursor = this.get_cursor();
+
+        loop {
+            match this.read(io, cursor, buffer)? {
+                WalRead::Record { next, record } => {
+                    cursor = next;
+                }
+                WalRead::Commit {
+                    to_region,
+                    to_offset,
+                    to_sequence,
+                    next,
+                } => {
+                    // If we have a commit the current region we are in
+                    // is not the head.
+                    region = to_region;
+                    region_start = to_offset;
+                    collection_sequence = to_sequence;
+
+                    cursor = next;
+                }
+                WalRead::EndOfRegion { next } => {
+                    cursor = next;
+                }
+                WalRead::EndOfWAL => {
+                    break;
+                }
+            }
+
+            head = cursor.region;
+            next_entry = cursor.offset;
+            head_sequence = cursor.collection_sequence;
+        }
+
+        this.region = region;
+        this.region_start = region_start;
+        this.collection_sequence = collection_sequence;
+
+        Ok(this)
     }
 
     pub fn region(&self) -> B::RegionAddress {
@@ -172,7 +251,7 @@ impl<B: IoBackend> Wal<B> {
     pub fn write_worker<const MAX_HEADS: usize>(
         &mut self,
         io: &mut Io<B, MAX_HEADS>,
-        entry: &EntryRecord<B::RegionAddress>,
+        entry: &EntryRecord<B::RegionAddress, B::CollectionSequence>,
         buffer: &mut [u8],
     ) -> Result<WriteResult, IoError<B::BackingError, B::RegionAddress>> {
         let Ok(used) = to_slice_crc32(&entry, buffer, CRC.digest()) else {
@@ -186,7 +265,8 @@ impl<B: IoBackend> Wal<B> {
         // We need our own postcard_max_len because the
         // the built in feature is experimental and can't
         // be depended on.
-        let next_command_len = EntryRecord::<B::RegionAddress>::postcard_max_len() + LEN_BYTES;
+        let next_command_len =
+            EntryRecord::<B::RegionAddress, B::CollectionSequence>::postcard_max_len() + LEN_BYTES;
         let size = io.region_size();
         if offset + len + next_command_len > size {
             if len + next_command_len > size {
@@ -239,7 +319,7 @@ impl<B: IoBackend> Wal<B> {
         WalCursor {
             region: self.head,
             offset: 0,
-            collection_sequence: self.head__sequence,
+            collection_sequence: self.head_sequence,
         }
     }
 
@@ -300,14 +380,14 @@ impl<B: IoBackend> Wal<B> {
         let record_len: usize = len - (len_bytes.len() + crc_bytes.len());
         io.get_region_data(region, offset, record_len, buffer)?;
 
-        let entry: EntryRecord<'b, B::RegionAddress> = match from_bytes_crc32(buffer, CRC.digest())
-        {
-            Ok(entry) => entry,
-            Err(_e) => {
-                // TODO: Log error
-                return Err(IoError::SerializationError);
-            }
-        };
+        let entry: EntryRecord<'b, B::RegionAddress, B::CollectionSequence> =
+            match from_bytes_crc32(buffer, CRC.digest()) {
+                Ok(entry) => entry,
+                Err(_e) => {
+                    // TODO: Log error
+                    return Err(IoError::SerializationError);
+                }
+            };
 
         let result: WalRead<
             'b,
@@ -327,11 +407,18 @@ impl<B: IoBackend> Wal<B> {
                     record: data_record,
                 }
             }
-            EntryRecord::Commit => {
+            EntryRecord::Commit {
+                to_offset,
+                to_region,
+                to_sequence,
+            } => {
                 let region = cursor.region;
                 let offset = offset + record_len;
                 let collection_sequence = cursor.collection_sequence;
                 WalRead::Commit {
+                    to_offset,
+                    to_region,
+                    to_sequence,
                     next: WalCursor {
                         region,
                         offset,

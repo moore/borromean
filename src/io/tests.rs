@@ -22,7 +22,8 @@ fn init_io() {
     let mut mem_io =
         MemIo::<DATA_SIZE, MAX_HEADS, REGION_COUNT>::new().expect("Failed to create MemIo");
 
-    let _io: Io<'_, MemIo<1024, 8, 4>, MAX_HEADS> = Io::init(&mut mem_io, DATA_SIZE, REGION_COUNT).expect("Failed to initialize Io");
+    let _io: Io<'_, MemIo<1024, 8, 4>, MAX_HEADS> =
+        Io::init(&mut mem_io, DATA_SIZE, REGION_COUNT).expect("Failed to initialize Io");
 }
 #[test]
 fn test_double_init_fails() {
@@ -34,7 +35,8 @@ fn test_double_init_fails() {
         MemIo::<DATA_SIZE, MAX_HEADS, REGION_COUNT>::new().expect("Failed to create MemIo");
 
     // First init should succeed
-    let _io: Io<'_, MemIo<1024, 8, 4>, MAX_HEADS> = Io::init(&mut mem_io, DATA_SIZE, REGION_COUNT).expect("Failed to initialize Io");
+    let _io: Io<'_, MemIo<1024, 8, 4>, MAX_HEADS> =
+        Io::init(&mut mem_io, DATA_SIZE, REGION_COUNT).expect("Failed to initialize Io");
 
     // Second init should fail with AlreadyInitialized
     assert!(matches!(
@@ -69,7 +71,8 @@ fn test_init_and_open() {
         MemIo::<DATA_SIZE, MAX_HEADS, REGION_COUNT>::new().expect("Failed to create MemIo");
 
     // Initialize storage
-    let _io = Io::<'_, _, MAX_HEADS>::init(&mut mem_io, DATA_SIZE, REGION_COUNT).expect("Failed to initialize Io");
+    let _io = Io::<'_, _, MAX_HEADS>::init(&mut mem_io, DATA_SIZE, REGION_COUNT)
+        .expect("Failed to initialize Io");
 
     // Should be able to open initialized storage
     let _io = Io::<'_, _, MAX_HEADS>::open(&mut mem_io).expect("Failed to open Io");
@@ -116,7 +119,8 @@ fn test_allocate_region() {
     let mut mem_io =
         MemIo::<DATA_SIZE, MAX_HEADS, REGION_COUNT>::new().expect("Failed to create MemIo");
 
-    let mut io = Io::<'_, _, MAX_HEADS>::init(&mut mem_io, DATA_SIZE, REGION_COUNT).expect("Failed to initialize Io");
+    let mut io = Io::<'_, _, MAX_HEADS>::init(&mut mem_io, DATA_SIZE, REGION_COUNT)
+        .expect("Failed to initialize Io");
 
     // Should be able to allocate first region
     let collection_id = CollectionId(1);
@@ -153,7 +157,8 @@ fn test_write_region_header() {
     let mut mem_io =
         MemIo::<DATA_SIZE, MAX_HEADS, REGION_COUNT>::new().expect("Failed to create MemIo");
 
-    let mut io = Io::<'_, _, MAX_HEADS>::init(&mut mem_io, DATA_SIZE, REGION_COUNT).expect("Failed to initialize Io");
+    let mut io = Io::<'_, _, MAX_HEADS>::init(&mut mem_io, DATA_SIZE, REGION_COUNT)
+        .expect("Failed to initialize Io");
 
     // Allocate a region
     let collection_id = CollectionId(1);
@@ -176,7 +181,7 @@ fn test_write_region_header() {
     assert_eq!(header.collection_type, collection_type);
     assert_eq!(header.collection_sequence, collection_sequence);
     assert_eq!(header.sequence, storage_sequence);
-    assert_eq!(header.heads.len(), 2 );
+    assert_eq!(header.heads.len(), 2);
 }
 
 #[test]
@@ -188,7 +193,8 @@ fn test_write_region_header_sequence_increments() {
     let mut mem_io =
         MemIo::<DATA_SIZE, MAX_HEADS, REGION_COUNT>::new().expect("Failed to create MemIo");
 
-    let mut io = Io::<'_, _, MAX_HEADS>::init(&mut mem_io, DATA_SIZE, REGION_COUNT).expect("Failed to initialize Io");
+    let mut io = Io::<'_, _, MAX_HEADS>::init(&mut mem_io, DATA_SIZE, REGION_COUNT)
+        .expect("Failed to initialize Io");
 
     let collection_id = CollectionId(1);
     let region = io

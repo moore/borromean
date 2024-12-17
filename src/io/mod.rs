@@ -106,7 +106,7 @@ impl<'a, B: IoBackend, const MAX_HEADS: usize> Io<'a, B, MAX_HEADS> {
 
         let sequence = <B as IoBackend>::StorageSequence::first();
         let collection_id = CollectionId(0);
-        
+
         let mut heads = Vec::new();
 
         // Should only error if heads is 0
@@ -151,10 +151,10 @@ impl<'a, B: IoBackend, const MAX_HEADS: usize> Io<'a, B, MAX_HEADS> {
             }
         }
 
-
         let mut heads = Vec::new();
 
-        { // Give some love to the barrow checker
+        {
+            // Give some love to the barrow checker
             let current_head = backing.get_region_header(storage_head)?;
 
             let head_list = current_head.heads();
@@ -162,7 +162,7 @@ impl<'a, B: IoBackend, const MAX_HEADS: usize> Io<'a, B, MAX_HEADS> {
             let Ok(_) = heads.extend_from_slice(head_list) else {
                 return Err(IoError::Unreachable);
             };
-        }   
+        }
 
         let mut this = Self {
             storage_head,
@@ -173,8 +173,6 @@ impl<'a, B: IoBackend, const MAX_HEADS: usize> Io<'a, B, MAX_HEADS> {
             heads,
         };
 
-
-  
         // BOOG implement this!
         // let wall = Wall::open(&mut this, wall_address)?;
         // this.wal = Some(wal);

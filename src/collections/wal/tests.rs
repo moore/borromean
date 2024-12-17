@@ -41,6 +41,56 @@ fn test_wal_creation() {
 }
 
 #[test]
+fn test_wal_creation_and_open() {
+    const DATA_SIZE: usize = 1024;
+    const MAX_HEADS: usize = 8;
+    const REGION_COUNT: usize = 4;
+    const BUFFER_SIZE: usize = 64;
+
+    let mut mem_io =
+        MemIo::<DATA_SIZE, MAX_HEADS, REGION_COUNT>::new().expect("Failed to create MemIo");
+
+    let mut io = Io::init(&mut mem_io, DATA_SIZE, REGION_COUNT).expect("Failed to initialize Io");
+
+    let collection_id = CollectionId(1);
+
+    // Should be able to create a new WAL
+    let wal =
+        Wal::<MemIo<DATA_SIZE, MAX_HEADS, REGION_COUNT>>::new::<MAX_HEADS>(&mut io, collection_id)
+            .expect("Failed to create WAL");
+
+    let region = wal.region;
+    let mut read_buffer = [0u8; BUFFER_SIZE];
+
+    // Should be able to create a new WAL
+    let wal = Wal::<MemIo<DATA_SIZE, MAX_HEADS, REGION_COUNT>>::open::<MAX_HEADS>(
+        &mut io,
+        region,
+        &mut read_buffer,
+    )
+    .expect("Failed to create WAL");
+
+    assert_eq!(wal.collection_id, collection_id);
+    assert_eq!(wal.next_entry, 0);
+    assert_eq!(wal.head, wal.region);
+    assert_eq!(
+        wal.collection_sequence,
+        <MemIo<DATA_SIZE, MAX_HEADS, REGION_COUNT> as IoBackend>::CollectionSequence::first()
+    );
+
+    // Verify the region was allocated and header written correctly
+    let header = mem_io
+        .get_region_header(wal.region)
+        .expect("Failed to get header");
+    assert_eq!(header.collection_id, collection_id);
+    assert_eq!(header.collection_type, CollectionType::Wal);
+    assert_eq!(
+        header.collection_sequence,
+        <MemIo<DATA_SIZE, MAX_HEADS, REGION_COUNT> as IoBackend>::CollectionSequence::first()
+    );
+}
+
+#[test]
 fn test_wal_creation_fails_when_storage_full() {
     const DATA_SIZE: usize = 1024;
     const MAX_HEADS: usize = 8;
@@ -150,7 +200,12 @@ fn test_wal_write_read_multiple_regions() {
                     cursor = next;
                     break;
                 }
-                WalRead::Commit { next } => {
+                WalRead::Commit {
+                    to_offset,
+                    to_region,
+                    to_sequence,
+                    next,
+                } => {
                     cursor = next;
                 }
                 WalRead::EndOfRegion { next } => {
@@ -165,7 +220,7 @@ fn test_wal_write_read_multiple_regions() {
 
     // Verify we've read everything
     match wal.read(&mut io, cursor, &mut read_buffer).unwrap() {
-        WalRead::Commit { next: _ } => panic!("Got unexpected Commit"),
+        WalRead::Commit { .. } => panic!("Got unexpected Commit"),
         WalRead::EndOfRegion { next: _ } => panic!("Unexpected EndOfRegion"),
         WalRead::Record { next: _, record: _ } => panic!("Got unexpected Record"),
         WalRead::EndOfWAL => (), // Expeceted
