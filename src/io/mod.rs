@@ -1,6 +1,6 @@
 pub mod mem_io;
 use crate::{CollectionId, CollectionType, Wal};
-use core::{any::Any, fmt::Debug};
+use core::fmt::Debug;
 
 use serde::{Deserialize, Serialize};
 

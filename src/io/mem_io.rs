@@ -15,6 +15,7 @@ pub enum MemIoError {
 
 #[derive(Debug)]
 pub struct MemStorageMeta {
+    #[allow(dead_code)]
     region_size: usize,
     region_count: usize,
 }
@@ -54,9 +55,9 @@ impl RegionAddress for MemRegionAddress {
         // This is per the docs
         // https://github.com/jamesmunns/postcard/blob/main/spec/src/wire-format.md
         const {
-            const bits_per_byte: usize = 8;
-            const enc_bits_per_byte: usize = 7;
-            (size_of::<MemRegionAddressValue>() * bits_per_byte).div_ceil(enc_bits_per_byte)
+            const BITS_PER_BYTE: usize = 8;
+            const ENC_BITS_PER_BYTE: usize = 7;
+            (size_of::<MemRegionAddressValue>() * BITS_PER_BYTE).div_ceil(ENC_BITS_PER_BYTE)
         }
     }
 }
@@ -143,8 +144,6 @@ impl<'a, const DATA_SIZE: usize, const MAX_HEADS: usize, const REGION_COUNT: usi
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct MemFreePointer(u32);
 
 #[derive(Debug, Clone)]
 pub struct MemRegion<const DATA_SIZE: usize, const MAX_HEADS: usize> {

@@ -146,7 +146,7 @@ impl<B: IoBackend> Wal<B> {
 
         loop {
             match this.read(io, cursor, buffer)? {
-                WalRead::Record { next, record } => {
+                WalRead::Record { next, .. } => {
                     cursor = next;
                 }
                 WalRead::Commit {
@@ -338,7 +338,7 @@ impl<B: IoBackend> Wal<B> {
     /// that a record will only be read if it is current
     /// and we will reject stale data left from a previous
     /// use of the region.
-    pub fn write_worker<const MAX_HEADS: usize>(
+    fn write_worker<const MAX_HEADS: usize>(
         &mut self,
         io: &mut Io<B, MAX_HEADS>,
         entry: &EntryRecord<B::RegionAddress, B::CollectionSequence>,
@@ -396,6 +396,7 @@ impl<B: IoBackend> Wal<B> {
 
         // This should never fail but we check anyway to catch
         // refactoring errors.
+        #[allow(irrefutable_let_patterns)]
         let Ok(len): Result<usize, _> = len.try_into() else {
             // TODO: Log this error
             return Err(IoError::SerializationError);
@@ -450,6 +451,7 @@ impl<B: IoBackend> Wal<B> {
             return Ok(WalRead::EndOfWAL);
         }
 
+        #[allow(irrefutable_let_patterns)]
         let Ok(len): Result<usize, _> = len.try_into() else {
             return Err(IoError::SerializationError);
         };

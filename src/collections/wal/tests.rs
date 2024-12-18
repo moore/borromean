@@ -201,10 +201,7 @@ fn test_wal_write_read_multiple_regions() {
                     break;
                 }
                 WalRead::Commit {
-                    to_offset,
-                    to_region,
-                    to_sequence,
-                    next,
+                    next, ..
                 } => {
                     cursor = next;
                 }
@@ -270,7 +267,6 @@ fn test_wal_commit() {
     const DATA_SIZE: usize = 1024;
     const MAX_HEADS: usize = 8;
     const REGION_COUNT: usize = 4; 
-    const BUFFER_SIZE: usize = 128;
 
     let mut mem_io =
         MemIo::<DATA_SIZE, MAX_HEADS, REGION_COUNT>::new().expect("Failed to create MemIo");
@@ -337,7 +333,6 @@ fn test_wal_open_with_commits() {
     const DATA_SIZE: usize = 1024;
     const MAX_HEADS: usize = 8;
     const REGION_COUNT: usize = 4;
-    const BUFFER_SIZE: usize = 128;
 
     let mut mem_io =
         MemIo::<DATA_SIZE, MAX_HEADS, REGION_COUNT>::new().expect("Failed to create MemIo");
@@ -381,7 +376,7 @@ fn test_wal_open_with_commits() {
 
         loop {
             match wal.read(&mut io, cursor, &mut read_buffer).expect("Read failed") {
-                WalRead::Record { next, record } => {
+                WalRead::Record { next, .. } => {
                     entries_found += 1;
                     cursor = next;
                 }
@@ -416,7 +411,7 @@ fn test_wal_open_with_commits() {
 
     loop {
         match wal.read(&mut io, cursor, &mut read_buffer).expect("Read failed") {
-            WalRead::Record { next, record } => {
+            WalRead::Record { next, .. } => {
                 entries_found += 1;
                 cursor = next;
             }
@@ -440,7 +435,6 @@ fn test_wal_sequence_handling() {
     const DATA_SIZE: usize = 1024;
     const MAX_HEADS: usize = 8;
     const REGION_COUNT: usize = 4;
-    const BUFFER_SIZE: usize = 128;
 
     let mut mem_io =
         MemIo::<DATA_SIZE, MAX_HEADS, REGION_COUNT>::new().expect("Failed to create MemIo");
