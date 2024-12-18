@@ -35,6 +35,7 @@ pub enum StorageError<B: IoBackend> {
 impl<B: IoBackend> From<IoError<B::BackingError, B::RegionAddress>> for StorageError<B> {
     fn from(error: IoError<B::BackingError, B::RegionAddress>) -> Self {
         match error {
+            IoError::AlreadyCommitted => StorageError::OutOfBounds,
             IoError::Unreachable => StorageError::Unreachable,
             IoError::RecordTooLarge(len) => StorageError::RecordTooLarge(len),
             IoError::StorageFull => StorageError::StorageFull,

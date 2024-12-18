@@ -25,6 +25,7 @@ pub enum IoError<BackingError, RegionAddress> {
     SerializationError,
     BufferTooSmall(usize),
     RecordTooLarge(usize),
+    AlreadyCommitted,
 }
 
 impl<BackingError, RegionAddress> From<BackingError> for IoError<BackingError, RegionAddress> {

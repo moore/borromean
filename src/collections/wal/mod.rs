@@ -17,6 +17,7 @@ mod tests;
 enum EntryRecord<'a, A: RegionAddress, S: RegionSequence> {
     Data(#[serde(borrow)] DataRecord<'a>),
     Commit {
+        // TODO: THis should have just been a WalCursor
         to_region: A,
         to_offset: usize,
         to_sequence: S,
@@ -46,15 +47,6 @@ pub struct WalCursor<A: RegionAddress, S: RegionSequence> {
     collection_sequence: S,
 }
 
-pub struct Wal<B: IoBackend> {
-    region: B::RegionAddress,
-    region_start: usize,
-    collection_id: CollectionId,
-    collection_sequence: B::CollectionSequence,
-    head: B::RegionAddress,
-    head_sequence: B::CollectionSequence,
-    next_entry: usize,
-}
 
 pub enum WalRead<'a, A: RegionAddress, S: RegionSequence> {
     Record {
@@ -76,6 +68,16 @@ pub enum WalRead<'a, A: RegionAddress, S: RegionSequence> {
 enum WriteResult {
     Wrote(usize),
     RegionFull,
+}
+
+pub struct Wal<B: IoBackend> {
+    head_region: B::RegionAddress,
+    head_region_start_offset: usize,
+    collection_id: CollectionId,
+    head_sequence: B::CollectionSequence,
+    tail_region: B::RegionAddress,
+    tail_sequence: B::CollectionSequence,
+    tail_next_entry_offset: usize,
 }
 
 type RecordLength = u16;
@@ -101,13 +103,13 @@ impl<B: IoBackend> Wal<B> {
         io.write_region_header(region, collection_id, collection_type, collection_sequence)?;
 
         Ok(Self {
-            region,
-            region_start: 0,
+            head_region: region,
+            head_region_start_offset: 0,
             collection_id,
-            collection_sequence,
-            head: region,
             head_sequence: collection_sequence,
-            next_entry: 0,
+            tail_region: region,
+            tail_sequence: collection_sequence,
+            tail_next_entry_offset: 0,
         })
     }
 
@@ -126,18 +128,18 @@ impl<B: IoBackend> Wal<B> {
 
         let mut region = region;
         let mut region_start = 0;
-        let mut head = region;
-        let mut head_sequence = collection_sequence;
+        let mut tail = region;
+        let mut tail_sequence = collection_sequence;
         let mut next_entry = 0;
 
         let mut this = Self {
-            region,
-            region_start,
+            head_region: region,
+            head_region_start_offset: region_start,
             collection_id,
-            collection_sequence,
-            head,
-            head_sequence,
-            next_entry,
+            head_sequence: collection_sequence,
+            tail_region: tail,
+            tail_sequence,
+            tail_next_entry_offset: next_entry,
         };
 
         let mut cursor = this.get_cursor();
@@ -169,20 +171,31 @@ impl<B: IoBackend> Wal<B> {
                 }
             }
 
-            head = cursor.region;
+            tail = cursor.region;
             next_entry = cursor.offset;
-            head_sequence = cursor.collection_sequence;
+            tail_sequence = cursor.collection_sequence;
         }
 
-        this.region = region;
-        this.region_start = region_start;
-        this.collection_sequence = collection_sequence;
+        this.head_region = region;
+        this.head_region_start_offset = region_start;
+        this.head_sequence = collection_sequence;
+        this.tail_region = tail;
+        this.tail_sequence = tail_sequence;
+        this.tail_next_entry_offset = next_entry;
 
         Ok(this)
     }
 
     pub fn region(&self) -> B::RegionAddress {
-        self.region
+        self.head_region
+    }
+
+    pub fn get_cursor(&self) -> WalCursor<B::RegionAddress, B::CollectionSequence> {
+        WalCursor {
+            region: self.head_region,
+            offset: self.head_region_start_offset,
+            collection_sequence: self.head_sequence,
+        }
     }
 
     pub fn commit<const MAX_HEADS: usize>(
@@ -191,13 +204,66 @@ impl<B: IoBackend> Wal<B> {
         cursor: WalCursor<B::RegionAddress, B::CollectionSequence>,
         buffer: &mut [u8],
     ) -> Result<(), IoError<B::BackingError, B::RegionAddress>> {
+
+        if cursor.offset > io.region_size() {
+            // This should not happen
+            return Err(IoError::OutOfBounds);
+        }
+
+        if cursor.collection_sequence < self.head_sequence {
+            // This is a stale commit
+            return Err(IoError::AlreadyCommitted);
+        } else if cursor.collection_sequence == self.head_sequence {
+
+            if cursor.region != self.head_region {
+                // This should not happen
+                return Err(IoError::Unreachable);
+            } 
+
+            if cursor.offset < self.head_region_start_offset {
+                // This is a stale commit
+                return Err(IoError::AlreadyCommitted);
+            }
+
+            if cursor.offset > self.tail_next_entry_offset {
+                // This should not happen
+                return Err(IoError::OutOfBounds);
+            }
+        } else if cursor.collection_sequence == self.tail_sequence {
+
+            if cursor.region != self.tail_region {
+                // This should not happen
+                return Err(IoError::Unreachable);
+            }
+
+            if cursor.offset > self.tail_next_entry_offset {
+                // This should not happen
+                return Err(IoError::OutOfBounds);
+            }
+        } else {
+            if cursor.collection_sequence > self.tail_sequence {
+                // This should not happen
+                return Err(IoError::OutOfBounds);
+
+            }
+        }
+
+
         let entry = EntryRecord::Commit {
             to_region: cursor.region,
             to_offset: cursor.offset,
             to_sequence: cursor.collection_sequence,
         };
 
-        self.write_entry(io, entry, buffer)
+        self.write_entry(io, entry, buffer)?;
+
+        //TODO: free any regions that are no longer needed
+
+        self.head_sequence = cursor.collection_sequence;
+        self.head_region = cursor.region;
+        self.head_region_start_offset = cursor.offset;
+
+        Ok(())
     }
 
     pub fn write<const MAX_HEADS: usize>(
@@ -238,18 +304,18 @@ impl<B: IoBackend> Wal<B> {
                     return Err(IoError::SerializationError);
                 };
 
-                let collection_sequence = self.collection_sequence.increment();
+                let new_sequence = self.tail_sequence.increment();
                 io.write_region_header(
                     region,
                     collection_id,
                     CollectionType::Wal,
-                    collection_sequence,
+                    new_sequence,
                 )?;
 
                 // do this after writing the header as it may fail.
-                self.collection_sequence = collection_sequence;
-                self.region = region;
-                self.next_entry = 0;
+                self.tail_sequence = new_sequence;
+                self.tail_region = region;
+                self.tail_next_entry_offset = 0;
 
                 let result = self.write_worker(io, &entry, buffer)?;
 
@@ -278,13 +344,13 @@ impl<B: IoBackend> Wal<B> {
         entry: &EntryRecord<B::RegionAddress, B::CollectionSequence>,
         buffer: &mut [u8],
     ) -> Result<WriteResult, IoError<B::BackingError, B::RegionAddress>> {
-        let Ok(used) = to_slice_crc32(&entry, buffer, CRC.digest()) else {
+        let Ok(serialized) = to_slice_crc32(&entry, buffer, CRC.digest()) else {
             // TODO: Log error details
             return Err(IoError::SerializationError);
         };
-
-        let offset = self.next_entry;
-        let len: usize = used.len() + LEN_BYTES;
+         
+        let offset = self.tail_next_entry_offset;
+        let len: usize = serialized.len() + LEN_BYTES;
 
         // We need our own postcard_max_len because the
         // the built in feature is experimental and can't
@@ -307,11 +373,11 @@ impl<B: IoBackend> Wal<B> {
         };
 
         let len_record_bytes = len.to_le_bytes();
-        io.write_region_data(self.region, &len_record_bytes, offset)?;
+        io.write_region_data(self.tail_region, &len_record_bytes, offset)?;
 
         let offset = offset + len_record_bytes.len();
 
-        let sequence_bytes = self.collection_sequence.to_le_bytes();
+        let sequence_bytes = self.tail_sequence.to_le_bytes();
         let collection_id_bytes = self.collection_id.to_le_bytes();
 
         let mut digest = LEN_CRC.digest();
@@ -322,11 +388,11 @@ impl<B: IoBackend> Wal<B> {
         let len_crc = digest.finalize();
         let len_crc_bytes = len_crc.to_le_bytes();
 
-        io.write_region_data(self.region, &len_crc_bytes, offset)?;
+        io.write_region_data(self.tail_region, &len_crc_bytes, offset)?;
 
         let offset = offset + len_crc_bytes.len();
 
-        io.write_region_data(self.region, used, offset)?;
+        io.write_region_data(self.tail_region, serialized, offset)?;
 
         // This should never fail but we check anyway to catch
         // refactoring errors.
@@ -335,17 +401,10 @@ impl<B: IoBackend> Wal<B> {
             return Err(IoError::SerializationError);
         };
 
-        self.next_entry += len;
+        self.tail_next_entry_offset += len;
         Ok(WriteResult::Wrote(len))
     }
 
-    pub fn get_cursor(&self) -> WalCursor<B::RegionAddress, B::CollectionSequence> {
-        WalCursor {
-            region: self.head,
-            offset: 0,
-            collection_sequence: self.head_sequence,
-        }
-    }
 
     fn read<'b, const MAX_HEADS: usize>(
         &mut self,
