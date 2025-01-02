@@ -17,3 +17,6 @@ heapless = { version = "0.8.0", features = ["serde"] }
 postcard = { version = "1.0.8", features = ["use-crc"] }
 serde = { version = "1.0", default-features = false, features = ["derive"] }
 
+[dev-dependencies]
+proptest = "1.0.0"
+
