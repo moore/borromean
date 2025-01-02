@@ -47,7 +47,6 @@ pub struct WalCursor<A: RegionAddress, S: RegionSequence> {
     collection_sequence: S,
 }
 
-
 pub enum WalRead<'a, A: RegionAddress, S: RegionSequence> {
     Record {
         next: WalCursor<A, S>,
@@ -204,7 +203,6 @@ impl<B: IoBackend> Wal<B> {
         cursor: WalCursor<B::RegionAddress, B::CollectionSequence>,
         buffer: &mut [u8],
     ) -> Result<(), IoError<B::BackingError, B::RegionAddress>> {
-
         if cursor.offset > io.region_size() {
             // This should not happen
             return Err(IoError::OutOfBounds);
@@ -214,11 +212,10 @@ impl<B: IoBackend> Wal<B> {
             // This is a stale commit
             return Err(IoError::AlreadyCommitted);
         } else if cursor.collection_sequence == self.head_sequence {
-
             if cursor.region != self.head_region {
                 // This should not happen
                 return Err(IoError::Unreachable);
-            } 
+            }
 
             if cursor.offset < self.head_region_start_offset {
                 // This is a stale commit
@@ -230,7 +227,6 @@ impl<B: IoBackend> Wal<B> {
                 return Err(IoError::OutOfBounds);
             }
         } else if cursor.collection_sequence == self.tail_sequence {
-
             if cursor.region != self.tail_region {
                 // This should not happen
                 return Err(IoError::Unreachable);
@@ -244,10 +240,8 @@ impl<B: IoBackend> Wal<B> {
             if cursor.collection_sequence > self.tail_sequence {
                 // This should not happen
                 return Err(IoError::OutOfBounds);
-
             }
         }
-
 
         let entry = EntryRecord::Commit {
             to_region: cursor.region,
@@ -305,12 +299,7 @@ impl<B: IoBackend> Wal<B> {
                 };
 
                 let new_sequence = self.tail_sequence.increment();
-                io.write_region_header(
-                    region,
-                    collection_id,
-                    CollectionType::Wal,
-                    new_sequence,
-                )?;
+                io.write_region_header(region, collection_id, CollectionType::Wal, new_sequence)?;
 
                 // do this after writing the header as it may fail.
                 self.tail_sequence = new_sequence;
@@ -348,7 +337,7 @@ impl<B: IoBackend> Wal<B> {
             // TODO: Log error details
             return Err(IoError::SerializationError);
         };
-         
+
         let offset = self.tail_next_entry_offset;
         let len: usize = serialized.len() + LEN_BYTES;
 
@@ -405,7 +394,6 @@ impl<B: IoBackend> Wal<B> {
         self.tail_next_entry_offset += len;
         Ok(WriteResult::Wrote(len))
     }
-
 
     fn read<'b, const MAX_HEADS: usize>(
         &mut self,

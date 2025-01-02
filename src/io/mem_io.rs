@@ -144,7 +144,6 @@ impl<'a, const DATA_SIZE: usize, const MAX_HEADS: usize, const REGION_COUNT: usi
     }
 }
 
-
 #[derive(Debug, Clone)]
 pub struct MemRegion<const DATA_SIZE: usize, const MAX_HEADS: usize> {
     header: MemRegionHeader<MAX_HEADS>,

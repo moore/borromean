@@ -64,6 +64,14 @@ impl CollectionId {
     pub fn to_le_bytes(&self) -> [u8; size_of::<CollectionIdCounter>()] {
         self.0.to_be_bytes()
     }
+
+    pub fn increment(&self) -> Option<Self> {
+        let Some(next) = self.0.checked_add(1) else {
+            return None;
+        };
+
+        Some(Self(next))
+    }
 }
 
 /// Represents different types of collections that can be stored

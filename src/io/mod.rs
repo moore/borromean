@@ -111,8 +111,10 @@ impl<'a, B: IoBackend, const MAX_HEADS: usize> Io<'a, B, MAX_HEADS> {
         let mut heads = Vec::new();
 
         // Should only error if heads is 0
-        let _ = heads.push((collection_id, wal_address)) else {
-            return Err(IoError::OutOfBounds);
+        let Ok(_) = heads.push((collection_id, wal_address)) else {
+            // This should not happen
+            // TODO: Log this
+            return Err(IoError::Unreachable);
         };
 
         let mut this = Self {
@@ -258,6 +260,13 @@ impl<'a, B: IoBackend, const MAX_HEADS: usize> Io<'a, B, MAX_HEADS> {
         region: B::RegionAddress,
     ) -> Result<B::RegionHeader<'b>, IoError<B::BackingError, B::RegionAddress>> {
         self.backing.get_region_header(region)
+    }
+
+    pub(crate) fn new_wal(&mut self) -> Result<Wal<B>, IoError<B::BackingError, B::RegionAddress>> {
+        unimplemented!();
+        let collection_id = CollectionId(0); // BOOG
+        let wal = Wal::new(self, collection_id)?;
+        Ok(wal)
     }
 }
 
