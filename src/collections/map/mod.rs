@@ -250,9 +250,13 @@ where
         let search_result = self.find_index(&key)?;
 
         let entry = Entry { key, value };
-
+    
         match search_result {
-            SearchResult::Found(index) => {}
+            SearchResult::Found(index) => {
+                // Try and overwrite the the entry else
+                // leak the current value and write in a new location.
+                unimplemented!();
+            }
             SearchResult::NotFound(index) => {
                 let start = self.record_offset;
                 // TODO: check bounds?
@@ -261,7 +265,7 @@ where
 
                 let mut end = start;
                 end.increment(used)?;
-
+                // BUG: This should be changed to insert instead of write
                 EntryRef::write(self.map, self.index_offset, start, end)?;
 
                 self.index_offset.increment();
