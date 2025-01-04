@@ -34,11 +34,11 @@ proptest! {
         let entry1 = EntryRef::read(&buffer, index1).unwrap();
         let entry2 = EntryRef::read(&buffer, index2).unwrap();
 
-        assert_eq!(entry1.start.0, start1.0 as u32);
-        assert_eq!(entry1.end.0, end1.0 as u32);
+        assert_eq!(entry1.start, start1.0 as u32);
+        assert_eq!(entry1.end, end1.0 as u32);
 
-        assert_eq!(entry2.start.0, start2.0 as u32);
-        assert_eq!(entry2.end.0, end2.0 as u32);
+        assert_eq!(entry2.start, start2.0 as u32);
+        assert_eq!(entry2.end, end2.0 as u32);
 
     }
 }

@@ -51,10 +51,8 @@ where
     value: V,
 }
 
-type RefInner = u32;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-struct RefType(RefInner);
+type RefType = u32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct EntryRef {
@@ -84,12 +82,12 @@ impl EntryRef {
     ) -> Result<(), MapError> {
         let offset = Self::offset_from_index(index, buffer)?;
 
-        let start: RefInner = start
+        let start: RefType = start
             .0
             .try_into()
             .map_err(|e| MapError::SerializationError)?;
         
-        let end: RefInner = end.0.try_into().map_err(|_| MapError::SerializationError)?;
+        let end: RefType = end.0.try_into().map_err(|_| MapError::SerializationError)?;
 
         let start_bytes = start.to_le_bytes();
         let end_bytes = end.to_le_bytes();
@@ -108,16 +106,16 @@ impl EntryRef {
         let mut buf = [0u8; ENTRY_REF_POINTER_SIZE];
 
         buf.copy_from_slice(&buffer[offset..offset + ENTRY_REF_POINTER_SIZE]);
-        let start = RefInner::from_le_bytes(buf);
+        let start = RefType::from_le_bytes(buf);
 
         buf.copy_from_slice(
             &buffer[offset + ENTRY_REF_POINTER_SIZE..offset + ENTRY_REF_POINTER_SIZE * 2],
         );
-        let end = RefInner::from_le_bytes(buf);
+        let end = RefType::from_le_bytes(buf);
 
         let entry = Self {
-            start: RefType(start),
-            end: RefType(end),
+            start: start,
+            end: end,
         };
 
         Ok(entry)
@@ -285,7 +283,7 @@ where
             let mid = (left + right) / 2;
             let entry_ref = EntryRef::read(self.map, self.index_offset.seek(mid))?;
             let entry: Entry<K, V> =
-                from_bytes(&self.map[entry_ref.start.0 as usize..entry_ref.end.0 as usize])?;
+                from_bytes(&self.map[entry_ref.start as usize..entry_ref.end as usize])?;
 
             match key.cmp(&entry.key) {
                 core::cmp::Ordering::Equal => return Ok(SearchResult::Found(mid as usize)),
