@@ -9,7 +9,6 @@ use serde::{Deserialize, Serialize};
 #[cfg(test)]
 mod tests;
 
-
 // A alloc free version of this would store everything in a array of
 // bytes. The format would be:
 // ```
@@ -51,7 +50,6 @@ where
     value: V,
 }
 
-
 type RefType = u32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -64,29 +62,19 @@ const ENTRY_REF_POINTER_SIZE: usize = size_of::<RefType>();
 const ENTRY_REF_SIZE: usize = ENTRY_REF_POINTER_SIZE * 2;
 
 impl EntryRef {
-    fn offset_from_index(index: IndexOffset, buffer: &[u8]) -> Result<usize, MapError> {
-        // The 0th index is at the end of the buffer and we work
-        // backwards.
-        let Some(offset) = buffer.len().checked_sub(ENTRY_REF_SIZE * (index.0 + 1)) else {
-            return Err(MapError::IndexOutOfBounds);
-        };
-
-        Ok(offset)
-    }
-
     fn write(
         buffer: &mut [u8],
-        index: IndexOffset,
+        index: RecordIndex,
         start: RecordOffset,
         end: RecordOffset,
     ) -> Result<(), MapError> {
-        let offset = Self::offset_from_index(index, buffer)?;
+        let offset = index.offset(buffer)?;
 
         let start: RefType = start
             .0
             .try_into()
             .map_err(|e| MapError::SerializationError)?;
-        
+
         let end: RefType = end.0.try_into().map_err(|_| MapError::SerializationError)?;
 
         let start_bytes = start.to_le_bytes();
@@ -100,8 +88,27 @@ impl EntryRef {
         Ok(())
     }
 
-    fn read(buffer: &[u8], index: IndexOffset) -> Result<Self, MapError> {
-        let offset = Self::offset_from_index(index, buffer)?;
+    fn insert(
+        buffer: &mut [u8],
+        index: RecordIndex,
+        last_index: RecordIndex,
+        start: RecordOffset,
+        end: RecordOffset,
+    ) -> Result<(), MapError> {
+        let location = index.0;
+        let current = index.0 + 1;
+
+        let current_offset = index.offset(buffer)?;
+        let target_offset = index.next().offset(buffer)?;
+        let end_offset = last_index.previous().offset(buffer)?;
+
+        buffer.copy_within(current_offset..end_offset, target_offset);
+
+        Self::write(buffer, index, start, end)
+    }
+
+    fn read(buffer: &[u8], index: RecordIndex) -> Result<Self, MapError> {
+        let offset = index.offset(buffer)?;
 
         let mut buf = [0u8; ENTRY_REF_POINTER_SIZE];
 
@@ -120,9 +127,6 @@ impl EntryRef {
 
         Ok(entry)
     }
-
-    
-
 }
 struct EntryCount(u32);
 const ENTRY_COUNT_SIZE: usize = size_of::<EntryCount>();
@@ -151,6 +155,10 @@ impl EntryCount {
     fn read(buffer: &[u8]) -> Result<Self, MapError> {
         Self::from_bytes(buffer)
     }
+
+    fn increment(&mut self) {
+        self.0 += 1;
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -162,54 +170,65 @@ impl RecordOffset {
     }
 
     fn increment(&mut self, amount: usize) -> Result<(), MapError> {
-        self.0
+        self.0 = self
+            .0
             .checked_add(amount)
             .ok_or(MapError::SerializationError)?;
         Ok(())
     }
 }
 
+type RecordIndexInner = usize;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-struct IndexOffset(usize);
+struct RecordIndex(RecordIndexInner);
 
-impl IndexOffset {
-    fn new(offset: usize) -> Self {
-        Self(offset)
+// BUG: switched to checked math and Result
+impl RecordIndex {
+    fn new(index: RecordIndexInner) -> Self {
+        Self(index)
     }
 
     fn increment(&mut self) {
-        // BUG use checked arithmetic
-        self.0 -= size_of::<EntryRef>();
+        self.0 += 1;
     }
 
-    fn seek(&self, count: i32) -> Self {
-        if count < 0 {
-            let diff = count.abs() as usize * size_of::<EntryRef>();
-            Self(self.0 + diff)
-        } else {
-            let diff = count as usize * size_of::<EntryRef>();
-            Self(self.0 - diff)
-        }
+    fn next(&self) -> Self {
+        Self(self.0 + 1)
+    }
+
+    fn previous(&self) -> Self {
+        Self(self.0 - 1)
+    }
+
+    fn offset(&self, buffer: &[u8]) -> Result<usize, MapError> {
+        // The 0th index is at the end of the buffer and we work
+        // backwards.
+        let Some(offset) = buffer.len().checked_sub(ENTRY_REF_SIZE * (self.0 + 1)) else {
+            return Err(MapError::IndexOutOfBounds);
+        };
+
+        Ok(offset)
     }
 }
 
+#[derive(Debug)]
 enum SearchResult {
-    Found(usize),
-    NotFound(usize),
+    Found(RecordIndex),
+    NotFound(RecordIndex),
 }
 
-pub struct LsmMap<'a, K, V, B: IoBackend, const CASH_SIZE: usize> {
+pub struct LsmMap<'a, K, V, B: IoBackend> {
     id: CollectionId,
-    wal: Wal<B>,
+    //wal: Wal<B>, // BUG: implement wal usage
     record_count: EntryCount,
-    record_offset: RecordOffset,
-    index_offset: IndexOffset,
+    next_record_offset: RecordOffset,
+    next_record_index: RecordIndex,
     map: &'a mut [u8],
     next: Option<B::RegionAddress>,
     _phantom: PhantomData<(K, V)>,
 }
 
-impl<'a, K, V, B: IoBackend, const CASH_SIZE: usize> LsmMap<'a, K, V, B, CASH_SIZE>
+impl<'a, K, V, B: IoBackend> LsmMap<'a, K, V, B>
 where
     K: Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
     V: Serialize + for<'de> Deserialize<'de>,
@@ -219,10 +238,10 @@ where
         id: CollectionId,
         buffer: &'a mut [u8],
     ) -> Result<Self, IoError<B::BackingError, B::RegionAddress>> {
-        let wal = io.new_wal()?;
+        //let wal = io.new_wal()?;
         let record_count = EntryCount(0);
-        let record_offset = RecordOffset(ENTRY_COUNT_SIZE);
-        let index_offset = IndexOffset(buffer.len());
+        let next_record_offset = RecordOffset(ENTRY_COUNT_SIZE);
+        let next_record_index = RecordIndex(0);
         let map = buffer;
         let _phantom = PhantomData;
 
@@ -230,10 +249,10 @@ where
 
         Ok(Self {
             id,
-            wal,
+            //wal,
             record_count,
-            index_offset,
-            record_offset,
+            next_record_index,
+            next_record_offset,
             map,
             next: None,
             _phantom,
@@ -248,49 +267,99 @@ where
         let search_result = self.find_index(&key)?;
 
         let entry = Entry { key, value };
-    
+
         match search_result {
             SearchResult::Found(index) => {
-                // Try and overwrite the the entry else
+                // TODO: Try and overwrite the the entry before we leak it.
                 // leak the current value and write in a new location.
-                unimplemented!();
+                let (start, end) = self.add_entry(&entry)?;
+
+                EntryRef::write(self.map, index, start, end)?;
+
+                self.next_record_offset = end;
             }
             SearchResult::NotFound(index) => {
-                let start = self.record_offset;
-                // TODO: check bounds?
-                let buf = &mut self.map[start.0..self.index_offset.0];
-                let used = to_slice(&entry, buf)?.len();
+                let (start, end) = self.add_entry(&entry)?;
+                if self.record_count.0 == 0 {
+                    EntryRef::write(self.map, index, start, end)?;
+                } else {
+                    EntryRef::insert(self.map, index, self.next_record_index, start, end)?;
+                }
 
-                let mut end = start;
-                end.increment(used)?;
-                // BUG: This should be changed to insert instead of write
-                EntryRef::write(self.map, self.index_offset, start, end)?;
+                self.next_record_index.increment();
 
-                self.index_offset.increment();
+                self.next_record_offset = end;
 
-                self.record_offset.increment(used)?;
+                self.record_count.increment();
+
+                self.record_count.write(self.map);
             }
         }
 
         Ok(())
     }
 
+    pub fn get(&self, key: &K) -> Result<Option<V>, MapError> {
+        let search_result = self.find_index(key)?;
+
+        match search_result {
+            SearchResult::NotFound(_) => Ok(None),
+            SearchResult::Found(index) => {
+                let entry_ref = EntryRef::read(self.map, index)?;
+                let entry: Entry<K, V> =
+                    from_bytes(&self.map[entry_ref.start as usize..entry_ref.end as usize])?;
+                Ok(Some(entry.value))
+            }
+        }
+    }
+
+    fn add_entry(&mut self, entry: &Entry<K, V>) -> Result<(RecordOffset, RecordOffset), MapError> {
+        let start = self.next_record_offset;
+        let index_offset = self.next_record_index.offset(self.map)?;
+        // TODO: check bounds?
+        let buf = &mut self.map[start.0..index_offset];
+        let used = to_slice(&entry, buf)?.len();
+
+        let mut end = start;
+
+        end.increment(used)?;
+
+        Ok((start, end))
+    }
+
+    // TODO: Proving the binary search could be done in Kani
     fn find_index(&self, key: &K) -> Result<SearchResult, MapError> {
-        let mut left = self.index_offset.0 as i32;
-        let mut right = (self.map.len() - ENTRY_REF_SIZE) as i32;
+        if self.record_count.0 == 0 {
+            return Ok(SearchResult::NotFound(RecordIndex(0)));
+        } else if self.record_count.0 == 1 {
+            let entry_ref = EntryRef::read(self.map, RecordIndex::new(0))?;
+            let entry: Entry<K, V> =
+                from_bytes(&self.map[entry_ref.start as usize..entry_ref.end as usize])?;
+            let result = match key.cmp(&entry.key) {
+                core::cmp::Ordering::Equal => SearchResult::Found(RecordIndex(0)),
+                core::cmp::Ordering::Less => SearchResult::NotFound(RecordIndex(0)),
+                core::cmp::Ordering::Greater => SearchResult::NotFound(RecordIndex(1)),
+            };
+
+            return Ok(result);
+        }
+
+        let mut left = 0;
+        let mut right = self.next_record_index.0 - 1;
 
         while left <= right {
             let mid = (left + right) / 2;
-            let entry_ref = EntryRef::read(self.map, self.index_offset.seek(mid))?;
+            let entry_ref = EntryRef::read(self.map, RecordIndex::new(mid))?;
             let entry: Entry<K, V> =
                 from_bytes(&self.map[entry_ref.start as usize..entry_ref.end as usize])?;
 
             match key.cmp(&entry.key) {
-                core::cmp::Ordering::Equal => return Ok(SearchResult::Found(mid as usize)),
-                core::cmp::Ordering::Less => right = mid - 1,
-                core::cmp::Ordering::Greater => left = mid + 1,
+                core::cmp::Ordering::Equal => return Ok(SearchResult::Found(RecordIndex(mid))),
+                core::cmp::Ordering::Less => right = mid + 1,
+                core::cmp::Ordering::Greater => left = mid - 1,
             }
         }
-        Ok(SearchResult::Found(left as usize))
+
+        Ok(SearchResult::NotFound(RecordIndex(left)))
     }
 }
