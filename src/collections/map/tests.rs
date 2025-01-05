@@ -49,40 +49,49 @@ proptest! {
 
 }
 
-#[test]
-fn test_read_write() {
-    const BUFFER_SIZE: usize = 2048;
-    let mut buffer = vec![0u8; BUFFER_SIZE];
-    let id = CollectionId(1);
+fn k_v_vec() -> impl Strategy<Value = Vec<(i32, i32)>> {
+    prop::collection::vec((0..i32::MAX, 0..i32::MAX), 1..100)
+}
 
-    const DATA_SIZE: usize = BUFFER_SIZE;
-    const MAX_HEADS: usize = 8;
-    const REGION_COUNT: usize = 4;
+proptest! {
 
-    let mut mem_io =
-        MemIo::<DATA_SIZE, MAX_HEADS, REGION_COUNT>::new().expect("Failed to create MemIo");
+    #[test]
+    fn test_read_write(entries in k_v_vec()) {
+        const BUFFER_SIZE: usize = 2048;
+        let mut buffer = vec![0u8; BUFFER_SIZE];
+        let id = CollectionId(1);
 
-    let mut io: Io<'_, MemIo<2048, 8, 4>, MAX_HEADS> =
-        Io::init(&mut mem_io, DATA_SIZE, REGION_COUNT).expect("Failed to initialize Io");
+        const DATA_SIZE: usize = BUFFER_SIZE;
+        const MAX_HEADS: usize = 8;
+        const REGION_COUNT: usize = 4;
 
-    let mut map = LsmMap::init::<MAX_HEADS>(&mut io, id, buffer.as_mut_slice())
-        .expect("Could not construct LsmMap.");
 
-    let key = 31337;
-    let value = 42;
-    map.set(key, value).expect("insert failed");
-    let key2 = 31415;
-    let value2 = 17;
-    map.set(key2, value2).expect("insert 2 failed");
+        let mut mem_io =
+            MemIo::<DATA_SIZE, MAX_HEADS, REGION_COUNT>::new().expect("Failed to create MemIo");
 
-    let got = map
-        .get(&key)
-        .expect("could not get key")
-        .expect("got None for key");
+        let mut io: Io<'_, MemIo<2048, 8, 4>, MAX_HEADS> =
+            Io::init(&mut mem_io, DATA_SIZE, REGION_COUNT).expect("Failed to initialize Io");
 
-    assert_eq!(value, got);
+        let mut map = LsmMap::init::<MAX_HEADS>(&mut io, id, buffer.as_mut_slice())
+            .expect("Could not construct LsmMap.");
 
-    //let got = map.get(&key2).expect("could not get key").expect("got None for key");
+        let (mut last_key, mut last_value) = entries[0];
+        map.set(last_key, last_value).expect("insert failed");
 
-    //assert_eq!(value2, got);
+        for (key, value) in entries[1..].iter() {
+            map.set(*key, *value).expect("insert failed");
+            if *key != last_key {
+                let got = map
+                .get(&last_key)
+                .expect("could not get key")
+                .expect("got None for key");
+
+                assert_eq!(got, last_value);
+            }
+
+            last_key = *key;
+            last_value = *value;
+        }
+    }
+
 }

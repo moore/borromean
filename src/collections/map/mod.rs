@@ -1,6 +1,7 @@
 use crate::collections::wal::Wal;
 use crate::io::{Io, IoBackend, IoError, RegionAddress, RegionSequence};
 use crate::CollectionId;
+use core::fmt::Debug;
 use core::marker::PhantomData;
 use core::mem::size_of;
 use postcard::{from_bytes, to_slice};
@@ -44,7 +45,8 @@ impl From<postcard::Error> for MapError {
 ))]
 pub struct Entry<K, V>
 where
-    K: Ord + PartialOrd + Eq + PartialEq,
+    K: Debug + Ord + PartialOrd + Eq + PartialEq,
+    V: Debug,
 {
     key: K,
     value: V,
@@ -69,7 +71,6 @@ impl EntryRef {
         end: RecordOffset,
     ) -> Result<(), MapError> {
         let offset = index.offset(buffer)?;
-
         let start: RefType = start
             .0
             .try_into()
@@ -98,11 +99,10 @@ impl EntryRef {
         let location = index.0;
         let current = index.0 + 1;
 
-        let current_offset = index.offset(buffer)?;
-        let target_offset = index.next().offset(buffer)?;
-        let end_offset = last_index.previous().offset(buffer)?;
-
-        buffer.copy_within(current_offset..end_offset, target_offset);
+        let current_offset = index.offset(buffer)? + ENTRY_REF_SIZE;
+        let target_offset = last_index.next().offset(buffer)?;
+        let end_offset = last_index.offset(buffer)?;
+        buffer.copy_within(end_offset..current_offset, target_offset);
 
         Self::write(buffer, index, start, end)
     }
@@ -128,6 +128,8 @@ impl EntryRef {
         Ok(entry)
     }
 }
+
+#[derive(Debug)]
 struct EntryCount(u32);
 const ENTRY_COUNT_SIZE: usize = size_of::<EntryCount>();
 
@@ -230,8 +232,8 @@ pub struct LsmMap<'a, K, V, B: IoBackend> {
 
 impl<'a, K, V, B: IoBackend> LsmMap<'a, K, V, B>
 where
-    K: Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
-    V: Serialize + for<'de> Deserialize<'de>,
+    K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
+    V: Debug + Serialize + for<'de> Deserialize<'de>,
 {
     pub fn init<const MAX_HEADS: usize>(
         io: &mut Io<B, MAX_HEADS>,
@@ -265,7 +267,6 @@ where
         V: Serialize + for<'d> Deserialize<'d>,
     {
         let search_result = self.find_index(&key)?;
-
         let entry = Entry { key, value };
 
         match search_result {
@@ -280,10 +281,16 @@ where
             }
             SearchResult::NotFound(index) => {
                 let (start, end) = self.add_entry(&entry)?;
-                if self.record_count.0 == 0 {
+                if index == self.next_record_index {
                     EntryRef::write(self.map, index, start, end)?;
                 } else {
-                    EntryRef::insert(self.map, index, self.next_record_index, start, end)?;
+                    EntryRef::insert(
+                        self.map,
+                        index,
+                        self.next_record_index.previous(),
+                        start,
+                        end,
+                    )?;
                 }
 
                 self.next_record_index.increment();
@@ -295,13 +302,11 @@ where
                 self.record_count.write(self.map);
             }
         }
-
         Ok(())
     }
 
     pub fn get(&self, key: &K) -> Result<Option<V>, MapError> {
         let search_result = self.find_index(key)?;
-
         match search_result {
             SearchResult::NotFound(_) => Ok(None),
             SearchResult::Found(index) => {
@@ -323,7 +328,6 @@ where
         let mut end = start;
 
         end.increment(used)?;
-
         Ok((start, end))
     }
 
@@ -344,22 +348,28 @@ where
             return Ok(result);
         }
 
-        let mut left = 0;
-        let mut right = self.next_record_index.0 - 1;
+        let mut low_index = 0;
+        let mut high_index = self.next_record_index.0 - 1;
+        while low_index <= high_index {
+            // SAFETY: high - low will not under flow and mid will
+            // alway be smaller then high.
+            let mid = low_index + (high_index - low_index) / 2;
 
-        while left <= right {
-            let mid = (left + right) / 2;
             let entry_ref = EntryRef::read(self.map, RecordIndex::new(mid))?;
             let entry: Entry<K, V> =
                 from_bytes(&self.map[entry_ref.start as usize..entry_ref.end as usize])?;
-
             match key.cmp(&entry.key) {
                 core::cmp::Ordering::Equal => return Ok(SearchResult::Found(RecordIndex(mid))),
-                core::cmp::Ordering::Less => right = mid + 1,
-                core::cmp::Ordering::Greater => left = mid - 1,
+                core::cmp::Ordering::Less => {
+                    if mid == 0 {
+                        return Ok(SearchResult::NotFound(RecordIndex(0)));
+                    }
+                    high_index = mid - 1
+                }
+                core::cmp::Ordering::Greater => low_index = mid + 1,
             }
         }
 
-        Ok(SearchResult::NotFound(RecordIndex(left)))
+        Ok(SearchResult::NotFound(RecordIndex(low_index)))
     }
 }
