@@ -70,10 +70,10 @@ fn test_read_write() {
 
     let key = 31337;
     let value = 42;
-    map.insert(key, value).expect("insert failed");
+    map.set(key, value).expect("insert failed");
     let key2 = 31415;
     let value2 = 17;
-    map.insert(key2, value2).expect("insert 2 failed");
+    map.set(key2, value2).expect("insert 2 failed");
 
     let got = map
         .get(&key)

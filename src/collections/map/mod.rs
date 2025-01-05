@@ -259,7 +259,7 @@ where
         })
     }
 
-    pub fn insert(&mut self, key: K, value: V) -> Result<(), MapError>
+    pub fn set(&mut self, key: K, value: V) -> Result<(), MapError>
     where
         K: Ord + PartialOrd + Eq + PartialEq + Serialize + for<'d> Deserialize<'d>,
         V: Serialize + for<'d> Deserialize<'d>,
