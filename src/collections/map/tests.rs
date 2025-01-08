@@ -19,7 +19,13 @@ fn vec_and_indexes() -> impl Strategy<Value = (Vec<u8>, usize, usize)> {
 proptest! {
 
     #[test]
-    fn check_entry_ref((buffer, index1, index2) in vec_and_indexes(), start1 in 0..u32::MAX, end1 in 0..u32::MAX, start2 in 0..u32::MAX, end2 in 0..u32::MAX) {
+    fn check_entry_ref(
+        (buffer, index1, index2) in vec_and_indexes(), 
+        start1 in 0..RefType::MAX, 
+        end1 in 0..RefType::MAX, 
+        start2 in 0..RefType::MAX, 
+        end2 in 0..RefType::MAX
+    ) {
         if index1 == index2 {
             return Ok(());
         }
@@ -38,11 +44,11 @@ proptest! {
         let entry1 = EntryRef::read(&buffer, index1).unwrap();
         let entry2 = EntryRef::read(&buffer, index2).unwrap();
 
-        assert_eq!(entry1.start, start1.0 as u32);
-        assert_eq!(entry1.end, end1.0 as u32);
+        assert_eq!(entry1.start, start1.0 as RefType);
+        assert_eq!(entry1.end, end1.0 as RefType);
 
-        assert_eq!(entry2.start, start2.0 as u32);
-        assert_eq!(entry2.end, end2.0 as u32);
+        assert_eq!(entry2.start, start2.0 as RefType);
+        assert_eq!(entry2.end, end2.0 as RefType);
 
     }
 

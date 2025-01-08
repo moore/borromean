@@ -52,7 +52,7 @@ where
     value: V,
 }
 
-type RefType = u32;
+type RefType = u16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct EntryRef {
@@ -74,7 +74,7 @@ impl EntryRef {
         let start: RefType = start
             .0
             .try_into()
-            .map_err(|e| MapError::SerializationError)?;
+            .map_err(|_| MapError::SerializationError)?;
 
         let end: RefType = end.0.try_into().map_err(|_| MapError::SerializationError)?;
 
