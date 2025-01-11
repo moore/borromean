@@ -20,10 +20,10 @@ proptest! {
 
     #[test]
     fn check_entry_ref(
-        (buffer, index1, index2) in vec_and_indexes(), 
-        start1 in 0..RefType::MAX, 
-        end1 in 0..RefType::MAX, 
-        start2 in 0..RefType::MAX, 
+        (buffer, index1, index2) in vec_and_indexes(),
+        start1 in 0..RefType::MAX,
+        end1 in 0..RefType::MAX,
+        start2 in 0..RefType::MAX,
         end2 in 0..RefType::MAX
     ) {
         if index1 == index2 {
@@ -55,14 +55,14 @@ proptest! {
 
 }
 
-fn k_v_vec() -> impl Strategy<Value = Vec<(i32, i32)>> {
-    prop::collection::vec((0..i32::MAX, 0..i32::MAX), 1..100)
+fn k_v_vec(count: usize) -> impl Strategy<Value = Vec<(i32, i32)>> {
+    prop::collection::vec((0..i32::MAX, 0..i32::MAX), count..(count + 1))
 }
 
 proptest! {
 
     #[test]
-    fn test_read_write(entries in k_v_vec()) {
+    fn test_read_write(entries in k_v_vec(100)) {
         const BUFFER_SIZE: usize = 2048;
         let mut buffer = vec![0u8; BUFFER_SIZE];
         let id = CollectionId(1);
@@ -97,6 +97,57 @@ proptest! {
 
             last_key = *key;
             last_value = *value;
+        }
+    }
+
+}
+
+proptest! {
+
+    #[test]
+    fn test_write_delete(entries in k_v_vec(5), delete in 0usize..5) {
+        const BUFFER_SIZE: usize = 2048;
+        let mut buffer = vec![0u8; BUFFER_SIZE];
+        let id = CollectionId(1);
+
+        const DATA_SIZE: usize = BUFFER_SIZE;
+        const MAX_HEADS: usize = 8;
+        const REGION_COUNT: usize = 4;
+
+
+        let mut mem_io =
+            MemIo::<DATA_SIZE, MAX_HEADS, REGION_COUNT>::new().expect("Failed to create MemIo");
+
+        let mut io: Io<'_, MemIo<2048, 8, 4>, MAX_HEADS> =
+            Io::init(&mut mem_io, DATA_SIZE, REGION_COUNT).expect("Failed to initialize Io");
+
+        let mut map = LsmMap::init::<MAX_HEADS>(&mut io, id, buffer.as_mut_slice())
+            .expect("Could not construct LsmMap.");
+
+
+
+        for (key, value) in entries.iter() {
+            map.set(*key, *value).expect("insert failed");
+        }
+
+        let delete_key = entries[delete].0;
+
+        map.delete(delete_key).expect("delete failed");
+
+
+        for (key, value) in entries.iter() {
+
+
+            let got = map
+            .get(key)
+            .expect("could not get key");
+
+            if *key == delete_key {
+                assert_eq!(got, None);
+            } else {
+                assert_eq!(got, Some(*value));
+            }
+
         }
     }
 

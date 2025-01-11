@@ -49,7 +49,7 @@ where
     V: Debug,
 {
     key: K,
-    value: V,
+    value: Option<V>,
 }
 
 type RefType = u16;
@@ -266,6 +266,21 @@ where
         K: Ord + PartialOrd + Eq + PartialEq + Serialize + for<'d> Deserialize<'d>,
         V: Serialize + for<'d> Deserialize<'d>,
     {
+        self.set_worker(key, Some(value))
+    }
+
+    pub fn delete(&mut self, key: K) -> Result<(), MapError>
+    where
+        K: Ord + PartialOrd + Eq + PartialEq + Serialize + for<'d> Deserialize<'d>,
+    {
+        self.set_worker(key, None)
+    }
+
+    fn set_worker(&mut self, key: K, value: Option<V>) -> Result<(), MapError>
+    where
+        K: Ord + PartialOrd + Eq + PartialEq + Serialize + for<'d> Deserialize<'d>,
+        V: Serialize + for<'d> Deserialize<'d>,
+    {
         let search_result = self.find_index(&key)?;
         let entry = Entry { key, value };
 
@@ -313,7 +328,7 @@ where
                 let entry_ref = EntryRef::read(self.map, index)?;
                 let entry: Entry<K, V> =
                     from_bytes(&self.map[entry_ref.start as usize..entry_ref.end as usize])?;
-                Ok(Some(entry.value))
+                Ok(entry.value)
             }
         }
     }
