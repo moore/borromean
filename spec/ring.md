@@ -58,7 +58,14 @@ each affected uncommitted collection into a new WAL region by snapshoting the co
 Once collection data is flushed from a WAL head being reclaimed, any current head records are moved to the WAL tail, a WAL head record is
 written pointing to the new head, and the old wall head of the WAL is added to the free list.
 
-BUG: when freeing any region we must preform the steps, update collection (WAL inluded) so that region to free has no live records, remove it from the collection, and add it to the free list. If there is a crash between removing it from the collection and adding it to the free list the region will be leeked. To solve this we should add a "start collection" recored to the WAL befor we start the collection steps, and add a final "colleciton finished" message after compleation. This requires that all colettion steps be indempotant.
+Any reclaim that frees a region is a WAL-tracked transaction. Before
+removing a region from live collection or WAL state, borromean writes
+and syncs `reclaim_begin(region_id)`. After the region is no longer
+live, it is appended to the free list. Reclaim completes only after
+`reclaim_end(region_id)` is written and synced. Startup replay treats
+any `reclaim_begin` without a matching `reclaim_end` as an incomplete,
+idempotent reclaim operation that must either be completed or proven
+unnecessary before open succeeds.
 
 The storage system also keeps a free list of regions that are
 available to satisfy new allocations. This list is FIFO (First In,
@@ -150,7 +157,8 @@ within the WAL region chain.
 
 Each record includes:
 
-1. `record_type`: one of `update`, `snapshot`, `head`, `link`
+1. `record_type`: one of `update`, `snapshot`, `head`, `link`,
+`reclaim_begin`, `reclaim_end`
 2. `collection_id`: required for `update`, `snapshot`, and `head`
 3. `payload_len`: payload size in bytes
 4. `payload`: opaque bytes defined by `record_type`
@@ -183,6 +191,16 @@ header.
 The record also stores `free_list_head_after`, the next free region
 after allocating `next_region_id`.
 
+5. `reclaim_begin`
+Marks the start of reclaim for `region_id`. The payload contains the
+region being freed. This record does not itself make the region free;
+it only makes the reclaim intent durable before any live references to
+that region are removed.
+
+6. `reclaim_end`
+Marks successful completion of reclaim for `region_id`. The payload
+contains the same `region_id` as the matching `reclaim_begin`.
+
 Ordering and validity rules:
 
 1. A valid `snapshot` record is itself a durable WAL-snapshot head for
@@ -199,6 +217,10 @@ write that consumes a free-list entry advances allocator state only if
 the same WAL record's `free_list_head_after` is durable.
 6. Replay stops at the first invalid checksum or torn record in the
 tail region.
+7. `reclaim_begin(region_id)` and `reclaim_end(region_id)` must appear
+in WAL order and are matched by `region_id`.
+8. `reclaim_end(region_id)` is only valid if preceded by a valid
+`reclaim_begin(region_id)`.
 
 Assumption for replay correctness:
 
@@ -290,7 +312,7 @@ target region as the active append tail.
 For the tail region, stop at first invalid checksum or torn record.
 7. Maintain replay state:
 per collection `last_head` and `pending_updates`, plus global
-`last_free_list_head`.
+`last_free_list_head`, and ordered pending region reclaims.
 8. On `update(collection_id)`:
 append to `pending_updates` for that collection.
 9. On `snapshot(collection_id)`:
@@ -303,15 +325,29 @@ older than this head decision.
 set durable `last_free_list_head` to `free_list_head_after`.
 11. On `link(next_region_id, expected_sequence, free_list_head_after)`:
 set durable `last_free_list_head` to `free_list_head_after`.
-12. For any WAL record format extension that writes a newly allocated
+12. On `reclaim_begin(region_id)`:
+append `region_id` to pending reclaims unless a later matching
+`reclaim_end` removes it.
+13. On `reclaim_end(region_id)`:
+mark the matching pending reclaim as finished.
+14. For any WAL record format extension that writes a newly allocated
 region:
 validate and apply its `free_list_head_after` exactly once in replay
 order.
-13. After replay, for each collection:
+15. After replay, for each collection:
 if `last_head` is `region`, load region state; if `last_head` is
 `wal_snapshot`, load snapshot state; then apply remaining
 `pending_updates` in WAL order to build in-memory working state.
-14. Initialize allocator state from `last_free_list_head`.
+16. Initialize allocator state from `last_free_list_head`.
+17. For each pending reclaim in WAL order:
+if the target region is still reachable from any live collection head
+or the WAL chain, leave it allocated because the reclaim did not reach
+the detach point durably.
+If the target region is unreachable from live state and not yet in the
+free-list chain, complete the free-list append using the Region
+Reclaim procedure.
+If the target region is already reachable from the free-list chain,
+finish the reclaim transaction by appending `reclaim_end(region_id)`.
 
 
 ## no_std Tracker Types (Rust)
@@ -491,7 +527,7 @@ Required write and sync ordering:
 4. WAL rotation:
 `W(link(next_region_id, expected_sequence, free_list_head_after)) -> S(link) -> W(new_wal_region_init(sequence=expected_sequence)) -> S(new_wal_region_init)`.
 5. Reclaim:
-`W(replacement_live_state_and_new_links) -> S(replacement_state) -> metadata updates (write+sync) -> Add old WAL region to free list`.
+`W(reclaim_begin(region_id)) -> S(reclaim_begin) -> W(replacement_live_state_and_new_links) -> S(replacement_state) -> append old region to free list (write+sync) -> W(reclaim_end(region_id)) -> S(reclaim_end)`.
 
 General region-write allocation rule:
 
@@ -522,6 +558,14 @@ finishes initialization using `expected_sequence`.
 8. Crash during tail-record write:
 replay stops at first invalid/torn tail record; earlier complete
 records remain valid.
+9. Crash after `S(reclaim_begin)` but before the region is detached
+from all live state:
+startup sees an incomplete reclaim, but the region is still live and
+must not be freed.
+10. Crash after the region is detached from live state but before
+`S(reclaim_end)`:
+startup sees an incomplete reclaim and must complete the free-list
+append idempotently if the region is not already free.
 
 ## Storage Metadata
 
@@ -635,7 +679,9 @@ normal replay decisions.
 Region reclaim appends a newly freed region to the tail of the free
 list. If the free list was non-empty, reclaim must update the previous
 tail region's `next_tail` pointer so the chain now ends at the newly
-reclaimed region.
+reclaimed region. Because reclaim removes a region from live metadata
+before making it reachable from the free-list chain, it is always
+modeled as a WAL-tracked transaction.
 
 Normative append semantics:
 
@@ -650,23 +696,37 @@ free list.
 
 Preconditions:
 
-1. The reclaimed region `r` is no longer reachable from any live
-collection head or live WAL state.
-2. `r` is not already reachable from the free-list chain.
-3. If a current free-list tail exists, call it `t_prev`.
+1. `reclaim_begin(r)` is durable in the WAL before any live metadata is
+updated to stop referencing `r`.
+2. After the detach step, the reclaimed region `r` is no longer
+reachable from any live collection head or live WAL state.
+3. `r` is not already reachable from the free-list chain, unless this
+procedure is being re-entered during crash recovery.
+4. If a current free-list tail exists, call it `t_prev`.
 
 Procedure:
 
-1. Erase region `r` before reuse.
-2. Initialize `r.free_pointer.next_tail = none`.
-3. Sync `r` so its free-pointer state is durable before linking it.
-4. If `t_prev` exists, write `t_prev.free_pointer.next_tail = r`.
+1. Ensure `reclaim_begin(r)` is durable. On the initial reclaim
+attempt this means append and sync `reclaim_begin(r)`. On recovery
+re-entry the existing durable record satisfies this step.
+2. Durably perform any collection-head or WAL-head updates needed so
+that `r` has no remaining live references.
+3. If recovery finds that `r` is already reachable from the free-list
+chain, skip to step 10.
+4. Erase region `r` before reuse.
+5. Initialize `r.free_pointer.next_tail = none`.
+6. Sync `r` so its free-pointer state is durable before linking it.
+7. If `t_prev` exists, write `t_prev.free_pointer.next_tail = r`.
 This is the operation that links the previous free tail to the new
 tail.
-5. Sync `t_prev` after writing `next_tail`.
-6. Update in-memory `free_list_tail = r`.
-7. If no tail existed before step 4, set both in-memory
+8. If `t_prev` exists, sync `t_prev` after writing `next_tail`.
+9. If `t_prev` exists, update in-memory `free_list_tail = r`.
+If no tail existed before step 7, set both in-memory
 `free_list_head = r` and `free_list_tail = r`.
+10. If recovery found `r` already reachable from the free-list chain,
+update in-memory free-list state so it reflects `r` as the current
+tail when needed.
+11. Append and sync `reclaim_end(r)`.
 
 Postconditions:
 
@@ -680,10 +740,17 @@ Postconditions:
 6. If a prior tail existed, the only new durable predecessor link for
 `r` is `t_prev.next_tail = r`, where `t_prev` is the free-list tail
 from before reclaim.
+7. Replay either finds a matching `reclaim_end(r)` or can safely
+re-enter the procedure and derive the same result without duplicating
+`r` in the free-list chain.
 
 Crash-safety ordering requirement:
 
-1. `r` must be erased/initialized and synced before any durable write
+1. `reclaim_begin(r)` must be durable before any live metadata stops
+referencing `r`.
+2. `r` must be erased/initialized and synced before any durable write
 that makes it reachable from `t_prev.next_tail`.
-2. The `t_prev.next_tail = r` write must be synced before reclaim is
-acknowledged.
+3. If `t_prev` exists, the `t_prev.next_tail = r` write must be synced before
+`reclaim_end(r)` is acknowledged.
+4. The reclaim procedure must be idempotent across crashes between any
+two steps above.
