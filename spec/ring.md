@@ -73,9 +73,11 @@ collected, it can be copied directly to the WAL tail while updating
 the head pointer to the new location.
 
 Once collection data is flushed from a WAL head being reclaimed, any
-current head records are moved to the WAL tail, a WAL head record is
-written pointing to the new head, and the old WAL head is added to
-the free list.
+current head records are moved to the WAL tail, a normal
+`head(collection_id = 0, region_id = new_head)` record is written
+pointing to the new WAL head, and the old WAL head is added to the
+free list. The WAL does not have a separate WAL-only head-record type;
+it uses the same `head` record as every other collection.
 
 Any reclaim that frees a region is a WAL-tracked transaction. Before
 removing a region from live collection or WAL state, borromean writes
@@ -173,9 +175,10 @@ The WAL is collection 0. At startup we scan regions to find the WAL
 region with the largest sequence number (the current WAL tail). The
 start of each WAL region records the WAL head at the time that region
 was created. We must also scan the tail region for any changes to the
-head caused by reclaiming the WAL head region. Startup uses this
-metadata plus WAL replay to reconstruct uncommitted state in memory
-and the current free-list head.
+head caused by reclaiming the WAL head region; those changes are
+represented by ordinary `head` records with `collection_id = 0`.
+Startup uses this metadata plus WAL replay to reconstruct uncommitted
+state in memory and the current free-list head.
 
 ## WAL Record Types
 
@@ -214,7 +217,8 @@ is erased before a later `head` or `link` record uses it.
 
 4. `head`
 Commits a collection to a new durable region head. Payload contains
-the target `region_id`.
+the target `region_id`. When `collection_id = 0`, this record commits a
+new WAL head region; there is no distinct WAL-head record type.
 
 5. `link`
 Points from a full WAL region to the next WAL region. Payload contains
@@ -350,8 +354,12 @@ Algorithm:
 2. Scan all regions and collect candidate WAL regions
 (`collection_id == 0`) with valid headers.
 3. Select WAL tail as the WAL region with the largest valid sequence.
-4. Read the WAL-head pointer stored at the start of that tail region.
-5. Walk the WAL region chain from head to tail using `link` records.
+4. Read the WAL-head pointer stored at the start of that tail region as
+the initial WAL-head candidate. Then scan valid records in that tail
+region and let the last valid `head(collection_id = 0, region_id)`
+record override that candidate.
+5. Walk the WAL region chain from the resulting WAL head to tail using
+`link` records.
 If a `link` is missing/invalid before reaching the known tail, return
 an error (corrupted WAL chain).
 If the known tail contains a trailing `link` whose target header is
