@@ -416,12 +416,17 @@ layout.
 
 use heapless::Vec;
 
-// BUG: we should update these to tuple structs
-// so they are unique types.
-pub type RegionId = u32; // BUG: this should be region index.
-pub type CollectionId = u64; // BUG: should this be a u16 counter or a u64 nonce?
-pub type WalSequence = u64;
-pub type WalOffset = u32;
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RegionId(pub u32); // BUG: this should be region index.
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CollectionId(pub u64); // BUG: should this be a u16 counter or a u64 nonce?
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WalSequence(pub u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WalOffset(pub u32);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WalPosition {
