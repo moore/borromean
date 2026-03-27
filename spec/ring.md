@@ -28,11 +28,12 @@ To solve these challenges, borromean divides flash into equal-size
 regions. Each collection is implemented as an append-only data
 structure where new writes are added to the head region and data can
 only be freed by truncating the tail. For each collection, borromean
-tracks a collection id and current head. 
+tracks a collection id and current head.
 
 Before being written to storage, updates to a collection are kept in
-memory. To persist mutations before a full region flush or snap shot, each mutation is also
-written to a global write-ahead log (WAL) shared by all collections.
+memory. To persist mutations before a full region flush or snapshot,
+each mutation is also written to a global write-ahead log (WAL)
+shared by all collections.
 Per-collection WAL entries contain a stable collection id and opaque
 bytes. Collection ids are opaque 64-bit nonces that are assigned when
 a collection is created and are not recycled.
@@ -52,7 +53,8 @@ effective storage utilization because partial snapshots can be
 intermixed with other WAL entries and more easily collected when
 stale.
 
-Furter snapshoting to a WAL allows bounded RAM usage with an unbounded number of collections. If an update
+Further snapshotting to the WAL allows bounded RAM usage with an
+unbounded number of collections. If an update
 targets a collection that does not currently have a free in-memory
 buffer, the system may evict the least-frequently-used buffered
 collection by flushing its current state snapshot to the WAL and
@@ -62,11 +64,18 @@ When a WAL region is filled, its last record points to the next WAL
 region.
 
 A WAL region can be reclaimed when the number of live records drops
-below a configurable threshold. During reclaim, we write the current live state for
-each affected uncommitted collection into a new WAL region by snapshoting the collection in it to the head wall region. If the collection's data is not in memory that implies that that it's current snapshot is in the WAL. If a current snapshot is in the region being collected it can directly be copied to a the tail of the WAL allong with updating the head pointer to the new location.
+below a configurable threshold. During reclaim, we write the current
+live state for each affected uncommitted collection into a new WAL
+region by snapshotting that collection into the WAL head region. If a
+collection's data is not in memory, that implies its current snapshot
+is already in the WAL. If a current snapshot is in the region being
+collected, it can be copied directly to the WAL tail while updating
+the head pointer to the new location.
 
-Once collection data is flushed from a WAL head being reclaimed, any current head records are moved to the WAL tail, a WAL head record is
-written pointing to the new head, and the old wall head of the WAL is added to the free list.
+Once collection data is flushed from a WAL head being reclaimed, any
+current head records are moved to the WAL tail, a WAL head record is
+written pointing to the new head, and the old WAL head is added to
+the free list.
 
 Any reclaim that frees a region is a WAL-tracked transaction. Before
 removing a region from live collection or WAL state, borromean writes
@@ -99,12 +108,18 @@ checksum over the header itself.
 
 The sequence number is a monotonically increasing value assigned each
 time a new region is written. This lets us scan regions and identify
-the newest region for each collection. This is primarlly used to find the head tail of the WAL which is used to open the database.
+the newest region for each collection. This is primarily used to find
+the head and tail of the WAL when opening the database.
 
-The collection format defines how user data is encoded in the User Data section. Storing the format in each region allows format evolution over time.
+The collection format defines how user data is encoded in the user
+data section. Storing the format in each region allows format
+evolution over time.
 
 The free pointer stores the location of the next free region for
-regions that have been freed the reagion in question is in the free list. This page is written not when the region is freed but when the next region is freed. This is the mechinisem we use to make the free list a FIFO.
+regions that have been freed, so the region in question is in the free
+list. This field is written not when the region is freed, but when the
+next region is freed. This is the mechanism used to make the free list
+a FIFO.
 
 ```mermaid
 block-beta
@@ -157,8 +172,10 @@ Each of these is solved by tracking this information in the WAL.
 The WAL is collection 0. At startup we scan regions to find the WAL
 region with the largest sequence number (the current WAL tail). The
 start of each WAL region records the WAL head at the time that region
-was created. We must also scan the tail region looking for any changes to the head due to collecting a head WAL region. Startup uses this metadata plus WAL replay to reconstruct
-uncommitted state in memory and the current free-list head.
+was created. We must also scan the tail region for any changes to the
+head caused by reclaiming the WAL head region. Startup uses this
+metadata plus WAL replay to reconstruct uncommitted state in memory
+and the current free-list head.
 
 ## WAL Record Types
 
@@ -226,7 +243,7 @@ equal to `expected_sequence`.
 if `free_list_head_after` is missing or corrupt.
 5. A `head(region_id)` or `link(next_region_id, ...)` record that
 writes a newly allocated region is valid only if replay has already
-seen a prior unmatched `alloc_begin` for the same region id.
+seen a prior unmatched `alloc_begin` for the same region index.
 6. Durable allocator advance happens at `alloc_begin`, not at `head` or
 `link`.
 7. Replay stops at the first invalid checksum or torn record in the
@@ -685,7 +702,7 @@ The `sequence` field is a monotonic value that is used to find the
 newest header when the database is opened.
 
 The `collection_id` defines which collection this region belongs to,
-and the `collection_type` the type of the collection. It is a stable
+and the `collection_type` is the type of the collection. It is a stable
 64-bit nonce, not a small reusable counter.
 
 The `header_checksum` validates header integrity.
@@ -721,7 +738,7 @@ write WAL-region prologue with WAL head pointing to region `0`, then
 sync region `0`.
 4. For each region `r` in `[1, region_count - 1]`:
 write a valid free-region header, write `r.free_pointer.next_tail`
-to the next region id (`r + 1`) or `none` for the last region, and
+to the next region index (`r + 1`) or `none` for the last region, and
 sync `r`.
 5. Formatting is complete only after metadata and all initialized
 regions are durable.
@@ -730,7 +747,7 @@ Postconditions:
 
 1. WAL head and WAL tail are both region `0`.
 2. No user collection durable heads exist.
-3. Free list contains every non-WAL region in ascending region-id
+3. Free list contains every non-WAL region in ascending region-index
 order.
 4. If `region_count = 1`, the free list is empty.
 
