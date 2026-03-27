@@ -6,6 +6,7 @@ use core::marker::PhantomData;
 use core::mem::size_of;
 use postcard::{from_bytes, to_slice};
 use serde::{Deserialize, Serialize};
+use heapless::Vec;
 
 #[cfg(test)]
 mod tests;
@@ -23,6 +24,21 @@ mod tests;
 // the size of the entries.
 //
 // we write the index in backwards order so that we can implement merge join efficiently.
+
+
+// We can store merged maps larger than a single segment by building up a skip list as 
+// we merge. This works because we will never have to do inserts in to the skip list as we
+// merge ordered maps. Can we even optimize this by stopping the merge and reusing previous
+// Segments if we end up wit only one map to merge?
+//
+// so the over all stricture can be: write to log + in memory map -> write to new on disk
+// skip list -> merge lists when there are to many.
+//
+// question is should we always merge all maps in a merge or try and maintain something like
+// each layer doubling in size?
+//
+// In this approach the head of the map is alway the log. 
+
 
 #[derive(Debug)]
 pub enum MapError {
@@ -219,18 +235,18 @@ enum SearchResult {
     NotFound(RecordIndex),
 }
 
-pub struct LsmMap<'a, K, V, B: IoBackend> {
+pub struct LsmMap<'a, K, V, B: IoBackend, const MAX_INDEXES: usize> {
     id: CollectionId,
     //wal: Wal<B>, // BUG: implement wal usage
     record_count: EntryCount,
     next_record_offset: RecordOffset,
     next_record_index: RecordIndex,
     map: &'a mut [u8],
-    next: Option<B::RegionAddress>,
+    next: Vec<Option<B::RegionAddress>, MAX_INDEXES>,
     _phantom: PhantomData<(K, V)>,
 }
 
-impl<'a, K, V, B: IoBackend> LsmMap<'a, K, V, B>
+impl<'a, K, V, B: IoBackend, const MAX_INDEXES: usize> LsmMap<'a, K, V, B, MAX_INDEXES>
 where
     K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
     V: Debug + Serialize + for<'de> Deserialize<'de>,
@@ -256,7 +272,7 @@ where
             next_record_index,
             next_record_offset,
             map,
-            next: None,
+            next: Vec::new(),
             _phantom,
         })
     }

@@ -70,6 +70,7 @@ proptest! {
         const DATA_SIZE: usize = BUFFER_SIZE;
         const MAX_HEADS: usize = 8;
         const REGION_COUNT: usize = 4;
+        const MAX_INDEXES: usize = 4;
 
 
         let mut mem_io =
@@ -78,7 +79,7 @@ proptest! {
         let mut io: Io<'_, MemIo<2048, 8, 4>, MAX_HEADS> =
             Io::init(&mut mem_io, DATA_SIZE, REGION_COUNT).expect("Failed to initialize Io");
 
-        let mut map = LsmMap::init::<MAX_HEADS>(&mut io, id, buffer.as_mut_slice())
+        let mut map = LsmMap::<_, _, _, MAX_INDEXES>::init::<MAX_HEADS>(&mut io, id, buffer.as_mut_slice())
             .expect("Could not construct LsmMap.");
 
         let (mut last_key, mut last_value) = entries[0];
@@ -113,6 +114,7 @@ proptest! {
         const DATA_SIZE: usize = BUFFER_SIZE;
         const MAX_HEADS: usize = 8;
         const REGION_COUNT: usize = 4;
+        const MAX_INDEXES: usize = 4;
 
 
         let mut mem_io =
@@ -121,7 +123,7 @@ proptest! {
         let mut io: Io<'_, MemIo<2048, 8, 4>, MAX_HEADS> =
             Io::init(&mut mem_io, DATA_SIZE, REGION_COUNT).expect("Failed to initialize Io");
 
-        let mut map = LsmMap::init::<MAX_HEADS>(&mut io, id, buffer.as_mut_slice())
+        let mut map = LsmMap::<_, _, _, MAX_INDEXES>::init::<MAX_HEADS>(&mut io, id, buffer.as_mut_slice())
             .expect("Could not construct LsmMap.");
 
 
