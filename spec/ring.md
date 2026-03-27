@@ -409,7 +409,8 @@ finish the reclaim transaction by appending `reclaim_end(region_id)`.
 
 The replay and allocator terms above map to the following explicit
 `no_std` tracker state. These structs are runtime state, not on-disk
-layout.
+layout. Region references in tracker state are indexes into the
+configured region array, not opaque identifiers.
 
 ```rust
 #![no_std]
@@ -417,7 +418,7 @@ layout.
 use heapless::Vec;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RegionId(pub u32); // BUG: this should be region index.
+pub struct RegionIndex(pub u32);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CollectionId(pub u64); // BUG: should this be a u16 counter or a u64 nonce?
@@ -436,7 +437,7 @@ pub struct WalPosition {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DurableHead {
-  Region { region_id: RegionId },
+  Region { region_index: RegionIndex },
   WalSnapshot { wal_pos: WalPosition },
 }
 
@@ -456,12 +457,12 @@ pub struct PendingUpdateRef {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FreeListTracker {
   // Durable allocator cursor reconstructed from replay decisions.
-  pub last_free_list_head: Option<RegionId>,
+  pub last_free_list_head: Option<RegionIndex>,
   // Region reserved by `alloc_begin` but not yet consumed by a durable
   // `head` or `link` record.
-  pub ready_region: Option<RegionId>,
+  pub ready_region: Option<RegionIndex>,
   // Runtime-only convenience for append-on-free operations.
-  pub free_list_tail: Option<RegionId>,
+  pub free_list_tail: Option<RegionIndex>,
 }
 
 pub struct ReplayTracker<
