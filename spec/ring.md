@@ -40,7 +40,15 @@ a committed region or to a WAL-resident snapshot. The data payload in
 each region is defined by the collection type implementation.
 
 A collection can be flushed either as a full region write or
-as a partial state snapshot into the WAL. Allowing snapshots to the wall prevents many partially filled regions and low effective storage utilization becouse partial snapshots can be intermxed with other WAL entries and more easily collected when stale.
+as a partial state snapshot into the WAL. A WAL snapshot is a durable
+staging point: when that collection is mutated again, the snapshot is
+loaded into RAM, later mutations are still appended to the WAL as
+`update` records, and the in-memory state is allowed to accumulate
+enough change to eventually justify writing a full region. Allowing
+snapshots to the WAL prevents many partially filled regions and low
+effective storage utilization because partial snapshots can be
+intermixed with other WAL entries and more easily collected when
+stale.
 
 Furter snapshoting to a WAL allows bounded RAM usage with an unbounded number of collections. If an update
 targets a collection that does not currently have a free in-memory
@@ -246,7 +254,10 @@ Each collection has exactly one logical current head after replay.
 States:
 
 1. `InMemoryDirty`
-Latest state is in RAM; WAL has prior durable state.
+Latest state is represented by a collection-defined in-memory
+frontier layered over a durable basis. The frontier may be a full
+materialization, but it may also be a compact delta or memtable that
+supersedes data still stored in the durable basis.
 
 2. `WALSnapshotHead`
 Latest durable head points to a WAL `snapshot` record.
@@ -266,7 +277,8 @@ region, then write `head(region_id)`.
 Durable after the `head` record is durable.
 
 3. `WALSnapshotHead -> InMemoryDirty`
-Load snapshot into RAM and apply new updates.
+Load the snapshot into RAM as the mutable working state, then append
+new updates to the WAL while updating that RAM state.
 
 4. `WALSnapshotHead -> RegionHead`
 Write `alloc_begin(region_id, free_list_head_after)`, materialize
@@ -274,9 +286,23 @@ snapshot (plus any RAM updates) into that new region, then write
 `head(region_id)`.
 
 5. `RegionHead -> InMemoryDirty`
-Load region into RAM and apply new updates.
+Open a mutable frontier over the committed region basis and apply new
+updates without requiring the full region contents to be loaded into
+RAM first.
 
-BUG: We don't need to load completed regions in to memory. The format for the region should be able to interpret new updates in the in memory data as superseeding the data persisted in regions. Examples of such data strcuturs are logs or Log Strcutured Merge tables (LSM).
+Collection format responsibility:
+
+1. Each collection format defines how reads merge the durable basis
+with the in-memory frontier.
+2. The frontier must take precedence over older values in the durable
+basis.
+3. Flush to `RegionHead` materializes the logical state produced by
+that merge.
+4. Formats such as append-only logs or LSM-like structures may keep
+only recent mutable state in RAM while older immutable state remains
+in committed regions.
+5. A `WALSnapshotHead` must be loadable into RAM before that
+collection accepts further mutations.
 
 Invariants:
 
@@ -357,9 +383,14 @@ allocator state:
 validate and apply its `free_list_head_after` exactly once in replay
 order.
 16. After replay, for each collection:
-if `last_head` is `region`, load region state; if `last_head` is
-`wal_snapshot`, load snapshot state; then apply remaining
-`pending_updates` in WAL order to build in-memory working state.
+reconstruct its durable basis from `last_head`; if `last_head` is
+`region`, the basis may remain in-place in flash. If `last_head` is
+`wal_snapshot` and the collection has post-basis updates, load that
+snapshot into RAM and apply the remaining `pending_updates` in WAL
+order to reconstruct mutable working state. If `last_head` is
+`wal_snapshot` and there are no post-basis updates, the snapshot may
+remain dormant until the next mutation, but it must be loaded into RAM
+before accepting that mutation.
 17. Initialize allocator state from `last_free_list_head`.
 18. If `ready_region` is set, hold it in memory as the next region to
 use before consuming another free-list entry.
