@@ -33,7 +33,9 @@ tracks a collection id and current head.
 Before being written to storage, updates to a collection are kept in
 memory. To persist mutations before a full region flush or snap shot, each mutation is also
 written to a global write-ahead log (WAL) shared by all collections.
-Per-collection WAL entries contain a collection id and opaque bytes.
+Per-collection WAL entries contain a stable collection id and opaque
+bytes. Collection ids are opaque 64-bit nonces that are assigned when
+a collection is created and are not recycled.
 
 A collection head may refer either to
 a committed region or to a WAL-resident snapshot. The data payload in
@@ -421,7 +423,7 @@ use heapless::Vec;
 pub struct RegionIndex(pub u32);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CollectionId(pub u64); // BUG: should this be a u16 counter or a u64 nonce?
+pub struct CollectionId(pub u64);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WalSequence(pub u64);
@@ -675,7 +677,8 @@ The `sequence` field is a monotonic value that is used to find the
 newest header when the database is opened.
 
 The `collection_id` defines which collection this region belongs to,
-and the `collection_type` the type of the collection.
+and the `collection_type` the type of the collection. It is a stable
+64-bit nonce, not a small reusable counter.
 
 The `header_checksum` validates header integrity.
 
