@@ -433,7 +433,7 @@ pub struct WalOffset(pub u32);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WalPosition {
-  pub sequence: WalSequence, //BUG: this should be RegionId
+  pub region_index: RegionIndex,
   pub offset: WalOffset,
 }
 
@@ -487,11 +487,13 @@ heapless = { version = "0.8", default-features = false }
 Field mapping to this spec:
 
 1. `CollectionReplayState.last_head` maps to replay `last_head`.
-2. `CollectionReplayState.basis` is `B(c) = P(H(c))`.
-3. `FreeListTracker.last_free_list_head` maps to replay
+2. `WalPosition` identifies a WAL record by WAL region index plus
+byte offset within that region.
+3. `CollectionReplayState.basis` is `B(c) = P(H(c))`.
+4. `FreeListTracker.last_free_list_head` maps to replay
 `last_free_list_head`.
-4. `FreeListTracker.ready_region` maps to replay `ready_region`.
-5. `FreeListTracker.free_list_tail` is runtime state needed to link
+5. `FreeListTracker.ready_region` maps to replay `ready_region`.
+6. `FreeListTracker.free_list_tail` is runtime state needed to link
 `t_prev.next_tail = r` during reclaim.
 
 ## WAL Reclaim Eligibility
