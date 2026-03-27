@@ -351,23 +351,24 @@ target region as the active append tail.
 6. Parse records in WAL order (region order, then offset order).
 For the tail region, stop at first invalid checksum or torn record.
 7. Maintain replay state:
-per collection `last_head` and `pending_updates`, plus global
-`last_free_list_head`, optional reserved `ready_region`, and ordered
-pending region reclaims.
+per collection `last_head`, `basis_pos`, and `pending_updates`, plus
+global `last_free_list_head`, optional reserved `ready_region`, and
+ordered pending region reclaims.
 8. On `update(collection_id)`:
 append to `pending_updates` for that collection.
 9. On `snapshot(collection_id)`:
-set durable `last_head` to this snapshot and clear older pending
-updates for that collection at WAL positions up to and including this
-snapshot.
+set durable `last_head` to this snapshot, set `basis_pos` to this
+record's WAL position, and clear older pending updates for that
+collection at WAL positions up to and including this snapshot.
 10. On `alloc_begin(region_id, free_list_head_after)`:
 if `ready_region` is already set, return an error because replay found
 two unmatched allocation reservations.
 set durable `last_free_list_head` to `free_list_head_after`.
 set `ready_region = region_id`.
 11. On `head(collection_id, region_id)`:
-set durable `last_head` to that region and clear WAL updates/snapshots
-older than this head decision.
+set durable `last_head` to that region, set `basis_pos` to this
+record's WAL position, and clear WAL updates/snapshots older than this
+head decision.
 if `ready_region = region_id`, clear `ready_region`.
 otherwise return an error because the region was never reserved by
 `alloc_begin`.
@@ -447,7 +448,9 @@ pub enum DurableHead {
 pub struct CollectionReplayState {
   pub collection_id: CollectionId,
   pub last_head: DurableHead,
-  pub basis: WalPosition, // BUG: what is this?
+  // WAL position of the durable head decision record that established
+  // `last_head`.
+  pub basis_pos: WalPosition,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -489,7 +492,8 @@ Field mapping to this spec:
 1. `CollectionReplayState.last_head` maps to replay `last_head`.
 2. `WalPosition` identifies a WAL record by WAL region index plus
 byte offset within that region.
-3. `CollectionReplayState.basis` is `B(c) = P(H(c))`.
+3. `CollectionReplayState.basis_pos` is `B(c)`, the WAL position of
+the durable head decision record for that collection.
 4. `FreeListTracker.last_free_list_head` maps to replay
 `last_free_list_head`.
 5. `FreeListTracker.ready_region` maps to replay `ready_region`.
@@ -505,19 +509,21 @@ state.
 
 Per-collection cutoff:
 
-1. Let `H(c)` be the last durable head decision for collection `c`
-(`snapshot` or `head(region)`).
-2. Let `P(H(c))` be the WAL position of `H(c)`.
-3. `B(c) = P(H(c))` is the collection's durable basis position.
+1. Let `H(c)` be the current durable logical head for collection `c`
+(`WalSnapshot` or `RegionHead`).
+2. Let `D(c)` be the WAL position of the last durable head decision
+record for collection `c` (`snapshot` or `head(region)`).
+3. `B(c) = D(c)` is the collection's durable basis position.
 
 Per-record liveness rules:
 
 1. `head(region)` record:
-live only if it is `H(c)` for collection `c`; older `head(region)`
+live only if it is the decision record at `D(c)` for a collection
+whose logical head `H(c)` is a `RegionHead`; older `head(region)`
 records are reclaimable.
 2. `snapshot` record:
-live only if it is `H(c)` for collection `c`;
-otherwise reclaimable.
+live only if it is the decision record at `D(c)` for a collection
+whose logical head `H(c)` is a `WalSnapshot`; otherwise reclaimable.
 3. `update` record for collection `c`:
 live only if its WAL position is greater than `B(c)`; updates at or
 before `B(c)` are reclaimable.
