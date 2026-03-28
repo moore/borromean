@@ -92,8 +92,11 @@ buffer, the system may evict the least-frequently-used buffered
 collection by flushing its current state snapshot to the WAL and
 marking that WAL snapshot as the collection's current head.
 
-When a WAL region is filled, its last record points to the next WAL
-region.
+In a completed WAL rotation, the last record of the old WAL tail is
+`link(next_region_index, expected_sequence)`, which points to the next
+WAL region. A crash may leave an incomplete rotation whose durable
+tail ends earlier; startup recovery finishes that rotation before
+resuming normal appends.
 
 A WAL region can be reclaimed when the number of live records drops
 below a configurable threshold. During reclaim, we write the current
@@ -211,6 +214,9 @@ the erased state left from allocation already represents "no
 successor". After a region is durably reachable from the free-list
 chain, it must not be erased until it is allocated for reuse, because
 the free-pointer chain is stored inside the free regions themselves.
+
+A WAL region is a region whose valid header has `collection_id = 0`
+and the WAL `collection_format`.
 
 For WAL regions, the user-data area begins with a fixed
 `WalRegionPrologue`. That prologue records the WAL head that was
@@ -723,7 +729,8 @@ Algorithm:
 `region_count`, `min_free_regions`, `erased_byte`,
 `wal_write_granule`, `wal_record_magic`, and storage version support).
 2. Scan all regions, collect candidate WAL regions
-(`collection_id == 0`) with valid headers, and track
+(`collection_id == 0` plus WAL `collection_format`) with valid
+headers, and track
 `max_seen_sequence` as the largest `sequence` value seen in any valid
 region header.
 3. Select WAL tail as the WAL region with the largest valid sequence.
@@ -957,9 +964,6 @@ pub struct RegionIndex(pub u32);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CollectionId(pub u64);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct WalSequence(pub u64);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RegionSequence(pub u64);
@@ -1333,9 +1337,10 @@ struct WalRegionPrologue {
 }
 ```
 
-`WalRegionPrologue` is present only in WAL regions (`collection_id = 0`)
-and occupies the first bytes of the region user-data area immediately
-after the region `Header`.
+`WalRegionPrologue` is present only in WAL regions (regions whose valid
+header has `collection_id = 0` and WAL `collection_format`) and
+occupies the first bytes of the region user-data area immediately after
+the region `Header`.
 
 `wal_head_region_index` is the durable WAL head that was current when
 that WAL region was initialized. It must name a region index strictly
@@ -1387,7 +1392,8 @@ Procedure:
 `region_count`, `min_free_regions`, `erased_byte`,
 `wal_write_granule`, `wal_record_magic`) and sync metadata.
 3. Initialize region `0` as WAL:
-write valid `Header` with `collection_id = 0` and `sequence = 0`,
+write valid `Header` with `collection_id = 0`, WAL `collection_format`,
+and `sequence = 0`,
 write a valid `WalRegionPrologue` with `wal_head_region_index = 0`,
 then sync region `0`.
 4. For each region `r` in `[1, region_count - 1]`:
@@ -1418,11 +1424,11 @@ Expected replay outcome on first open:
 
 1. Region scan finds WAL tail at region `0` (`sequence = 0`).
 2. WAL chain walk yields a single-region chain (`head = tail = 0`).
-3. No `new_collection`, `update`, `snapshot`, `head`,
-`drop_collection`, `link`, or `free_list_head` records are replayed.
+3. No WAL records are replayed.
 4. Replay therefore yields:
 no tracked user collections,
 `pending_updates = empty`,
+`pending_reclaims = empty`,
 and durable `last_free_list_head = Some(1)` iff `region_count >= 2`,
 otherwise `None`, inherited from the formatted initial free-list root.
 5. Normal replay reconstruction then yields
@@ -1430,7 +1436,8 @@ otherwise `None`, inherited from the formatted initial free-list root.
 `free_list.free_list_tail = Some(region_count - 1)` iff
 `region_count >= 2`, otherwise `None`,
 `collections = empty`,
-and `pending_updates = empty`.
+`pending_updates = empty`,
+and `pending_reclaims = empty`.
 
 This is not a special-case bootstrap. Replay always starts with the
 formatted initial durable free-list head and then applies later
