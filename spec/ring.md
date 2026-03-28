@@ -87,10 +87,11 @@ the head pointer to the new location.
 
 Once collection data is flushed from a WAL head being reclaimed, any
 current head records are moved to the WAL tail, a normal
-`head(collection_id = 0, region_index = new_head)` record is written
-pointing to the new WAL head, and the old WAL head is added to the
-free list. The WAL does not have a separate WAL-only head-record type;
-it uses the same `head` record as every other collection.
+`head(collection_id = 0, collection_type = wal, region_index =
+new_head)` record is written pointing to the new WAL head, and the old
+WAL head is added to the free list. The WAL does not have a separate
+WAL-only head-record type; it uses the same `head` record as every
+other collection.
 
 Any reclaim that frees a region is a WAL-tracked transaction. Before
 removing a region from live collection or WAL state, borromean writes
@@ -228,10 +229,9 @@ if the first byte is neither, that slot lies inside a torn/corrupt WAL
 record, so replay keeps scanning forward by aligned
 `wal_write_granule` steps and ignores the corrupt bytes.
 7. The recovered append point for the tail region is the first aligned
-slot after the last valid replayed tail record whose start byte is
-`erased_byte`. If no such slot exists, the tail region is currently
-full and the next WAL append must rotate via `link` to a new WAL
-region.
+slot whose first byte is `erased_byte` after the last valid replayed
+tail record. If no such slot exists, the tail region is currently full
+and the next WAL append must rotate via `link` to a new WAL region.
 
 Each WAL record encodes the following fields:
 
@@ -578,8 +578,8 @@ At the end of each reachable non-tail WAL region,
 `pending_wal_recovery_boundary` must be clear; otherwise return an
 error.
 After scanning the tail region, recover the append point as the first
-aligned slot after the last valid replayed tail record whose start byte
-is `erased_byte`. If no such slot exists, the tail region is full.
+aligned slot whose first byte is `erased_byte` after the last valid
+replayed tail record. If no such slot exists, the tail region is full.
 7. Maintain replay state:
 per collection `collection_type`, `last_head`, `basis_pos`, and
 `pending_updates`, plus global `last_free_list_head`, optional
@@ -675,9 +675,9 @@ retain all state recovered from earlier complete records. The WAL head
 is unchanged. Replay may still recover and apply later valid tail
 records that begin after the torn bytes, but the first such later valid
 record must be `wal_recovery`. The recovered append point is the first
-aligned slot after the last valid replayed tail record whose start byte
-is `erased_byte`, so later WAL appends may resume there and overwrite
-any ignored torn tail bytes before that point.
+aligned slot whose first byte is `erased_byte` after the last valid
+replayed tail record, so later WAL appends may resume there and
+overwrite any ignored torn tail bytes before that point.
 
 
 ## no_std Tracker Types (Rust)
@@ -946,8 +946,8 @@ records remain valid. Recovery ignores the torn record bytes and keeps
 scanning in aligned `wal_write_granule` steps for later valid
 `wal_record_magic` starts, so valid records written after the torn one
 are still replayed. After open, the recovered append point is the first
-aligned slot after the last valid replayed tail record whose start byte
-is `erased_byte`. If later WAL appends resume after that recovered
+aligned slot whose first byte is `erased_byte` after the last valid
+replayed tail record. If later WAL appends resume after that recovered
 append point, the first durable later record must be `wal_recovery()`.
 An aligned tail slot whose first byte is still `erased_byte` is not a
 torn record; it is an unwritten slot that marks end of the written
