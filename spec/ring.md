@@ -420,7 +420,8 @@ region is not currently free. For user collections, borromean core
 does not impose a global mapping from `collection_format` to
 `collection_type`; the collection implementation owns that
 interpretation. Replay does not revalidate that not-free append-time
-invariant.
+invariant; this is an intentional application of the checksum trust
+model defined below.
 
 6. `drop_collection`
 Payload is empty. Durably tombstones a user collection. The record
@@ -578,6 +579,28 @@ links, and committed-region/header mismatch.
 in WAL order and are matched by `region_index`.
 27. `reclaim_end(region_index)` is only valid if preceded by a valid
 `reclaim_begin(region_index)`.
+
+Checksum trust model:
+
+1. During replay, borromean treats a WAL record or region header with a
+valid checksum and otherwise valid local encoding as authoritative at
+the layer described by this spec.
+2. Those checksums are intended to catch non-intentional corruption
+such as torn writes, random bit flips, and flash wear. They are not an
+authentication mechanism against an actor who can intentionally rewrite
+storage.
+3. Replay therefore does not attempt to prove every possible global
+semantic invariant by cross-checking all checksum-valid records against
+all other on-disk state.
+4. An intentionally corrupted database may survive checksum validation
+and fail only when later semantic checks or collection-specific format
+validation are applied.
+5. An implementation MUST ensure that even intentionally corrupted
+storage eventually produces a reported error rather than memory
+unsafety, undefined behavior, control-flow corruption, infinite loops,
+or unbounded resource consumption amounting to denial of service. All
+replay walks, decoders, and collection-format handlers MUST remain
+bounded by configured storage geometry and record sizes.
 
 Assumptions for replay correctness:
 
