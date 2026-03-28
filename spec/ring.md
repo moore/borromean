@@ -187,9 +187,17 @@ a FIFO. A free region whose free-pointer slot is still uninitialized
 A free region is defined by membership in the durable free-list chain,
 not by a distinct on-disk header encoding. Free regions may still
 contain stale header and payload bytes from their prior use; those
-bytes are ignored while the region is free. Because the free-pointer
-chain is stored inside the free regions themselves, a free region must
-not be erased until it is allocated for reuse.
+bytes are ignored while the region is free. The free-pointer footer of
+a region must not be written while that region is allocated for live
+use. Allocation first erases the region, then writes the region header
+and collection payload, leaving the free-pointer area untouched. When a
+region is later added to the durable free-list chain, that is when its
+free-pointer footer becomes meaningful. For a newly appended free-list
+tail, `free_pointer.next_tail` remains uninitialized, typically because
+the erased state left from allocation already represents "no
+successor". After a region is durably reachable from the free-list
+chain, it must not be erased until it is allocated for reuse, because
+the free-pointer chain is stored inside the free regions themselves.
 
 For WAL regions, the user-data area begins with a fixed
 `WalRegionPrologue`. That prologue records the WAL head that was
@@ -1405,21 +1413,22 @@ re-entry the existing durable record satisfies this step.
 that `r` has no remaining live references.
 3. If recovery finds that `r` is already reachable from the free-list
 chain, skip to step 10.
-4. Erase region `r` before reuse.
-5. Leave `r.free_pointer.next_tail` uninitialized so `r` is a valid
-free-list tail once linked.
-6. Sync `r` so its free-pointer state is durable before linking it.
-7. If `t_prev` exists, write `t_prev.free_pointer.next_tail = r`.
+4. Establish `r` as a free region without erasing it. In particular,
+`r.free_pointer.next_tail` must still be uninitialized when `r` is
+about to become the new free-list tail. If the region still has the
+erased footer state from when it was allocated, no additional write to
+`r` is required for this step.
+5. If `t_prev` exists, write `t_prev.free_pointer.next_tail = r`.
 This is the operation that links the previous free tail to the new
 tail.
-8. If `t_prev` exists, sync `t_prev` after writing `next_tail`.
-9. If `t_prev` exists, update in-memory `free_list_tail = r`.
-If no tail existed before step 7, append and sync `free_list_head(r)`,
+6. If `t_prev` exists, sync `t_prev` after writing `next_tail`.
+7. If `t_prev` exists, update in-memory `free_list_tail = r`.
+If no tail existed before step 5, append and sync `free_list_head(r)`,
 then set both in-memory `free_list_head = r` and `free_list_tail = r`.
-10. If recovery found `r` already reachable from the free-list chain,
+8. If recovery found `r` already reachable from the free-list chain,
 update in-memory free-list state so it reflects `r` as the current
 tail when needed.
-11. Append and sync `reclaim_end(r)`.
+9. Append and sync `reclaim_end(r)`.
 
 Postconditions:
 
@@ -1442,8 +1451,10 @@ Crash-safety ordering requirement:
 
 1. `reclaim_begin(r)` must be durable before any live metadata stops
 referencing `r`.
-2. `r` must be erased/initialized and synced before any durable write
-that makes it reachable from `t_prev.next_tail`.
+2. Before any durable write makes `r` reachable from `t_prev.next_tail`,
+the implementation must ensure that `r` already has the correct
+free-list-tail footer state, namely an uninitialized
+`r.free_pointer.next_tail`.
 3. If `t_prev = none`, `free_list_head(r)` must be durable before
 `reclaim_end(r)` is acknowledged.
 4. If `t_prev` exists, the `t_prev.next_tail = r` write must be synced before
