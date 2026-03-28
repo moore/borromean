@@ -866,8 +866,9 @@ is unchanged. Replay may still recover and apply later valid tail
 records that begin after the torn bytes, but the first such later valid
 record must be `wal_recovery`. The recovered append point is the first
 aligned slot whose first byte is `erased_byte` after the last valid
-replayed tail record, so later WAL appends may resume there and
-overwrite any ignored torn tail bytes before that point.
+replayed tail record, so later WAL appends may resume there while the
+ignored corrupt span before that point remains uninterpreted until that
+region is reclaimed or erased for reuse.
 
 
 ## no_std Tracker Types (Rust)
