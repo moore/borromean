@@ -215,32 +215,36 @@ encoded record bytes.
 5. The encoded size of every WAL record is rounded up to a multiple of
 `wal_write_granule`. Replay advances from one candidate record start to
 the next in aligned `wal_write_granule` steps.
-6. At an aligned candidate record start in the tail region:
-if the first byte is `erased_byte`, that slot is currently unwritten and scanning stops with and that slot is recorded as the WAL append point;
+6. At an aligned candidate record start in a reachable WAL region:
+if the first byte is `erased_byte`, that slot is currently unwritten and
+replay continues scanning later aligned slots for a possible later
+`wal_record_magic`;
 if the first byte is `wal_record_magic`, that slot is a candidate WAL
 record and must parse and validate normally;
-if the first byte is neither, that slot lies inside a torn/corrupt tail
+if the first byte is neither, that slot lies inside a torn/corrupt WAL
 record, so replay keeps scanning forward by aligned
-`wal_write_granule` steps and ignores the torn bytes.
+`wal_write_granule` steps and ignores the corrupt bytes.
 7. The recovered append point for the tail region is the first aligned
 slot after the last valid replayed tail record whose start byte is
-`erased_byte`. If no such slot exists, the tail region is full and should have had a link record leaving the WAL in a croupt state.
+`erased_byte`. If no such slot exists, the tail region is currently
+full and the next WAL append must rotate via `link` to a new WAL
+region.
 
 Each WAL record encodes the following fields:
 
 1. `record_type`: one of `new_collection`, `update`, `snapshot`,
 `alloc_begin`, `head`, `link`, `free_list_head`, `reclaim_begin`,
-`reclaim_end`
+`reclaim_end`, `wal_recovery`
 2. `collection_id`: required for `new_collection`, `update`,
 `snapshot`, and `head`
 3. `collection_type`: required for `new_collection`, `snapshot`, and
 `head`; omitted for `update`, `alloc_begin`, `link`, `free_list_head`,
-`reclaim_begin`, and `reclaim_end`
+`reclaim_begin`, `reclaim_end`, and `wal_recovery`
 4. `payload_len`: payload size in bytes
 5. `payload`: opaque bytes defined by `record_type`
 6. `free_list_head_after`: required for `alloc_begin`; omitted for
 `update`, `snapshot`, `head`, `link`, `free_list_head`,
-`reclaim_begin`, and `reclaim_end`
+`reclaim_begin`, `reclaim_end`, and `wal_recovery`
 7. `record_checksum`: checksum covering the full logical record before
 COBS encoding
 8. `padding`: zero or more non-reserved bytes so the encoded record size is a
@@ -304,6 +308,13 @@ that region are removed.
 Marks successful completion of reclaim for `region_index`. The payload
 contains the same `region_index` as the matching `reclaim_begin`.
 
+10. `wal_recovery`
+Payload is empty. Marks that replay or a prior open detected and
+intentionally skipped one or more corrupt/torn aligned WAL slots before
+resuming WAL appends. `wal_recovery` has no direct collection or
+allocator effect; it only makes that recovery boundary explicit and
+durable.
+
 Ordering and validity rules:
 
 1. A valid `new_collection(collection_id, collection_type)` record is
@@ -345,18 +356,27 @@ writes a newly allocated region is valid only if replay has already
 seen a prior unmatched `alloc_begin` for the same region index.
 14. Durable allocator-head advance happens at `alloc_begin` or
 `free_list_head`, not at `head` or `link`.
-15. Replay may recover only from a checksum-invalid or torn record in
-the current tail region. In that case replay ignores that torn/corrupt
-tail record, continues scanning later aligned tail slots, and may still
-replay later valid records that begin with `wal_record_magic`.
-16. Any other invalidity of a complete record is storage corruption and
+15. Replay may recover only from checksum-invalid or torn aligned WAL
+slots. Replay tracks a pending WAL-recovery boundary from the first
+ignored corrupt/torn aligned slot until a later valid `wal_recovery`
+record is replayed.
+16. If replay has a pending WAL-recovery boundary and encounters a
+later valid complete record whose `record_type` is not `wal_recovery`,
+startup must fail because later WAL data exists after unexplained
+corruption.
+17. If replay reaches the end of a reachable non-tail WAL region with a
+pending WAL-recovery boundary that was not closed by `wal_recovery`,
+startup must fail because that region contains unresolved mid-log
+corruption. A pending WAL-recovery boundary may remain open only at the
+end of the current replay tail region.
+18. Any other invalidity of a complete record is storage corruption and
 startup must fail rather than skipping that record. This includes
 duplicate `new_collection`, collection-type mismatch, `head` or `link`
 without a matching prior `alloc_begin`, broken non-tail WAL chain
 links, and committed-region/header mismatch.
-17. `reclaim_begin(region_index)` and `reclaim_end(region_index)` must appear
+19. `reclaim_begin(region_index)` and `reclaim_end(region_index)` must appear
 in WAL order and are matched by `region_index`.
-18. `reclaim_end(region_index)` is only valid if preceded by a valid
+20. `reclaim_end(region_index)` is only valid if preceded by a valid
 `reclaim_begin(region_index)`.
 
 Assumptions for replay correctness:
@@ -511,27 +531,33 @@ startup fails with error. After successful recovery init, use the
 target region as the active append tail.
 6. Parse records in WAL order (region order, then offset order).
 Record parsing begins only at offsets aligned to `wal_write_granule`.
-For reachable non-tail WAL regions, every complete record must be
-valid; otherwise return an error.
-For the tail region, if an aligned candidate start byte equals
-`erased_byte`, treat that slot as currently unwritten which indecates the end of the written WAL.
-If the aligned start byte equals `wal_record_magic`, parse the record;
-if parsing or checksum validation fails, treat it as a torn tail record
-and keep scanning forward in aligned `wal_write_granule` steps, ignoring
-that torn record's bytes while still looking for later valid
-`wal_record_magic` starts.
+Maintain a replay-local flag `pending_wal_recovery_boundary`,
+initially clear.
+If an aligned candidate start byte equals `erased_byte`, treat that
+slot as currently unwritten and continue scanning later aligned slots.
+If the aligned start byte equals `wal_record_magic`, parse the record.
+If parsing or checksum validation fails, treat that aligned slot as a
+corrupt/torn WAL slot, set `pending_wal_recovery_boundary`, and keep
+scanning forward in aligned `wal_write_granule` steps.
 If the aligned start byte is neither `erased_byte` nor
-`wal_record_magic`, treat it as lying inside a torn/corrupt tail record
-and keep scanning forward in aligned `wal_write_granule` steps while
-still looking for later valid `wal_record_magic` starts. Do not attempt
-to decode or repair the torn bytes themselves.
+`wal_record_magic`, treat that aligned slot as corrupt/torn WAL bytes,
+set `pending_wal_recovery_boundary`, and keep scanning forward in
+aligned `wal_write_granule` steps. Do not attempt to decode or repair
+those corrupt bytes.
+If a later valid record is found while
+`pending_wal_recovery_boundary` is set, that record must be
+`wal_recovery`; otherwise return an error.
+At the end of each reachable non-tail WAL region,
+`pending_wal_recovery_boundary` must be clear; otherwise return an
+error.
 After scanning the tail region, recover the append point as the first
 aligned slot after the last valid replayed tail record whose start byte
 is `erased_byte`. If no such slot exists, the tail region is full.
 7. Maintain replay state:
 per collection `collection_type`, `last_head`, `basis_pos`, and
 `pending_updates`, plus global `last_free_list_head`, optional
-reserved `ready_region`, and ordered pending region reclaims.
+reserved `ready_region`, ordered pending region reclaims, and the
+replay-local `pending_wal_recovery_boundary`.
 8. On `new_collection(collection_id, collection_type)`:
 if `collection_id` is already tracked, return an error.
 otherwise create replay state for that collection with durable basis
@@ -575,7 +601,10 @@ append `region_index` to pending reclaims unless a later matching
 `reclaim_end` removes it.
 16. On `reclaim_end(region_index)`:
 mark the matching pending reclaim as finished.
-17. After replay, for each collection:
+17. On `wal_recovery()`:
+if `pending_wal_recovery_boundary` is clear, return an error.
+otherwise clear `pending_wal_recovery_boundary`.
+18. After replay, for each collection:
 reconstruct its durable basis from `last_head`. If `last_head` is
 `empty`, the basis is the empty collection declared by
 `new_collection`; if that collection has post-basis updates,
@@ -588,14 +617,14 @@ mutable working state. If `last_head` is `wal_snapshot` and there are
 no post-basis updates, the snapshot may remain dormant until the next
 mutation, but it must be loaded into RAM before accepting that
 mutation.
-18. Initialize allocator state from `last_free_list_head`.
-19. Reconstruct runtime `free_list_tail` by following free-pointer
+19. Initialize allocator state from `last_free_list_head`.
+20. Reconstruct runtime `free_list_tail` by following free-pointer
 links starting at `last_free_list_head` until reaching a free region
 whose free-pointer slot is uninitialized.
 If `last_free_list_head = none`, then `free_list_tail = none`.
-20. If `ready_region` is set, hold it in memory as the next region to
+21. If `ready_region` is set, hold it in memory as the next region to
 use before consuming another free-list entry.
-21. For each pending reclaim in WAL order:
+22. For each pending reclaim in WAL order:
 if the target region is still reachable from any live collection head
 or the WAL chain, leave it allocated because the reclaim did not reach
 the detach point durably.
@@ -604,13 +633,14 @@ free-list chain, complete the free-list append using the Region
 Reclaim procedure.
 If the target region is already reachable from the free-list chain,
 finish the reclaim transaction by appending `reclaim_end(region_index)`.
-22. If replay encountered a torn or checksum-invalid tail record,
+23. If replay encountered a torn or checksum-invalid tail record,
 retain all state recovered from earlier complete records. The WAL head
 is unchanged. Replay may still recover and apply later valid tail
-records that begin after the torn bytes. The recovered append point is
-the first aligned slot after the last valid replayed tail record whose
-start byte is `erased_byte`, so later WAL appends may resume there and
-overwrite any ignored torn tail bytes before that point.
+records that begin after the torn bytes, but the first such later valid
+record must be `wal_recovery`. The recovered append point is the first
+aligned slot after the last valid replayed tail record whose start byte
+is `erased_byte`, so later WAL appends may resume there and overwrite
+any ignored torn tail bytes before that point.
 
 
 ## no_std Tracker Types (Rust)
@@ -754,6 +784,12 @@ live if either:
 it is the last valid free-list-head decision in replay order; or
 its reservation is still needed to recover unmatched `ready_region`.
 It becomes reclaimable only after both of those properties are false.
+8. `wal_recovery` record:
+live only if replay still needs it to justify later valid WAL records
+that appear after an ignored corrupt/torn span in that WAL region.
+Once those later dependent records are reclaimable or have been
+superseded by newer durable state, the `wal_recovery` record is
+reclaimable too.
 
 WAL-region reclaim preconditions:
 
@@ -808,7 +844,7 @@ completes.
 2. Write ordering without sync ordering is not sufficient for
 durability guarantees.
 3. Replay must treat partially written records as torn and ignore
-them using checksum validation and tail truncation rules.
+them using checksum validation and WAL tail recovery rules.
 
 Notation:
 
@@ -827,6 +863,8 @@ Required write and sync ordering:
 `W(alloc_begin(next_region_index, free_list_head_after)) -> S(alloc_begin) -> W(link(next_region_index, expected_sequence)) -> S(link) -> W(new_wal_region_init(sequence=expected_sequence)) -> S(new_wal_region_init)`.
 5. Reclaim:
 `W(reclaim_begin(region_index)) -> S(reclaim_begin) -> W(replacement_live_state_and_new_links) -> S(replacement_state) -> append old region to free list (write+sync) -> W(reclaim_end(region_index)) -> S(reclaim_end)`.
+6. Resuming WAL appends after a recovered torn/corrupt tail record:
+`W(wal_recovery()) -> S(wal_recovery) -> W(next_normal_wal_record) -> S(next_normal_wal_record)`.
 
 General region-allocation rule:
 
@@ -872,7 +910,8 @@ scanning in aligned `wal_write_granule` steps for later valid
 `wal_record_magic` starts, so valid records written after the torn one
 are still replayed. After open, the recovered append point is the first
 aligned slot after the last valid replayed tail record whose start byte
-is `erased_byte`, and later WAL appends may resume there.
+is `erased_byte`. If later WAL appends resume after that recovered
+append point, the first durable later record must be `wal_recovery()`.
 An aligned tail slot whose first byte is still `erased_byte` is not a
 torn record; it is an unwritten slot that replay skips unless it lies
 after the last valid replayed tail record.
