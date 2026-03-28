@@ -199,22 +199,45 @@ state in memory and the current free-list head.
 All WAL records are append-only and ordered by physical write order
 within the WAL region chain.
 
+WAL record encoding and alignment:
+
+1. Every WAL record begins with a one-byte `record_magic`.
+2. `record_magic` must equal the storage's configured
+`wal_record_magic`, and `wal_record_magic` must not equal
+`erased_byte`, the byte value returned by erased flash.
+3. Every WAL record start offset within a WAL region must be aligned to
+`wal_write_granule`, the smallest writable unit of the backing flash.
+4. The encoded size of every WAL record is rounded up to a multiple of
+`wal_write_granule`. Replay advances from one record to the next using
+that padded size.
+5. At an aligned candidate record start in the tail region:
+if the first byte is `erased_byte`, that slot is unwritten and marks
+end-of-WAL;
+if the first byte is `wal_record_magic`, that slot is a candidate WAL
+record and must parse and validate normally;
+if the first byte is neither, treat the slot as a torn/corrupt tail
+record and truncate replay at the prior complete record.
+
 Each record includes:
 
-1. `record_type`: one of `new_collection`, `update`, `snapshot`,
+1. `record_magic`: one byte equal to `wal_record_magic`
+2. `record_type`: one of `new_collection`, `update`, `snapshot`,
 `alloc_begin`, `head`, `link`, `free_list_head`, `reclaim_begin`,
 `reclaim_end`
-2. `collection_id`: required for `new_collection`, `update`,
+3. `collection_id`: required for `new_collection`, `update`,
 `snapshot`, and `head`
-3. `collection_type`: required for `new_collection`, `snapshot`, and
+4. `collection_type`: required for `new_collection`, `snapshot`, and
 `head`; omitted for `update`, `alloc_begin`, `link`, `free_list_head`,
 `reclaim_begin`, and `reclaim_end`
-4. `payload_len`: payload size in bytes
-5. `payload`: opaque bytes defined by `record_type`
-6. `free_list_head_after`: required for `alloc_begin`; omitted for
+5. `payload_len`: payload size in bytes
+6. `payload`: opaque bytes defined by `record_type`
+7. `free_list_head_after`: required for `alloc_begin`; omitted for
 `update`, `snapshot`, `head`, `link`, `free_list_head`,
 `reclaim_begin`, and `reclaim_end`
-7. `record_checksum`: checksum covering the full record
+8. `record_checksum`: checksum covering the full logical record,
+including `record_magic`
+9. `padding`: zero or more bytes so the encoded record size is a
+multiple of `wal_write_granule`
 
 The record payloads are:
 
@@ -315,11 +338,18 @@ writes a newly allocated region is valid only if replay has already
 seen a prior unmatched `alloc_begin` for the same region index.
 14. Durable allocator-head advance happens at `alloc_begin` or
 `free_list_head`, not at `head` or `link`.
-15. Replay stops at the first invalid checksum or torn record in the
-tail region.
-16. `reclaim_begin(region_index)` and `reclaim_end(region_index)` must appear
+15. Replay may truncate only at the first checksum-invalid or torn
+record in the current tail region. In that case the recovered end of
+the WAL is the last complete record before the torn/corrupt bytes in
+that tail region.
+16. Any other invalidity of a complete record is storage corruption and
+startup must fail rather than skipping that record. This includes
+duplicate `new_collection`, collection-type mismatch, `head` or `link`
+without a matching prior `alloc_begin`, broken non-tail WAL chain
+links, and committed-region/header mismatch.
+17. `reclaim_begin(region_index)` and `reclaim_end(region_index)` must appear
 in WAL order and are matched by `region_index`.
-17. `reclaim_end(region_index)` is only valid if preceded by a valid
+18. `reclaim_end(region_index)` is only valid if preceded by a valid
 `reclaim_begin(region_index)`.
 
 Assumptions for replay correctness:
@@ -328,10 +358,13 @@ Assumptions for replay correctness:
 2. Replay's "stop at first invalid/torn record" rule depends on this
 erase-before-reuse guarantee so stale bytes from prior use cannot be
 misinterpreted as new valid records.
-3. Any operation that consumes a free-list head must first make the
+3. Replay distinguishes unwritten space from a torn record by checking
+the aligned slot's first byte against `erased_byte` and
+`wal_record_magic`.
+4. Any operation that consumes a free-list head must first make the
 allocator advance durable with `alloc_begin(region_index,
 free_list_head_after)`.
-4. If replay ends with an unmatched `alloc_begin(region_index, ...)`, that
+5. If replay ends with an unmatched `alloc_begin(region_index, ...)`, that
 region is treated as a reserved `ready_region` for the next allocation
 instead of being returned to the free list.
 
@@ -443,7 +476,8 @@ after the durable free-list head is known
 Algorithm:
 
 1. Read `StorageMetadata` and validate static geometry (`region_size`,
-`region_count`, and storage version support).
+`region_count`, `erased_byte`, `wal_write_granule`,
+`wal_record_magic`, and storage version support).
 2. Scan all regions and collect candidate WAL regions
 (`collection_id == 0`) with valid headers.
 3. Select WAL tail as the WAL region with the largest valid sequence.
@@ -468,7 +502,18 @@ region prologue metadata, and sync. If this recovery init fails,
 startup fails with error. After successful recovery init, use the
 target region as the active append tail.
 6. Parse records in WAL order (region order, then offset order).
-For the tail region, stop at first invalid checksum or torn record.
+Record parsing begins only at offsets aligned to `wal_write_granule`.
+For reachable non-tail WAL regions, every complete record must be
+valid; otherwise return an error.
+For the tail region, if an aligned candidate start byte equals
+`erased_byte`, treat that slot as unwritten and stop replay normally.
+If the aligned start byte equals `wal_record_magic`, parse the record;
+if parsing or checksum validation fails, treat it as a torn tail record
+and stop replay at the preceding complete record.
+If the aligned start byte is neither `erased_byte` nor
+`wal_record_magic`, treat it as a torn/corrupt tail record and stop
+replay at the preceding complete record. Do not attempt to decode,
+repair, or skip past trailing invalid bytes.
 7. Maintain replay state:
 per collection `collection_type`, `last_head`, `basis_pos`, and
 `pending_updates`, plus global `last_free_list_head`, optional
@@ -545,6 +590,12 @@ free-list chain, complete the free-list append using the Region
 Reclaim procedure.
 If the target region is already reachable from the free-list chain,
 finish the reclaim transaction by appending `reclaim_end(region_index)`.
+22. If replay truncated the tail region because of a torn or
+checksum-invalid tail record, retain all state recovered from earlier
+complete records. The WAL head is unchanged. After open, the
+implementation must not append across the invalid byte range; it must
+either prove the remaining tail bytes are still appendable or rotate to
+a newly allocated WAL tail before the next WAL append.
 
 
 ## no_std Tracker Types (Rust)
@@ -801,7 +852,13 @@ missing/corrupt/wrong sequence, rotation is incomplete and startup
 finishes initialization using `expected_sequence`.
 8. Crash during tail-record write:
 replay stops at first invalid/torn tail record; earlier complete
-records remain valid.
+records remain valid. Recovery truncates the logical WAL at the last
+complete prior record and does not attempt to repair the torn bytes.
+After open, the implementation must not append across that invalid byte
+range; it must either prove the remaining bytes are still appendable or
+rotate to a fresh WAL tail before the next WAL append.
+An aligned tail slot whose first byte is still `erased_byte` is not a
+torn record; it is unwritten space and simply marks end-of-WAL.
 9. Crash after `S(reclaim_begin)` but before the region is detached
 from all live state:
 startup sees an incomplete reclaim, but the region is still live and
@@ -818,12 +875,17 @@ one sig StorageMetadata {
   storage_version: Int,
   region_size: Int,
   region_count: Int,
+  erased_byte: Int,
+  wal_write_granule: Int,
+  wal_record_magic: Int,
 }
 ```
 
 The `StorageMetadata` struct describes the version of the storage as
-well as the size of each region in bytes and the number of regions in
-the database.
+well as the size of each region in bytes, the number of regions in the
+database, the erased-flash byte value, the minimum writable granule
+used to align WAL records, and the WAL record magic byte. The stored
+`wal_record_magic` must differ from `erased_byte`.
 
 ## Header
 
@@ -867,12 +929,15 @@ Preconditions:
 1. Backing storage is writable and erasable at region granularity.
 2. `region_count >= 1`.
 3. Region `0` is reserved as the initial WAL region.
+4. `wal_write_granule >= 1`.
+5. `wal_record_magic != erased_byte`.
 
 Procedure:
 
 1. Erase metadata area and all data regions.
 2. Write `StorageMetadata` (`storage_version`, `region_size`,
-`region_count`) and sync metadata.
+`region_count`, `erased_byte`, `wal_write_granule`,
+`wal_record_magic`) and sync metadata.
 3. Initialize region `0` as WAL:
 write valid `Header` with `collection_id = 0` and `sequence = 0`,
 write WAL-region prologue with WAL head pointing to region `0`, then
