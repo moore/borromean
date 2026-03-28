@@ -621,6 +621,10 @@ per collection `collection_type`, `last_head`, `basis_pos`, and
 `pending_updates`, plus global `last_free_list_head`, optional
 reserved `ready_region`, ordered pending region reclaims, and the
 replay-local `pending_wal_recovery_boundary`.
+Initialize `last_free_list_head` to `Some(1)` iff `region_count >= 2`,
+otherwise `None`, because format establishes that as the initial
+durable free-list head. Later `alloc_begin` and `free_list_head`
+records override this baseline in replay order.
 8. On `new_collection(collection_id, collection_type)`:
 if `collection_id` is already tracked, return an error.
 otherwise create replay state for that collection with durable basis
@@ -1091,7 +1095,9 @@ Postconditions:
 2. No user collection durable heads exist.
 3. Free list contains every non-WAL region in ascending region-index
 order.
-4. If `region_count = 1`, the free list is empty.
+4. Because region `0` is reserved as the WAL, the initial durable
+free-list head is region `1` iff `region_count >= 2`; otherwise the
+durable free list is empty.
 
 ### First Open After Fresh Format
 
@@ -1107,24 +1113,21 @@ Expected replay outcome on first open:
 4. Replay therefore yields:
 no tracked user collections,
 `pending_updates = empty`,
-and no replay-driven `last_free_list_head` decision.
+and durable `last_free_list_head = Some(1)` iff `region_count >= 2`,
+otherwise `None`, inherited from the formatted initial free-list root.
+5. Normal replay reconstruction then yields
+`free_list.ready_region = None`,
+`free_list.free_list_tail = Some(region_count - 1)` iff
+`region_count >= 2`, otherwise `None`,
+`collections = empty`,
+and `pending_updates = empty`.
 
-Initial in-memory tracker bootstrap (`ReplayTracker`) on this path:
-
-1. `free_list.last_free_list_head = Some(1)` when `region_count > 1`,
-otherwise `None`.
-2. `free_list.ready_region = None`.
-3. `free_list.free_list_tail = Some(region_count - 1)` when
-`region_count > 1`, otherwise `None`.
-4. `collections = empty`.
-5. `pending_updates = empty`.
-
-This bootstrap is only for the no-record fresh-format case. Once WAL
-records exist, allocator and collection-head state must come from
-normal replay decisions. On non-fresh opens, `free_list_tail` is
-reconstructed by walking the free-pointer chain from the recovered
-durable free-list head until a free region with an uninitialized
-free-pointer slot is reached; it is not found by scanning WAL regions.
+This is not a special-case bootstrap. Replay always starts with the
+formatted initial durable free-list head and then applies later
+`alloc_begin` / `free_list_head` decisions in WAL order. `free_list_tail`
+is always reconstructed by walking the free-pointer chain from the
+recovered durable free-list head; it is not found by scanning WAL
+regions.
 
 ### Region Reclaim
 
