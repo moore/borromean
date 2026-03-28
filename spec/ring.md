@@ -302,7 +302,12 @@ header.
 Commits a new durable free-list head. Payload contains the new
 `region_index` or `none` if the free list is empty. This record is used
 when reclaim or crash recovery changes the durable allocator head
-without consuming the prior head through `alloc_begin`.
+without consuming the prior head through `alloc_begin`. If the payload
+is `region_index`, that region must be a free region that can serve as
+the head of a valid free-pointer chain whose walk reaches an
+uninitialized tail slot in at most `region_count` visited regions. If
+the payload is `none`, the record asserts that the durable free list is
+empty.
 
 8. `reclaim_begin`
 Marks the start of reclaim for `region_index`. The payload contains the
@@ -346,8 +351,13 @@ tracked `collection_type`.
 8. For the WAL (`collection_id = 0`), `head` records are valid only if
 their `collection_type` is the WAL collection type.
 9. A `link` is only valid as the last complete record in a WAL region.
-When traversed, its target must have a valid WAL header with sequence
-equal to `expected_sequence`.
+During WAL-chain traversal, a `link` in a reachable non-tail WAL region
+is valid only if its target has a valid WAL header with sequence equal
+to `expected_sequence`. For the known tail WAL region only, a durable
+trailing `link` whose target header is missing, corrupt, or has the
+wrong sequence is treated as an incomplete rotation rather than
+corruption; startup may finish initializing the target region using
+`expected_sequence`.
 10. For non-WAL collections (`collection_id != 0`), `update`,
 `snapshot`, and `head(collection_id, collection_type, region_index)` are
 valid only if replay has already
@@ -359,7 +369,12 @@ if `free_list_head_after` is missing or corrupt, if replay's current
 durable `last_free_list_head` is `none`, or if `region_index` does not
 equal that durable free-list head.
 12. A `free_list_head(region_index_or_none)` record is invalid if the
-payload is corrupt.
+payload is corrupt. If `region_index_or_none = region_index`, the
+record is valid only if startup can reconstruct a valid free-pointer
+chain beginning at that region and terminating at a tail whose
+free-pointer slot is uninitialized after visiting at most
+`region_count` regions. If `region_index_or_none = none`, the record
+asserts that the durable free list is empty.
 13. A `head(region_index)` or `link(next_region_index, ...)` record that
 writes a newly allocated region is valid only if replay has already
 seen a prior unmatched `alloc_begin` for the same region index.
@@ -613,7 +628,7 @@ if `ready_region = next_region_index`, clear `ready_region`.
 otherwise return an error because the region was never reserved by
 `alloc_begin`.
 14. On `free_list_head(region_index_or_none)`:
-set durable `last_free_list_head` to `region_index_or_none`.
+set tentative durable `last_free_list_head` to `region_index_or_none`.
 15. On `reclaim_begin(region_index)`:
 append `region_index` to pending reclaims unless a later matching
 `reclaim_end` removes it.
@@ -639,6 +654,10 @@ mutation.
 20. Reconstruct runtime `free_list_tail` by following free-pointer
 links starting at `last_free_list_head` until reaching a free region
 whose free-pointer slot is uninitialized.
+If this walk encounters a malformed next pointer, a region that is not
+a valid free region, or exceeds `region_count` visited regions before
+reaching an uninitialized tail slot, return an error because the
+durable free-list head does not name a valid free-list chain.
 If `last_free_list_head = none`, then `free_list_tail = none`.
 21. If `ready_region` is set, hold it in memory as the next region to
 use before consuming another free-list entry.
