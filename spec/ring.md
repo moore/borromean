@@ -912,6 +912,33 @@ replayed tail record, so later WAL appends may resume there while the
 ignored corrupt span before that point remains uninterpreted until that
 region is reclaimed or erased for reuse.
 
+### Why Reclaimed WAL Regions Cannot Confuse Startup
+
+Startup region scan may encounter free-list regions whose stale header
+bytes still look like old WAL headers. That does not let a reclaimed
+WAL region take over bootstrap.
+
+1. Startup chooses the WAL tail as the candidate WAL region with the
+largest valid `sequence`.
+2. Each newly allocated region uses `sequence = max_seen_sequence + 1`,
+then advances `max_seen_sequence` in memory.
+3. Therefore, once a WAL region has been superseded by a later live WAL
+tail or by any later successful region allocation, that reclaimed
+region's stale `sequence` is permanently older than the current maximum
+durable sequence seen at startup.
+4. A reclaimed former WAL region may still be discovered during region
+scan, but it cannot win WAL-tail selection unless the monotonic
+sequence rule has already been violated.
+5. Startup derives the WAL head only from the selected tail's
+`WalRegionPrologue` plus any later `head(collection_id = 0, ...)`
+records found in that same tail region. Stale headers in free-list
+regions therefore do not influence WAL-head recovery once they lose
+tail selection.
+
+Under the monotonic-sequence rule, stale free-list WAL headers may be
+visible during scan, but they cannot outrank the live WAL tail and so
+cannot redirect startup onto the wrong WAL chain.
+
 
 ## no_std Tracker Types (Rust)
 
