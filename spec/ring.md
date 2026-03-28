@@ -41,7 +41,9 @@ bytes. Collection ids are opaque 64-bit nonces that are assigned when
 a collection is created by `new_collection(collection_id,
 collection_type)`. Collection
 id `0` is reserved for the WAL; all user collection ids are nonzero
-and are not recycled.
+and are not recycled. Borromean core also reserves
+`collection_type = wal` for `collection_id = 0`; user collections must
+not use that collection type.
 
 A collection may be removed durably by appending
 `drop_collection(collection_id)` to the WAL. Once that record is
@@ -111,12 +113,18 @@ logical oldest live WAL region in the chain; new WAL records are always
 appended at the WAL tail.
 
 Once collection data is flushed from a WAL head being reclaimed, any
-current head records are moved to the WAL tail, a normal
+current user-collection basis records that must remain live are
+rewritten to the WAL tail. If reclaim advances the WAL head, a normal
 `head(collection_id = 0, collection_type = wal, region_index =
-new_head)` record is written pointing to the new WAL head, and the old
-WAL head is added to the free list. The WAL does not have a separate
-WAL-only head-record type; it uses the same `head` record as every
-other collection.
+new_head)` control record is appended in the current WAL tail pointing
+to the new WAL head, and the old WAL head is added to the free list.
+Startup step 4 derives the WAL head only from the current tail
+region's `WalRegionPrologue` plus the last valid tail-local
+`head(collection_id = 0, ...)` override, so reclaim and rotation must
+preserve the effective WAL head in one of those two forms before the
+older representation becomes unreachable. The WAL does not have a
+separate WAL-only head-record type; it uses the same `head` record as
+every other collection.
 
 Any reclaim that frees a region is a WAL-tracked transaction. Before
 removing a region from live collection or WAL state, borromean writes
@@ -350,9 +358,12 @@ would leave fewer than `wal_rotation_reserve` unwritten bytes in that
 region.
 11. Appending the `alloc_begin(next_region_index, free_list_head_after)`
 that starts WAL rotation is invalid unless its aligned end offset still
-leaves at least `wal_link_reserve` unwritten bytes in that region. Once
-that rotation `alloc_begin` is durable, the only valid later WAL record
-in that region is the matching trailing `link`.
+leaves at least `wal_link_reserve` and fewer than
+`wal_rotation_reserve` unwritten bytes in that region. This
+reserve-window placement makes an unmatched tail `alloc_begin`
+unambiguously recognizable as the WAL-rotation-start record during
+startup recovery. Once that rotation `alloc_begin` is durable, the only
+valid later WAL record in that region is the matching trailing `link`.
 
 Each WAL record encodes the following fields:
 
@@ -770,8 +781,9 @@ Startup recovery reconstructs seven things:
 committed by `head` or `link`
 5. Runtime `free_list_tail`, reconstructed from the free-pointer chain
 after the durable free-list head is known
-6. Runtime `max_seen_sequence`, the largest `sequence` observed in any
-valid region header during region scan
+6. Runtime `max_seen_sequence`, initially the largest `sequence`
+observed in any valid region header during region scan, then advanced
+further if startup recovery initializes an incomplete WAL rotation
 7. Ordered incomplete reclaim transactions that still need post-replay
 recovery work
 
@@ -785,11 +797,15 @@ Algorithm:
 headers, and track
 `max_seen_sequence` as the largest `sequence` value seen in any valid
 region header.
-3. Select WAL tail as the WAL region with the largest valid sequence.
+3. Select WAL tail as the unique candidate WAL region with the largest
+valid sequence. If no candidate WAL region exists, or if multiple
+candidate WAL regions share that largest valid sequence, return an
+error.
 4. Read and validate the `WalRegionPrologue` stored at the start of the
 tail region's user-data area, and use its `wal_head_region_index` as
-the initial WAL-head candidate. Then scan valid records in that tail
-region and let the last valid
+the initial WAL-head candidate. Then scan that tail region using the
+same aligned candidate-start and record-validation rules defined in
+step 6, and let the last valid
 `head(collection_id = 0, collection_type = wal, region_index)`
 record override that candidate.
 5. Walk the WAL region chain from the resulting WAL head to tail using
@@ -798,18 +814,32 @@ If a `link` is missing/invalid before reaching the known tail, return
 an error (corrupted WAL chain).
 If the known tail contains a trailing `link` whose target header is
 missing/corrupt or has the wrong sequence, treat this as an incomplete
-rotation. Use the known tail as replay tail.
-For incomplete rotation recovery, if the known tail ends with a durable
-`link(next_region_index, expected_sequence)` and the target WAL header is
-missing/corrupt/wrong sequence, or the target `WalRegionPrologue` is
-missing/corrupt, finish initializing the target region:
+rotation after `link`. Use the known tail as replay tail until that
+recovery finishes.
+If instead the known tail's last valid record is an
+`alloc_begin(next_region_index, free_list_head_after)` whose aligned
+end offset leaves at least `wal_link_reserve` and fewer than
+`wal_rotation_reserve` unwritten bytes in that region, treat this as
+an incomplete rotation before `link`. That reserve-window placement is
+what makes this durable tail `alloc_begin` unambiguously the
+WAL-rotation-start record rather than an ordinary allocation
+reservation.
+For incomplete rotation recovery:
+if a durable trailing `link(next_region_index, expected_sequence)` is
+already present, use that `expected_sequence`;
+otherwise let `expected_sequence = max_seen_sequence + 1`, append and
+sync the missing `link(next_region_index, expected_sequence)` into the
+reserved tail space, and treat any failure of that recovery append as a
+startup error.
+Then finish initializing the target WAL region:
 erase target region if needed, write a valid WAL header with
 `collection_id = 0` and `sequence = expected_sequence`, then write a
 valid `WalRegionPrologue` whose `wal_head_region_index` equals the WAL
 head already determined for this WAL chain before the incomplete
-rotation target is considered. Sync the initialized target region. If
-this recovery init fails, startup fails with error. After successful
-recovery init, use the target region as the active append tail.
+rotation target is considered. Sync the initialized target region, set
+in-memory `max_seen_sequence = expected_sequence`, and use the target
+region as the active append tail. If this recovery init fails, startup
+fails with error.
 6. Parse records in WAL order (region order, then offset order).
 Record parsing begins only at offsets aligned to `wal_write_granule`
 and greater than or equal to `wal_record_area_offset` within each WAL
@@ -1120,10 +1150,11 @@ it to link `t_prev.next_tail = r`.
 8. `ReplayTracker.pending_reclaims` maps to replay's ordered pending
 region reclaims that remain incomplete after WAL replay and are
 processed during post-replay recovery.
-9. `ReplayTracker.max_seen_sequence` is the largest region `sequence`
-value observed during startup region scan; each newly allocated region
-uses the next value (`max_seen_sequence + 1`), then updates this
-runtime field.
+9. `ReplayTracker.max_seen_sequence` is initialized from the largest
+region `sequence` value observed during startup region scan, and may be
+advanced further if startup recovery initializes an incomplete WAL
+rotation. Each newly allocated region uses the next value
+(`max_seen_sequence + 1`), then updates this runtime field.
 
 ## WAL Reclaim Eligibility
 
@@ -1133,6 +1164,11 @@ the same `last_head`, `pending_updates`, `last_free_list_head`,
 reserved `ready_region`, and ordered incomplete reclaim state.
 
 Per-collection cutoff:
+
+These cutoff terms apply only to user collections (`collection_id !=
+0`). WAL-head bootstrap records for `collection_id = 0` are governed
+separately below because startup step 4 reconstructs them only from the
+current WAL tail region.
 
 1. Let `H(c)` be the current durable logical head for collection `c`
 (`EmptyHead`, `WalSnapshot`, `RegionHead`, or `Dropped`).
@@ -1147,28 +1183,38 @@ Per-record liveness rules:
 1. `new_collection(collection_id, collection_type)` record:
 live only if it is the basis decision at `D(c)` for a collection whose
 logical head `H(c)` is `EmptyHead`; otherwise reclaimable.
-2. `head(collection_id, collection_type, region_index)` record:
+2. `head(collection_id = 0, collection_type = wal, region_index)`
+record:
+live only if startup step 4 would currently use it as the effective
+WAL-head override for the current tail region. Equivalently, it must be
+the last valid WAL-head control record in the current WAL tail region.
+Any earlier such control record, or any such record in a non-tail WAL
+region, is reclaimable once the same effective WAL head is preserved by
+a later tail-local control record or by the current tail region's
+`WalRegionPrologue`.
+3. `head(collection_id, collection_type, region_index)` record for a
+user collection:
 live only if it is the decision record at `D(c)` for a collection
 whose logical head `H(c)` is a `RegionHead`; older `head(...)` records
 are reclaimable.
-3. `snapshot` record:
+4. `snapshot` record:
 live only if it is the decision record at `D(c)` for a collection
 whose logical head `H(c)` is a `WalSnapshot`; otherwise reclaimable.
-4. `drop_collection(collection_id)` record:
+5. `drop_collection(collection_id)` record:
 live only if it is the decision record at `D(c)` for a collection
 whose logical head `H(c)` is `Dropped`; older `drop_collection(...)`
 records are reclaimable.
-5. `update` record for collection `c`:
+6. `update` record for collection `c`:
 live only if its WAL position is greater than `B(c)`; updates at or
 before `B(c)` are reclaimable.
-6. `link` record:
+7. `link` record:
 live only while required to maintain a valid WAL chain from current
 WAL head to current WAL tail.
-7. `free_list_head(region_index_or_none)` record:
+8. `free_list_head(region_index_or_none)` record:
 live only if it is the last valid explicit free-list-head decision in
 replay order that has not been superseded by a later `alloc_begin` or
 `free_list_head`.
-8. `alloc_begin(region_index, free_list_head_after)` record:
+9. `alloc_begin(region_index, free_list_head_after)` record:
 live if either:
 it is the last valid free-list-head decision in replay order; or
 its reservation is still needed to recover unmatched `ready_region`.
@@ -1176,19 +1222,19 @@ Its reservation role exists only until `head` or `link` durably
 consumes the allocated region; after that point, retaining the record
 is no longer required for region-consumption validity. It becomes
 reclaimable once both of the conditions above are false.
-9. `reclaim_begin(region_index)` record:
+10. `reclaim_begin(region_index)` record:
 live only if replay still needs it to reconstruct an incomplete reclaim
 transaction for `region_index` that would remain pending after replay.
 If a later durable `reclaim_end(region_index)` closes that transaction,
 or replay can prove the reclaim was unnecessary because the region
 never became durably detached from live state, the `reclaim_begin`
 record is reclaimable.
-10. `reclaim_end(region_index)` record:
+11. `reclaim_end(region_index)` record:
 live only if replay still needs it to cancel a still-live
 `reclaim_begin(region_index)` that would otherwise reconstruct as an
 incomplete reclaim transaction. Once the matching `reclaim_begin`
 becomes reclaimable, the matching `reclaim_end` is reclaimable too.
-11. `wal_recovery` record:
+12. `wal_recovery` record:
 live only if replay still needs it to justify later valid WAL records
 that appear after an ignored corrupt/torn span in that WAL region.
 Once those later dependent records are reclaimable or have been
@@ -1215,9 +1261,14 @@ bytes in the reclaimed region.
 state.
 4. The ordered set of incomplete reclaim transactions that replay would
 continue matches pre-reclaim crash-recovery state.
-5. WAL chain integrity remains valid (no broken `link` path).
-6. The reclaimed region is erased before reuse.
-7. If reclaim allocates any replacement WAL regions, replay-visible
+5. Startup step 4 would recover the same effective WAL head after
+reclaim as before reclaim, using the current tail region's
+`WalRegionPrologue` plus the last valid tail-local
+`head(collection_id = 0, collection_type = wal, region_index = ...)`
+override, if any.
+6. WAL chain integrity remains valid (no broken `link` path).
+7. The reclaimed region is erased before reuse.
+8. If reclaim allocates any replacement WAL regions, replay-visible
 `alloc_begin` records for those allocations carry
 `free_list_head_after` so replay reconstructs the same allocator
 position.
@@ -1316,15 +1367,24 @@ unless a later durable `head` consumes it.
 7. Crash after `S(head(collection_id, collection_type, region_index))`:
 region head transition is durable and consumes the reserved
 `ready_region`.
-8. Crash after `W(link)` but before `S(link)`:
+8. Crash after `S(alloc_begin(next_region_index, free_list_head_after))`
+for WAL rotation but before any durable matching `link`:
+if that `alloc_begin` occupies the reserve window that only a
+rotation-start record may occupy, startup treats it as an incomplete
+rotation before `link`. Recovery appends and syncs
+`link(next_region_index, expected_sequence)` with
+`expected_sequence = max_seen_sequence + 1`, then initializes and syncs
+the target WAL region with that sequence and the current WAL head.
+After that recovery completes, the target becomes the active WAL tail.
+9. Crash after `W(link)` but before `S(link)`:
 link may be torn/missing and old tail remains active, but the reserved
 region remains tracked by `alloc_begin`.
-9. Crash after `S(link)` but before `S(new_wal_region_init)`:
+10. Crash after `S(link)` but before `S(new_wal_region_init)`:
 startup validates the link target header sequence and
 `WalRegionPrologue`; if the header is missing/corrupt/wrong sequence,
 or the `WalRegionPrologue` is missing/corrupt, rotation is incomplete
 and startup finishes initialization using `expected_sequence`.
-10. Crash during tail-record write:
+11. Crash during tail-record write:
 replay detects the torn/invalid tail record; earlier complete
 records remain valid. Recovery ignores the torn record bytes and keeps
 scanning in aligned `wal_write_granule` steps for later valid
@@ -1336,11 +1396,11 @@ append point, the first durable later record must be `wal_recovery()`.
 An aligned tail slot whose first byte is still `erased_byte` is not a
 torn record; it is an unwritten slot that marks end of the written
 portion of the tail region.
-11. Crash after `S(reclaim_begin)` but before the region is detached
+12. Crash after `S(reclaim_begin)` but before the region is detached
 from all live state:
 startup sees an incomplete reclaim, but the region is still live and
 must not be freed.
-12. Crash after the region is detached from live state but before
+13. Crash after the region is detached from live state but before
 `S(reclaim_end)`:
 startup sees an incomplete reclaim and must complete the free-list
 append idempotently if the region is not already free.
