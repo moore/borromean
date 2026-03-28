@@ -239,6 +239,12 @@ The record stores `free_list_head_after`, the next free region after
 removing `region_id` from the free list. Once `alloc_begin` is
 durable, allocator replay state advances even if the reserved region
 is erased before a later `head` or `link` record uses it.
+`alloc_begin(region_id, free_list_head_after)` has two replay-visible
+effects:
+1. It advances the durable free-list head to `free_list_head_after`.
+2. It reserves `region_id` as `ready_region` until a matching durable
+`head(..., region_id)` or `link(... next_region_id = region_id ...)`
+consumes it.
 
 5. `head`
 Commits a collection to a new durable region head. Payload contains
@@ -681,6 +687,7 @@ replay order that has not been superseded by a later `alloc_begin` or
 live if either:
 it is the last valid free-list-head decision in replay order; or
 its reservation is still needed to recover unmatched `ready_region`.
+It becomes reclaimable only after both of those properties are false.
 
 WAL-region reclaim preconditions:
 
