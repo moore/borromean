@@ -25,7 +25,9 @@ option.
 ## Overview
 
 To solve these challenges, borromean divides flash into equal-size
-regions. Each collection is implemented as an append-only data
+regions. Region starts and sizes must be aligned to the backing
+flash's erase-block size so every region can be erased independently.
+Each collection is implemented as an append-only data
 structure where new writes are added to the head region and data can
 only be freed by truncating the tail. For each collection, borromean
 tracks a collection id and current head.
