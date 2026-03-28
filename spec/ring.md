@@ -220,6 +220,12 @@ successor". After a region is durably reachable from the free-list
 chain, it must not be erased until it is allocated for reuse, because
 the free-pointer chain is stored inside the free regions themselves.
 
+Deployment sizing guideline: choose `region_size` so the fixed
+per-region header plus free-pointer footer consume less than 10% of the
+region. WAL regions also carry `WalRegionPrologue`, so practical WAL
+deployments normally need additional slack beyond that rule of thumb.
+This is guidance only, not a validity rule.
+
 A WAL region is a region whose valid header has `collection_id = 0`
 and `collection_format = wal_v1`.
 
@@ -1409,6 +1415,14 @@ This guarantees that after reserving region `0` for the WAL and
 preserving the configured `min_free_regions` reserve, a freshly
 formatted store still has at least one non-reserved free region
 available for ordinary allocations.
+There is intentionally no normative minimum usable `region_size`
+enforced by borromean. Geometries that are formally formatable but too
+small to leave useful payload after `Header`, free-pointer footer, WAL
+prologue, and WAL-reserve overhead are treated as deployment mistakes
+rather than format errors. As deployment guidance, choose
+`region_size` so the fixed header plus footer consume less than 10% of
+the region, and leave enough remaining room for the intended WAL and
+collection payloads.
 
 Procedure:
 
