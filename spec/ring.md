@@ -130,7 +130,14 @@ still make forward progress before the first region is freed.
 Ordinary foreground allocations must not consume the last
 `min_free_regions` free regions; those regions are reserved so reclaim,
 WAL rotation, and crash recovery can always make forward progress
-instead of deadlocking while trying to free space.
+instead of deadlocking while trying to free space. If an ordinary write
+would require consuming that reserve, the implementation must first try
+to reclaim regions. If, after such reclaim attempts, the free-list
+still contains fewer than `min_free_regions` free regions, the database
+must be treated as full for purposes of accepting further ordinary
+writes. At that point, more drastic action such as dropping or
+truncating collections, or migrating/reformatting onto a larger backing
+store, is required before additional ordinary writes may be accepted.
 
 ### Storage Structure
 
