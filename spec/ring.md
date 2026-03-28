@@ -846,10 +846,9 @@ The `header_checksum` validates header integrity.
 
 ### Init
 
-When the database is initialized the metadata is written. All but the
-first region have a dummy header written and their free pointers set
-to build a list containing all but the first region. The first region
-is initialized with a WAL collection type and a sequence of zero.
+Initialization is defined normatively by
+`Format Storage (On-Disk Initialization)`. This section is informative
+only.
 
 ### Format Storage (On-Disk Initialization)
 
