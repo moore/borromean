@@ -149,6 +149,12 @@ list. This field is written not when the region is freed, but when the
 next region is freed. This is the mechanism used to make the free list
 a FIFO. A free region whose free-pointer slot is still uninitialized
 (for example, left in the erased state) is the current free-list tail.
+A free region is defined by membership in the durable free-list chain,
+not by a distinct on-disk header encoding. Free regions may still
+contain stale header and payload bytes from their prior use; those
+bytes are ignored while the region is free. Because the free-pointer
+chain is stored inside the free regions themselves, a free region must
+not be erased until it is allocated for reuse.
 
 ```mermaid
 block-beta
@@ -330,8 +336,8 @@ Commits a new durable free-list head. Payload contains the new
 `region_index` or `none` if the free list is empty. This record is used
 when reclaim or crash recovery changes the durable allocator head
 without consuming the prior head through `alloc_begin`. If the payload
-is `region_index`, that region must be a free region that can serve as
-the head of a valid free-pointer chain whose walk reaches an
+is `region_index`, that region must be the start of a durable
+free-pointer chain whose walk reaches an
 uninitialized tail slot in at most `region_count` visited regions. If
 the payload is `none`, the record asserts that the durable free list is
 empty.
@@ -695,8 +701,9 @@ mutation.
 links starting at `last_free_list_head` until reaching a free region
 whose free-pointer slot is uninitialized.
 If this walk encounters a malformed next pointer, a region that is not
-a valid free region, or exceeds `region_count` visited regions before
-reaching an uninitialized tail slot, return an error because the
+a valid member of that free-list chain, or exceeds `region_count`
+visited regions before reaching an uninitialized tail slot, return an
+error because the
 durable free-list head does not name a valid free-list chain.
 If `last_free_list_head = none`, then `free_list_tail = none`.
 21. If `ready_region` is set, hold it in memory as the next region to
@@ -1082,9 +1089,10 @@ write valid `Header` with `collection_id = 0` and `sequence = 0`,
 write WAL-region prologue with WAL head pointing to region `0`, then
 sync region `0`.
 4. For each region `r` in `[1, region_count - 1]`:
-write a valid free-region header, write `r.free_pointer.next_tail`
-to the next region index (`r + 1`) for every region except the last,
-leave the last region's free-pointer slot uninitialized, and
+leave any stale prior region contents uninterpreted, write
+`r.free_pointer.next_tail` to the next region index (`r + 1`) for every
+region except the last, leave the last region's free-pointer slot
+uninitialized, and
 sync `r`.
 5. Formatting is complete only after metadata and all initialized
 regions are durable.
