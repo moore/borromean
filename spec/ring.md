@@ -43,6 +43,13 @@ collection_type)`. Collection
 id `0` is reserved for the WAL; all user collection ids are nonzero
 and are not recycled.
 
+A collection may be removed durably by appending
+`drop_collection(collection_id)` to the WAL. Once that record is
+durable, the collection is no longer live, no later WAL record for
+that collection id is valid, and its older durable bytes may be
+reclaimed once they are no longer physically reachable from live
+storage state.
+
 A collection head may refer either to
 a committed region or to a WAL-resident snapshot. The data payload in
 each region is defined by the collection type implementation.
@@ -298,17 +305,17 @@ in that region is the matching trailing `link`.
 Each WAL record encodes the following fields:
 
 1. `record_type`: one of `new_collection`, `update`, `snapshot`,
-`alloc_begin`, `head`, `link`, `free_list_head`, `reclaim_begin`,
-`reclaim_end`, `wal_recovery`
+`alloc_begin`, `head`, `drop_collection`, `link`, `free_list_head`,
+`reclaim_begin`, `reclaim_end`, `wal_recovery`
 2. `collection_id`: required for `new_collection`, `update`,
-`snapshot`, and `head`
+`snapshot`, `head`, and `drop_collection`
 3. `collection_type`: required for `new_collection`, `snapshot`, and
-`head`; omitted for `update`, `alloc_begin`, `link`, `free_list_head`,
-`reclaim_begin`, `reclaim_end`, and `wal_recovery`
+`head`; omitted for `update`, `alloc_begin`, `drop_collection`, `link`,
+`free_list_head`, `reclaim_begin`, `reclaim_end`, and `wal_recovery`
 4. `payload_len`: payload size in bytes
 5. `payload`: opaque bytes defined by `record_type`
 6. `free_list_head_after`: required for `alloc_begin`; omitted for
-`update`, `snapshot`, `head`, `link`, `free_list_head`,
+`update`, `snapshot`, `head`, `drop_collection`, `link`, `free_list_head`,
 `reclaim_begin`, `reclaim_end`, and `wal_recovery`
 7. `record_checksum`: checksum covering the full logical record before
 COBS encoding
@@ -355,12 +362,21 @@ that durable region basis. When `collection_id = 0`, this record
 commits a new WAL head region; there is no distinct WAL-head record
 type.
 
-6. `link`
+6. `drop_collection`
+Payload is empty. Durably tombstones a user collection. The record
+detaches that collection's current durable basis from the live
+namespace, discards any pending WAL updates for that collection, and
+forbids any later WAL record for the same `collection_id`.
+Previously live WAL snapshots or committed regions for that collection
+become reclaimable once region reclaim removes any remaining physical
+references to them.
+
+7. `link`
 Points from a full WAL region to the next WAL region. Payload contains
 `next_region_index` and `expected_sequence` for the next WAL region
 header.
 
-7. `free_list_head`
+8. `free_list_head`
 Commits a new durable free-list head. Payload contains the new
 `region_index` or `none` if the free list is empty. This record is used
 when reclaim or crash recovery changes the durable allocator head
@@ -371,17 +387,17 @@ uninitialized tail slot in at most `region_count` visited regions. If
 the payload is `none`, the record asserts that the durable free list is
 empty.
 
-8. `reclaim_begin`
+9. `reclaim_begin`
 Marks the start of reclaim for `region_index`. The payload contains the
 region being freed. This record does not itself make the region free;
 it only makes the reclaim intent durable before any live references to
 that region are removed.
 
-9. `reclaim_end`
+10. `reclaim_end`
 Marks successful completion of reclaim for `region_index`. The payload
 contains the same `region_index` as the matching `reclaim_begin`.
 
-10. `wal_recovery`
+11. `wal_recovery`
 Payload is empty. Marks that replay or a prior open detected and
 intentionally skipped one or more corrupt/torn aligned WAL slots before
 resuming WAL appends. `wal_recovery` has no direct collection or
@@ -402,17 +418,19 @@ if `collection_type` is missing or corrupt.
 commit point for a region flush.
 5. A `head(collection_id, collection_type, region_index)` record is
 invalid if `collection_type` is missing or corrupt.
-6. For user collections (`collection_id != 0`), `snapshot` and
+6. A `drop_collection(collection_id)` record is invalid if
+`collection_id = 0`.
+7. For user collections (`collection_id != 0`), `snapshot` and
 `head(collection_id, collection_type, region_index)` are valid only if
 their `collection_type` either establishes the collection's tracked
 type or matches the already tracked type for that collection.
-7. A `head(collection_id, collection_type, region_index)` record for a
+8. A `head(collection_id, collection_type, region_index)` record for a
 user collection is valid only if the committed region header has the
 same `collection_id` and a `collection_format` that is valid for that
 tracked `collection_type`.
-8. For the WAL (`collection_id = 0`), `head` records are valid only if
+9. For the WAL (`collection_id = 0`), `head` records are valid only if
 their `collection_type` is the WAL collection type.
-9. A `link` is only valid as the last complete record in a WAL region.
+10. A `link` is only valid as the last complete record in a WAL region.
 During WAL-chain traversal, a `link` in a reachable non-tail WAL region
 is valid only if its target has a valid WAL header with sequence equal
 to `expected_sequence` and a valid `WalRegionPrologue`. For the known
@@ -421,58 +439,63 @@ missing, corrupt, or wrong-sequence, or whose `WalRegionPrologue` is
 missing or corrupt, is treated as an incomplete rotation rather than
 corruption; startup may finish initializing the target region using
 `expected_sequence`.
-10. A WAL record in the current tail region, other than the specific
+11. A WAL record in the current tail region, other than the specific
 `alloc_begin(next_region_index, free_list_head_after)` that starts WAL
 rotation or the matching trailing `link`, is invalid if its aligned end
 offset leaves fewer than `wal_rotation_reserve` bytes of currently
 unwritten space remaining in that WAL region.
-11. The `alloc_begin(next_region_index, free_list_head_after)` that
+12. The `alloc_begin(next_region_index, free_list_head_after)` that
 starts WAL rotation is invalid unless its aligned end offset leaves at
 least `wal_link_reserve` bytes of currently unwritten space remaining
 in that WAL region.
-12. For non-WAL collections (`collection_id != 0`), `update`,
-`snapshot`, and `head(collection_id, collection_type, region_index)` are
-valid only if replay has already
+13. For non-WAL collections (`collection_id != 0`), `update`,
+`snapshot`, `head(collection_id, collection_type, region_index)`, and
+`drop_collection(collection_id)` are valid only if replay has already
 seen a prior valid authoritative type-bearing record for that
 collection, except that `snapshot` and `head` themselves may be the
 record that first establishes that tracked type.
-13. An `alloc_begin(region_index, free_list_head_after)` record is invalid
+14. For non-WAL collections (`collection_id != 0`), `update`,
+`snapshot`, `head(collection_id, collection_type, region_index)`, and
+`drop_collection(collection_id)` are invalid if replay has already seen
+a prior valid `drop_collection(collection_id)` for that collection.
+15. An `alloc_begin(region_index, free_list_head_after)` record is invalid
 if `free_list_head_after` is missing or corrupt, if replay's current
 durable `last_free_list_head` is `none`, or if `region_index` does not
 equal that durable free-list head.
-14. A `free_list_head(region_index_or_none)` record is invalid if the
+16. A `free_list_head(region_index_or_none)` record is invalid if the
 payload is corrupt. If `region_index_or_none = region_index`, the
 record is valid only if startup can reconstruct a valid free-pointer
 chain beginning at that region and terminating at a tail whose
 free-pointer slot is uninitialized after visiting at most
 `region_count` regions. If `region_index_or_none = none`, the record
 asserts that the durable free list is empty.
-15. A `head(region_index)` or `link(next_region_index, ...)` record that
+17. A `head(region_index)` or `link(next_region_index, ...)` record that
 writes a newly allocated region is valid only if replay has already
 seen a prior unmatched `alloc_begin` for the same region index.
-16. Durable allocator-head advance happens at `alloc_begin` or
+18. Durable allocator-head advance happens at `alloc_begin` or
 `free_list_head`, not at `head` or `link`.
-17. Replay may recover only from checksum-invalid or torn aligned WAL
+19. Replay may recover only from checksum-invalid or torn aligned WAL
 slots. Replay tracks a pending WAL-recovery boundary from the first
 ignored corrupt/torn aligned slot until a later valid `wal_recovery`
 record is replayed.
-18. If replay has a pending WAL-recovery boundary and encounters a
+20. If replay has a pending WAL-recovery boundary and encounters a
 later valid complete record whose `record_type` is not `wal_recovery`,
 startup must fail because later WAL data exists after unexplained
 corruption.
-19. If replay reaches the end of a reachable non-tail WAL region with a
+21. If replay reaches the end of a reachable non-tail WAL region with a
 pending WAL-recovery boundary that was not closed by `wal_recovery`,
 startup must fail because that region contains unresolved mid-log
 corruption. A pending WAL-recovery boundary may remain open only at the
 end of the current replay tail region.
-20. Any other invalidity of a complete record is storage corruption and
+22. Any other invalidity of a complete record is storage corruption and
 startup must fail rather than skipping that record. This includes
 duplicate `new_collection`, collection-type mismatch, `head` or `link`
-without a matching prior `alloc_begin`, broken non-tail WAL chain
+without a matching prior `alloc_begin`, any record after a valid
+`drop_collection` for the same collection, broken non-tail WAL chain
 links, and committed-region/header mismatch.
-21. `reclaim_begin(region_index)` and `reclaim_end(region_index)` must appear
+23. `reclaim_begin(region_index)` and `reclaim_end(region_index)` must appear
 in WAL order and are matched by `region_index`.
-22. `reclaim_end(region_index)` is only valid if preceded by a valid
+24. `reclaim_end(region_index)` is only valid if preceded by a valid
 `reclaim_begin(region_index)`.
 
 Assumptions for replay correctness:
@@ -496,7 +519,8 @@ instead of being returned to the free list.
 
 ## Collection Head State Machine
 
-Each user collection has exactly one logical current head after replay.
+Each tracked user collection is either durably dropped or has exactly
+one logical current head after replay.
 
 States:
 
@@ -517,6 +541,12 @@ Latest durable head points to a WAL `snapshot` record.
 
 4. `RegionHead`
 Latest durable head points to a committed collection region.
+
+5. `Dropped`
+Latest durable basis is a `drop_collection(collection_id)` tombstone.
+The collection id remains reserved and tracked, but the collection no
+longer has a live durable basis, accepts no further mutations, and its
+older durable bytes are reclaimable once physically detached.
 
 Transitions:
 
@@ -553,6 +583,13 @@ Open a mutable frontier over the committed region basis and apply new
 updates without requiring the full region contents to be loaded into
 RAM first.
 
+8. `EmptyHead | InMemoryDirty | WALSnapshotHead | RegionHead -> Dropped`
+Write `drop_collection(collection_id)`.
+Durable after the `drop_collection` record is durable. Any pending WAL
+updates for that collection are discarded from the durable basis, the
+collection leaves the live namespace, and no later WAL record for that
+collection id is valid.
+
 Collection format responsibility:
 
 1. Each collection format defines how reads merge the durable basis
@@ -580,19 +617,25 @@ Invariants:
 
 1. The active durable basis for a collection is the last valid basis
 decision in replay order, where a basis decision is
-`new_collection`, `snapshot`, or
+`new_collection`, `snapshot`,
+`drop_collection`, or
 `head(collection_id, collection_type, region_index)`.
-2. `new_collection`, `snapshot`, and
+2. `new_collection`, `snapshot`,
+`drop_collection`, and
 `head(collection_id, collection_type, region_index)` records totally
 order durable basis decisions per collection.
-3. Any `new_collection`, `update`, or `snapshot` older than the active
-basis for that collection is reclaimable.
+3. Any `new_collection`, `update`, `snapshot`, or `head` older than the
+active basis for that collection is reclaimable.
+4. If the active basis for a collection is `drop_collection`, then that
+collection is logically absent from the live namespace and any older
+durable basis or update bytes for that collection are reclaimable once
+they are no longer physically reachable.
 
 ## Startup Replay Algorithm
 
 Startup recovery reconstructs five things:
 
-1. Durable collection heads
+1. Durable collection states (live heads plus dropped tombstones)
 2. In-memory working state for collections with uncommitted updates
 3. Durable free-list head
 4. Reserved `ready_region`, if an allocation was started but not yet
@@ -673,10 +716,12 @@ otherwise create replay state for that collection with durable basis
 updates.
 9. On `update(collection_id)`:
 if `collection_id` is not tracked, return an error.
+if that collection's durable `last_head` is `Dropped`, return an error.
 append to `pending_updates` for that collection.
 10. On `snapshot(collection_id, collection_type)`:
 if `collection_id` is not tracked, create replay state for that
 collection and set tracked `collection_type` from this record.
+if that collection's durable `last_head` is `Dropped`, return an error.
 if this record's `collection_type` does not match the tracked
 `collection_type`, return an error.
 set durable `last_head` to this snapshot, set `basis_pos` to this
@@ -695,6 +740,8 @@ set `ready_region = region_index`.
 if `collection_id != 0` and `collection_id` is not tracked, create
 replay state for that collection and set tracked `collection_type`
 from this record.
+if `collection_id != 0` and that collection's durable `last_head` is
+`Dropped`, return an error.
 if `collection_id != 0` and this record's `collection_type` does not
 match the tracked `collection_type`, return an error.
 set durable `last_head` to that region, set `basis_pos` to this
@@ -707,17 +754,22 @@ otherwise return an error because the region was never reserved by
 if `ready_region = next_region_index`, clear `ready_region`.
 otherwise return an error because the region was never reserved by
 `alloc_begin`.
-14. On `free_list_head(region_index_or_none)`:
+14. On `drop_collection(collection_id)`:
+if `collection_id` is not tracked, return an error.
+if that collection's durable `last_head` is `Dropped`, return an error.
+set durable `last_head` to `Dropped`, set `basis_pos` to this record's
+WAL position, and clear all pending updates for that collection.
+15. On `free_list_head(region_index_or_none)`:
 set tentative durable `last_free_list_head` to `region_index_or_none`.
-15. On `reclaim_begin(region_index)`:
+16. On `reclaim_begin(region_index)`:
 append `region_index` to pending reclaims unless a later matching
 `reclaim_end` removes it.
-16. On `reclaim_end(region_index)`:
+17. On `reclaim_end(region_index)`:
 mark the matching pending reclaim as finished.
-17. On `wal_recovery()`:
+18. On `wal_recovery()`:
 if `pending_wal_recovery_boundary` is clear, return an error.
 otherwise clear `pending_wal_recovery_boundary`.
-18. After replay, for each collection:
+19. After replay, for each collection:
 reconstruct its durable basis from `last_head`. If `last_head` is
 `empty`, the basis is the empty collection declared by
 `new_collection`; if that collection has post-basis updates,
@@ -729,9 +781,11 @@ apply the remaining `pending_updates` in WAL order to reconstruct
 mutable working state. If `last_head` is `wal_snapshot` and there are
 no post-basis updates, the snapshot may remain dormant until the next
 mutation, but it must be loaded into RAM before accepting that
-mutation.
-19. Initialize allocator state from `last_free_list_head`.
-20. Reconstruct runtime `free_list_tail` by following free-pointer
+mutation. If `last_head` is `Dropped`, do not reconstruct mutable
+state for that collection and do not accept further mutations for that
+collection id.
+20. Initialize allocator state from `last_free_list_head`.
+21. Reconstruct runtime `free_list_tail` by following free-pointer
 links starting at `last_free_list_head` until reaching a free region
 whose free-pointer slot is uninitialized.
 If this walk encounters a malformed next pointer, a region that is not
@@ -740,9 +794,9 @@ visited regions before reaching an uninitialized tail slot, return an
 error because the
 durable free-list head does not name a valid free-list chain.
 If `last_free_list_head = none`, then `free_list_tail = none`.
-21. If `ready_region` is set, hold it in memory as the next region to
+22. If `ready_region` is set, hold it in memory as the next region to
 use before consuming another free-list entry.
-22. For each pending reclaim in WAL order:
+23. For each pending reclaim in WAL order:
 if the target region is still reachable from any live collection head
 or the WAL chain, leave it allocated because the reclaim did not reach
 the detach point durably.
@@ -751,7 +805,7 @@ free-list chain, complete the free-list append using the Region
 Reclaim procedure.
 If the target region is already reachable from the free-list chain,
 finish the reclaim transaction by appending `reclaim_end(region_index)`.
-23. If replay encountered a torn or checksum-invalid tail record,
+24. If replay encountered a torn or checksum-invalid tail record,
 retain all state recovered from earlier complete records. The WAL head
 is unchanged. Replay may still recover and apply later valid tail
 records that begin after the torn bytes, but the first such later valid
@@ -796,6 +850,7 @@ pub enum DurableHead {
   Empty,
   Region { region_index: RegionIndex },
   WalSnapshot { wal_pos: WalPosition },
+  Dropped,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -804,7 +859,7 @@ pub struct CollectionReplayState {
   pub collection_type: CollectionType,
   pub last_head: DurableHead,
   // WAL position of the durable basis decision record that established
-  // `last_head` (`new_collection`, `snapshot`, or `head`).
+  // `last_head` (`new_collection`, `snapshot`, `drop_collection`, or `head`).
   pub basis_pos: WalPosition,
 }
 
@@ -844,7 +899,8 @@ heapless = { version = "0.8", default-features = false }
 
 Field mapping to this spec:
 
-1. `CollectionReplayState.last_head` maps to replay `last_head`.
+1. `CollectionReplayState.last_head` maps to replay `last_head`,
+including the durable `Dropped` tombstone state.
 2. `WalPosition` identifies a WAL record by WAL region index plus
 byte offset within that region.
 3. `CollectionReplayState.basis_pos` is `B(c)`, the WAL position of
@@ -869,9 +925,10 @@ reserved `ready_region`, and ordered incomplete reclaim state.
 Per-collection cutoff:
 
 1. Let `H(c)` be the current durable logical head for collection `c`
-(`EmptyHead`, `WalSnapshot`, or `RegionHead`).
+(`EmptyHead`, `WalSnapshot`, `RegionHead`, or `Dropped`).
 2. Let `D(c)` be the WAL position of the last durable basis decision
-record for collection `c` (`new_collection`, `snapshot`, or
+record for collection `c` (`new_collection`, `snapshot`,
+`drop_collection`, or
 `head(collection_id, collection_type, region_index)`).
 3. `B(c) = D(c)` is the collection's durable basis position.
 
@@ -887,34 +944,38 @@ are reclaimable.
 3. `snapshot` record:
 live only if it is the decision record at `D(c)` for a collection
 whose logical head `H(c)` is a `WalSnapshot`; otherwise reclaimable.
-4. `update` record for collection `c`:
+4. `drop_collection(collection_id)` record:
+live only if it is the decision record at `D(c)` for a collection
+whose logical head `H(c)` is `Dropped`; older `drop_collection(...)`
+records are reclaimable.
+5. `update` record for collection `c`:
 live only if its WAL position is greater than `B(c)`; updates at or
 before `B(c)` are reclaimable.
-5. `link` record:
+6. `link` record:
 live only while required to maintain a valid WAL chain from current
 WAL head to current WAL tail.
-6. `free_list_head(region_index_or_none)` record:
+7. `free_list_head(region_index_or_none)` record:
 live only if it is the last valid explicit free-list-head decision in
 replay order that has not been superseded by a later `alloc_begin` or
 `free_list_head`.
-7. `alloc_begin(region_index, free_list_head_after)` record:
+8. `alloc_begin(region_index, free_list_head_after)` record:
 live if either:
 it is the last valid free-list-head decision in replay order; or
 its reservation is still needed to recover unmatched `ready_region`.
 It becomes reclaimable only after both of those properties are false.
-8. `reclaim_begin(region_index)` record:
+9. `reclaim_begin(region_index)` record:
 live only if replay still needs it to reconstruct an incomplete reclaim
 transaction for `region_index` that would remain pending after replay.
 If a later durable `reclaim_end(region_index)` closes that transaction,
 or replay can prove the reclaim was unnecessary because the region
 never became durably detached from live state, the `reclaim_begin`
 record is reclaimable.
-9. `reclaim_end(region_index)` record:
+10. `reclaim_end(region_index)` record:
 live only if replay still needs it to cancel a still-live
 `reclaim_begin(region_index)` that would otherwise reconstruct as an
 incomplete reclaim transaction. Once the matching `reclaim_begin`
 becomes reclaimable, the matching `reclaim_end` is reclaimable too.
-10. `wal_recovery` record:
+11. `wal_recovery` record:
 live only if replay still needs it to justify later valid WAL records
 that appear after an ignored corrupt/torn span in that WAL region.
 Once those later dependent records are reclaimable or have been
@@ -926,8 +987,9 @@ WAL-region reclaim preconditions:
 1. The candidate region is the head of the WAL.
 2. For every live record in the candidate, an equivalent live state is
 already represented durably outside the candidate (typically by newer
-`snapshot`, or by `head(collection_id, collection_type, region_index)`
-plus newer updates).
+`snapshot`, `drop_collection`, or by
+`head(collection_id, collection_type, region_index)` plus newer
+updates).
 3. After planned metadata updates, startup replay can still walk a
 valid WAL chain from head to tail.
 
@@ -992,13 +1054,15 @@ Required write and sync ordering:
 `W(update_record) -> S(update_record) -> acknowledge update durable`.
 2. `snapshot` head transition:
 `W(snapshot(collection_id, collection_type, payload)) -> S(snapshot)`.
-3. `region` head transition:
+3. `drop_collection` transition:
+`W(drop_collection(collection_id)) -> S(drop_collection)`.
+4. `region` head transition:
 `W(alloc_begin(region_index, free_list_head_after)) -> S(alloc_begin) -> erase/init reserved region if needed -> W(region header+data) -> S(region) -> W(head(collection_id, collection_type, ref=region_index)) -> S(head)`.
-4. WAL rotation:
+5. WAL rotation:
 `W(alloc_begin(next_region_index, free_list_head_after)) -> S(alloc_begin) -> W(link(next_region_index, expected_sequence)) -> S(link) -> W(new_wal_region_init(sequence=expected_sequence)) -> S(new_wal_region_init)`.
-5. Reclaim:
+6. Reclaim:
 `W(reclaim_begin(region_index)) -> S(reclaim_begin) -> W(replacement_live_state_and_new_links) -> S(replacement_state) -> append old region to free list (write+sync) -> W(reclaim_end(region_index)) -> S(reclaim_end)`.
-6. Resuming WAL appends after a recovered torn/corrupt tail record:
+7. Resuming WAL appends after a recovered torn/corrupt tail record:
 `W(wal_recovery()) -> S(wal_recovery) -> W(next_normal_wal_record) -> S(next_normal_wal_record)`.
 
 General region-allocation rule:
@@ -1021,28 +1085,33 @@ Crash-cut outcomes:
 snapshot may be missing/torn and is ignored.
 2. Crash after `S(snapshot(collection_id, collection_type, payload))`:
 snapshot transition is durable and acts as the collection WAL head.
-3. Crash before `S(region)`:
+3. Crash before `S(drop_collection(collection_id))`:
+the collection drop may be missing/torn and is ignored.
+4. Crash after `S(drop_collection(collection_id))`:
+the collection is durably dropped and no later WAL record for that
+collection id may be accepted.
+5. Crash before `S(region)`:
 new region is not considered durable.
 If `alloc_begin` was already durable, replay still preserves the
 reserved `ready_region`.
-4. Crash after `S(region)` but before
+6. Crash after `S(region)` but before
 `S(head(collection_id, collection_type, region_index))`:
 region exists but is not committed as collection head.
 The allocator advance remains durable because `alloc_begin` already
 committed it, so replay keeps `region_index` reserved as `ready_region`
 unless a later durable `head` consumes it.
-5. Crash after `S(head(collection_id, collection_type, region_index))`:
+7. Crash after `S(head(collection_id, collection_type, region_index))`:
 region head transition is durable and consumes the reserved
 `ready_region`.
-6. Crash after `W(link)` but before `S(link)`:
+8. Crash after `W(link)` but before `S(link)`:
 link may be torn/missing and old tail remains active, but the reserved
 region remains tracked by `alloc_begin`.
-7. Crash after `S(link)` but before `S(new_wal_region_init)`:
+9. Crash after `S(link)` but before `S(new_wal_region_init)`:
 startup validates the link target header sequence and
 `WalRegionPrologue`; if the header is missing/corrupt/wrong sequence,
 or the `WalRegionPrologue` is missing/corrupt, rotation is incomplete
 and startup finishes initialization using `expected_sequence`.
-8. Crash during tail-record write:
+10. Crash during tail-record write:
 replay detects the torn/invalid tail record; earlier complete
 records remain valid. Recovery ignores the torn record bytes and keeps
 scanning in aligned `wal_write_granule` steps for later valid
@@ -1054,11 +1123,11 @@ append point, the first durable later record must be `wal_recovery()`.
 An aligned tail slot whose first byte is still `erased_byte` is not a
 torn record; it is an unwritten slot that marks end of the written
 portion of the tail region.
-9. Crash after `S(reclaim_begin)` but before the region is detached
+11. Crash after `S(reclaim_begin)` but before the region is detached
 from all live state:
 startup sees an incomplete reclaim, but the region is still live and
 must not be freed.
-10. Crash after the region is detached from live state but before
+12. Crash after the region is detached from live state but before
 `S(reclaim_end)`:
 startup sees an incomplete reclaim and must complete the free-list
 append idempotently if the region is not already free.
@@ -1195,8 +1264,8 @@ Expected replay outcome on first open:
 
 1. Region scan finds WAL tail at region `0` (`sequence = 0`).
 2. WAL chain walk yields a single-region chain (`head = tail = 0`).
-3. No `new_collection`, `update`, `snapshot`, `head`, `link`, or
-`free_list_head` records are replayed.
+3. No `new_collection`, `update`, `snapshot`, `head`,
+`drop_collection`, `link`, or `free_list_head` records are replayed.
 4. Replay therefore yields:
 no tracked user collections,
 `pending_updates = empty`,
