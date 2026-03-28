@@ -98,11 +98,14 @@ region.
 A WAL region can be reclaimed when the number of live records drops
 below a configurable threshold. During reclaim, we write the current
 live state for each affected uncommitted collection into a new WAL
-region by snapshotting that collection into the WAL head region. If a
+region by snapshotting that collection into the current WAL tail
+region, rotating to a new tail region first if needed. If a
 collection's data is not in memory, that implies its current snapshot
 is already in the WAL. If a current snapshot is in the region being
 collected, it can be copied directly to the WAL tail while updating
-the head pointer to the new location.
+the head pointer to the new location. Here "WAL head" means the
+logical oldest live WAL region in the chain; new WAL records are always
+appended at the WAL tail.
 
 Once collection data is flushed from a WAL head being reclaimed, any
 current head records are moved to the WAL tail, a normal
@@ -129,8 +132,10 @@ is replayed exactly once. Allocations advance the durable free-list
 head through `alloc_begin(..., free_list_head_after)`. Reclaim or
 recovery steps that make a region the new free-list head without
 consuming one use an explicit `free_list_head(region_index_or_none)`
-record. Any WAL command that writes a newly allocated region must
-persist the post-allocation free-list head in the same WAL record,
+record. Any operation that writes a newly allocated region must first
+durably reserve that region with
+`alloc_begin(region_index, free_list_head_after)`. The later `head` or
+`link` record that uses that region consumes the reservation;
 otherwise that region write and its allocation are not considered
 durable.
 
@@ -170,9 +175,10 @@ region's sequence number, collection id, collection format, and a
 checksum over the header itself.
 
 The sequence number is a monotonically increasing value assigned each
-time a new region is written. This lets us scan regions and identify
-the newest region for each collection. This is primarily used to find
-the head and tail of the WAL when opening the database.
+time a new region is written. This lets startup identify the newest WAL
+region and order physical region writes. Logical collection heads are
+recovered from WAL `head(...)` records rather than by choosing the
+newest region for a collection.
 
 The collection format defines how user data is encoded in the user
 data section. Storing the format in each region allows format
@@ -473,7 +479,9 @@ user collection is valid only if the target region header has the same
 `collection_id`. Replay does not revalidate the append-time check that
 an existing-region head target was not free.
 11. For the WAL (`collection_id = 0`), `head` records are valid only if
-their `collection_type` is the WAL collection type.
+their `collection_type` is the WAL collection type. Startup uses them
+only during WAL-head discovery from the tail region; they do not create
+ordinary collection replay state during the main replay pass.
 12. A `link` is only valid as the last complete record in a WAL region.
 During WAL-chain traversal, a `link` in a reachable non-tail WAL region
 is valid only if its target has a valid WAL header with sequence equal
@@ -795,14 +803,20 @@ if `last_free_list_head != region_index`, return an error because
 set durable `last_free_list_head` to `free_list_head_after`.
 set `ready_region = region_index`.
 12. On `head(collection_id, collection_type, region_index)`:
-if `collection_id != 0` and `collection_id` is not tracked, create
-replay state for that collection because an earlier `new_collection`
-may have been reclaimed, and set tracked `collection_type` from this
-record.
-if `collection_id != 0` and that collection's durable `last_head` is
-`Dropped`, return an error.
-if `collection_id != 0` and this record's `collection_type` does not
-match the tracked `collection_type`, return an error.
+if `collection_id = 0`, this is a WAL-head control record. Its replay
+effect was already consumed in step 4 while determining the WAL-head
+candidate from the tail region. If `collection_type != wal`, return an
+error; otherwise ignore this record during the main per-record replay
+pass.
+otherwise, if `collection_id` is not tracked, create replay state for
+that collection because an earlier `new_collection` may have been
+reclaimed, and set tracked `collection_type` from this record.
+if that collection's durable `last_head` is `Dropped`, return an
+error.
+if this record's `collection_type` does not match the tracked
+`collection_type`, return an error.
+if the target region header is missing, corrupt, or has a different
+`collection_id`, return an error.
 set durable `last_head` to that region, set `basis_pos` to this
 record's WAL position, and clear WAL updates/snapshots older than this
 basis decision.
