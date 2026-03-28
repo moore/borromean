@@ -178,7 +178,14 @@ The sequence number is a monotonically increasing value assigned each
 time a new region is written. This lets startup identify the newest WAL
 region and order physical region writes. Logical collection heads are
 recovered from WAL `head(...)` records rather than by choosing the
-newest region for a collection.
+newest region for a collection. During startup region scanning,
+borromean records `max_seen_sequence`, the largest `sequence` value
+found in any valid region header. Each newly allocated region, whether
+for a user collection or for a newly initialized WAL region, must use
+`sequence = max_seen_sequence + 1`, after which that new value becomes
+the new `max_seen_sequence` in memory. Crashes or abandoned allocations
+may leave gaps in the observed sequence values, but the values used by
+successful later region writes must remain strictly monotonic.
 
 The collection format defines how user data is encoded in the user
 data section. Storing the format in each region allows format
@@ -257,7 +264,7 @@ of:
 
  1. The current heads of each collection instance.
  2. The tracking of free regions.
- 3. The tracking of the root of the database.
+ 3. The tracking of the WAL head.
 
 Each of these is solved by tracking this information in the WAL.
 The WAL is collection 0. At startup we scan regions to find the WAL
@@ -382,7 +389,7 @@ effects:
 consumes it.
 
 5. `head`
-Commits a collection to a new durable region head. Payload contains
+Commits a collection to a durable region head. Payload contains
 the target `region_index`. The record also carries the collection type for
 that durable region basis. When `collection_id = 0`, this record
 commits a new WAL head region; there is no distinct WAL-head record
@@ -517,14 +524,15 @@ durable `last_free_list_head` is `none`, or if `region_index` does not
 equal that durable free-list head.
 19. A `free_list_head(region_index_or_none)` record is invalid if the
 payload is corrupt. If `region_index_or_none = region_index`, the
-record is valid only if startup can reconstruct a valid free-pointer
-chain beginning at that region and terminating at a tail whose
-free-pointer slot is uninitialized after visiting at most
-`region_count` regions. If `region_index_or_none = none`, the record
-asserts that the durable free list is empty.
-20. A `head(region_index)` or `link(next_region_index, ...)` record that
-writes a newly allocated region is valid only if replay has already
-seen a prior unmatched `alloc_begin` for the same region index.
+record makes `region_index` the tentative durable free-list head in
+replay order. Replay does not validate the referenced free-pointer
+chain immediately; startup validates only the final recovered
+`last_free_list_head` after replay. If `region_index_or_none = none`,
+the record asserts that the durable free list is empty.
+20. A `head(collection_id, collection_type, region_index)` or
+`link(next_region_index, ...)` record that commits a newly allocated
+region is valid only if replay has already seen a prior unmatched
+`alloc_begin` for the same region index.
 21. Durable allocator-head advance happens at `alloc_begin` or
 `free_list_head`, not at `head` or `link`.
 22. Replay may recover only from checksum-invalid or torn aligned WAL
@@ -695,7 +703,7 @@ the earliest retained basis record instead.
 
 ## Startup Replay Algorithm
 
-Startup recovery reconstructs five things:
+Startup recovery reconstructs seven things:
 
 1. Durable collection states (live heads plus dropped tombstones)
 2. In-memory working state for collections with uncommitted updates
@@ -704,14 +712,20 @@ Startup recovery reconstructs five things:
 committed by `head` or `link`
 5. Runtime `free_list_tail`, reconstructed from the free-pointer chain
 after the durable free-list head is known
+6. Runtime `max_seen_sequence`, the largest `sequence` observed in any
+valid region header during region scan
+7. Ordered incomplete reclaim transactions that still need post-replay
+recovery work
 
 Algorithm:
 
 1. Read `StorageMetadata` and validate static geometry (`region_size`,
 `region_count`, `min_free_regions`, `erased_byte`,
 `wal_write_granule`, `wal_record_magic`, and storage version support).
-2. Scan all regions and collect candidate WAL regions
-(`collection_id == 0`) with valid headers.
+2. Scan all regions, collect candidate WAL regions
+(`collection_id == 0`) with valid headers, and track
+`max_seen_sequence` as the largest `sequence` value seen in any valid
+region header.
 3. Select WAL tail as the WAL region with the largest valid sequence.
 4. Read and validate the `WalRegionPrologue` stored at the start of the
 tail region's user-data area, and use its `wal_head_region_index` as
@@ -875,7 +889,11 @@ durable free-list head does not name a valid free-list chain.
 If `last_free_list_head = none`, then `free_list_tail = none`.
 22. If `ready_region` is set, hold it in memory as the next region to
 use before consuming another free-list entry.
-23. For each pending reclaim in WAL order:
+23. Keep `max_seen_sequence` as the runtime source of the next region
+sequence. The next newly allocated region must use
+`max_seen_sequence + 1` as its header `sequence`, then update
+`max_seen_sequence` in memory to that new value.
+24. For each pending reclaim in WAL order:
 if the target region is still reachable from any live collection head
 or the WAL chain, leave it allocated because the reclaim did not reach
 the detach point durably.
@@ -884,7 +902,7 @@ free-list chain, complete the free-list append using the Region
 Reclaim procedure.
 If the target region is already reachable from the free-list chain,
 finish the reclaim transaction by appending `reclaim_end(region_index)`.
-24. If replay encountered a torn or checksum-invalid tail record,
+25. If replay encountered a torn or checksum-invalid tail record,
 retain all state recovered from earlier complete records. The WAL head
 is unchanged. Replay may still recover and apply later valid tail
 records that begin after the torn bytes, but the first such later valid
@@ -915,6 +933,9 @@ pub struct CollectionId(pub u64);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WalSequence(pub u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RegionSequence(pub u64);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct WalOffset(pub u32);
@@ -973,6 +994,7 @@ pub struct ReplayTracker<
   const MAX_PENDING_RECLAIMS: usize,
 > {
   pub free_list: FreeListTracker,
+  pub max_seen_sequence: RegionSequence,
   pub collections: Vec<CollectionReplayState, MAX_COLLECTIONS>,
   pub pending_updates: Vec<PendingUpdateRef, MAX_PENDING_UPDATES>,
   pub pending_reclaims: Vec<PendingReclaim, MAX_PENDING_RECLAIMS>,
@@ -1008,6 +1030,10 @@ it to link `t_prev.next_tail = r`.
 8. `ReplayTracker.pending_reclaims` maps to replay's ordered pending
 region reclaims that remain incomplete after WAL replay and are
 processed during post-replay recovery.
+9. `ReplayTracker.max_seen_sequence` is the largest region `sequence`
+value observed during startup region scan; each newly allocated region
+uses the next value (`max_seen_sequence + 1`), then updates this
+runtime field.
 
 ## WAL Reclaim Eligibility
 
@@ -1111,7 +1137,7 @@ Safety invariant:
 reclaim state, and reconstructed `free_list_tail`, after reclaim must
 match the pre-reclaim logical state.
 
-Example timeline (`collection_id = 7`):
+Example timeline for an already-live collection (`collection_id = 7`):
 
 1. WAL appends `update(u1)`, `update(u2)`.
 2. WAL appends `snapshot(s1)`.
@@ -1338,7 +1364,7 @@ write valid `Header` with `collection_id = 0` and `sequence = 0`,
 write a valid `WalRegionPrologue` with `wal_head_region_index = 0`,
 then sync region `0`.
 4. For each region `r` in `[1, region_count - 1]`:
-leave any stale prior region contents uninterpreted, write
+leave the erased header and payload bytes otherwise uninterpreted, write
 `r.free_pointer.next_tail` to the next region index (`r + 1`) for every
 region except the last, leave the last region's free-pointer slot
 uninitialized, and
@@ -1426,7 +1452,7 @@ re-entry the existing durable record satisfies this step.
 2. Durably perform any collection-head or WAL-head updates needed so
 that `r` has no remaining live references.
 3. If recovery finds that `r` is already reachable from the free-list
-chain, skip to step 10.
+chain, skip to step 8.
 4. Establish `r` as a free region without erasing it. In particular,
 `r.free_pointer.next_tail` must still be uninitialized when `r` is
 about to become the new free-list tail. If the region still has the
