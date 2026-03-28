@@ -369,7 +369,9 @@ namespace, discards any pending WAL updates for that collection, and
 forbids any later WAL record for the same `collection_id`.
 Previously live WAL snapshots or committed regions for that collection
 become reclaimable once region reclaim removes any remaining physical
-references to them.
+references to them. Any region associated with that dropped collection
+may be added to the free list through normal reclaim processing if it
+is not already reachable from the free-list chain.
 
 7. `link`
 Points from a full WAL region to the next WAL region. Payload contains
@@ -546,7 +548,9 @@ Latest durable head points to a committed collection region.
 Latest durable basis is a `drop_collection(collection_id)` tombstone.
 The collection id remains reserved and tracked, but the collection no
 longer has a live durable basis, accepts no further mutations, and its
-older durable bytes are reclaimable once physically detached.
+older durable bytes are reclaimable once physically detached. Any
+region associated with the dropped collection may be appended to the
+free list if it is not already present there.
 
 Transitions:
 
@@ -629,7 +633,9 @@ active basis for that collection is reclaimable.
 4. If the active basis for a collection is `drop_collection`, then that
 collection is logically absent from the live namespace and any older
 durable basis or update bytes for that collection are reclaimable once
-they are no longer physically reachable.
+they are no longer physically reachable. Any region associated with
+that dropped collection may then be added to the free list if it is
+not already in the free-list chain.
 
 ## Startup Replay Algorithm
 
