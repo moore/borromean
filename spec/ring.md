@@ -115,6 +115,14 @@ persist the post-allocation free-list head in the same WAL record,
 otherwise that region write and its allocation are not considered
 durable.
 
+Borromean must also maintain a configured `min_free_regions` reserve.
+`min_free_regions` must be at least the maximum number of free regions
+that any reclaim or crash-recovery path may need to allocate before it
+can free one. Ordinary foreground allocations must not consume the last
+`min_free_regions` free regions; those regions are reserved so reclaim,
+WAL rotation, and crash recovery can always make forward progress
+instead of deadlocking while trying to free space.
+
 ### Storage Structure
 
 Storage starts with a static metadata region that describes the
@@ -559,8 +567,8 @@ after the durable free-list head is known
 Algorithm:
 
 1. Read `StorageMetadata` and validate static geometry (`region_size`,
-`region_count`, `erased_byte`, `wal_write_granule`,
-`wal_record_magic`, and storage version support).
+`region_count`, `min_free_regions`, `erased_byte`,
+`wal_write_granule`, `wal_record_magic`, and storage version support).
 2. Scan all regions and collect candidate WAL regions
 (`collection_id == 0`) with valid headers.
 3. Select WAL tail as the WAL region with the largest valid sequence.
@@ -941,6 +949,9 @@ General region-allocation rule:
 or `link` uses `region_index`, replay must preserve `region_index` as
 `ready_region` and must not attempt to recover the old free-pointer
 contents from flash.
+4. Any allocation that is not itself part of reclaim or crash recovery
+is invalid if consuming it would reduce the number of free regions
+below `min_free_regions`.
 
 Crash-cut outcomes:
 
@@ -996,6 +1007,7 @@ one sig StorageMetadata {
   storage_version: Int,
   region_size: Int,
   region_count: Int,
+  min_free_regions: Int,
   erased_byte: Int,
   wal_write_granule: Int,
   wal_record_magic: Int,
@@ -1004,9 +1016,10 @@ one sig StorageMetadata {
 
 The `StorageMetadata` struct describes the version of the storage as
 well as the size of each region in bytes, the number of regions in the
-database, the erased-flash byte value, the minimum writable granule
-used to align WAL records, and the WAL record magic byte. The stored
-`wal_record_magic` must differ from `erased_byte`.
+database, the configured `min_free_regions` reserve, the erased-flash
+byte value, the minimum writable granule used to align WAL records, and
+the WAL record magic byte. The stored `wal_record_magic` must differ
+from `erased_byte`.
 
 ## Header
 
@@ -1052,13 +1065,14 @@ Preconditions:
 3. Region `0` is reserved as the initial WAL region.
 4. `wal_write_granule >= 1`.
 5. `wal_record_magic != erased_byte`.
+6. `region_count >= 1 + min_free_regions`.
 
 Procedure:
 
 1. Erase metadata area and all data regions.
 2. Write `StorageMetadata` (`storage_version`, `region_size`,
-`region_count`, `erased_byte`, `wal_write_granule`,
-`wal_record_magic`) and sync metadata.
+`region_count`, `min_free_regions`, `erased_byte`,
+`wal_write_granule`, `wal_record_magic`) and sync metadata.
 3. Initialize region `0` as WAL:
 write valid `Header` with `collection_id = 0` and `sequence = 0`,
 write WAL-region prologue with WAL head pointing to region `0`, then
