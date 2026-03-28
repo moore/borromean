@@ -715,10 +715,12 @@ For incomplete rotation recovery, if the known tail ends with a durable
 missing/corrupt/wrong sequence, or the target `WalRegionPrologue` is
 missing/corrupt, finish initializing the target region:
 erase target region if needed, write a valid WAL header with
-`collection_id = 0` and `sequence = expected_sequence`, write a valid
-`WalRegionPrologue`, and sync. If this recovery init fails,
-startup fails with error. After successful recovery init, use the
-target region as the active append tail.
+`collection_id = 0` and `sequence = expected_sequence`, then write a
+valid `WalRegionPrologue` whose `wal_head_region_index` equals the WAL
+head already determined for this WAL chain before the incomplete
+rotation target is considered. Sync the initialized target region. If
+this recovery init fails, startup fails with error. After successful
+recovery init, use the target region as the active append tail.
 6. Parse records in WAL order (region order, then offset order).
 Record parsing begins only at offsets aligned to `wal_write_granule`
 and greater than or equal to `wal_record_area_offset` within each WAL
@@ -1129,7 +1131,7 @@ Required write and sync ordering:
 4. `region` head transition:
 `W(alloc_begin(region_index, free_list_head_after)) -> S(alloc_begin) -> erase/init reserved region if needed -> W(region header+data) -> S(region) -> W(head(collection_id, collection_type, ref=region_index)) -> S(head)`.
 5. WAL rotation:
-`W(alloc_begin(next_region_index, free_list_head_after)) -> S(alloc_begin) -> W(link(next_region_index, expected_sequence)) -> S(link) -> W(new_wal_region_init(sequence=expected_sequence)) -> S(new_wal_region_init)`.
+`W(alloc_begin(next_region_index, free_list_head_after)) -> S(alloc_begin) -> W(link(next_region_index, expected_sequence)) -> S(link) -> W(new_wal_region_init(sequence=expected_sequence, wal_head_region_index=current_wal_head)) -> S(new_wal_region_init)`.
 6. Reclaim:
 `W(reclaim_begin(region_index)) -> S(reclaim_begin) -> W(replacement_live_state_and_new_links) -> S(replacement_state) -> append old region to free list (write+sync) -> W(reclaim_end(region_index)) -> S(reclaim_end)`.
 7. Resuming WAL appends after a recovered torn/corrupt tail record:
@@ -1262,7 +1264,10 @@ after the region `Header`.
 
 `wal_head_region_index` is the durable WAL head that was current when
 that WAL region was initialized. It must name a region index strictly
-less than `region_count`.
+less than `region_count`. If startup finishes an incomplete WAL
+rotation by initializing a missing/corrupt target region, it must write
+the same already-determined WAL head into this field rather than
+choosing a new value during recovery.
 
 `prologue_checksum` validates the logical prologue contents. It covers
 `wal_head_region_index` in the same byte order used on disk.
