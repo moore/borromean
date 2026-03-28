@@ -217,8 +217,7 @@ encoded record bytes.
 the next in aligned `wal_write_granule` steps.
 6. At an aligned candidate record start in a reachable WAL region:
 if the first byte is `erased_byte`, that slot is currently unwritten and
-replay continues scanning later aligned slots for a possible later
-`wal_record_magic`;
+marks the end of the written portion of that WAL region;
 if the first byte is `wal_record_magic`, that slot is a candidate WAL
 record and must parse and validate normally;
 if the first byte is neither, that slot lies inside a torn/corrupt WAL
@@ -389,6 +388,8 @@ misinterpreted as new valid records.
 the aligned slot's first byte against `erased_byte` and
 `wal_record_magic`, and by relying on the COBS-encoded WAL format to
 exclude both reserved byte values from record bodies.
+An aligned slot whose first byte is `erased_byte` marks end of the
+written portion of that WAL region.
 4. Any operation that consumes a free-list head must first make the
 allocator advance durable with `alloc_begin(region_index,
 free_list_head_after)`.
@@ -534,7 +535,7 @@ Record parsing begins only at offsets aligned to `wal_write_granule`.
 Maintain a replay-local flag `pending_wal_recovery_boundary`,
 initially clear.
 If an aligned candidate start byte equals `erased_byte`, treat that
-slot as currently unwritten and continue scanning later aligned slots.
+slot as currently unwritten and stop scanning that WAL region.
 If the aligned start byte equals `wal_record_magic`, parse the record.
 If parsing or checksum validation fails, treat that aligned slot as a
 corrupt/torn WAL slot, set `pending_wal_recovery_boundary`, and keep
@@ -913,8 +914,8 @@ aligned slot after the last valid replayed tail record whose start byte
 is `erased_byte`. If later WAL appends resume after that recovered
 append point, the first durable later record must be `wal_recovery()`.
 An aligned tail slot whose first byte is still `erased_byte` is not a
-torn record; it is an unwritten slot that replay skips unless it lies
-after the last valid replayed tail record.
+torn record; it is an unwritten slot that marks end of the written
+portion of the tail region.
 9. Crash after `S(reclaim_begin)` but before the region is detached
 from all live state:
 startup sees an incomplete reclaim, but the region is still live and
