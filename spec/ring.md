@@ -232,6 +232,25 @@ record, so replay keeps scanning forward by aligned
 slot whose first byte is `erased_byte` after the last valid replayed
 tail record. If no such slot exists, the tail region is currently full
 and the next WAL append must rotate via `link` to a new WAL region.
+8. Let `wal_link_reserve` be the aligned encoded size needed in the
+current tail region to append the trailing
+`link(next_region_index, expected_sequence)` record that completes WAL
+rotation.
+9. Let `wal_rotation_reserve` be the total aligned encoded size needed
+in the current tail region to append the two WAL records required to
+start and complete rotation to a new tail region:
+`alloc_begin(next_region_index, free_list_head_after)` followed by
+`link(next_region_index, expected_sequence)`.
+10. Appending any WAL record to the current tail region, other than the
+specific `alloc_begin(next_region_index, free_list_head_after)` that
+starts WAL rotation or the trailing `link`, is invalid if doing so
+would leave fewer than `wal_rotation_reserve` unwritten bytes in that
+region.
+11. Appending the `alloc_begin(next_region_index, free_list_head_after)`
+that starts WAL rotation is invalid unless its aligned end offset still
+leaves at least `wal_link_reserve` unwritten bytes in that region. Once
+that rotation `alloc_begin` is durable, the only valid later WAL record
+in that region is the matching trailing `link`.
 
 Each WAL record encodes the following fields:
 
@@ -358,49 +377,58 @@ trailing `link` whose target header is missing, corrupt, or has the
 wrong sequence is treated as an incomplete rotation rather than
 corruption; startup may finish initializing the target region using
 `expected_sequence`.
-10. For non-WAL collections (`collection_id != 0`), `update`,
+10. A WAL record in the current tail region, other than the specific
+`alloc_begin(next_region_index, free_list_head_after)` that starts WAL
+rotation or the matching trailing `link`, is invalid if its aligned end
+offset leaves fewer than `wal_rotation_reserve` bytes of currently
+unwritten space remaining in that WAL region.
+11. The `alloc_begin(next_region_index, free_list_head_after)` that
+starts WAL rotation is invalid unless its aligned end offset leaves at
+least `wal_link_reserve` bytes of currently unwritten space remaining
+in that WAL region.
+12. For non-WAL collections (`collection_id != 0`), `update`,
 `snapshot`, and `head(collection_id, collection_type, region_index)` are
 valid only if replay has already
 seen a prior valid authoritative type-bearing record for that
 collection, except that `snapshot` and `head` themselves may be the
 record that first establishes that tracked type.
-11. An `alloc_begin(region_index, free_list_head_after)` record is invalid
+13. An `alloc_begin(region_index, free_list_head_after)` record is invalid
 if `free_list_head_after` is missing or corrupt, if replay's current
 durable `last_free_list_head` is `none`, or if `region_index` does not
 equal that durable free-list head.
-12. A `free_list_head(region_index_or_none)` record is invalid if the
+14. A `free_list_head(region_index_or_none)` record is invalid if the
 payload is corrupt. If `region_index_or_none = region_index`, the
 record is valid only if startup can reconstruct a valid free-pointer
 chain beginning at that region and terminating at a tail whose
 free-pointer slot is uninitialized after visiting at most
 `region_count` regions. If `region_index_or_none = none`, the record
 asserts that the durable free list is empty.
-13. A `head(region_index)` or `link(next_region_index, ...)` record that
+15. A `head(region_index)` or `link(next_region_index, ...)` record that
 writes a newly allocated region is valid only if replay has already
 seen a prior unmatched `alloc_begin` for the same region index.
-14. Durable allocator-head advance happens at `alloc_begin` or
+16. Durable allocator-head advance happens at `alloc_begin` or
 `free_list_head`, not at `head` or `link`.
-15. Replay may recover only from checksum-invalid or torn aligned WAL
+17. Replay may recover only from checksum-invalid or torn aligned WAL
 slots. Replay tracks a pending WAL-recovery boundary from the first
 ignored corrupt/torn aligned slot until a later valid `wal_recovery`
 record is replayed.
-16. If replay has a pending WAL-recovery boundary and encounters a
+18. If replay has a pending WAL-recovery boundary and encounters a
 later valid complete record whose `record_type` is not `wal_recovery`,
 startup must fail because later WAL data exists after unexplained
 corruption.
-17. If replay reaches the end of a reachable non-tail WAL region with a
+19. If replay reaches the end of a reachable non-tail WAL region with a
 pending WAL-recovery boundary that was not closed by `wal_recovery`,
 startup must fail because that region contains unresolved mid-log
 corruption. A pending WAL-recovery boundary may remain open only at the
 end of the current replay tail region.
-18. Any other invalidity of a complete record is storage corruption and
+20. Any other invalidity of a complete record is storage corruption and
 startup must fail rather than skipping that record. This includes
 duplicate `new_collection`, collection-type mismatch, `head` or `link`
 without a matching prior `alloc_begin`, broken non-tail WAL chain
 links, and committed-region/header mismatch.
-19. `reclaim_begin(region_index)` and `reclaim_end(region_index)` must appear
+21. `reclaim_begin(region_index)` and `reclaim_end(region_index)` must appear
 in WAL order and are matched by `region_index`.
-20. `reclaim_end(region_index)` is only valid if preceded by a valid
+22. `reclaim_end(region_index)` is only valid if preceded by a valid
 `reclaim_begin(region_index)`.
 
 Assumptions for replay correctness:
