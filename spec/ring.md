@@ -847,8 +847,8 @@ it to link `t_prev.next_tail = r`.
 
 Reclaim operates on WAL regions but correctness is defined per record.
 A record is reclaimable only when replay no longer needs it to rebuild
-the same `last_head`, `pending_updates`, and `last_free_list_head`
-state.
+the same `last_head`, `pending_updates`, `last_free_list_head`,
+reserved `ready_region`, and ordered incomplete reclaim state.
 
 Per-collection cutoff:
 
@@ -886,7 +886,19 @@ live if either:
 it is the last valid free-list-head decision in replay order; or
 its reservation is still needed to recover unmatched `ready_region`.
 It becomes reclaimable only after both of those properties are false.
-8. `wal_recovery` record:
+8. `reclaim_begin(region_index)` record:
+live only if replay still needs it to reconstruct an incomplete reclaim
+transaction for `region_index` that would remain pending after replay.
+If a later durable `reclaim_end(region_index)` closes that transaction,
+or replay can prove the reclaim was unnecessary because the region
+never became durably detached from live state, the `reclaim_begin`
+record is reclaimable.
+9. `reclaim_end(region_index)` record:
+live only if replay still needs it to cancel a still-live
+`reclaim_begin(region_index)` that would otherwise reconstruct as an
+incomplete reclaim transaction. Once the matching `reclaim_begin`
+becomes reclaimable, the matching `reclaim_end` is reclaimable too.
+10. `wal_recovery` record:
 live only if replay still needs it to justify later valid WAL records
 that appear after an ignored corrupt/torn span in that WAL region.
 Once those later dependent records are reclaimable or have been
@@ -908,9 +920,13 @@ WAL-region reclaim postconditions:
 1. No collection's `H(c)`, `B(c)`, or live post-basis updates depend on
 bytes in the reclaimed region.
 2. The recovered free-list head matches pre-reclaim allocator state.
-3. WAL chain integrity remains valid (no broken `link` path).
-4. The reclaimed region is erased before reuse.
-5. If reclaim allocates any replacement WAL regions, replay-visible
+3. The recovered `ready_region`, if any, matches pre-reclaim allocator
+state.
+4. The ordered set of incomplete reclaim transactions that replay would
+continue matches pre-reclaim crash-recovery state.
+5. WAL chain integrity remains valid (no broken `link` path).
+6. The reclaimed region is erased before reuse.
+7. If reclaim allocates any replacement WAL regions, replay-visible
 `alloc_begin` records for those allocations carry
 `free_list_head_after` so replay reconstructs the same allocator
 position.
@@ -919,8 +935,9 @@ Safety invariant:
 
 1. Reclaim must not change replay result: the recovered `last_head` and
 `pending_updates` for every collection, the recovered
-`last_free_list_head`, and the reconstructed `free_list_tail`, after
-reclaim must match the pre-reclaim logical state.
+`last_free_list_head`, reserved `ready_region`, ordered incomplete
+reclaim state, and reconstructed `free_list_tail`, after reclaim must
+match the pre-reclaim logical state.
 
 Example timeline (`collection_id = 7`):
 
