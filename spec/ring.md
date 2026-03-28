@@ -116,9 +116,18 @@ otherwise that region write and its allocation are not considered
 durable.
 
 Borromean must also maintain a configured `min_free_regions` reserve.
-`min_free_regions` must be at least the maximum number of free regions
-that any reclaim or crash-recovery path may need to allocate before it
-can free one. Ordinary foreground allocations must not consume the last
+Let `max_in_memory_dirty_collections` be the maximum number of dirty
+collections that may simultaneously have in-memory working state.
+Each such dirty in-memory collection must be preservable using at most
+one newly allocated region before reclaim frees any region: either by
+writing a WAL snapshot if that snapshot fits in the available WAL
+space, or by writing a normal collection region instead if the
+snapshot would not fit efficiently in the WAL.
+Under that assumption, `min_free_regions` must be at least
+`max_in_memory_dirty_collections + 1`. The extra `+1` region is
+reserved so WAL rotation, reclaim bookkeeping, or crash recovery can
+still make forward progress before the first region is freed.
+Ordinary foreground allocations must not consume the last
 `min_free_regions` free regions; those regions are reserved so reclaim,
 WAL rotation, and crash recovery can always make forward progress
 instead of deadlocking while trying to free space.
