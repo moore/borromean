@@ -156,6 +156,13 @@ bytes are ignored while the region is free. Because the free-pointer
 chain is stored inside the free regions themselves, a free region must
 not be erased until it is allocated for reuse.
 
+For WAL regions, the user-data area begins with a fixed
+`WalRegionPrologue`. That prologue records the WAL head that was
+current when the WAL region was initialized. WAL records do not begin
+immediately after the region `Header`; they begin at the first
+`wal_write_granule`-aligned byte after the end of the
+`WalRegionPrologue`.
+
 ```mermaid
 block-beta
  columns 4
@@ -220,6 +227,12 @@ within the WAL region chain.
 
 WAL record encoding and alignment:
 
+Let `wal_record_area_offset` be the first offset within a WAL region
+that is both:
+past the end of the region `Header` plus `WalRegionPrologue`; and
+aligned to `wal_write_granule`.
+Replay and append scanning consider candidate WAL record starts only at
+aligned offsets greater than or equal to `wal_record_area_offset`.
 1. Every physical WAL record begins with a one-byte `record_magic`.
 2. `record_magic` must equal the storage's configured
 `wal_record_magic`, and `wal_record_magic` must not equal
@@ -386,9 +399,10 @@ their `collection_type` is the WAL collection type.
 9. A `link` is only valid as the last complete record in a WAL region.
 During WAL-chain traversal, a `link` in a reachable non-tail WAL region
 is valid only if its target has a valid WAL header with sequence equal
-to `expected_sequence`. For the known tail WAL region only, a durable
-trailing `link` whose target header is missing, corrupt, or has the
-wrong sequence is treated as an incomplete rotation rather than
+to `expected_sequence` and a valid `WalRegionPrologue`. For the known
+tail WAL region only, a durable trailing `link` whose target header is
+missing, corrupt, or wrong-sequence, or whose `WalRegionPrologue` is
+missing or corrupt, is treated as an incomplete rotation rather than
 corruption; startup may finish initializing the target region using
 `expected_sequence`.
 10. A WAL record in the current tail region, other than the specific
@@ -578,7 +592,8 @@ Algorithm:
 2. Scan all regions and collect candidate WAL regions
 (`collection_id == 0`) with valid headers.
 3. Select WAL tail as the WAL region with the largest valid sequence.
-4. Read the WAL-head pointer stored at the start of that tail region as
+4. Read and validate the `WalRegionPrologue` stored at the start of the
+tail region's user-data area, and use its `wal_head_region_index` as
 the initial WAL-head candidate. Then scan valid records in that tail
 region and let the last valid
 `head(collection_id = 0, collection_type = wal, region_index)`
@@ -592,14 +607,17 @@ missing/corrupt or has the wrong sequence, treat this as an incomplete
 rotation. Use the known tail as replay tail.
 For incomplete rotation recovery, if the known tail ends with a durable
 `link(next_region_index, expected_sequence)` and the target WAL header is
-missing/corrupt/wrong sequence, finish initializing the target region:
+missing/corrupt/wrong sequence, or the target `WalRegionPrologue` is
+missing/corrupt, finish initializing the target region:
 erase target region if needed, write a valid WAL header with
-`collection_id = 0` and `sequence = expected_sequence`, write WAL
-region prologue metadata, and sync. If this recovery init fails,
+`collection_id = 0` and `sequence = expected_sequence`, write a valid
+`WalRegionPrologue`, and sync. If this recovery init fails,
 startup fails with error. After successful recovery init, use the
 target region as the active append tail.
 6. Parse records in WAL order (region order, then offset order).
-Record parsing begins only at offsets aligned to `wal_write_granule`.
+Record parsing begins only at offsets aligned to `wal_write_granule`
+and greater than or equal to `wal_record_area_offset` within each WAL
+region.
 Maintain a replay-local flag `pending_wal_recovery_boundary`,
 initially clear.
 If an aligned candidate start byte equals `erased_byte`, treat that
@@ -987,9 +1005,10 @@ region head transition is durable and consumes the reserved
 link may be torn/missing and old tail remains active, but the reserved
 region remains tracked by `alloc_begin`.
 7. Crash after `S(link)` but before `S(new_wal_region_init)`:
-startup validates the link target sequence/header; if target is
-missing/corrupt/wrong sequence, rotation is incomplete and startup
-finishes initialization using `expected_sequence`.
+startup validates the link target header sequence and
+`WalRegionPrologue`; if the header is missing/corrupt/wrong sequence,
+or the `WalRegionPrologue` is missing/corrupt, rotation is incomplete
+and startup finishes initialization using `expected_sequence`.
 8. Crash during tail-record write:
 replay detects the torn/invalid tail record; earlier complete
 records remain valid. Recovery ignores the torn record bytes and keeps
@@ -1056,6 +1075,33 @@ without changing the collection's stable `collection_type`.
 
 The `header_checksum` validates header integrity.
 
+## WAL Region Prologue
+
+```rust
+struct WalRegionPrologue {
+  wal_head_region_index: u32,
+  prologue_checksum: [u8; 32],
+}
+```
+
+`WalRegionPrologue` is present only in WAL regions (`collection_id = 0`)
+and occupies the first bytes of the region user-data area immediately
+after the region `Header`.
+
+`wal_head_region_index` is the durable WAL head that was current when
+that WAL region was initialized. It must name a region index strictly
+less than `region_count`.
+
+`prologue_checksum` validates the logical prologue contents. It covers
+`wal_head_region_index` in the same byte order used on disk.
+
+Let `wal_record_area_offset` be the first offset within a WAL region
+that is both greater than or equal to the end of `Header` plus
+`WalRegionPrologue`, and aligned to `wal_write_granule`.
+Replay scans candidate WAL record starts only at aligned offsets
+greater than or equal to `wal_record_area_offset`, and new WAL appends
+must begin at such offsets as well.
+
 ## Operations
 
 ### Init
@@ -1086,8 +1132,8 @@ Procedure:
 `wal_write_granule`, `wal_record_magic`) and sync metadata.
 3. Initialize region `0` as WAL:
 write valid `Header` with `collection_id = 0` and `sequence = 0`,
-write WAL-region prologue with WAL head pointing to region `0`, then
-sync region `0`.
+write a valid `WalRegionPrologue` with `wal_head_region_index = 0`,
+then sync region `0`.
 4. For each region `r` in `[1, region_count - 1]`:
 leave any stale prior region contents uninterpreted, write
 `r.free_pointer.next_tail` to the next region index (`r + 1`) for every
