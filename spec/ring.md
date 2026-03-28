@@ -191,7 +191,12 @@ may leave gaps in the observed sequence values, but the values used by
 successful later region writes must remain strictly monotonic.
 
 The collection format defines how user data is encoded in the user
-data section. Storing the format in each region allows format
+data section. For user collections, the meaning of non-WAL
+`collection_format` values is owned by the corresponding
+`collection_type` implementation rather than by borromean core. This
+spec reserves exactly one canonical core-defined format identifier,
+`wal_v1`, for WAL regions; no user collection may use that identifier.
+Storing the format in each region still allows per-collection format
 evolution over time.
 
 The free pointer stores the location of the next free region for
@@ -216,7 +221,7 @@ chain, it must not be erased until it is allocated for reuse, because
 the free-pointer chain is stored inside the free regions themselves.
 
 A WAL region is a region whose valid header has `collection_id = 0`
-and the WAL `collection_format`.
+and `collection_format = wal_v1`.
 
 For WAL regions, the user-data area begins with a fixed
 `WalRegionPrologue`. That prologue records the WAL head that was
@@ -405,8 +410,11 @@ region. Otherwise, the `head` retargets the logical collection head to
 an already allocated existing region. Before appending such a
 retargeting `head`, the implementation must validate that the target
 region's header has the same `collection_id` and that the target
-region is not currently free. Replay does not revalidate that
-not-free append-time invariant.
+region is not currently free. For user collections, borromean core
+does not impose a global mapping from `collection_format` to
+`collection_type`; the collection implementation owns that
+interpretation. Replay does not revalidate that not-free append-time
+invariant.
 
 6. `drop_collection`
 Payload is empty. Durably tombstones a user collection. The record
@@ -661,25 +669,34 @@ collection id is valid.
 
 Collection format responsibility:
 
-1. Each collection format defines how reads merge the durable basis
+1. Each non-WAL `collection_format` value is defined by the user
+collection type that writes it; borromean core stores that value in the
+region header but does not assign it global meaning.
+2. Each user collection format defines how reads merge the durable basis
 with the in-memory frontier.
-2. The frontier must take precedence over older values in the durable
+3. The frontier must take precedence over older values in the durable
 basis.
-3. Flush to `RegionHead` materializes the logical state produced by
+4. Flush to `RegionHead` materializes the logical state produced by
 that merge.
-4. Formats such as append-only logs or LSM-like structures may keep
+5. Formats such as append-only logs or LSM-like structures may keep
 only recent mutable state in RAM while older immutable state remains
 in committed regions.
-5. A `WALSnapshotHead` must be loadable into RAM before that
+6. A `WALSnapshotHead` must be loadable into RAM before that
 collection accepts further mutations.
-6. For live user collections, the replay-tracked collection type is
+7. For live user collections, the replay-tracked collection type is
 fixed by the earliest retained type-bearing record for that collection
 (`new_collection`, `snapshot`, or `head`). Historically this begins at
 `new_collection`, but WAL reclaim may later remove that record.
-7. Every later retained type-bearing record for that collection must
+8. Every later retained type-bearing record for that collection must
 carry the same `collection_type`, otherwise replay must treat the
 mismatch as corruption.
-8. Per-region format evolution remains allowed because region headers
+9. When a user collection implementation loads a committed region
+basis, it validates that region's `collection_format` according to its
+own rules.
+10. Borromean core reserves exactly one canonical
+`collection_format`, `wal_v1`, for WAL regions. Every WAL region uses
+`wal_v1`, and that identifier is not user-definable.
+11. Per-region format evolution remains allowed because region headers
 carry `collection_format` independently of the collection's stable
 type.
 
@@ -729,7 +746,7 @@ Algorithm:
 `region_count`, `min_free_regions`, `erased_byte`,
 `wal_write_granule`, `wal_record_magic`, and storage version support).
 2. Scan all regions, collect candidate WAL regions
-(`collection_id == 0` plus WAL `collection_format`) with valid
+(`collection_id == 0` plus `collection_format = wal_v1`) with valid
 headers, and track
 `max_seen_sequence` as the largest `sequence` value seen in any valid
 region header.
@@ -838,6 +855,10 @@ if this record's `collection_type` does not match the tracked
 `collection_type`, return an error.
 if the target region header is missing, corrupt, or has a different
 `collection_id`, return an error.
+Core replay does not impose any further global `collection_format`
+check for user collections; if that region is later loaded as a
+committed basis, its collection implementation validates that the
+stored `collection_format` is one it understands.
 set durable `last_head` to that region, set `basis_pos` to this
 record's WAL position, and clear WAL updates/snapshots older than this
 basis decision.
@@ -1323,8 +1344,12 @@ newest header when the database is opened.
 The `collection_id` defines which collection this region belongs to,
 and is a stable 64-bit nonce, not a small reusable counter. The
 `collection_format` defines the per-region encoding format for replay
-and read semantics. This format may evolve across regions over time
-without changing the collection's stable `collection_type`.
+and read semantics. For user collections, non-WAL
+`collection_format` values are defined by the corresponding
+`collection_type` implementation rather than by borromean core, and may
+evolve across regions over time without changing the collection's
+stable `collection_type`. Borromean core reserves one canonical format
+identifier, `wal_v1`, for WAL regions.
 
 The `header_checksum` validates header integrity.
 
@@ -1338,7 +1363,7 @@ struct WalRegionPrologue {
 ```
 
 `WalRegionPrologue` is present only in WAL regions (regions whose valid
-header has `collection_id = 0` and WAL `collection_format`) and
+header has `collection_id = 0` and `collection_format = wal_v1`) and
 occupies the first bytes of the region user-data area immediately after
 the region `Header`.
 
@@ -1392,8 +1417,8 @@ Procedure:
 `region_count`, `min_free_regions`, `erased_byte`,
 `wal_write_granule`, `wal_record_magic`) and sync metadata.
 3. Initialize region `0` as WAL:
-write valid `Header` with `collection_id = 0`, WAL `collection_format`,
-and `sequence = 0`,
+write valid `Header` with `collection_id = 0`,
+`collection_format = wal_v1`, and `sequence = 0`,
 write a valid `WalRegionPrologue` with `wal_head_region_index = 0`,
 then sync region `0`.
 4. For each region `r` in `[1, region_count - 1]`:
