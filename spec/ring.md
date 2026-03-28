@@ -47,11 +47,13 @@ A collection head may refer either to
 a committed region or to a WAL-resident snapshot. The data payload in
 each region is defined by the collection type implementation.
 Borromean tracks the current collection type for each collection in WAL
-replay state. That tracked type is established by
-`new_collection(collection_id, collection_type)` and does not change
-for the lifetime of that collection. Later durable basis decisions
-(`snapshot` and `head`) also carry `collection_type`, but only so
-replay can verify that they match the tracked type.
+replay state. Any durable record that carries `collection_type`
+(`new_collection`, `snapshot`, or `head`) is authoritative for that
+collection. The first valid type-bearing record seen for a collection
+establishes its tracked `collection_type`, and that type does not
+change for the lifetime of the collection. Every later valid
+type-bearing record for that collection must carry the same
+`collection_type`.
 
 A collection can be flushed either as a full region write or
 as a partial state snapshot into the WAL. A WAL snapshot is a durable
@@ -321,8 +323,7 @@ Ordering and validity rules:
 1. A valid `new_collection(collection_id, collection_type)` record is
 invalid if `collection_id = 0`, if `collection_type` is missing or
 corrupt, or if replay has already seen a prior valid
-`new_collection(collection_id, ...)` for a currently tracked
-collection.
+type-bearing record for that collection.
 2. A valid `snapshot(collection_id, collection_type, ...)` record is
 itself a durable WAL-snapshot head for that collection.
 3. A `snapshot(collection_id, collection_type, ...)` record is invalid
@@ -333,8 +334,8 @@ commit point for a region flush.
 invalid if `collection_type` is missing or corrupt.
 6. For user collections (`collection_id != 0`), `snapshot` and
 `head(collection_id, collection_type, region_index)` are valid only if
-their `collection_type` matches the collection's tracked type from
-`new_collection`.
+their `collection_type` either establishes the collection's tracked
+type or matches the already tracked type for that collection.
 7. A `head(collection_id, collection_type, region_index)` record for a
 user collection is valid only if the committed region header has the
 same `collection_id` and a `collection_format` that is valid for that
@@ -347,7 +348,9 @@ equal to `expected_sequence`.
 10. For non-WAL collections (`collection_id != 0`), `update`,
 `snapshot`, and `head(collection_id, collection_type, region_index)` are
 valid only if replay has already
-seen a prior valid `new_collection(collection_id, ...)`.
+seen a prior valid authoritative type-bearing record for that
+collection, except that `snapshot` and `head` themselves may be the
+record that first establishes that tracked type.
 11. An `alloc_begin(region_index, free_list_head_after)` record is invalid
 if `free_list_head_after` is missing or corrupt.
 12. A `free_list_head(region_index_or_none)` record is invalid if the
@@ -472,10 +475,11 @@ in committed regions.
 5. A `WALSnapshotHead` must be loadable into RAM before that
 collection accepts further mutations.
 6. The tracked collection type for a collection is fixed by
-`new_collection(collection_id, collection_type)`.
-7. Every later `snapshot` and `head` for that collection must carry the
-same `collection_type` so replay can validate the basis decision
-without consulting external state.
+the first valid type-bearing record for that collection
+(`new_collection`, `snapshot`, or `head`).
+7. Every later type-bearing record for that collection must carry the
+same `collection_type`, otherwise replay must treat the mismatch as
+corruption.
 8. Per-region format evolution remains allowed because region headers
 carry `collection_format` independently of the collection's stable
 type.
@@ -571,7 +575,8 @@ updates.
 if `collection_id` is not tracked, return an error.
 append to `pending_updates` for that collection.
 10. On `snapshot(collection_id, collection_type)`:
-if `collection_id` is not tracked, return an error.
+if `collection_id` is not tracked, create replay state for that
+collection and set tracked `collection_type` from this record.
 if this record's `collection_type` does not match the tracked
 `collection_type`, return an error.
 set durable `last_head` to this snapshot, set `basis_pos` to this
@@ -583,8 +588,9 @@ two unmatched allocation reservations.
 set durable `last_free_list_head` to `free_list_head_after`.
 set `ready_region = region_index`.
 12. On `head(collection_id, collection_type, region_index)`:
-if `collection_id != 0` and `collection_id` is not tracked, return an
-error.
+if `collection_id != 0` and `collection_id` is not tracked, create
+replay state for that collection and set tracked `collection_type`
+from this record.
 if `collection_id != 0` and this record's `collection_type` does not
 match the tracked `collection_type`, return an error.
 set durable `last_head` to that region, set `basis_pos` to this
@@ -735,8 +741,8 @@ byte offset within that region.
 3. `CollectionReplayState.basis_pos` is `B(c)`, the WAL position of
 the durable basis decision record for that collection.
 4. `CollectionReplayState.collection_type` is the replay-tracked
-collection type established by `new_collection` and validated by later
-`snapshot` and `head` records.
+collection type established by the first valid type-bearing record for
+that collection and validated by later type-bearing records.
 5. `FreeListTracker.last_free_list_head` maps to replay
 `last_free_list_head`.
 6. `FreeListTracker.ready_region` maps to replay `ready_region`.
