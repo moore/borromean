@@ -928,6 +928,11 @@ pub struct PendingUpdateRef {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PendingReclaim {
+  pub region_index: RegionIndex,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FreeListTracker {
   // Durable allocator cursor reconstructed from replay decisions.
   pub last_free_list_head: Option<RegionIndex>,
@@ -941,10 +946,12 @@ pub struct FreeListTracker {
 pub struct ReplayTracker<
   const MAX_COLLECTIONS: usize,
   const MAX_PENDING_UPDATES: usize,
+  const MAX_PENDING_RECLAIMS: usize,
 > {
   pub free_list: FreeListTracker,
   pub collections: Vec<CollectionReplayState, MAX_COLLECTIONS>,
   pub pending_updates: Vec<PendingUpdateRef, MAX_PENDING_UPDATES>,
+  pub pending_reclaims: Vec<PendingReclaim, MAX_PENDING_RECLAIMS>,
 }
 ```
 
@@ -974,6 +981,9 @@ tombstone whose older type-bearing records were reclaimed.
 7. `FreeListTracker.free_list_tail` is runtime state reconstructed by
 walking the free-pointer chain from `last_free_list_head`; reclaim uses
 it to link `t_prev.next_tail = r`.
+8. `ReplayTracker.pending_reclaims` maps to replay's ordered pending
+region reclaims that remain incomplete after WAL replay and are
+processed during post-replay recovery.
 
 ## WAL Reclaim Eligibility
 
@@ -1284,7 +1294,11 @@ Preconditions:
 3. Region `0` is reserved as the initial WAL region.
 4. `wal_write_granule >= 1`.
 5. `wal_record_magic != erased_byte`.
-6. `region_count >= 1 + min_free_regions`.
+6. `region_count >= 2 + min_free_regions`.
+This guarantees that after reserving region `0` for the WAL and
+preserving the configured `min_free_regions` reserve, a freshly
+formatted store still has at least one non-reserved free region
+available for ordinary allocations.
 
 Procedure:
 
