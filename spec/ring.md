@@ -276,6 +276,9 @@ The record stores `free_list_head_after`, the next free region after
 removing `region_index` from the free list. Once `alloc_begin` is
 durable, allocator replay state advances even if the reserved region
 is erased before a later `head` or `link` record uses it.
+When written, `region_index` must equal the durable free-list head in
+replay order, and `free_list_head_after` must be the successor that was
+observed from that head's free-pointer chain at allocation time.
 `alloc_begin(region_index, free_list_head_after)` has two replay-visible
 effects:
 1. It advances the durable free-list head to `free_list_head_after`.
@@ -352,7 +355,9 @@ seen a prior valid authoritative type-bearing record for that
 collection, except that `snapshot` and `head` themselves may be the
 record that first establishes that tracked type.
 11. An `alloc_begin(region_index, free_list_head_after)` record is invalid
-if `free_list_head_after` is missing or corrupt.
+if `free_list_head_after` is missing or corrupt, if replay's current
+durable `last_free_list_head` is `none`, or if `region_index` does not
+equal that durable free-list head.
 12. A `free_list_head(region_index_or_none)` record is invalid if the
 payload is corrupt.
 13. A `head(region_index)` or `link(next_region_index, ...)` record that
@@ -585,6 +590,10 @@ collection at WAL positions up to and including this snapshot.
 11. On `alloc_begin(region_index, free_list_head_after)`:
 if `ready_region` is already set, return an error because replay found
 two unmatched allocation reservations.
+if `last_free_list_head = none`, return an error because allocation
+cannot consume an empty durable free list.
+if `last_free_list_head != region_index`, return an error because
+`alloc_begin` did not consume the current durable free-list head.
 set durable `last_free_list_head` to `free_list_head_after`.
 set `ready_region = region_index`.
 12. On `head(collection_id, collection_type, region_index)`:
