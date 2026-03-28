@@ -138,9 +138,11 @@ consuming one use an explicit `free_list_head(region_index_or_none)`
 record. Any operation that writes a newly allocated region must first
 durably reserve that region with
 `alloc_begin(region_index, free_list_head_after)`. The later `head` or
-`link` record that uses that region consumes the reservation;
-otherwise that region write and its allocation are not considered
-durable.
+`link` record that uses that region consumes the reservation. That
+reservation exists to prevent a free region from being leaked across a
+crash between allocation and consumption; once the region has been
+durably consumed, replay no longer needs the historical `alloc_begin`
+for region-consumption validity.
 
 Borromean must also maintain a configured `min_free_regions` reserve.
 Let `max_in_memory_dirty_collections` be the maximum number of dirty
@@ -403,7 +405,8 @@ effects:
 1. It advances the durable free-list head to `free_list_head_after`.
 2. It reserves `region_index` as `ready_region` until a matching durable
 `head(..., region_index)` or `link(... next_region_index = region_index ...)`
-consumes it.
+consumes it. This reservation exists only to preserve crash-safe
+allocator state until consumption so the allocated region cannot leak.
 
 5. `head`
 Commits a collection to a durable region head. Payload contains
@@ -552,8 +555,11 @@ chain immediately; startup validates only the final recovered
 the record asserts that the durable free list is empty.
 20. A `head(collection_id, collection_type, region_index)` or
 `link(next_region_index, ...)` record that commits a newly allocated
-region is valid only if replay has already seen a prior unmatched
-`alloc_begin` for the same region index.
+region is append-valid only if it historically followed a matching
+earlier `alloc_begin` for the same region index. Replay requires a
+prior unmatched `alloc_begin` only when reconstructing a still
+unconsumed `ready_region`; after a durable `head` or `link` has
+consumed that region, the historical `alloc_begin` may be reclaimed.
 21. Durable allocator-head advance happens at `alloc_begin` or
 `free_list_head`, not at `head` or `link`.
 22. Replay may recover only from checksum-invalid or torn aligned WAL
@@ -571,8 +577,8 @@ corruption. A pending WAL-recovery boundary may remain open only at the
 end of the current replay tail region.
 25. Any other invalidity of a complete record is storage corruption and
 startup must fail rather than skipping that record. This includes
-duplicate `new_collection`, collection-type mismatch, `head` or `link`
-without a matching prior `alloc_begin`, any record after a valid
+duplicate `new_collection`, collection-type mismatch, two unmatched
+`alloc_begin` reservations, any record after a valid
 `drop_collection` for the same collection, broken non-tail WAL chain
 links, and committed-region/header mismatch.
 26. `reclaim_begin(region_index)` and `reclaim_end(region_index)` must appear
@@ -892,12 +898,15 @@ set durable `last_head` to that region, set `basis_pos` to this
 record's WAL position, and clear WAL updates/snapshots older than this
 basis decision.
 if `ready_region = region_index`, clear `ready_region`;
-otherwise leave `ready_region` unchanged because this `head`
-retargeted the collection to an already allocated existing region.
+otherwise leave `ready_region` unchanged because this `head` either
+retargeted the collection to an already allocated existing region or
+refers to a region whose historical `alloc_begin` was already consumed
+and later reclaimed.
 13. On `link(next_region_index, expected_sequence)`:
 if `ready_region = next_region_index`, clear `ready_region`.
-otherwise return an error because the region was never reserved by
-`alloc_begin`.
+otherwise leave `ready_region` unchanged because this `link` may refer
+to a WAL-region allocation whose historical `alloc_begin` was already
+consumed and later reclaimed.
 14. On `drop_collection(collection_id)`:
 if `collection_id` is not tracked, create replay state for that
 collection because older retained basis records may already have been
@@ -1163,7 +1172,10 @@ replay order that has not been superseded by a later `alloc_begin` or
 live if either:
 it is the last valid free-list-head decision in replay order; or
 its reservation is still needed to recover unmatched `ready_region`.
-It becomes reclaimable only after both of those properties are false.
+Its reservation role exists only until `head` or `link` durably
+consumes the allocated region; after that point, retaining the record
+is no longer required for region-consumption validity. It becomes
+reclaimable once both of the conditions above are false.
 9. `reclaim_begin(region_index)` record:
 live only if replay still needs it to reconstruct an incomplete reclaim
 transaction for `region_index` that would remain pending after replay.
