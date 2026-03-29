@@ -47,8 +47,10 @@ Before being written to storage, updates to a collection are kept in
 memory. To persist mutations before a full region flush or snapshot,
 each mutation is also written to a global write-ahead log (WAL)
 shared by all collections.
-Per-collection WAL entries contain a stable collection id and opaque
-bytes. Collection ids are opaque 64-bit nonces that are assigned when
+Per-collection WAL entries contain a stable collection id and bytes
+whose meaning is defined by the corresponding collection-specific
+specification; those bytes are opaque to borromean core. Collection ids
+are opaque 64-bit nonces that are assigned when
 a collection is created by `new_collection(collection_id,
 collection_type)`. Collection
 id `0` is reserved for the WAL; all user collection ids are nonzero
@@ -65,7 +67,7 @@ storage state.
 
 A collection head may refer either to
 a committed region or to a WAL-resident snapshot. The data payload in
-each region is defined by the collection type implementation.
+each region is defined by the corresponding collection specification.
 For user collections, append-time validity requires a successful
 `new_collection(collection_id, collection_type)` before any later
 record for that collection may be appended. WAL reclaim may later
@@ -342,14 +344,21 @@ records MUST be encoded little-endian.
 `collection_id: u64`, `sequence: u64`, `payload_len: u32`,
 `collection_type: u16`, `collection_format: u16`,
 `erased_byte: u8`, and `wal_record_magic: u8`.
-3. `RING-DISK-003` `collection_type` is a stable deployment-defined
-`u16` namespace recorded durably in WAL records. Borromean core
-reserves `0x0000` for `wal`; user collection types MUST use nonzero
-values.
+3. `RING-DISK-003` `collection_type` is a stable global `u16`
+namespace recorded durably in WAL records. Borromean core reserves
+`0x0000` for `wal`, `0x0001` for `channel`, `0x0002` for `map`,
+`0x0003..0x00ff` for future core-defined collection types,
+`0x0100..0x7fff` for public extension collection types, and
+`0x8000..0xffff` for private deployment-local collection types that are
+not required to interoperate across deployments.
 4. `RING-DISK-004` `collection_format` is a stable per-region `u16`
-namespace recorded durably in region headers. Borromean core reserves
-`0x0000` for `wal_v1`; user collection formats MUST use nonzero
-values.
+namespace recorded durably in region headers. The pair
+`(collection_type, collection_format)` identifies a concrete committed
+region payload encoding. Borromean core reserves `collection_format =
+0x0000` globally for `wal_v1`; every non-WAL collection format MUST be
+nonzero. For any non-WAL collection type, `0x0001..0x7fff` are stable
+public format identifiers and `0x8000..0xffff` are private
+deployment-local format identifiers.
 5. `RING-DISK-005` Optional region indexes carried inside logical WAL
 records MUST be encoded as `OptRegionIndex`, a one-byte tag followed,
 when the tag is `1`, by a `u32 region_index`. Tag `0` means `none`;
@@ -987,6 +996,32 @@ own rules.
 11. `RING-FORMAT-011` Per-region format evolution remains allowed because region headers
 carry `collection_format` independently of the collection's stable
 type.
+12. `RING-FORMAT-012` Every non-WAL `collection_type` that may appear
+durably on disk MUST have a corresponding normative collection
+specification.
+13. `RING-FORMAT-013` That collection specification MUST define, at
+minimum: the empty logical state established by `new_collection`; the
+exact bytes and interpretation of every supported committed-region
+`collection_format`; the exact bytes and interpretation of `snapshot`
+payloads; the exact bytes and interpretation of `update` payloads; the
+rules for applying updates and merging a durable basis with the
+in-memory frontier; and the collection-specific validation rules used
+when loading a basis or replaying WAL payloads.
+14. `RING-FORMAT-014` For non-WAL collections, the pair
+`(collection_type, collection_format)` MUST identify a unique committed
+region payload format.
+15. `RING-FORMAT-015` An implementation MUST NOT open a database
+successfully if replay yields a live collection whose
+`collection_type` is unsupported by that implementation.
+16. `RING-FORMAT-016` An implementation MUST NOT open a database
+successfully if replay yields a live collection whose retained
+committed-region basis, retained `snapshot` payload, or retained
+post-basis `update` payloads are unsupported or invalid under that
+collection's normative specification.
+17. `RING-FORMAT-017` A dropped tombstone for an unsupported
+collection type may remain as inert replay state. Support for that old
+collection type is not required unless a live basis or retained
+post-basis updates still exist for it.
 
 Invariants:
 
@@ -1250,6 +1285,17 @@ aligned slot whose first byte is `erased_byte` after the last valid
 replayed tail record, so later WAL appends may resume there while the
 ignored corrupt span before that point remains uninterpreted until that
 region is reclaimed or erased for reuse.
+26. `RING-STARTUP-026` If replay yields a live collection whose
+`collection_type` is unsupported by the implementation, startup MUST
+fail.
+27. `RING-STARTUP-027` If replay yields a live collection whose
+retained committed-region basis, retained `snapshot` payload, or
+retained post-basis `update` payloads are unsupported or invalid under
+that collection's normative specification, startup MUST fail before
+open succeeds.
+28. `RING-STARTUP-028` A dropped tombstone whose old
+`collection_type` is unsupported MAY remain as inert metadata and does
+not by itself require startup failure.
 
 ```mermaid
 %%{init: {"flowchart": {"wrappingWidth": 180}} }%%
@@ -1323,6 +1369,9 @@ pub struct RegionIndex(pub u32);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CollectionId(pub u64);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CollectionType(pub u16);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RegionSequence(pub u64);
