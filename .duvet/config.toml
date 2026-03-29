@@ -1,0 +1,15 @@
+'$schema' = "https://awslabs.github.io/duvet/config/v0.4.json"
+
+[[source]]
+pattern = "src/**/*.rs"
+
+[[specification]]
+source = "spec/ring.md"
+
+[report.html]
+enabled = true
+path = ".duvet/reports/report.html"
+
+[report.json]
+enabled = true
+path = ".duvet/reports/report.json"
