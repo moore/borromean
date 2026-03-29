@@ -735,6 +735,35 @@ updates for that collection are discarded from the durable basis, the
 collection leaves the live namespace, and no later WAL record for that
 collection id is valid.
 
+```mermaid
+%%{init: {"flowchart": {"wrappingWidth": 180}} }%%
+flowchart LR
+    NoCollection([NoCollection])
+    EmptyHead["`EmptyHead
+durable basis: new_collection`"]
+    InMemoryDirty["`InMemoryDirty
+RAM frontier over durable basis`"]
+    WALSnapshotHead["`WALSnapshotHead
+durable head: snapshot`"]
+    RegionHead["`RegionHead
+durable head: committed region`"]
+    Dropped(["`Dropped
+durable tombstone`"])
+
+    NoCollection -->|write new_collection record| EmptyHead
+    EmptyHead -->|open state and append updates| InMemoryDirty
+    InMemoryDirty -->|write snapshot| WALSnapshotHead
+    InMemoryDirty -->|flush to committed region| RegionHead
+    WALSnapshotHead -->|load snapshot and resume updates| InMemoryDirty
+    WALSnapshotHead -->|materialize snapshot into region| RegionHead
+    RegionHead -->|open frontier and resume updates| InMemoryDirty
+
+    EmptyHead -->|write drop record| Dropped
+    InMemoryDirty -->|write drop record| Dropped
+    WALSnapshotHead -->|write drop record| Dropped
+    RegionHead -->|write drop record| Dropped
+```
+
 Collection format responsibility:
 
 1. Each non-WAL `collection_format` value is defined by the user
@@ -1029,6 +1058,33 @@ aligned slot whose first byte is `erased_byte` after the last valid
 replayed tail record, so later WAL appends may resume there while the
 ignored corrupt span before that point remains uninterpreted until that
 region is reclaimed or erased for reuse.
+
+```mermaid
+%%{init: {"flowchart": {"wrappingWidth": 180}} }%%
+flowchart TD
+    OpenStore([Open store])
+    ReadMeta["`Read and validate storage metadata`"]
+    ScanRegions["`Scan regions and track max seen sequence`"]
+    TailOk{"`Unique valid WAL tail?`"}
+    Fail([Open fails])
+    ReadHead["`Read WAL prologue and derive WAL head candidate`"]
+    ChainOk{"`WAL chain valid?`"}
+    Rotate{"`Incomplete WAL rotation?`"}
+    RecoverRotate["`Recover missing link or finish target WAL init`"]
+    Replay["`Replay reachable WAL records in WAL order`"]
+    Rebuild["`Rebuild collection state allocator state and free list tail`"]
+    FinishReclaims["`Finish pending reclaims that detached durably`"]
+    OpenReady([Open complete])
+
+    OpenStore --> ReadMeta --> ScanRegions --> TailOk
+    TailOk -->|no| Fail
+    TailOk -->|yes| ReadHead --> ChainOk
+    ChainOk -->|no| Fail
+    ChainOk -->|yes| Rotate
+    Rotate -->|yes| RecoverRotate --> Replay
+    Rotate -->|no| Replay
+    Replay --> Rebuild --> FinishReclaims --> OpenReady
+```
 
 ### Why Reclaimed WAL Regions Cannot Confuse Startup
 
@@ -1351,6 +1407,30 @@ Required write and sync ordering:
 7. Resuming WAL appends after a recovered torn/corrupt tail record:
 `W(wal_recovery()) -> S(wal_recovery) -> W(next_normal_wal_record) -> S(next_normal_wal_record)`.
 
+```mermaid
+%%{init: {"flowchart": {"wrappingWidth": 180}} }%%
+flowchart TD
+    Request([Operation starts])
+    Kind{"`Operation kind`"}
+    Update["`Write update then sync update`"]
+    Snapshot["`Write snapshot then sync snapshot`"]
+    Drop["`Write drop record then sync drop record`"]
+    RegionHead["`Write alloc begin then sync then write region then sync then write head then sync`"]
+    Rotation["`Write alloc begin then sync then write link then sync then init new WAL region then sync`"]
+    Reclaim["`Write reclaim begin then sync then write replacement state then sync then append old region to free list then write and sync reclaim end`"]
+    Recovery["`Write wal recovery then sync then write next normal WAL record then sync`"]
+    Durable([Durable boundary reached])
+
+    Request --> Kind
+    Kind -->|update| Update --> Durable
+    Kind -->|snapshot| Snapshot --> Durable
+    Kind -->|drop| Drop --> Durable
+    Kind -->|region head| RegionHead --> Durable
+    Kind -->|wal rotation| Rotation --> Durable
+    Kind -->|reclaim| Reclaim --> Durable
+    Kind -->|wal recovery| Recovery --> Durable
+```
+
 General region-allocation rule:
 
 1. Any operation that writes a newly allocated region must first make
@@ -1571,6 +1651,19 @@ order.
 free-list head is region `1` iff `region_count >= 2`; otherwise the
 durable free list is empty.
 
+```mermaid
+%%{init: {"flowchart": {"wrappingWidth": 180}} }%%
+flowchart LR
+    Start([Format storage])
+    Erase["`Erase metadata area and all regions`"]
+    WriteMeta["`Write and sync storage metadata`"]
+    InitWal["`Initialize and sync WAL region zero`"]
+    InitFree["`Initialize free list chain in remaining regions`"]
+    Fresh([Fresh formatted store])
+
+    Start --> Erase --> WriteMeta --> InitWal --> InitFree --> Fresh
+```
+
 ### First Open After Fresh Format
 
 Opening a freshly formatted store uses the same startup replay
@@ -1601,6 +1694,19 @@ formatted initial durable free-list head and then applies later
 is always reconstructed by walking the free-pointer chain from the
 recovered durable free-list head; it is not found by scanning WAL
 regions.
+
+```mermaid
+%%{init: {"flowchart": {"wrappingWidth": 180}} }%%
+flowchart LR
+    Fresh([Fresh formatted store])
+    FindTail["`Replay finds WAL head and tail at region zero`"]
+    NoWal["`Replay sees no WAL records`"]
+    DurableHead["`Durable free list head starts at region one when present`"]
+    Runtime["`Runtime state has no collections no ready region and no pending work`"]
+    OpenReady([First open complete])
+
+    Fresh --> FindTail --> NoWal --> DurableHead --> Runtime --> OpenReady
+```
 
 ### Region Reclaim
 
@@ -1676,6 +1782,29 @@ from before reclaim.
 7. Replay either finds a matching `reclaim_end(r)` or can safely
 re-enter the procedure and derive the same result without duplicating
 `r` in the free-list chain.
+
+```mermaid
+%%{init: {"flowchart": {"wrappingWidth": 180}} }%%
+flowchart TD
+    NeedFree([Need to reclaim region r])
+    Begin["`Ensure reclaim begin record is durable`"]
+    Detach["`Detach region r from live collection and WAL state`"]
+    AlreadyFree{"`Region r already in free list?`"}
+    Prep["`Keep region r as free tail candidate`"]
+    PriorTail{"`Prior free list tail exists?`"}
+    LinkPrev["`Write and sync previous tail next pointer`"]
+    NewHead["`Append and sync free list head record`"]
+    UpdateMem["`Update in memory free list head and tail`"]
+    End["`Append and sync reclaim end record`"]
+    Done([Reclaim complete])
+
+    NeedFree --> Begin --> Detach --> AlreadyFree
+    AlreadyFree -->|yes| UpdateMem
+    AlreadyFree -->|no| Prep --> PriorTail
+    PriorTail -->|yes| LinkPrev --> UpdateMem
+    PriorTail -->|no| NewHead --> UpdateMem
+    UpdateMem --> End --> Done
+```
 
 Crash-safety ordering requirement:
 
