@@ -6,6 +6,9 @@ pattern = "src/**/*.rs"
 [[specification]]
 source = "spec/ring.md"
 
+[[specification]]
+source = "spec/implementation.md"
+
 [report.html]
 enabled = true
 path = ".duvet/reports/report.html"
