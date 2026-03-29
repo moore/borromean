@@ -316,21 +316,43 @@ past the end of the region `Header` plus `WalRegionPrologue`; and
 aligned to `wal_write_granule`.
 Replay and append scanning consider candidate WAL record starts only at
 aligned offsets greater than or equal to `wal_record_area_offset`.
+
+Let `wal_escape_byte`, `wal_escape_code_erased`,
+`wal_escape_code_magic`, and `wal_escape_code_escape` be the first four
+byte values in ascending order that are distinct from both
+`erased_byte` and `wal_record_magic`. Because only those two byte
+values are reserved globally, such a four-byte choice always exists.
+
 1. Every physical WAL record begins with a one-byte `record_magic`.
 2. `record_magic` must equal the storage's configured
 `wal_record_magic`, and `wal_record_magic` must not equal
 `erased_byte`, the byte value returned by erased flash.
 3. After the leading `record_magic`, the rest of the physical WAL
-record is encoded with COBS (Consistent Overhead Byte Stuffing), or an
-equivalent compatible byte-stuffing profile, such that neither
-`erased_byte` nor `wal_record_magic` appears anywhere else in the
-encoded record bytes.
-4. Every WAL record start offset within a WAL region must be aligned to
+record is encoded with deterministic byte-stuffing over the logical WAL
+record bytes:
+for a logical byte equal to `erased_byte`, emit
+`wal_escape_byte wal_escape_code_erased`;
+for a logical byte equal to `wal_record_magic`, emit
+`wal_escape_byte wal_escape_code_magic`;
+for a logical byte equal to `wal_escape_byte`, emit
+`wal_escape_byte wal_escape_code_escape`;
+all other logical bytes are emitted unchanged.
+4. During decoding, any `wal_escape_byte` in the encoded body must be
+followed by exactly one of
+`wal_escape_code_erased`, `wal_escape_code_magic`, or
+`wal_escape_code_escape`; any other follower byte is corruption.
+5. Every byte after the leading `record_magic` in a valid encoded WAL
+record therefore differs from both `erased_byte` and
+`wal_record_magic`.
+6. After the full logical record through `record_checksum` has been
+decoded, any remaining bytes up to the aligned physical record end are
+padding. Those padding bytes must all equal `wal_escape_code_escape`.
+7. Every WAL record start offset within a WAL region must be aligned to
 `wal_write_granule`, the smallest writable unit of the backing flash.
-5. The encoded size of every WAL record is rounded up to a multiple of
+8. The encoded size of every WAL record is rounded up to a multiple of
 `wal_write_granule`. Replay advances from one candidate record start to
 the next in aligned `wal_write_granule` steps.
-6. At an aligned candidate record start in a reachable WAL region:
+9. At an aligned candidate record start in a reachable WAL region:
 if the first byte is `erased_byte`, that slot is currently unwritten and
 marks the end of the written portion of that WAL region;
 if the first byte is `wal_record_magic`, that slot is a candidate WAL
@@ -338,25 +360,25 @@ record and must parse and validate normally;
 if the first byte is neither, that slot lies inside a torn/corrupt WAL
 record, so replay keeps scanning forward by aligned
 `wal_write_granule` steps and ignores the corrupt bytes.
-7. The recovered append point for the tail region is the first aligned
+10. The recovered append point for the tail region is the first aligned
 slot whose first byte is `erased_byte` after the last valid replayed
 tail record. If no such slot exists, the tail region is currently full
 and the next WAL append must rotate via `link` to a new WAL region.
-8. Let `wal_link_reserve` be the aligned encoded size needed in the
+11. Let `wal_link_reserve` be the aligned encoded size needed in the
 current tail region to append the trailing
 `link(next_region_index, expected_sequence)` record that completes WAL
 rotation.
-9. Let `wal_rotation_reserve` be the total aligned encoded size needed
+12. Let `wal_rotation_reserve` be the total aligned encoded size needed
 in the current tail region to append the two WAL records required to
 start and complete rotation to a new tail region:
 `alloc_begin(next_region_index, free_list_head_after)` followed by
 `link(next_region_index, expected_sequence)`.
-10. Appending any WAL record to the current tail region, other than the
+13. Appending any WAL record to the current tail region, other than the
 specific `alloc_begin(next_region_index, free_list_head_after)` that
 starts WAL rotation or the trailing `link`, is invalid if doing so
 would leave fewer than `wal_rotation_reserve` unwritten bytes in that
 region.
-11. Appending the `alloc_begin(next_region_index, free_list_head_after)`
+14. Appending the `alloc_begin(next_region_index, free_list_head_after)`
 that starts WAL rotation is invalid unless its aligned end offset still
 leaves at least `wal_link_reserve` and fewer than
 `wal_rotation_reserve` unwritten bytes in that region. This
@@ -381,9 +403,9 @@ Each WAL record encodes the following fields:
 `update`, `snapshot`, `head`, `drop_collection`, `link`, `free_list_head`,
 `reclaim_begin`, `reclaim_end`, and `wal_recovery`
 7. `record_checksum`: checksum covering the full logical record before
-COBS encoding
-8. `padding`: zero or more non-reserved bytes so the encoded record size is a
-multiple of `wal_write_granule`
+byte-stuffing encoding
+8. `padding`: zero or more trailing `wal_escape_code_escape` bytes so
+the physical encoded record size is a multiple of `wal_write_granule`
 
 The record payloads are:
 
@@ -627,7 +649,7 @@ erase-before-reuse guarantee so stale bytes from prior use cannot be
 misinterpreted as new valid records.
 3. Replay distinguishes unwritten space from a torn record by checking
 the aligned slot's first byte against `erased_byte` and
-`wal_record_magic`, and by relying on the COBS-encoded WAL format to
+`wal_record_magic`, and by relying on the escape-stuffed WAL format to
 exclude both reserved byte values from record bodies.
 An aligned slot whose first byte is `erased_byte` marks end of the
 written portion of that WAL region.
