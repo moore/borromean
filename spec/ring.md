@@ -323,6 +323,49 @@ free-list chain, that region MUST NOT be erased until it is allocated
 for reuse.
 9. `RING-STORAGE-009` A WAL region MUST have `collection_id = 0` and
 `collection_format = wal_v1`.
+10. `RING-STORAGE-010` The metadata region MUST occupy exactly one
+`region_size` span at storage offset `0`, MUST NOT be counted in
+`region_count`, and data region `0` MUST begin immediately after that
+metadata region.
+
+### Canonical On-Disk Encoding
+
+Borromean defines one canonical byte-level encoding so independently
+written implementations can interoperate on the same media image.
+
+1. `RING-DISK-001` All fixed-width integer fields in `StorageMetadata`,
+`Header`, `WalRegionPrologue`, free-pointer footers, and logical WAL
+records MUST be encoded little-endian.
+2. `RING-DISK-002` The canonical scalar widths are:
+`region_index: u32`, `region_size: u32`, `region_count: u32`,
+`min_free_regions: u32`, `wal_write_granule: u32`,
+`collection_id: u64`, `sequence: u64`, `payload_len: u32`,
+`collection_type: u16`, `collection_format: u16`,
+`erased_byte: u8`, and `wal_record_magic: u8`.
+3. `RING-DISK-003` `collection_type` is a stable deployment-defined
+`u16` namespace recorded durably in WAL records. Borromean core
+reserves `0x0000` for `wal`; user collection types MUST use nonzero
+values.
+4. `RING-DISK-004` `collection_format` is a stable per-region `u16`
+namespace recorded durably in region headers. Borromean core reserves
+`0x0000` for `wal_v1`; user collection formats MUST use nonzero
+values.
+5. `RING-DISK-005` Optional region indexes carried inside logical WAL
+records MUST be encoded as `OptRegionIndex`, a one-byte tag followed,
+when the tag is `1`, by a `u32 region_index`. Tag `0` means `none`;
+any other tag value is corruption.
+6. `RING-DISK-006` `metadata_checksum`, `header_checksum`,
+`prologue_checksum`, and `record_checksum` MUST all use the standard
+CRC-32C (Castagnoli) parameters (`poly = 0x1edc6f41`,
+`init = 0xffffffff`, `refin = true`, `refout = true`,
+`xorout = 0xffffffff`) and MUST be stored little-endian.
+7. `RING-DISK-007` Unless a structure explicitly says otherwise, the
+checksum for that structure MUST cover the exact logical bytes of every
+earlier field in that structure, in on-disk order, and MUST exclude the
+checksum field itself and any later padding.
+8. `RING-DISK-008` Struct-like layouts in this specification are exact
+byte sequences with no implicit padding; the field order shown is the
+on-disk order.
 
 For WAL regions, the user-data area begins with a fixed
 `WalRegionPrologue`. That prologue records the WAL head that was
@@ -505,6 +548,55 @@ Each WAL record encodes the following fields:
 byte-stuffing encoding
 8. `RING-WAL-FIELD-008` `padding`: zero or more trailing `wal_escape_code_escape` bytes so
 the physical encoded record size is a multiple of `wal_write_granule`
+
+Logical WAL record byte layout before byte-stuffing:
+
+```text
+LogicalWalRecord =
+  record_type:u8
+  [collection_id:u64 if required by record_type]
+  [collection_type:u16 if required by record_type]
+  payload_len:u32
+  payload:[u8; payload_len]
+  [free_list_head_after:OptRegionIndex if record_type = alloc_begin]
+  record_checksum:u32
+```
+
+1. `RING-WAL-LAYOUT-001` `record_type` MUST use these canonical byte
+codes:
+`new_collection = 0x01`,
+`update = 0x02`,
+`snapshot = 0x03`,
+`alloc_begin = 0x04`,
+`head = 0x05`,
+`drop_collection = 0x06`,
+`link = 0x07`,
+`free_list_head = 0x08`,
+`reclaim_begin = 0x09`,
+`reclaim_end = 0x0a`,
+`wal_recovery = 0x0b`.
+2. `RING-WAL-LAYOUT-002` The logical field order before byte-stuffing
+MUST be exactly the order shown above.
+3. `RING-WAL-LAYOUT-003` `payload_len` MUST equal the number of logical
+payload bytes only. It MUST exclude omitted optional fields,
+`record_checksum`, the physical leading `record_magic`, and any
+physical padding.
+4. `RING-WAL-LAYOUT-004` `record_checksum` MUST be CRC-32C over the
+logical WAL record bytes from `record_type` through the final byte of
+the last field preceding `record_checksum`.
+5. `RING-WAL-LAYOUT-005` Record types whose payload is empty
+(`new_collection`, `drop_collection`, and `wal_recovery`) MUST still
+encode `payload_len = 0`.
+6. `RING-WAL-LAYOUT-006` Payload bytes are encoded canonically by record
+type:
+`update` and `snapshot` payloads are opaque collection-defined bytes;
+`alloc_begin`, `head`, `reclaim_begin`, and `reclaim_end` payloads are
+a single `u32 region_index`;
+`link` payload is `next_region_index:u32` followed by
+`expected_sequence:u64`;
+`free_list_head` payload is `OptRegionIndex`;
+`new_collection`, `drop_collection`, and `wal_recovery` payloads are
+empty.
 
 The record payloads are:
 
@@ -939,7 +1031,8 @@ recovery work
 
 Algorithm:
 
-1. `RING-STARTUP-001` Read `StorageMetadata` and validate static geometry (`region_size`,
+1. `RING-STARTUP-001` Read `StorageMetadata`, validate
+`metadata_checksum`, and validate static geometry (`region_size`,
 `region_count`, `min_free_regions`, `erased_byte`,
 `wal_write_granule`, `wal_record_magic`, and storage version support).
 2. `RING-STARTUP-002` Scan all regions, collect candidate WAL regions
@@ -1608,15 +1701,16 @@ append idempotently if the region is not already free.
 
 ## Storage Metadata
 
-```alloy
-one sig StorageMetadata {
-  storage_version: Int,
-  region_size: Int,
-  region_count: Int,
-  min_free_regions: Int,
-  erased_byte: Int,
-  wal_write_granule: Int,
-  wal_record_magic: Int,
+```rust
+struct StorageMetadata {
+  storage_version: u32,
+  region_size: u32,
+  region_count: u32,
+  min_free_regions: u32,
+  wal_write_granule: u32,
+  erased_byte: u8,
+  wal_record_magic: u8,
+  metadata_checksum: u32,
 }
 ```
 
@@ -1627,14 +1721,27 @@ byte value, the minimum writable granule used to align WAL records, and
 the WAL record magic byte. The stored `wal_record_magic` must differ
 from `erased_byte`.
 
+1. `RING-META-001` The canonical on-disk `storage_version` defined by
+this specification MUST be `1`.
+2. `RING-META-002` `StorageMetadata` MUST be encoded as the exact byte
+sequence of the fields shown above, in that order, with no implicit
+padding.
+3. `RING-META-003` `metadata_checksum` MUST be CRC-32C over every
+earlier `StorageMetadata` field in on-disk order.
+4. `RING-META-004` Startup MUST reject the store if
+`metadata_checksum` is invalid or if `storage_version` is unsupported.
+5. `RING-META-005` Any bytes in the metadata region after the encoded
+`StorageMetadata` are reserved, MUST be left erased by formatting, and
+MUST be ignored on read.
+
 ## Header
 
 ```rust
 struct Header {
   sequence: u64,
   collection_id: u64,
-  collection_format: CollectionFormat,
-  header_checksum: [u8; 32],
+  collection_format: u16,
+  header_checksum: u32,
 }
 ```
 
@@ -1655,12 +1762,41 @@ identifier, `wal_v1`, for WAL regions.
 
 The `header_checksum` validates header integrity.
 
+1. `RING-HEADER-001` `Header` MUST be encoded as the exact byte
+sequence of the fields shown above, in that order, with no implicit
+padding.
+2. `RING-HEADER-002` `header_checksum` MUST be CRC-32C over `sequence`,
+`collection_id`, and `collection_format` in on-disk order.
+
+## Free-Pointer Footer
+
+```rust
+struct FreePointerFooter {
+  next_tail: u32,
+}
+```
+
+The free-pointer footer occupies the final four bytes of every data
+region. It is interpreted only when the region is durably reachable
+from the free-list chain.
+
+1. `RING-FREE-001` The free-pointer footer MUST occupy the final four
+bytes of the region.
+2. `RING-FREE-002` If all four footer bytes equal `erased_byte`, the
+footer is uninitialized and represents `next_tail = none`.
+3. `RING-FREE-003` Otherwise the footer MUST decode as a little-endian
+`u32 region_index` strictly less than `region_count`; any other value is
+malformed.
+4. `RING-FREE-004` While a region is allocated for live use, the bytes
+in its free-pointer footer are uninterpreted stale data and MUST NOT be
+used to infer free-list membership.
+
 ## WAL Region Prologue
 
 ```rust
 struct WalRegionPrologue {
   wal_head_region_index: u32,
-  prologue_checksum: [u8; 32],
+  prologue_checksum: u32,
 }
 ```
 
@@ -1678,6 +1814,14 @@ choosing a new value during recovery.
 
 `prologue_checksum` validates the logical prologue contents. It covers
 `wal_head_region_index` in the same byte order used on disk.
+
+1. `RING-PROLOGUE-001` `WalRegionPrologue` MUST be encoded as the exact
+byte sequence of the fields shown above, in that order, with no
+implicit padding.
+2. `RING-PROLOGUE-002` `prologue_checksum` MUST be CRC-32C over
+`wal_head_region_index`.
+3. `RING-PROLOGUE-003` `wal_head_region_index` MUST be strictly less
+than `region_count`.
 
 Let `wal_record_area_offset` be the first offset within a WAL region
 that is both greater than or equal to the end of `Header` plus
@@ -1723,9 +1867,10 @@ collection payloads.
 Procedure:
 
 1. `RING-FORMAT-STORAGE-001` Erase metadata area and all data regions.
-2. `RING-FORMAT-STORAGE-002` Write `StorageMetadata` (`storage_version`, `region_size`,
-`region_count`, `min_free_regions`, `erased_byte`,
-`wal_write_granule`, `wal_record_magic`) and sync metadata.
+2. `RING-FORMAT-STORAGE-002` Write `StorageMetadata` (`storage_version`,
+`region_size`, `region_count`, `min_free_regions`,
+`wal_write_granule`, `erased_byte`, `wal_record_magic`,
+`metadata_checksum`) and sync metadata.
 3. `RING-FORMAT-STORAGE-003` Initialize region `0` as WAL:
 write valid `Header` with `collection_id = 0`,
 `collection_format = wal_v1`, and `sequence = 0`,
@@ -1743,7 +1888,8 @@ regions are durable.
 Postconditions:
 
 1. `RING-FORMAT-STORAGE-POST-001` WAL head and WAL tail MUST both be region `0`.
-2. `RING-FORMAT-STORAGE-POST-002` No user collection durable heads MUST NOT exist after formatting.
+2. `RING-FORMAT-STORAGE-POST-002` A user collection durable head MUST
+NOT exist after formatting.
 3. `RING-FORMAT-STORAGE-POST-003` The free list MUST contain every non-WAL region in ascending region-index
 order.
 4. `RING-FORMAT-STORAGE-POST-004` Because region `0` is reserved as the WAL, the initial durable
