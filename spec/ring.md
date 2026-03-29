@@ -101,11 +101,15 @@ intermixed with other WAL entries and more easily collected when
 stale.
 
 Further snapshotting to the WAL allows bounded RAM usage with an
-unbounded number of collections. If an update
-targets a collection that does not currently have a free in-memory
-buffer, the system may evict the least-frequently-used buffered
-collection by flushing its current state snapshot to the WAL and
-marking that WAL snapshot as the collection's current head.
+unbounded number of collections. However, each collection's mutable
+in-memory update frontier is bounded. If applying another update would
+overflow that frontier, the implementation flushes the current logical
+frontier into a newly allocated collection region, commits that region
+as the new durable head, clears the in-memory frontier, and continues
+accepting later updates into RAM over the new region head. Collections
+therefore remain log-structured: a flush creates a new immutable
+append-only region segment, analogous to an LSM SSTable, instead of
+rewriting an existing live region in place.
 
 In a completed WAL rotation, the last record of the old WAL tail is
 `link(next_region_index, expected_sequence)`, which points to the next
@@ -233,6 +237,16 @@ the last `min_free_regions` free regions.
 14. `RING-CORE-014` If reclaim cannot restore at least
 `min_free_regions` free regions, the database MUST treat ordinary
 writes as out of space until space is freed or the store is migrated.
+15. `RING-CORE-015` Each collection's mutable in-memory update frontier
+MUST have a bounded configured capacity.
+16. `RING-CORE-016` If applying another update would exceed that
+capacity, the implementation MUST flush the collection's current
+logical frontier into a newly allocated region, durably commit that
+region as the collection head, and clear the in-memory frontier before
+accepting further updates for that collection.
+17. `RING-CORE-017` After such a frontier-capacity flush, later updates
+for that collection MUST accumulate in a fresh in-memory frontier
+layered over the newly committed region head.
 
 ### Storage Structure
 
@@ -364,7 +378,7 @@ records MUST be encoded as `OptRegionIndex`, a one-byte tag followed,
 when the tag is `1`, by a `u32 region_index`. Tag `0` means `none`;
 any other tag value is corruption.
 6. `RING-DISK-006` `metadata_checksum`, `header_checksum`,
-`prologue_checksum`, and `record_checksum` MUST all use the standard
+`prologue_checksum`, `footer_checksum`, and `record_checksum` MUST all use the standard
 CRC-32C (Castagnoli) parameters (`poly = 0x1edc6f41`,
 `init = 0xffffffff`, `refin = true`, `refout = true`,
 `xorout = 0xffffffff`) and MUST be stored little-endian.
@@ -821,9 +835,10 @@ in WAL order and are matched by `region_index`.
 
 Checksum trust model:
 
-1. `RING-CHECKSUM-001` During replay, borromean treats a WAL record or region header with a
-valid checksum and otherwise valid local encoding as authoritative at
-the layer described by this spec.
+1. `RING-CHECKSUM-001` During replay, borromean treats a WAL record,
+region header, `WalRegionPrologue`, `StorageMetadata`, or free-pointer
+footer with a valid checksum and otherwise valid local encoding as
+authoritative at the layer described by this spec.
 2. `RING-CHECKSUM-002` Those checksums are intended to catch non-intentional corruption
 such as torn writes, random bit flips, and flash wear. They are not an
 authentication mechanism against an actor who can intentionally rewrite
@@ -975,9 +990,11 @@ with the in-memory frontier.
 basis.
 4. `RING-FORMAT-004` Flush to `RegionHead` materializes the logical state produced by
 that merge.
-5. `RING-FORMAT-005` Formats such as append-only logs or LSM-like structures may keep
-only recent mutable state in RAM while older immutable state remains
-in committed regions.
+5. `RING-FORMAT-005` Every user collection MUST remain log-structured:
+flushing mutable state writes a new immutable committed region segment
+instead of rewriting an existing live region in place. An LSM-style
+layout with SSTable-like immutable regions is one valid way to satisfy
+this requirement.
 6. `RING-FORMAT-006` A `WALSnapshotHead` MUST be loadable into RAM before that
 collection accepts further mutations.
 7. `RING-FORMAT-007` For live user collections, the replay-tracked collection type is
@@ -1255,7 +1272,8 @@ collection id.
 21. `RING-STARTUP-021` Reconstruct runtime `free_list_tail` by following free-pointer
 links starting at `last_free_list_head` until reaching a free region
 whose free-pointer slot is uninitialized.
-If this walk encounters a malformed next pointer, a region that is not
+If this walk encounters a checksum-invalid or malformed free-pointer
+footer, a region that is not
 a valid member of that free-list chain, or exceeds `region_count`
 visited regions before reaching an uninitialized tail slot, return an
 error because the
@@ -1822,21 +1840,29 @@ padding.
 ```rust
 struct FreePointerFooter {
   next_tail: u32,
+  footer_checksum: u32,
 }
 ```
 
-The free-pointer footer occupies the final four bytes of every data
+The free-pointer footer occupies the final eight bytes of every data
 region. It is interpreted only when the region is durably reachable
 from the free-list chain.
 
-1. `RING-FREE-001` The free-pointer footer MUST occupy the final four
+1. `RING-FREE-001` The free-pointer footer MUST occupy the final eight
 bytes of the region.
-2. `RING-FREE-002` If all four footer bytes equal `erased_byte`, the
+2. `RING-FREE-002` If all eight footer bytes equal `erased_byte`, the
 footer is uninitialized and represents `next_tail = none`.
-3. `RING-FREE-003` Otherwise the footer MUST decode as a little-endian
+3. `RING-FREE-003` Otherwise the footer MUST decode as
+`next_tail:u32, footer_checksum:u32`, both little-endian, with
+`footer_checksum` equal to CRC-32C over `next_tail`.
+4. `RING-FREE-004` A checksum-valid non-erased footer MUST decode to a
 `u32 region_index` strictly less than `region_count`; any other value is
 malformed.
-4. `RING-FREE-004` While a region is allocated for live use, the bytes
+5. `RING-FREE-005` Wherever this specification says
+`r.free_pointer.next_tail = x`, it means writing a complete
+`FreePointerFooter` with `next_tail = x` and a matching
+`footer_checksum`.
+6. `RING-FREE-006` While a region is allocated for live use, the bytes
 in its free-pointer footer are uninterpreted stale data and MUST NOT be
 used to infer free-list membership.
 
@@ -1927,9 +1953,9 @@ write a valid `WalRegionPrologue` with `wal_head_region_index = 0`,
 then sync region `0`.
 4. `RING-FORMAT-STORAGE-004` For each region `r` in `[1, region_count - 1]`:
 leave the erased header and payload bytes otherwise uninterpreted, write
-`r.free_pointer.next_tail` to the next region index (`r + 1`) for every
-region except the last, leave the last region's free-pointer slot
-uninitialized, and
+valid `FreePointerFooter { next_tail = r + 1, footer_checksum }` bytes
+for every region except the last, leave the last region's free-pointer
+footer uninitialized, and
 sync `r`.
 5. `RING-FORMAT-STORAGE-005` Formatting is complete only after metadata and all initialized
 regions are durable.
