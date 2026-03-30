@@ -1,0 +1,70 @@
+target = "spec/implementation.md#execution-requirements"
+
+# Execution Requirements
+#
+# 1. `RING-IMPL-EXEC-001` Every fallible storage operation that may
+# require one or more device interactions MUST be expressible as a
+# single future.
+# 2. `RING-IMPL-EXEC-002` Borromean futures MUST make progress only when
+# polled by the caller and when the caller-provided I/O object becomes
+# ready; they MUST NOT rely on background tasks internal to borromean.
+# 3. `RING-IMPL-EXEC-003` A simple single-threaded poll-to-completion
+# executor MUST be sufficient to drive any borromean operation future to
+# completion.
+# 4. `RING-IMPL-EXEC-004` Borromean operations on a given `Storage`
+# instance MUST require exclusive mutable access to that instance unless
+# and until a separate concurrency specification defines stronger
+# sharing rules.
+# 5. `RING-IMPL-EXEC-005` Await boundaries inside borromean operations
+# MUST align only with externally visible I/O steps or with pure
+# in-memory decision points that preserve the ring ordering rules.
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-IMPL-EXEC-001` Every fallible storage operation that may
+require one or more device interactions MUST be expressible as a
+single future.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-IMPL-EXEC-002` Borromean futures MUST make progress only when
+polled by the caller and when the caller-provided I/O object becomes
+ready; they MUST NOT rely on background tasks internal to borromean.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-IMPL-EXEC-002` Borromean futures MUST make progress only when
+polled by the caller and when the caller-provided I/O object becomes
+ready; they MUST NOT rely on background tasks internal to borromean.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-IMPL-EXEC-003` A simple single-threaded poll-to-completion
+executor MUST be sufficient to drive any borromean operation future to
+completion.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-IMPL-EXEC-004` Borromean operations on a given `Storage`
+instance MUST require exclusive mutable access to that instance unless
+and until a separate concurrency specification defines stronger
+sharing rules.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-IMPL-EXEC-005` Await boundaries inside borromean operations
+MUST align only with externally visible I/O steps or with pure
+in-memory decision points that preserve the ring ordering rules.
+'''
+

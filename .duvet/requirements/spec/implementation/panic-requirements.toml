@@ -1,0 +1,55 @@
+target = "spec/implementation.md#panic-requirements"
+
+# Panic Requirements
+#
+# 1. `RING-IMPL-PANIC-001` The borromean core library and its non-test
+# support code MUST be panic free for all input data, including invalid
+# API inputs, corrupt on-storage state, exhausted capacities, and device
+# errors.
+# 2. `RING-IMPL-PANIC-002` Recoverable failures and invariant violations
+# that can be caused by external input or storage state MUST be reported
+# through explicit error results rather than by panicking.
+# 3. `RING-IMPL-PANIC-003` Non-test code MUST NOT use `panic!`,
+# `unwrap()`, `expect()`, `todo!()`, `unimplemented!()`, or
+# `unreachable!()` in any path that can be reached from public APIs or
+# from storage data under validation.
+# 4. `RING-IMPL-PANIC-004` If a condition is believed to be impossible by
+# construction, the implementation SHOULD encode that proof in types,
+# control flow, or checked validation before the point of use rather than
+# relying on a panic as a backstop.
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-IMPL-PANIC-001` The borromean core library and its non-test
+support code MUST be panic free for all input data, including invalid
+API inputs, corrupt on-storage state, exhausted capacities, and device
+errors.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-IMPL-PANIC-002` Recoverable failures and invariant violations
+that can be caused by external input or storage state MUST be reported
+through explicit error results rather than by panicking.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-IMPL-PANIC-003` Non-test code MUST NOT use `panic!`,
+`unwrap()`, `expect()`, `todo!()`, `unimplemented!()`, or
+`unreachable!()` in any path that can be reached from public APIs or
+from storage data under validation.
+'''
+
+[[spec]]
+level = "SHOULD"
+quote = '''
+`RING-IMPL-PANIC-004` If a condition is believed to be impossible by
+construction, the implementation SHOULD encode that proof in types,
+control flow, or checked validation before the point of use rather than
+relying on a panic as a backstop.
+'''
+

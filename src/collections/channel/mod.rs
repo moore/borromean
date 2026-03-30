@@ -2,11 +2,14 @@ use core::marker::PhantomData;
 
 use heapless::Vec;
 
-use crate::io::RegionAddress;
 use crate::vec_like::VecLike;
 use crate::CollectionId;
 #[cfg(test)]
 mod tests;
+
+pub trait ChannelAddress: Copy + Eq + PartialEq + Default {}
+
+impl<T> ChannelAddress for T where T: Copy + Eq + PartialEq + Default {}
 
 #[derive(Debug)]
 pub enum ChannelError {
@@ -31,15 +34,15 @@ pub struct MessageId {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CommandAddress<A: RegionAddress> {
+pub struct CommandAddress<A: ChannelAddress> {
     pub region: A,
     pub offset: usize,
 }
 
-impl<A: RegionAddress> CommandAddress<A> {
+impl<A: ChannelAddress> CommandAddress<A> {
     pub fn zero() -> Self {
         Self {
-            region: A::zero(),
+            region: A::default(),
             offset: 0,
         }
     }
@@ -53,7 +56,7 @@ pub struct MemberSequence {
 
 ///////////// Protocol /////////////
 
-pub enum ChannelCommand<A: RegionAddress, const PAYLOAD_MAX: usize, const CHECKPOINT_MAX: usize> {
+pub enum ChannelCommand<A: ChannelAddress, const PAYLOAD_MAX: usize, const CHECKPOINT_MAX: usize> {
     AddCommand(AddCommand<A, PAYLOAD_MAX>),
     AddMemberCommand(AddMemberCommand<A>),
     CheckPointCommand(CheckPointCommand<A, CHECKPOINT_MAX>),
@@ -75,7 +78,7 @@ pub enum ChannelCommand<A: RegionAddress, const PAYLOAD_MAX: usize, const CHECKP
 /// ordering to the whole channel but I am not sure what problem
 // doing so would solve so I am leaving it out for now.
 #[derive(Debug, Clone)]
-pub struct AddCommand<A: RegionAddress, const PAYLOAD_MAX: usize> {
+pub struct AddCommand<A: ChannelAddress, const PAYLOAD_MAX: usize> {
     /// A command with a sequence one less than
     /// the sequence of this command. It should
     /// be equal to the largest sequence that the
@@ -98,8 +101,8 @@ pub struct AddCommand<A: RegionAddress, const PAYLOAD_MAX: usize> {
     payload: Vec<u8, PAYLOAD_MAX>,
 }
 
-impl<A: RegionAddress, const PAYLOAD_MAX: usize> AddCommand<A, PAYLOAD_MAX> {
-    pub fn new<const MEMBER_LIMIT: usize>(
+impl<A: ChannelAddress, const PAYLOAD_MAX: usize> AddCommand<A, PAYLOAD_MAX> {
+    pub fn into_command<const MEMBER_LIMIT: usize>(
         prior: CommandAddress<A>,
         sender_last: ChannelSequence,
         sequence: ChannelSequence,
@@ -116,22 +119,50 @@ impl<A: RegionAddress, const PAYLOAD_MAX: usize> AddCommand<A, PAYLOAD_MAX> {
             payload,
         })
     }
+
+    pub fn prior(&self) -> &CommandAddress<A> {
+        &self.prior
+    }
+
+    pub fn sender_last(&self) -> ChannelSequence {
+        self.sender_last
+    }
+
+    pub fn sequence(&self) -> ChannelSequence {
+        self.sequence
+    }
+
+    pub fn author(&self) -> MemberId {
+        self.author
+    }
+
+    pub fn message_id(&self) -> MessageId {
+        self.message_id
+    }
+
+    pub fn payload(&self) -> &[u8] {
+        self.payload.as_slice()
+    }
 }
 
 ///////////// Add Member Command /////////////
-pub struct AddMemberCommand<A: RegionAddress> {
+pub struct AddMemberCommand<A: ChannelAddress> {
     member: MemberId,
     phantom: PhantomData<A>,
 }
 
-impl<A: RegionAddress> AddMemberCommand<A> {
-    pub fn new<const PAYLOAD_MAX: usize, const MEMBER_LIMIT: usize>(
+impl<A: ChannelAddress> AddMemberCommand<A> {
+    pub fn into_command<const PAYLOAD_MAX: usize, const MEMBER_LIMIT: usize>(
         member: MemberId,
     ) -> ChannelCommand<A, PAYLOAD_MAX, MEMBER_LIMIT> {
         ChannelCommand::AddMemberCommand(Self {
             member,
             phantom: PhantomData,
         })
+    }
+
+    pub fn member(&self) -> MemberId {
+        self.member
     }
 }
 
@@ -140,7 +171,7 @@ impl<A: RegionAddress> AddMemberCommand<A> {
 /// A check point is used when a one needs to talk about which devices
 /// have sent which commands in a way that allow only describing recent
 /// changes.
-pub struct CheckPointCommand<A: RegionAddress, const USER_LIMIT: usize> {
+pub struct CheckPointCommand<A: ChannelAddress, const USER_LIMIT: usize> {
     /// The checkpoint that this builds on
     previous_checkpoint: CommandAddress<A>,
     /// This is the total number of commands in the channel on this
@@ -153,8 +184,8 @@ pub struct CheckPointCommand<A: RegionAddress, const USER_LIMIT: usize> {
     sequences: Vec<MemberSequence, USER_LIMIT>,
 }
 
-impl<A: RegionAddress, const MEMBER_LIMIT: usize> CheckPointCommand<A, MEMBER_LIMIT> {
-    pub fn new<const PAYLOAD_MAX: usize>(
+impl<A: ChannelAddress, const MEMBER_LIMIT: usize> CheckPointCommand<A, MEMBER_LIMIT> {
+    pub fn into_command<const PAYLOAD_MAX: usize>(
         previous_checkpoint: CommandAddress<A>,
         command_count: u64,
         sequences: &Vec<MemberSequence, MEMBER_LIMIT>,
@@ -164,6 +195,18 @@ impl<A: RegionAddress, const MEMBER_LIMIT: usize> CheckPointCommand<A, MEMBER_LI
             command_count,
             sequences: sequences.clone(),
         })
+    }
+
+    pub fn previous_checkpoint(&self) -> &CommandAddress<A> {
+        &self.previous_checkpoint
+    }
+
+    pub fn command_count(&self) -> u64 {
+        self.command_count
+    }
+
+    pub fn sequences(&self) -> &[MemberSequence] {
+        self.sequences.as_slice()
     }
 }
 
@@ -183,7 +226,7 @@ pub struct Channel<
     'a,
     'b,
     'c,
-    A: RegionAddress,
+    A: ChannelAddress,
     M: VecLike<MemberSequence>,
     U: VecLike<MemberId>,
     P: VecLike<AddCommand<A, PAYLOAD_MAX>>,
@@ -206,7 +249,7 @@ impl<
         'a,
         'b,
         'c,
-        A: RegionAddress,
+        A: ChannelAddress,
         M: VecLike<MemberSequence>,
         U: VecLike<MemberId>,
         P: VecLike<AddCommand<A, PAYLOAD_MAX>>,
@@ -243,7 +286,7 @@ impl<
         &mut self,
         member: MemberId,
     ) -> Result<ChannelCommand<A, PAYLOAD_MAX, CHECKPOINT_MAX>, ChannelError> {
-        let command = AddMemberCommand::new(member);
+        let command = AddMemberCommand::into_command(member);
         self.apply_command(&command)?;
 
         Ok(command)
@@ -258,7 +301,7 @@ impl<
     ) -> Result<ChannelCommand<A, PAYLOAD_MAX, CHECKPOINT_MAX>, ChannelError> {
         let sender_last = self.get_last_sequence(&author)?;
         let sequence = self.get_next_sequence();
-        let command = AddCommand::new(prior, sender_last, sequence, author, message_id, payload);
+        let command = AddCommand::into_command(prior, sender_last, sequence, author, message_id, payload);
         self.apply_command(&command)?;
 
         Ok(command)
@@ -284,6 +327,7 @@ impl<
             }
             ChannelCommand::AddCommand(command) => {
                 // TODO: check that all the sequences and such are valid.
+                self.use_sequence(&command.author(), command.sequence())?;
 
                 let pending_command = command.clone();
                 let Ok(_) = self.pending.push(pending_command) else {
@@ -293,7 +337,10 @@ impl<
                 Ok(())
             }
             ChannelCommand::CheckPointCommand(command) => {
-                unimplemented!()
+                self.checkpoint = command.previous_checkpoint().clone();
+                self.next_sequence = ChannelSequence(command.command_count());
+                self.updates.clear();
+                Ok(())
             }
         }
     }
@@ -333,5 +380,17 @@ impl<
         let sequence = self.next_sequence;
         self.next_sequence = ChannelSequence(sequence.0 + 1);
         sequence
+    }
+
+    pub fn id(&self) -> CollectionId {
+        self.id
+    }
+
+    pub fn checkpoint(&self) -> &CommandAddress<A> {
+        &self.checkpoint
+    }
+
+    pub fn update_count(&self) -> usize {
+        self.updates.len()
     }
 }

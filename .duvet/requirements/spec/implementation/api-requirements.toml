@@ -1,0 +1,60 @@
+target = "spec/implementation.md#api-requirements"
+
+# API Requirements
+#
+# 1. `RING-IMPL-API-001` Public entry points for format, open, replay,
+# and mutating collection operations MUST make their workspace and I/O
+# dependencies explicit in the function signature.
+# 2. `RING-IMPL-API-002` The public API MUST allow a caller to drive the
+# same storage engine from either blocking test shims or asynchronous
+# device adapters without changing borromean correctness logic.
+# 3. `RING-IMPL-API-003` Collection implementations MUST define their
+# opaque payload semantics above the shared storage primitives rather
+# than bypassing WAL and region-management invariants.
+# 4. `RING-IMPL-API-004` The implementation SHOULD keep collection
+# operation APIs close to the prototype's explicit buffer-passing style
+# where that style avoids hidden allocation.
+# 5. `RING-IMPL-API-005` The implementation MAY provide optional helper
+# adapters for common executors or embedded frameworks, but the core
+# crate MUST remain usable without them.
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-IMPL-API-001` Public entry points for format, open, replay,
+and mutating collection operations MUST make their workspace and I/O
+dependencies explicit in the function signature.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-IMPL-API-002` The public API MUST allow a caller to drive the
+same storage engine from either blocking test shims or asynchronous
+device adapters without changing borromean correctness logic.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-IMPL-API-003` Collection implementations MUST define their
+opaque payload semantics above the shared storage primitives rather
+than bypassing WAL and region-management invariants.
+'''
+
+[[spec]]
+level = "SHOULD"
+quote = '''
+`RING-IMPL-API-004` The implementation SHOULD keep collection
+operation APIs close to the prototype's explicit buffer-passing style
+where that style avoids hidden allocation.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-IMPL-API-005` The implementation MAY provide optional helper
+adapters for common executors or embedded frameworks, but the core
+crate MUST remain usable without them.
+'''
+

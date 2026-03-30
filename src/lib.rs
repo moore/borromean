@@ -1,10 +1,58 @@
+//= spec/implementation.md#core-requirements
+//# `RING-IMPL-CORE-001` The core library crate MUST compile with `#![no_std]`.
+//= spec/implementation.md#core-requirements
+//# `RING-IMPL-CORE-002` The core library crate MUST NOT depend on the Rust `alloc` crate.
+//= spec/implementation.md#core-requirements
+//# `RING-IMPL-CORE-003` The core library crate MUST NOT depend on an async runtime, executor, scheduler, or timer facility.
+//= spec/implementation.md#api-requirements
+//# `RING-IMPL-API-005` The implementation MAY provide optional helper adapters for common executors or embedded frameworks, but the core crate MUST remain usable without them.
+//= spec/implementation.md#non-goal-requirements
+//# `RING-IMPL-NONGOAL-001` Borromean core MUST NOT require a specific embedded framework, RTOS, or async executor.
+//= spec/implementation.md#non-goal-requirements
+//# `RING-IMPL-NONGOAL-002` Borromean core MUST NOT assume thread support, background workers, or heap-backed task scheduling.
 #![no_std]
+//= spec/implementation.md#panic-requirements
+//# `RING-IMPL-PANIC-001` The borromean core library and its non-test support code MUST be panic free for all input data, including invalid API inputs, corrupt on-storage state, exhausted capacities, and device errors.
+//= spec/implementation.md#panic-requirements
+//# `RING-IMPL-PANIC-003` Non-test code MUST NOT use `panic!`, `unwrap()`, `expect()`, `todo!()`, `unimplemented!()`, or `unreachable!()` in any path that can be reached from public APIs or from storage data under validation.
+#![cfg_attr(
+    not(test),
+    deny(
+        clippy::unwrap_used,
+        clippy::expect_used,
+        clippy::panic,
+        clippy::todo,
+        clippy::unimplemented,
+        clippy::unreachable
+    )
+)]
 
 #[cfg(test)]
 mod tests;
 
-mod io;
-pub use io::*;
+pub mod disk;
+pub use disk::*;
+
+pub mod mock;
+pub use mock::*;
+
+pub mod flash_io;
+pub use flash_io::*;
+
+pub mod workspace;
+pub use workspace::*;
+
+pub mod startup;
+pub use startup::*;
+
+pub mod storage;
+pub use storage::*;
+
+pub mod wal_record;
+pub use wal_record::*;
+
+pub mod op_future;
+pub use op_future::*;
 
 mod collections;
 pub use collections::*;
@@ -12,69 +60,42 @@ pub use collections::*;
 pub mod vec_like;
 pub use vec_like::*;
 
+use core::fmt::Debug;
+use core::future::Future;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug)]
-pub enum StorageError<B: IoBackend> {
-    Unreachable,
-    RecordTooLarge(usize),
-    ArithmeticOverflow, // TODO: Remove
-    NoFreeRegions,
-    AlreadyInitialized,
-    NotInitialized,
-    InvalidAddress(B::RegionAddress),
-    InvalidHeads,
-    OutOfBounds,
-    InvalidRegionSize,
-    InvalidRegionCount,
-    StorageFull,
-    BackingError(B::BackingError),
-    SerializationError,
-}
-
-impl<B: IoBackend> From<IoError<B::BackingError, B::RegionAddress>> for StorageError<B> {
-    fn from(error: IoError<B::BackingError, B::RegionAddress>) -> Self {
-        match error {
-            IoError::AlreadyCommitted => StorageError::OutOfBounds,
-            IoError::Unreachable => StorageError::Unreachable,
-            IoError::RecordTooLarge(len) => StorageError::RecordTooLarge(len),
-            IoError::StorageFull => StorageError::StorageFull,
-            IoError::AlreadyInitialized => StorageError::AlreadyInitialized,
-            IoError::NotInitialized => StorageError::NotInitialized,
-            IoError::InvalidAddress(address) => StorageError::InvalidAddress(address),
-            IoError::OutOfBounds => StorageError::OutOfBounds,
-            IoError::InvalidRegionSize => StorageError::InvalidRegionSize,
-            IoError::InvalidRegionCount => StorageError::InvalidRegionCount,
-            IoError::InvalidHeads => StorageError::InvalidHeads,
-            IoError::Backing(e) => StorageError::BackingError(e),
-            IoError::RegionNotFound(address) => StorageError::InvalidAddress(address),
-            IoError::SerializationError => StorageError::SerializationError,
-            IoError::BufferTooSmall(_) => StorageError::OutOfBounds,
-        }
-    }
-}
-
-type CollectionIdCounter = u16;
+type CollectionIdCounter = u64;
 
 /// Newtype for collection identifiers
+//= spec/ring.md#core-requirements
+//# RING-CORE-003 Borromean MUST reserve `collection_id = 0` for the WAL, and all user collection identifiers MUST be nonzero stable 64-bit nonces that are never recycled.
+//= spec/ring.md#canonical-on-disk-encoding
+//# RING-DISK-002 The canonical scalar widths are: `region_index: u32`, `region_size: u32`, `region_count: u32`, `min_free_regions: u32`, `wal_write_granule: u32`, `collection_id: u64`, `sequence: u64`, `payload_len: u32`, `collection_type: u16`, `collection_format: u16`, `erased_byte: u8`, and `wal_record_magic: u8`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord)]
 pub struct CollectionId(pub(crate) CollectionIdCounter);
 
 impl CollectionId {
+    //= spec/implementation.md#arithmetic-requirements
+    //# `RING-IMPL-ARITH-001` Integer arithmetic that can affect storage layout, region addressing, WAL offsets, lengths, indexes, capacities, or sequence advancement MUST use checked arithmetic or an equivalent construction that makes overflow and underflow impossible by construction.
+    //= spec/implementation.md#arithmetic-requirements
+    //# `RING-IMPL-ARITH-002` If such arithmetic cannot be proven safe by construction and a checked operation fails, the implementation MUST return an explicit error rather than wrap, saturate, or silently truncate.
+    //= spec/implementation.md#arithmetic-requirements
+    //# `RING-IMPL-ARITH-003` The implementation MUST NOT rely on wrapping integer behavior for correctness unless a future disk-format requirement explicitly defines modulo arithmetic for that field.
     pub fn to_le_bytes(&self) -> [u8; size_of::<CollectionIdCounter>()] {
-        self.0.to_be_bytes()
+        self.0.to_le_bytes()
     }
 
     pub fn increment(&self) -> Option<Self> {
-        let Some(next) = self.0.checked_add(1) else {
-            return None;
-        };
-
+        let next = self.0.checked_add(1)?;
         Some(Self(next))
     }
 }
 
 /// Represents different types of collections that can be stored
+//= spec/ring.md#core-requirements
+//# RING-CORE-004 Borromean core MUST reserve `collection_type = wal` for `collection_id = 0`, and user collections MUST NOT use that collection type.
+//= spec/ring.md#canonical-on-disk-encoding
+//# RING-DISK-003 `collection_type` is a stable global `u16` namespace recorded durably in WAL records. Borromean core reserves `0x0000` for `wal`, `0x0001` for `channel`, `0x0002` for `map`, `0x0003..0x00ff` for future core-defined collection types, `0x0100..0x7fff` for public extension collection types, and `0x8000..0xffff` for private deployment-local collection types that are not required to interoperate across deployments.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CollectionType {
     Uninitialized,
@@ -84,61 +105,808 @@ pub enum CollectionType {
     Map,     // Key-value store
 }
 
+impl CollectionType {
+    pub const WAL_CODE: u16 = 0;
+    pub const CHANNEL_CODE: u16 = 1;
+    pub const MAP_CODE: u16 = 2;
+
+    pub fn stable_code(self) -> Option<u16> {
+        match self {
+            Self::Wal => Some(Self::WAL_CODE),
+            Self::Channel => Some(Self::CHANNEL_CODE),
+            Self::Map => Some(Self::MAP_CODE),
+            Self::Uninitialized | Self::Free => None,
+        }
+    }
+}
+
 pub trait Collection {
     fn id(&self) -> CollectionId;
     fn collection_type(&self) -> CollectionType;
 }
 
-pub struct Storage<'a, B: IoBackend, const MAX_HEADS: usize> {
-    io: Io<'a, B, MAX_HEADS>,
+//= spec/implementation.md#architecture-requirements
+//# `RING-IMPL-ARCH-001` `Storage` MUST own logical storage state and configuration, but MUST NOT require long-lived ownership of the backing I/O object.
+pub struct Storage<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize> {
+    state: StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
 }
 
-impl<'a, B, const MAX_HEADS: usize> Storage<'a, B, MAX_HEADS>
-where
-    B: IoBackend,
-    StorageError<B>: From<IoError<B::BackingError, B::RegionAddress>>,
+#[derive(Debug)]
+pub enum StorageOpenError {
+    Runtime(StorageRuntimeError),
+    UnsupportedLiveCollectionType(u16),
+    Map(MapStorageError),
+}
+
+impl From<StorageRuntimeError> for StorageOpenError {
+    fn from(error: StorageRuntimeError) -> Self {
+        Self::Runtime(error)
+    }
+}
+
+impl From<StartupError> for StorageOpenError {
+    fn from(error: StartupError) -> Self {
+        Self::Runtime(error.into())
+    }
+}
+
+impl From<MapStorageError> for StorageOpenError {
+    fn from(error: MapStorageError) -> Self {
+        Self::Map(error)
+    }
+}
+
+impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
+    Storage<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>
 {
-    pub fn init(
-        backing: &'a mut B,
-        region_size: usize,
-        region_count: usize,
-    ) -> Result<Self, StorageError<B>> {
-        if backing.is_initialized()? {
-            return Err(StorageError::AlreadyInitialized);
-        }
-
-        let io = Io::init(backing, region_size, region_count)?;
-        Ok(Self { io })
+    //= spec/implementation.md#api-requirements
+    //# `RING-IMPL-API-001` Public entry points for format, open, replay, and mutating collection operations MUST make their workspace and I/O dependencies explicit in the function signature.
+    //= spec/implementation.md#architecture-requirements
+    //# `RING-IMPL-ARCH-002` The backing I/O object MUST instead be passed into operation entry points or operation builders so the same `Storage` value can participate in externally driven async execution.
+    pub fn format_future<
+        'a,
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
+        flash: &'a mut IO,
+        workspace: &'a mut StorageWorkspace<REGION_SIZE>,
+        min_free_regions: u32,
+        wal_write_granule: u32,
+        wal_record_magic: u8,
+    ) -> impl Future<Output = Result<Self, StorageRuntimeError>> + 'a {
+        run_once(move || {
+            Self::format::<REGION_SIZE, REGION_COUNT, IO>(
+                flash,
+                workspace,
+                min_free_regions,
+                wal_write_granule,
+                wal_record_magic,
+            )
+        })
     }
 
-    pub fn open(backing: &'a mut B) -> Result<Self, StorageError<B>> {
-        if !backing.is_initialized()? {
-            return Err(StorageError::NotInitialized);
-        }
-
-        let io = Io::open(backing)?;
-
-        Ok(Self { io })
+    pub fn format<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        min_free_regions: u32,
+        wal_write_granule: u32,
+        wal_record_magic: u8,
+    ) -> Result<Self, StorageRuntimeError> {
+        Ok(Self {
+            state: storage::format::<
+                REGION_SIZE,
+                REGION_COUNT,
+                IO,
+                MAX_COLLECTIONS,
+                MAX_PENDING_RECLAIMS,
+            >(flash, workspace, min_free_regions, wal_write_granule, wal_record_magic)?,
+        })
     }
 
-    pub fn new_collection(
+    //= spec/implementation.md#api-requirements
+    //# `RING-IMPL-API-002` The public API MUST allow a caller to drive the same storage engine from either blocking test shims or asynchronous device adapters without changing borromean correctness logic.
+    pub fn open_future<'a, const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
+        flash: &'a mut IO,
+        workspace: &'a mut StorageWorkspace<REGION_SIZE>,
+    ) -> impl Future<Output = Result<Self, StorageOpenError>> + 'a {
+        OpenStorageFuture::<
+            MAX_COLLECTIONS,
+            MAX_PENDING_RECLAIMS,
+            REGION_SIZE,
+            REGION_COUNT,
+            IO,
+        >::new(flash, workspace)
+    }
+
+    pub fn open<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+    ) -> Result<Self, StorageOpenError> {
+        let storage = Self {
+            state: storage::open::<
+                REGION_SIZE,
+                REGION_COUNT,
+                IO,
+                MAX_COLLECTIONS,
+                MAX_PENDING_RECLAIMS,
+            >(flash, workspace)?,
+        };
+        storage.validate_live_collections::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace)?;
+        Ok(storage)
+    }
+
+    pub fn runtime(&self) -> &StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS> {
+        &self.state
+    }
+
+    pub fn runtime_mut(&mut self) -> &mut StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS> {
+        &mut self.state
+    }
+
+    pub fn into_runtime(self) -> StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS> {
+        self.state
+    }
+
+    pub fn metadata(&self) -> StorageMetadata {
+        self.state.metadata()
+    }
+
+    pub fn wal_head(&self) -> u32 {
+        self.state.wal_head()
+    }
+
+    pub fn wal_tail(&self) -> u32 {
+        self.state.wal_tail()
+    }
+
+    pub fn wal_append_offset(&self) -> usize {
+        self.state.wal_append_offset()
+    }
+
+    pub fn last_free_list_head(&self) -> Option<u32> {
+        self.state.last_free_list_head()
+    }
+
+    pub fn free_list_tail(&self) -> Option<u32> {
+        self.state.free_list_tail()
+    }
+
+    pub fn ready_region(&self) -> Option<u32> {
+        self.state.ready_region()
+    }
+
+    pub fn max_seen_sequence(&self) -> u64 {
+        self.state.max_seen_sequence()
+    }
+
+    pub fn collections(&self) -> &[StartupCollection] {
+        self.state.collections()
+    }
+
+    pub fn pending_reclaims(&self) -> &[u32] {
+        self.state.pending_reclaims()
+    }
+
+    pub fn pending_wal_recovery_boundary(&self) -> bool {
+        self.state.pending_wal_recovery_boundary()
+    }
+
+    pub fn tracked_user_collection_count(&self) -> usize {
+        self.state.tracked_user_collection_count()
+    }
+
+    pub(crate) fn validate_live_collections<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
+        &self,
+        _flash: &mut IO,
+        _workspace: &mut StorageWorkspace<REGION_SIZE>,
+    ) -> Result<(), StorageOpenError> {
+        for collection in self.collections() {
+            if collection.basis() == StartupCollectionBasis::Dropped {
+                continue;
+            }
+
+            let Some(collection_type) = collection.collection_type() else {
+                return Err(StorageOpenError::UnsupportedLiveCollectionType(0xffff));
+            };
+
+            //= spec/ring.md#collection-head-state-machine
+            //# `RING-FORMAT-015` An implementation MUST NOT open a database successfully if replay yields a live collection whose `collection_type` is unsupported by that implementation.
+            match collection_type {
+                CollectionType::MAP_CODE => {}
+                other => return Err(StorageOpenError::UnsupportedLiveCollectionType(other)),
+            }
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn from_runtime(
+        state: StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+    ) -> Self {
+        Self { state }
+    }
+
+    pub fn append_new_collection<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
         &mut self,
-        collection_type: CollectionType,
-    ) -> Result<CollectionId, StorageError<B>> {
-        unimplemented!()
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        collection_id: CollectionId,
+        collection_type: u16,
+    ) -> Result<(), StorageRuntimeError> {
+        self.state
+            .append_new_collection::<REGION_SIZE, REGION_COUNT, IO>(
+                flash,
+                workspace,
+                collection_id,
+                collection_type,
+            )
     }
 
-    pub fn get_collection_mut<'b, C: Collection>(
-        &'b mut self,
-        id: CollectionId,
-    ) -> Result<&'b mut C, StorageError<B>> {
-        unimplemented!()
+    pub fn append_update<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        collection_id: CollectionId,
+        payload: &[u8],
+    ) -> Result<(), StorageRuntimeError> {
+        self.state
+            .append_update::<REGION_SIZE, REGION_COUNT, IO>(
+                flash,
+                workspace,
+                collection_id,
+                payload,
+            )
     }
 
-    pub fn get_collection<'b, C: Collection>(
-        &'b self,
-        id: CollectionId,
-    ) -> Result<&'b C, StorageError<B>> {
-        unimplemented!()
+    pub fn append_snapshot<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        collection_id: CollectionId,
+        collection_type: u16,
+        payload: &[u8],
+    ) -> Result<(), StorageRuntimeError> {
+        self.state
+            .append_snapshot::<REGION_SIZE, REGION_COUNT, IO>(
+                flash,
+                workspace,
+                collection_id,
+                collection_type,
+                payload,
+            )
+    }
+
+    pub fn append_head<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        collection_id: CollectionId,
+        collection_type: u16,
+        region_index: u32,
+    ) -> Result<(), StorageRuntimeError> {
+        self.state
+            .append_head::<REGION_SIZE, REGION_COUNT, IO>(
+                flash,
+                workspace,
+                collection_id,
+                collection_type,
+                region_index,
+            )
+    }
+
+    pub fn append_drop_collection<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        collection_id: CollectionId,
+    ) -> Result<(), StorageRuntimeError> {
+        self.state
+            .append_drop_collection::<REGION_SIZE, REGION_COUNT, IO>(
+                flash,
+                workspace,
+                collection_id,
+            )
+    }
+
+    pub fn append_alloc_begin<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        region_index: u32,
+        free_list_head_after: Option<u32>,
+    ) -> Result<(), StorageRuntimeError> {
+        self.state
+            .append_alloc_begin::<REGION_SIZE, REGION_COUNT, IO>(
+                flash,
+                workspace,
+                region_index,
+                free_list_head_after,
+            )
+    }
+
+    pub fn append_free_list_head<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        region_index: Option<u32>,
+    ) -> Result<(), StorageRuntimeError> {
+        self.state
+            .append_free_list_head::<REGION_SIZE, REGION_COUNT, IO>(
+                flash,
+                workspace,
+                region_index,
+            )
+    }
+
+    pub fn append_reclaim_begin<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        region_index: u32,
+    ) -> Result<(), StorageRuntimeError> {
+        self.state
+            .append_reclaim_begin::<REGION_SIZE, REGION_COUNT, IO>(
+                flash,
+                workspace,
+                region_index,
+            )
+    }
+
+    pub fn append_reclaim_end<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        region_index: u32,
+    ) -> Result<(), StorageRuntimeError> {
+        self.state
+            .append_reclaim_end::<REGION_SIZE, REGION_COUNT, IO>(
+                flash,
+                workspace,
+                region_index,
+            )
+    }
+
+    pub fn reclaim_wal_head<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+    ) -> Result<u32, StorageRuntimeError> {
+        self.state
+            .reclaim_wal_head::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace)
+    }
+
+    pub fn reclaim_wal_head_future<
+        'a,
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
+        &'a mut self,
+        flash: &'a mut IO,
+        workspace: &'a mut StorageWorkspace<REGION_SIZE>,
+    ) -> impl Future<Output = Result<u32, StorageRuntimeError>> + 'a {
+        ReclaimWalHeadFuture::<
+            MAX_COLLECTIONS,
+            MAX_PENDING_RECLAIMS,
+            REGION_SIZE,
+            REGION_COUNT,
+            IO,
+        >::new(self, flash, workspace)
+    }
+
+    pub fn complete_pending_reclaim<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        region_index: u32,
+    ) -> Result<(), StorageRuntimeError> {
+        self.state
+            .complete_pending_reclaim::<REGION_SIZE, REGION_COUNT, IO>(
+                flash,
+                workspace,
+                region_index,
+            )
+    }
+
+    pub fn append_wal_recovery<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+    ) -> Result<(), StorageRuntimeError> {
+        self.state
+            .append_wal_recovery::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace)
+    }
+
+    pub fn append_wal_rotation_start<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+    ) -> Result<u32, StorageRuntimeError> {
+        self.state
+            .append_wal_rotation_start::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace)
+    }
+
+    pub fn append_wal_rotation_finish<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        next_region_index: u32,
+    ) -> Result<(), StorageRuntimeError> {
+        self.state
+            .append_wal_rotation_finish::<REGION_SIZE, REGION_COUNT, IO>(
+                flash,
+                workspace,
+                next_region_index,
+            )
+    }
+
+    pub fn create_map<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        collection_id: CollectionId,
+    ) -> Result<(), StorageRuntimeError> {
+        self.append_new_collection::<REGION_SIZE, REGION_COUNT, IO>(
+            flash,
+            workspace,
+            collection_id,
+            CollectionType::MAP_CODE,
+        )
+    }
+
+    pub fn create_map_future<
+        'a,
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
+        &'a mut self,
+        flash: &'a mut IO,
+        workspace: &'a mut StorageWorkspace<REGION_SIZE>,
+        collection_id: CollectionId,
+    ) -> impl Future<Output = Result<(), StorageRuntimeError>> + 'a {
+        run_once(move || self.create_map::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace, collection_id))
+    }
+
+    pub fn snapshot_map<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+        K,
+        V,
+        const MAX_INDEXES: usize,
+    >(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        map: &LsmMap<'_, K, V, MAX_INDEXES>,
+    ) -> Result<(), MapStorageError>
+    where
+        K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
+        V: Debug + Serialize + for<'de> Deserialize<'de>,
+    {
+        map.write_snapshot_to_storage::<
+            REGION_SIZE,
+            REGION_COUNT,
+            IO,
+            MAX_COLLECTIONS,
+            MAX_PENDING_RECLAIMS,
+        >(&mut self.state, flash, workspace)
+    }
+
+    pub fn snapshot_map_future<
+        'a,
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+        K,
+        V,
+        const MAX_INDEXES: usize,
+    >(
+        &'a mut self,
+        flash: &'a mut IO,
+        workspace: &'a mut StorageWorkspace<REGION_SIZE>,
+        map: &'a LsmMap<'a, K, V, MAX_INDEXES>,
+    ) -> impl Future<Output = Result<(), MapStorageError>> + 'a
+    where
+        K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
+        V: Debug + Serialize + for<'de> Deserialize<'de>,
+    {
+        run_once(move || self.snapshot_map::<REGION_SIZE, REGION_COUNT, IO, K, V, MAX_INDEXES>(flash, workspace, map))
+    }
+
+    //= spec/implementation.md#api-requirements
+    //# `RING-IMPL-API-004` The implementation SHOULD keep collection
+    //# operation APIs close to the prototype's explicit buffer-passing style
+    //# where that style avoids hidden allocation.
+    pub fn append_map_update<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+        K,
+        V,
+        const MAX_INDEXES: usize,
+    >(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        collection_id: CollectionId,
+        update: &MapUpdate<K, V>,
+        payload_buffer: &mut [u8],
+    ) -> Result<(), MapStorageError>
+    where
+        K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
+        V: Debug + Serialize + for<'de> Deserialize<'de>,
+    {
+        //= spec/implementation.md#api-requirements
+        //# `RING-IMPL-API-003` Collection implementations MUST define their opaque payload semantics above the shared storage primitives rather than bypassing WAL and region-management invariants.
+        let Some(collection) = self
+            .state
+            .collections()
+            .iter()
+            .find(|collection| collection.collection_id() == collection_id)
+        else {
+            return Err(MapStorageError::UnknownCollection(collection_id));
+        };
+        if collection.basis() == StartupCollectionBasis::Dropped {
+            return Err(MapStorageError::DroppedCollection(collection_id));
+        }
+        if collection.collection_type() != Some(CollectionType::MAP_CODE) {
+            return Err(MapStorageError::CollectionTypeMismatch {
+                collection_id,
+                expected: CollectionType::MAP_CODE,
+                actual: collection.collection_type(),
+            });
+        }
+
+        let used = LsmMap::<K, V, MAX_INDEXES>::encode_update_into(update, payload_buffer)?;
+        self.state
+            .append_update::<REGION_SIZE, REGION_COUNT, IO>(
+                flash,
+                workspace,
+                collection_id,
+                &payload_buffer[..used],
+            )
+            .map_err(MapStorageError::from)
+    }
+
+    pub fn append_map_update_future<
+        'a,
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+        K,
+        V,
+        const MAX_INDEXES: usize,
+    >(
+        &'a mut self,
+        flash: &'a mut IO,
+        workspace: &'a mut StorageWorkspace<REGION_SIZE>,
+        collection_id: CollectionId,
+        update: &'a MapUpdate<K, V>,
+        payload_buffer: &'a mut [u8],
+    ) -> impl Future<Output = Result<(), MapStorageError>> + 'a
+    where
+        K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
+        V: Debug + Serialize + for<'de> Deserialize<'de>,
+    {
+        //= spec/implementation.md#collection-requirements
+        //# `RING-IMPL-COLL-003` A collection operation that needs I/O MUST be drivable through the same runtime-agnostic future model as core storage operations.
+        run_once(move || {
+            self.append_map_update::<REGION_SIZE, REGION_COUNT, IO, K, V, MAX_INDEXES>(
+                flash,
+                workspace,
+                collection_id,
+                update,
+                payload_buffer,
+            )
+        })
+    }
+
+    pub fn flush_map<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+        K,
+        V,
+        const MAX_INDEXES: usize,
+    >(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        map: &LsmMap<'_, K, V, MAX_INDEXES>,
+    ) -> Result<u32, MapStorageError>
+    where
+        K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
+        V: Debug + Serialize + for<'de> Deserialize<'de>,
+    {
+        map.flush_to_storage::<
+            REGION_SIZE,
+            REGION_COUNT,
+            IO,
+            MAX_COLLECTIONS,
+            MAX_PENDING_RECLAIMS,
+        >(&mut self.state, flash, workspace)
+    }
+
+    pub fn flush_map_future<
+        'a,
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+        K,
+        V,
+        const MAX_INDEXES: usize,
+    >(
+        &'a mut self,
+        flash: &'a mut IO,
+        workspace: &'a mut StorageWorkspace<REGION_SIZE>,
+        map: &'a LsmMap<'a, K, V, MAX_INDEXES>,
+    ) -> impl Future<Output = Result<u32, MapStorageError>> + 'a
+    where
+        K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
+        V: Debug + Serialize + for<'de> Deserialize<'de>,
+    {
+        //= spec/implementation.md#collection-requirements
+        //# `RING-IMPL-COLL-003` A collection operation that needs I/O MUST be drivable through the same runtime-agnostic future model as core storage operations.
+        FlushMapFuture::<
+            MAX_COLLECTIONS,
+            MAX_PENDING_RECLAIMS,
+            REGION_SIZE,
+            REGION_COUNT,
+            IO,
+            K,
+            V,
+            MAX_INDEXES,
+        >::new(self, flash, workspace, map)
+    }
+
+    pub fn drop_map<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        collection_id: CollectionId,
+    ) -> Result<Option<u32>, MapStorageError> {
+        let Some(collection) = self
+            .state
+            .collections()
+            .iter()
+            .find(|collection| collection.collection_id() == collection_id)
+        else {
+            return Err(MapStorageError::UnknownCollection(collection_id));
+        };
+        if collection.basis() == StartupCollectionBasis::Dropped {
+            return Err(MapStorageError::DroppedCollection(collection_id));
+        }
+        if collection.collection_type() != Some(CollectionType::MAP_CODE) {
+            return Err(MapStorageError::CollectionTypeMismatch {
+                collection_id,
+                expected: CollectionType::MAP_CODE,
+                actual: collection.collection_type(),
+            });
+        }
+
+        self.state
+            .drop_collection_and_begin_reclaim::<REGION_SIZE, REGION_COUNT, IO>(
+                flash,
+                workspace,
+                collection_id,
+            )
+            .map_err(MapStorageError::from)
+    }
+
+    pub fn drop_map_future<
+        'a,
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
+        &'a mut self,
+        flash: &'a mut IO,
+        workspace: &'a mut StorageWorkspace<REGION_SIZE>,
+        collection_id: CollectionId,
+    ) -> impl Future<Output = Result<Option<u32>, MapStorageError>> + 'a {
+        run_once(move || self.drop_map::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace, collection_id))
+    }
+
+    pub fn open_map<
+        'a,
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+        K,
+        V,
+        const MAX_INDEXES: usize,
+    >(
+        &self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        collection_id: CollectionId,
+        buffer: &'a mut [u8],
+    ) -> Result<LsmMap<'a, K, V, MAX_INDEXES>, MapStorageError>
+    where
+        K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
+        V: Debug + Serialize + for<'de> Deserialize<'de>,
+    {
+        LsmMap::<K, V, MAX_INDEXES>::open_from_storage::<
+            REGION_SIZE,
+            REGION_COUNT,
+            IO,
+            MAX_COLLECTIONS,
+            MAX_PENDING_RECLAIMS,
+        >(&self.state, flash, workspace, collection_id, buffer)
     }
 }

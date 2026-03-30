@@ -1,12 +1,14 @@
-use crate::collections::wal::Wal;
-use crate::io::{Io, IoBackend, IoError, RegionAddress, RegionSequence};
-use crate::CollectionId;
+use crate::disk::{DiskError, FreePointerFooter, Header};
+use crate::flash_io::FlashIo;
+use crate::mock::MockError;
+use crate::storage::{StorageRuntime, StorageRuntimeError, StorageVisitError};
+use crate::workspace::StorageWorkspace;
+use crate::{CollectionId, CollectionType};
 use core::fmt::Debug;
 use core::marker::PhantomData;
 use core::mem::size_of;
 use postcard::{from_bytes, to_slice};
 use serde::{Deserialize, Serialize};
-use heapless::Vec;
 
 #[cfg(test)]
 mod tests;
@@ -45,12 +47,16 @@ pub enum MapError {
     InvalidEntryCount,
     SerializationError,
     IndexOutOfBounds,
+    SnapshotTooLarge,
+    BufferTooSmall,
 }
 
 impl From<postcard::Error> for MapError {
-    fn from(_: postcard::Error) -> Self {
-        // TODO: log error
-        MapError::SerializationError
+    fn from(error: postcard::Error) -> Self {
+        match error {
+            postcard::Error::SerializeBufferFull => MapError::BufferTooSmall,
+            _ => MapError::SerializationError,
+        }
     }
 }
 
@@ -78,6 +84,71 @@ struct EntryRef {
 
 const ENTRY_REF_POINTER_SIZE: usize = size_of::<RefType>();
 const ENTRY_REF_SIZE: usize = ENTRY_REF_POINTER_SIZE * 2;
+const SNAPSHOT_ENTRY_COUNT_SIZE: usize = size_of::<u32>();
+const SNAPSHOT_ENTRY_BYTES_LEN_SIZE: usize = size_of::<u32>();
+const REGION_SNAPSHOT_LEN_SIZE: usize = size_of::<u32>();
+
+pub const MAP_REGION_V1_FORMAT: u16 = 1;
+pub const EMPTY_MAP_SNAPSHOT: [u8; SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE] =
+    [0u8; SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE];
+
+#[derive(Debug)]
+pub enum MapStorageError {
+    Map(MapError),
+    Storage(StorageRuntimeError),
+    Mock(MockError),
+    Disk(DiskError),
+    UnknownCollection(CollectionId),
+    DroppedCollection(CollectionId),
+    CollectionTypeMismatch {
+        collection_id: CollectionId,
+        expected: u16,
+        actual: Option<u16>,
+    },
+    UnsupportedRegionFormat {
+        collection_id: CollectionId,
+        region_index: u32,
+        actual: u16,
+    },
+}
+
+impl From<MapError> for MapStorageError {
+    fn from(error: MapError) -> Self {
+        Self::Map(error)
+    }
+}
+
+impl From<StorageRuntimeError> for MapStorageError {
+    fn from(error: StorageRuntimeError) -> Self {
+        Self::Storage(error)
+    }
+}
+
+impl From<MockError> for MapStorageError {
+    fn from(error: MockError) -> Self {
+        Self::Mock(error)
+    }
+}
+
+impl From<DiskError> for MapStorageError {
+    fn from(error: DiskError) -> Self {
+        Self::Disk(error)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(bound(
+    serialize = "K: Serialize, V: Serialize",
+    deserialize = "K: Deserialize<'de>, V: Deserialize<'de>"
+))]
+pub enum MapUpdate<K, V>
+where
+    K: Debug + Ord + PartialOrd + Eq + PartialEq,
+    V: Debug,
+{
+    Set { key: K, value: V },
+    Delete { key: K },
+}
 
 impl EntryRef {
     fn write(
@@ -112,9 +183,6 @@ impl EntryRef {
         start: RecordOffset,
         end: RecordOffset,
     ) -> Result<(), MapError> {
-        let location = index.0;
-        let current = index.0 + 1;
-
         let current_offset = index.offset(buffer)? + ENTRY_REF_SIZE;
         let target_offset = last_index.next().offset(buffer)?;
         let end_offset = last_index.offset(buffer)?;
@@ -136,10 +204,7 @@ impl EntryRef {
         );
         let end = RefType::from_le_bytes(buf);
 
-        let entry = Self {
-            start: start,
-            end: end,
-        };
+        let entry = Self { start, end };
 
         Ok(entry)
     }
@@ -150,17 +215,6 @@ struct EntryCount(u32);
 const ENTRY_COUNT_SIZE: usize = size_of::<EntryCount>();
 
 impl EntryCount {
-    fn from_bytes(bytes: &[u8]) -> Result<Self, MapError> {
-        if bytes.len() < ENTRY_COUNT_SIZE {
-            return Err(MapError::InvalidEntryCount);
-        }
-
-        let mut buffer = [0u8; ENTRY_COUNT_SIZE];
-        buffer.copy_from_slice(&bytes[..ENTRY_COUNT_SIZE]);
-        let count = u32::from_le_bytes(buffer);
-        Ok(Self(count))
-    }
-
     fn to_bytes(&self) -> [u8; ENTRY_COUNT_SIZE] {
         self.0.to_le_bytes()
     }
@@ -169,13 +223,12 @@ impl EntryCount {
         let bytes = self.to_bytes();
         buffer[..ENTRY_COUNT_SIZE].copy_from_slice(&bytes);
     }
-
-    fn read(buffer: &[u8]) -> Result<Self, MapError> {
-        Self::from_bytes(buffer)
-    }
-
     fn increment(&mut self) {
         self.0 += 1;
+    }
+
+    fn decode(bytes: [u8; ENTRY_COUNT_SIZE]) -> Self {
+        Self(u32::from_le_bytes(bytes))
     }
 }
 
@@ -183,11 +236,9 @@ impl EntryCount {
 struct RecordOffset(usize);
 
 impl RecordOffset {
-    fn new(offset: usize) -> Self {
-        Self(offset)
-    }
-
     fn increment(&mut self, amount: usize) -> Result<(), MapError> {
+        //= spec/implementation.md#arithmetic-requirements
+        //# `RING-IMPL-ARITH-003` The implementation MUST NOT rely on wrapping integer behavior for correctness unless a future disk-format requirement explicitly defines modulo arithmetic for that field.
         self.0 = self
             .0
             .checked_add(amount)
@@ -200,7 +251,6 @@ type RecordIndexInner = usize;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct RecordIndex(RecordIndexInner);
 
-// BUG: switched to checked math and Result
 impl RecordIndex {
     fn new(index: RecordIndexInner) -> Self {
         Self(index)
@@ -235,28 +285,29 @@ enum SearchResult {
     NotFound(RecordIndex),
 }
 
-pub struct LsmMap<'a, K, V, B: IoBackend, const MAX_INDEXES: usize> {
+pub struct LsmMap<'a, K, V, const MAX_INDEXES: usize> {
+    //= spec/implementation.md#collection-requirements
+    //# `RING-IMPL-COLL-002` Collection-specific in-memory state MUST obey the same explicit-capacity and no-allocation rules as borromean core.
     id: CollectionId,
-    //wal: Wal<B>, // BUG: implement wal usage
     record_count: EntryCount,
     next_record_offset: RecordOffset,
     next_record_index: RecordIndex,
     map: &'a mut [u8],
-    next: Vec<Option<B::RegionAddress>, MAX_INDEXES>,
+    next_layer_count: usize,
     _phantom: PhantomData<(K, V)>,
 }
 
-impl<'a, K, V, B: IoBackend, const MAX_INDEXES: usize> LsmMap<'a, K, V, B, MAX_INDEXES>
+impl<'a, K, V, const MAX_INDEXES: usize> LsmMap<'a, K, V, MAX_INDEXES>
 where
     K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
     V: Debug + Serialize + for<'de> Deserialize<'de>,
 {
-    pub fn init<const MAX_HEADS: usize>(
-        io: &mut Io<B, MAX_HEADS>,
+    //= spec/implementation.md#architecture-requirements
+    //# RING-IMPL-ARCH-003 WAL handling, region-management logic, and collection-specific logic MUST remain separable modules with explicit interfaces.
+    pub fn new(
         id: CollectionId,
         buffer: &'a mut [u8],
-    ) -> Result<Self, IoError<B::BackingError, B::RegionAddress>> {
-        //let wal = io.new_wal()?;
+    ) -> Result<Self, MapError> {
         let record_count = EntryCount(0);
         let next_record_offset = RecordOffset(ENTRY_COUNT_SIZE);
         let next_record_index = RecordIndex(0);
@@ -267,14 +318,21 @@ where
 
         Ok(Self {
             id,
-            //wal,
             record_count,
             next_record_index,
             next_record_offset,
             map,
-            next: Vec::new(),
+            next_layer_count: 0,
             _phantom,
         })
+    }
+
+    pub fn id(&self) -> CollectionId {
+        self.id
+    }
+
+    pub fn layer_count(&self) -> usize {
+        self.next_layer_count
     }
 
     pub fn set(&mut self, key: K, value: V) -> Result<(), MapError>
@@ -302,8 +360,9 @@ where
 
         match search_result {
             SearchResult::Found(index) => {
-                // TODO: Try and overwrite the the entry before we leak it.
-                // leak the current value and write in a new location.
+                // Updating in place is a possible space optimization, but the
+                // current format keeps append-only entry payloads until the
+                // next snapshot/flush compacts them.
                 let (start, end) = self.add_entry(&entry)?;
 
                 EntryRef::write(self.map, index, start, end)?;
@@ -350,9 +409,13 @@ where
     }
 
     fn add_entry(&mut self, entry: &Entry<K, V>) -> Result<(RecordOffset, RecordOffset), MapError> {
+        //= spec/implementation.md#arithmetic-requirements
+        //# `RING-IMPL-ARITH-004` Conversions between integer widths that may lose information MUST be checked and MUST fail explicitly if the value is out of range for the destination type.
         let start = self.next_record_offset;
         let index_offset = self.next_record_index.offset(self.map)?;
-        // TODO: check bounds?
+        if start.0 >= index_offset {
+            return Err(MapError::BufferTooSmall);
+        }
         let buf = &mut self.map[start.0..index_offset];
         let used = to_slice(&entry, buf)?.len();
 
@@ -360,6 +423,223 @@ where
 
         end.increment(used)?;
         Ok((start, end))
+    }
+
+    pub fn snapshot_len(&self) -> Result<usize, MapError> {
+        let entry_count =
+            usize::try_from(self.record_count.0).map_err(|_| MapError::SerializationError)?;
+        let entry_bytes_len = self
+            .next_record_offset
+            .0
+            .checked_sub(ENTRY_COUNT_SIZE)
+            .ok_or(MapError::SerializationError)?;
+        SNAPSHOT_ENTRY_COUNT_SIZE
+            .checked_add(SNAPSHOT_ENTRY_BYTES_LEN_SIZE)
+            .and_then(|len| len.checked_add(entry_bytes_len))
+            .and_then(|len| len.checked_add(entry_count.checked_mul(ENTRY_REF_SIZE)?))
+            .ok_or(MapError::SerializationError)
+    }
+
+    pub fn region_len(&self) -> Result<usize, MapError> {
+        self.snapshot_len()?
+            .checked_add(REGION_SNAPSHOT_LEN_SIZE)
+            .ok_or(MapError::SerializationError)
+    }
+
+    //= spec/ring.md#collection-head-state-machine
+    //# RING-FORMAT-013 That collection specification MUST define, at minimum: the empty logical state established by `new_collection`; the exact bytes and interpretation of every supported committed-region `collection_format`; the exact bytes and interpretation of `snapshot` payloads; the exact bytes and interpretation of `update` payloads; the rules for applying updates and merging a durable basis with the in-memory frontier; and the collection-specific validation rules used when loading a basis or replaying WAL payloads.
+    pub fn encode_snapshot_into(&self, snapshot: &mut [u8]) -> Result<usize, MapError> {
+        let snapshot_len = self.snapshot_len()?;
+        if snapshot.len() < snapshot_len {
+            return Err(MapError::BufferTooSmall);
+        }
+
+        let entry_count_bytes = self.record_count.0.to_le_bytes();
+        snapshot[..SNAPSHOT_ENTRY_COUNT_SIZE].copy_from_slice(&entry_count_bytes);
+
+        let entry_bytes_len = self
+            .next_record_offset
+            .0
+            .checked_sub(ENTRY_COUNT_SIZE)
+            .ok_or(MapError::SerializationError)?;
+        let entry_bytes_len_u32 =
+            u32::try_from(entry_bytes_len).map_err(|_| MapError::SerializationError)?;
+        let entry_bytes_len_offset = SNAPSHOT_ENTRY_COUNT_SIZE;
+        snapshot[entry_bytes_len_offset..entry_bytes_len_offset + SNAPSHOT_ENTRY_BYTES_LEN_SIZE]
+            .copy_from_slice(&entry_bytes_len_u32.to_le_bytes());
+
+        let entries_offset = SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE;
+        let entries_end = entries_offset + entry_bytes_len;
+        snapshot[entries_offset..entries_end]
+            .copy_from_slice(&self.map[ENTRY_COUNT_SIZE..self.next_record_offset.0]);
+
+        let entry_count =
+            usize::try_from(self.record_count.0).map_err(|_| MapError::SerializationError)?;
+        for index in 0..entry_count {
+            let entry_ref = EntryRef::read(self.map, RecordIndex::new(index))?;
+            let ref_offset = entries_end + index * ENTRY_REF_SIZE;
+            snapshot[ref_offset..ref_offset + ENTRY_REF_POINTER_SIZE]
+                .copy_from_slice(&entry_ref.start.to_le_bytes());
+            snapshot[ref_offset + ENTRY_REF_POINTER_SIZE..ref_offset + ENTRY_REF_SIZE]
+                .copy_from_slice(&entry_ref.end.to_le_bytes());
+        }
+
+        Ok(snapshot_len)
+    }
+
+    pub fn encode_region_into(&self, region_payload: &mut [u8]) -> Result<usize, MapError> {
+        let snapshot_len = self.snapshot_len()?;
+        let region_len = self.region_len()?;
+        if region_payload.len() < region_len {
+            return Err(MapError::BufferTooSmall);
+        }
+
+        let snapshot_len_u32 =
+            u32::try_from(snapshot_len).map_err(|_| MapError::SerializationError)?;
+        region_payload[..REGION_SNAPSHOT_LEN_SIZE]
+            .copy_from_slice(&snapshot_len_u32.to_le_bytes());
+        self.encode_snapshot_into(
+            &mut region_payload[REGION_SNAPSHOT_LEN_SIZE..REGION_SNAPSHOT_LEN_SIZE + snapshot_len],
+        )?;
+        Ok(region_len)
+    }
+
+    pub fn load_snapshot(&mut self, snapshot: &[u8]) -> Result<(), MapError> {
+        if snapshot.len() < SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE {
+            return Err(MapError::SerializationError);
+        }
+
+        let mut entry_count_bytes = [0u8; SNAPSHOT_ENTRY_COUNT_SIZE];
+        entry_count_bytes.copy_from_slice(&snapshot[..SNAPSHOT_ENTRY_COUNT_SIZE]);
+        let record_count = EntryCount::decode(entry_count_bytes);
+        let entry_count =
+            usize::try_from(record_count.0).map_err(|_| MapError::SerializationError)?;
+
+        let mut entry_bytes_len_bytes = [0u8; SNAPSHOT_ENTRY_BYTES_LEN_SIZE];
+        let entry_bytes_len_offset = SNAPSHOT_ENTRY_COUNT_SIZE;
+        entry_bytes_len_bytes.copy_from_slice(
+            &snapshot[entry_bytes_len_offset..entry_bytes_len_offset + SNAPSHOT_ENTRY_BYTES_LEN_SIZE],
+        );
+        let entry_bytes_len = usize::try_from(u32::from_le_bytes(entry_bytes_len_bytes))
+            .map_err(|_| MapError::SerializationError)?;
+
+        let expected_len = SNAPSHOT_ENTRY_COUNT_SIZE
+            .checked_add(SNAPSHOT_ENTRY_BYTES_LEN_SIZE)
+            .and_then(|len| len.checked_add(entry_bytes_len))
+            .and_then(|len| len.checked_add(entry_count.checked_mul(ENTRY_REF_SIZE)?))
+            .ok_or(MapError::SerializationError)?;
+        if snapshot.len() != expected_len {
+            return Err(MapError::SerializationError);
+        }
+
+        let next_record_offset = ENTRY_COUNT_SIZE
+            .checked_add(entry_bytes_len)
+            .ok_or(MapError::SerializationError)?;
+        let refs_start = SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE + entry_bytes_len;
+        let index_bytes = entry_count
+            .checked_mul(ENTRY_REF_SIZE)
+            .ok_or(MapError::SerializationError)?;
+        let index_start = self
+            .map
+            .len()
+            .checked_sub(index_bytes)
+            .ok_or(MapError::IndexOutOfBounds)?;
+
+        if next_record_offset > index_start {
+            return Err(MapError::SnapshotTooLarge);
+        }
+
+        self.map.fill(0);
+        record_count.write(self.map);
+        self.map[ENTRY_COUNT_SIZE..next_record_offset]
+            .copy_from_slice(&snapshot[SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE..refs_start]);
+        for index in 0..entry_count {
+            let ref_offset = refs_start + index * ENTRY_REF_SIZE;
+            let mut start_bytes = [0u8; ENTRY_REF_POINTER_SIZE];
+            start_bytes.copy_from_slice(&snapshot[ref_offset..ref_offset + ENTRY_REF_POINTER_SIZE]);
+            let start = usize::from(RefType::from_le_bytes(start_bytes));
+
+            let mut end_bytes = [0u8; ENTRY_REF_POINTER_SIZE];
+            end_bytes.copy_from_slice(
+                &snapshot[ref_offset + ENTRY_REF_POINTER_SIZE..ref_offset + ENTRY_REF_SIZE],
+            );
+            let end = usize::from(RefType::from_le_bytes(end_bytes));
+
+            EntryRef::write(
+                self.map,
+                RecordIndex::new(index),
+                RecordOffset(start),
+                RecordOffset(end),
+            )?;
+        }
+
+        self.record_count = record_count;
+        self.next_record_offset = RecordOffset(next_record_offset);
+        self.next_record_index = RecordIndex::new(entry_count);
+        self.validate_loaded_state()?;
+        Ok(())
+    }
+
+    pub fn load_region(&mut self, region_payload: &[u8]) -> Result<(), MapError> {
+        if region_payload.len() < REGION_SNAPSHOT_LEN_SIZE {
+            return Err(MapError::SerializationError);
+        }
+
+        let mut snapshot_len_bytes = [0u8; REGION_SNAPSHOT_LEN_SIZE];
+        snapshot_len_bytes.copy_from_slice(&region_payload[..REGION_SNAPSHOT_LEN_SIZE]);
+        let snapshot_len = usize::try_from(u32::from_le_bytes(snapshot_len_bytes))
+            .map_err(|_| MapError::SerializationError)?;
+        let snapshot_end = REGION_SNAPSHOT_LEN_SIZE
+            .checked_add(snapshot_len)
+            .ok_or(MapError::SerializationError)?;
+        if snapshot_end > region_payload.len() {
+            return Err(MapError::SerializationError);
+        }
+
+        self.load_snapshot(&region_payload[REGION_SNAPSHOT_LEN_SIZE..snapshot_end])
+    }
+
+    pub fn encode_update_into(update: &MapUpdate<K, V>, payload: &mut [u8]) -> Result<usize, MapError> {
+        Ok(to_slice(update, payload)?.len())
+    }
+
+    pub fn apply_update_payload(&mut self, payload: &[u8]) -> Result<(), MapError> {
+        let update: MapUpdate<K, V> = from_bytes(payload)?;
+        match update {
+            MapUpdate::Set { key, value } => self.set(key, value),
+            MapUpdate::Delete { key } => self.delete(key),
+        }
+    }
+
+    fn validate_loaded_state(&self) -> Result<(), MapError> {
+        let entry_count =
+            usize::try_from(self.record_count.0).map_err(|_| MapError::SerializationError)?;
+        let mut previous_key: Option<K> = None;
+        for index in 0..entry_count {
+            let entry_ref = EntryRef::read(self.map, RecordIndex::new(index))?;
+            let start = usize::from(entry_ref.start);
+            let end = usize::from(entry_ref.end);
+            if start < ENTRY_COUNT_SIZE || start >= end || end > self.next_record_offset.0 {
+                return Err(MapError::SerializationError);
+            }
+            for previous_index in 0..index {
+                let previous_ref = EntryRef::read(self.map, RecordIndex::new(previous_index))?;
+                let previous_start = usize::from(previous_ref.start);
+                let previous_end = usize::from(previous_ref.end);
+                if start < previous_end && previous_start < end {
+                    return Err(MapError::SerializationError);
+                }
+            }
+
+            let entry: Entry<K, V> = from_bytes(&self.map[start..end])?;
+            if let Some(previous) = previous_key.as_ref() {
+                if entry.key.cmp(previous) != core::cmp::Ordering::Greater {
+                    return Err(MapError::SerializationError);
+                }
+            }
+            previous_key = Some(entry.key);
+        }
+        Ok(())
     }
 
     // TODO: Proving the binary search could be done in Kani
@@ -403,4 +683,254 @@ where
 
         Ok(SearchResult::NotFound(RecordIndex(low_index)))
     }
+
+    pub fn write_snapshot_to_storage<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+        const MAX_COLLECTIONS: usize,
+        const MAX_PENDING_RECLAIMS: usize,
+    >(
+        &self,
+        storage: &mut StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+    ) -> Result<(), MapStorageError> {
+        let mut snapshot = [0u8; REGION_SIZE];
+        let used = self.encode_snapshot_into(&mut snapshot)?;
+        storage.append_snapshot::<REGION_SIZE, REGION_COUNT, IO>(
+            flash,
+            workspace,
+            self.id,
+            CollectionType::MAP_CODE,
+            &snapshot[..used],
+        )?;
+        Ok(())
+    }
+
+    pub fn flush_to_storage<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+        const MAX_COLLECTIONS: usize,
+        const MAX_PENDING_RECLAIMS: usize,
+    >(
+        &self,
+        storage: &mut StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+    ) -> Result<u32, MapStorageError> {
+        //= spec/ring.md#collection-head-state-machine
+        //# `RING-FORMAT-005` Every user collection MUST remain log-structured: flushing mutable state writes a new immutable committed region segment instead of rewriting an existing live region in place.
+        let previous_region = storage
+            .collections()
+            .iter()
+            .find(|collection| collection.collection_id() == self.id)
+            .and_then(|collection| match collection.basis() {
+                crate::StartupCollectionBasis::Region(region_index) => Some(region_index),
+                _ => None,
+            });
+        let region_index =
+            storage.reserve_next_region::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace)?;
+        {
+            let (payload, _) = workspace.encode_buffers();
+            let used = self.encode_region_into(payload)?;
+            storage.write_committed_region::<REGION_SIZE, REGION_COUNT, IO>(
+                flash,
+                region_index,
+                self.id,
+                MAP_REGION_V1_FORMAT,
+                &payload[..used],
+            )?;
+        }
+        if let Some(previous_region) = previous_region {
+            storage.append_reclaim_begin::<REGION_SIZE, REGION_COUNT, IO>(
+                flash,
+                workspace,
+                previous_region,
+            )?;
+        }
+        storage.append_head::<REGION_SIZE, REGION_COUNT, IO>(
+            flash,
+            workspace,
+            self.id,
+            CollectionType::MAP_CODE,
+            region_index,
+        )?;
+        Ok(region_index)
+    }
+
+    //= spec/implementation.md#memory-requirements
+    //# `RING-IMPL-MEM-004` The implementation SHOULD avoid keeping
+    //# duplicate copies of large record payloads in memory when a borrowed
+    //# buffer or streaming decode is sufficient.
+    pub fn open_from_storage<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+        const MAX_COLLECTIONS: usize,
+        const MAX_PENDING_RECLAIMS: usize,
+    >(
+        storage: &StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        collection_id: CollectionId,
+        buffer: &'a mut [u8],
+    ) -> Result<Self, MapStorageError> {
+        //= spec/ring.md#collection-head-state-machine
+        //# `RING-FORMAT-006` A `WALSnapshotHead` MUST be loadable into RAM before that collection accepts further mutations.
+        //= spec/ring.md#collection-head-state-machine
+        //# `RING-FORMAT-008` Every later retained type-bearing record for that collection MUST carry the same `collection_type`, otherwise replay must treat the mismatch as corruption.
+        //= spec/ring.md#collection-head-state-machine
+        //# `RING-FORMAT-016` An implementation MUST NOT open a database successfully if replay yields a live collection whose retained committed-region basis, retained `snapshot` payload, or retained post-basis `update` payloads are unsupported or invalid under that collection's normative specification.
+        let Some(collection) = storage
+            .collections()
+            .iter()
+            .find(|collection| collection.collection_id() == collection_id)
+        else {
+            return Err(MapStorageError::UnknownCollection(collection_id));
+        };
+        if collection.basis() == crate::StartupCollectionBasis::Dropped {
+            return Err(MapStorageError::DroppedCollection(collection_id));
+        }
+        if collection.collection_type() != Some(CollectionType::MAP_CODE) {
+            return Err(MapStorageError::CollectionTypeMismatch {
+                collection_id,
+                expected: CollectionType::MAP_CODE,
+                actual: collection.collection_type(),
+            });
+        }
+
+        let mut map = Self::new(collection_id, buffer)?;
+        let target_basis = collection.basis();
+        let mut basis_loaded = matches!(target_basis, crate::StartupCollectionBasis::Empty);
+        let visit_result = storage.visit_wal_records::<REGION_SIZE, IO, _, _>(
+            flash,
+            workspace,
+            |flash, record| -> Result<(), MapStorageError> {
+                match record {
+                    crate::WalRecord::NewCollection {
+                        collection_id: record_collection_id,
+                        collection_type,
+                    } if record_collection_id == collection_id => {
+                        if collection_type != CollectionType::MAP_CODE {
+                            return Err(MapStorageError::CollectionTypeMismatch {
+                                collection_id,
+                                expected: CollectionType::MAP_CODE,
+                                actual: Some(collection_type),
+                            });
+                        }
+                    }
+                    crate::WalRecord::Update {
+                        collection_id: record_collection_id,
+                        payload,
+                    } if record_collection_id == collection_id => {
+                        if basis_loaded {
+                            map.apply_update_payload(payload)?;
+                        }
+                    }
+                    crate::WalRecord::Snapshot {
+                        collection_id: record_collection_id,
+                        collection_type,
+                        payload,
+                    } if record_collection_id == collection_id => {
+                        if collection_type != CollectionType::MAP_CODE {
+                            return Err(MapStorageError::CollectionTypeMismatch {
+                                collection_id,
+                                expected: CollectionType::MAP_CODE,
+                                actual: Some(collection_type),
+                            });
+                        }
+                        if target_basis == crate::StartupCollectionBasis::WalSnapshot {
+                            map.load_snapshot(payload)?;
+                            basis_loaded = true;
+                        } else {
+                            basis_loaded = false;
+                        }
+                    }
+                    crate::WalRecord::Head {
+                        collection_id: record_collection_id,
+                        collection_type,
+                        region_index,
+                    } if record_collection_id == collection_id => {
+                        if collection_type != CollectionType::MAP_CODE {
+                            return Err(MapStorageError::CollectionTypeMismatch {
+                                collection_id,
+                                expected: CollectionType::MAP_CODE,
+                                actual: Some(collection_type),
+                            });
+                        }
+                        if target_basis == crate::StartupCollectionBasis::Region(region_index) {
+                            load_map_region_from_flash::<REGION_SIZE, IO, K, V, MAX_INDEXES>(
+                                flash,
+                                storage.metadata(),
+                                collection_id,
+                                region_index,
+                                &mut map,
+                            )?;
+                            basis_loaded = true;
+                        } else {
+                            basis_loaded = false;
+                        }
+                    }
+                    crate::WalRecord::DropCollection {
+                        collection_id: record_collection_id,
+                    } if record_collection_id == collection_id => {
+                        return Err(MapStorageError::DroppedCollection(collection_id));
+                    }
+                    _ => {}
+                }
+
+                Ok(())
+            },
+        );
+
+        match visit_result {
+            Ok(()) => Ok(map),
+            Err(StorageVisitError::Storage(error)) => Err(MapStorageError::Storage(error)),
+            Err(StorageVisitError::Visitor(error)) => Err(error),
+        }
+    }
+}
+
+fn load_map_region_from_flash<
+    const REGION_SIZE: usize,
+    IO: FlashIo,
+    K,
+    V,
+    const MAX_INDEXES: usize,
+>(
+    flash: &mut IO,
+    metadata: crate::StorageMetadata,
+    collection_id: CollectionId,
+    region_index: u32,
+    map: &mut LsmMap<'_, K, V, MAX_INDEXES>,
+) -> Result<(), MapStorageError>
+where
+    K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
+    V: Debug + Serialize + for<'de> Deserialize<'de>,
+{
+    //= spec/ring.md#collection-head-state-machine
+    //# `RING-FORMAT-014` For non-WAL collections, the pair `(collection_type, collection_format)` MUST identify a unique committed region payload format.
+    let mut region_bytes = [0u8; REGION_SIZE];
+    flash.read_region(region_index, 0, &mut region_bytes)?;
+
+    let header = Header::decode(&region_bytes[..Header::ENCODED_LEN])?;
+    if header.collection_id != collection_id {
+        return Err(MapStorageError::UnknownCollection(collection_id));
+    }
+    if header.collection_format != MAP_REGION_V1_FORMAT {
+        return Err(MapStorageError::UnsupportedRegionFormat {
+            collection_id,
+            region_index,
+            actual: header.collection_format,
+        });
+    }
+
+    let payload_end = usize::try_from(metadata.region_size)
+        .map_err(|_| MapStorageError::Map(MapError::SerializationError))?
+        .checked_sub(FreePointerFooter::ENCODED_LEN)
+        .ok_or(MapStorageError::Map(MapError::SerializationError))?;
+    map.load_region(&region_bytes[Header::ENCODED_LEN..payload_end])?;
+    Ok(())
 }

@@ -11,6 +11,8 @@ keywords = ["embeded", "nostd", "storage", "flash", "collections"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+#= spec/implementation.md#core-requirements
+## `RING-IMPL-CORE-003` The core library crate MUST NOT depend on an async runtime, executor, scheduler, or timer facility.
 [dependencies]
 crc = "3.2.1"
 heapless = { version = "0.8.0", features = ["serde"] }
@@ -19,4 +21,3 @@ serde = { version = "1.0", default-features = false, features = ["derive"] }
 
 [dev-dependencies]
 proptest = "1.0.0"
-

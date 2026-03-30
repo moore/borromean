@@ -1,0 +1,58 @@
+target = "spec/implementation.md#operation-requirements"
+
+# Operation Requirements
+#
+# 1. `RING-IMPL-OP-001` A borromean future MUST NOT require spawning
+# another borromean future in order to complete.
+# 2. `RING-IMPL-OP-002` A borromean future MUST either complete with a
+# terminal result or remain safely resumable by further polling after
+# any `Poll::Pending`.
+# 3. `RING-IMPL-OP-003` If an operation future is dropped before
+# completion, any already-issued durable writes MUST still satisfy the
+# crash-safety rules from [spec/ring.md](ring.md).
+# 4. `RING-IMPL-OP-004` Pure in-memory state mutations that make a later
+# durable step mandatory MUST occur in an order that allows the same
+# operation to be retried or reconstructed after reset.
+# 5. `RING-IMPL-OP-005` Public operations SHOULD minimize the duration of
+# mutable borrows of large caller workspaces so embedded callers can
+# reuse buffers across sequential operations.
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-IMPL-OP-001` A borromean future MUST NOT require spawning
+another borromean future in order to complete.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-IMPL-OP-002` A borromean future MUST either complete with a
+terminal result or remain safely resumable by further polling after
+any `Poll::Pending`.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-IMPL-OP-003` If an operation future is dropped before
+completion, any already-issued durable writes MUST still satisfy the
+crash-safety rules from [spec/ring.md](ring.md).
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-IMPL-OP-004` Pure in-memory state mutations that make a later
+durable step mandatory MUST occur in an order that allows the same
+operation to be retried or reconstructed after reset.
+'''
+
+[[spec]]
+level = "SHOULD"
+quote = '''
+`RING-IMPL-OP-005` Public operations SHOULD minimize the duration of
+mutable borrows of large caller workspaces so embedded callers can
+reuse buffers across sequential operations.
+'''
+

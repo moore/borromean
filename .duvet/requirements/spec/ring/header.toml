@@ -1,0 +1,51 @@
+target = "spec/ring.md#header"
+
+# Header
+#
+# ```rust
+# struct Header {
+#   sequence: u64,
+#   collection_id: u64,
+#   collection_format: u16,
+#   header_checksum: u32,
+# }
+# ```
+# 
+# The `Header` is the first data in the region.
+# 
+# The `sequence` field is a monotonic value that is used to find the
+# newest header when the database is opened.
+# 
+# The `collection_id` defines which collection this region belongs to,
+# and is a stable 64-bit nonce, not a small reusable counter. The
+# `collection_format` defines the per-region encoding format for replay
+# and read semantics. For user collections, non-WAL
+# `collection_format` values are defined by the corresponding
+# `collection_type` implementation rather than by borromean core, and may
+# evolve across regions over time without changing the collection's
+# stable `collection_type`. Borromean core reserves one canonical format
+# identifier, `wal_v1`, for WAL regions.
+# 
+# The `header_checksum` validates header integrity.
+# 
+# 1. `RING-HEADER-001` `Header` MUST be encoded as the exact byte
+# sequence of the fields shown above, in that order, with no implicit
+# padding.
+# 2. `RING-HEADER-002` `header_checksum` MUST be CRC-32C over `sequence`,
+# `collection_id`, and `collection_format` in on-disk order.
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-HEADER-001` `Header` MUST be encoded as the exact byte
+sequence of the fields shown above, in that order, with no implicit
+padding.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-HEADER-002` `header_checksum` MUST be CRC-32C over `sequence`,
+`collection_id`, and `collection_format` in on-disk order.
+'''
+

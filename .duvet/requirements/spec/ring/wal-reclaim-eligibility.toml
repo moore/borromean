@@ -1,0 +1,216 @@
+target = "spec/ring.md#wal-reclaim-eligibility"
+
+# WAL Reclaim Eligibility
+#
+# Reclaim operates on WAL regions but correctness is defined per record.
+# A record is reclaimable only when replay no longer needs it to rebuild
+# the same `last_head`, `pending_updates`, `last_free_list_head`,
+# reserved `ready_region`, and ordered incomplete reclaim state.
+# 
+# Per-collection cutoff:
+# 
+# These cutoff terms apply only to user collections (`collection_id !=
+# 0`). WAL-head bootstrap records for `collection_id = 0` are governed
+# separately below because startup step 4 reconstructs them only from the
+# current WAL tail region.
+# 
+# 1. Let `H(c)` be the current durable logical head for collection `c`
+# (`EmptyHead`, `WalSnapshot`, `RegionHead`, or `Dropped`).
+# 2. Let `D(c)` be the WAL position of the last durable basis decision
+# record for collection `c` (`new_collection`, `snapshot`,
+# `drop_collection`, or
+# `head(collection_id, collection_type, region_index)`).
+# 3. `B(c) = D(c)` is the collection's durable basis position.
+# 
+# Per-record liveness rules:
+# 
+# 1. `RING-WAL-RECLAIM-001` `new_collection(collection_id, collection_type)` record:
+# live only if it is the basis decision at `D(c)` for a collection whose
+# logical head `H(c)` is `EmptyHead`; otherwise reclaimable.
+# 2. `RING-WAL-RECLAIM-002` `head(collection_id = 0, collection_type = wal, region_index)`
+# record:
+# live only if startup step 4 would currently use it as the effective
+# WAL-head override for the current tail region. Equivalently, it must be
+# the last valid WAL-head control record in the current WAL tail region.
+# Any earlier such control record, or any such record in a non-tail WAL
+# region, is reclaimable once the same effective WAL head is preserved by
+# a later tail-local control record or by the current tail region's
+# `WalRegionPrologue`.
+# 3. `RING-WAL-RECLAIM-003` `head(collection_id, collection_type, region_index)` record for a
+# user collection:
+# live only if it is the decision record at `D(c)` for a collection
+# whose logical head `H(c)` is a `RegionHead`; older `head(...)` records
+# are reclaimable.
+# 4. `RING-WAL-RECLAIM-004` `snapshot` record:
+# live only if it is the decision record at `D(c)` for a collection
+# whose logical head `H(c)` is a `WalSnapshot`; otherwise reclaimable.
+# 5. `RING-WAL-RECLAIM-005` `drop_collection(collection_id)` record:
+# live only if it is the decision record at `D(c)` for a collection
+# whose logical head `H(c)` is `Dropped`; older `drop_collection(...)`
+# records are reclaimable.
+# 6. `RING-WAL-RECLAIM-006` `update` record for collection `c`:
+# live only if its WAL position is greater than `B(c)`; updates at or
+# before `B(c)` are reclaimable.
+# 7. `RING-WAL-RECLAIM-007` `link` record:
+# live only while required to maintain a valid WAL chain from current
+# WAL head to current WAL tail.
+# 8. `RING-WAL-RECLAIM-008` `free_list_head(region_index_or_none)` record:
+# live only if it is the last valid explicit free-list-head decision in
+# replay order that has not been superseded by a later `alloc_begin` or
+# `free_list_head`.
+# 9. `RING-WAL-RECLAIM-009` `alloc_begin(region_index, free_list_head_after)` record:
+# live if either:
+# it is the last valid free-list-head decision in replay order; or
+# its reservation is still needed to recover unmatched `ready_region`.
+# Its reservation role exists only until `head` or `link` durably
+# consumes the allocated region; after that point, retaining the record
+# is no longer required for region-consumption validity. It becomes
+# reclaimable once both of the conditions above are false.
+# 10. `RING-WAL-RECLAIM-010` `reclaim_begin(region_index)` record:
+# live only if replay still needs it to reconstruct an incomplete reclaim
+# transaction for `region_index` that would remain pending after replay.
+# If a later durable `reclaim_end(region_index)` closes that transaction,
+# or replay can prove the reclaim was unnecessary because the region
+# never became durably detached from live state, the `reclaim_begin`
+# record is reclaimable.
+# 11. `RING-WAL-RECLAIM-011` `reclaim_end(region_index)` record:
+# live only if replay still needs it to cancel a still-live
+# `reclaim_begin(region_index)` that would otherwise reconstruct as an
+# incomplete reclaim transaction. Once the matching `reclaim_begin`
+# becomes reclaimable, the matching `reclaim_end` is reclaimable too.
+# 12. `RING-WAL-RECLAIM-012` `wal_recovery` record:
+# live only if replay still needs it to justify later valid WAL records
+# that appear after an ignored corrupt/torn span in that WAL region.
+# Once those later dependent records are reclaimable or have been
+# superseded by newer durable state, the `wal_recovery` record is
+# reclaimable too.
+# 
+# WAL-region reclaim preconditions:
+# 
+# 1. `RING-WAL-RECLAIM-PRE-001` The candidate region MUST be the head of the WAL.
+# 2. `RING-WAL-RECLAIM-PRE-002` For every live record in the candidate, an equivalent live state MUST be
+# already represented durably outside the candidate (typically by newer
+# `snapshot`, `drop_collection`, or by
+# `head(collection_id, collection_type, region_index)` plus newer
+# updates).
+# 3. `RING-WAL-RECLAIM-PRE-003` After planned metadata updates, startup replay MUST still be able to walk a
+# valid WAL chain from head to tail.
+# 
+# WAL-region reclaim postconditions:
+# 
+# 1. `RING-WAL-RECLAIM-POST-001` No collection's `H(c)`, `B(c)`, or live post-basis updates MUST NOT depend on
+# bytes in the reclaimed region.
+# 2. `RING-WAL-RECLAIM-POST-002` The recovered free-list head MUST match pre-reclaim allocator state.
+# 3. `RING-WAL-RECLAIM-POST-003` The recovered `ready_region`, if any, MUST match pre-reclaim allocator
+# state.
+# 4. `RING-WAL-RECLAIM-POST-004` The ordered set of incomplete reclaim transactions that replay would
+# continue matches pre-reclaim crash-recovery state.
+# 5. `RING-WAL-RECLAIM-POST-005` Startup step 4 MUST recover the same effective WAL head after
+# reclaim as before reclaim, using the current tail region's
+# `WalRegionPrologue` plus the last valid tail-local
+# `head(collection_id = 0, collection_type = wal, region_index = ...)`
+# override, if any.
+# 6. `RING-WAL-RECLAIM-POST-006` WAL chain integrity MUST remain valid with no broken `link` path.
+# 7. `RING-WAL-RECLAIM-POST-007` The reclaimed region MUST be erased before reuse.
+# 8. `RING-WAL-RECLAIM-POST-008` If reclaim allocates any replacement WAL regions, replay-visible
+# `alloc_begin` records for those allocations carry
+# `free_list_head_after` so replay reconstructs the same allocator
+# position.
+# 
+# Safety invariant:
+# 
+# 1. `RING-WAL-RECLAIM-SAFE-001` Reclaim MUST NOT change replay result: the recovered `last_head` and
+# `pending_updates` for every collection, the recovered
+# `last_free_list_head`, reserved `ready_region`, ordered incomplete
+# reclaim state, and reconstructed `free_list_tail`, after reclaim must
+# match the pre-reclaim logical state.
+# 
+# Example timeline for an already-live collection (`collection_id = 7`):
+# 
+# 1. WAL appends `update(u1)`, `update(u2)`.
+# 2. WAL appends `snapshot(s1)`.
+# `u1` and `u2` are now reclaimable.
+# 3. WAL appends `update(u3)`.
+# `u3` is live because it is after basis `B(7) = pos(s1)`.
+# 4. WAL appends `alloc_begin(r44, free_list_head_after=f9)`.
+# 5. Collection flushes to region `r44`, then WAL appends
+# `head(collection_id = 7, collection_type = T, region_index = r44)`.
+# Now `s1` and `u3` are reclaimable because
+# `head(collection_id = 7, collection_type = T, region_index = r44)` becomes
+# the new basis.
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-WAL-RECLAIM-PRE-001` The candidate region MUST be the head of the WAL.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-WAL-RECLAIM-PRE-002` For every live record in the candidate, an equivalent live state MUST be
+already represented durably outside the candidate (typically by newer
+`snapshot`, `drop_collection`, or by
+`head(collection_id, collection_type, region_index)` plus newer
+updates).
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-WAL-RECLAIM-PRE-003` After planned metadata updates, startup replay MUST still be able to walk a
+valid WAL chain from head to tail.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-WAL-RECLAIM-POST-001` No collection's `H(c)`, `B(c)`, or live post-basis updates MUST NOT depend on
+bytes in the reclaimed region.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-WAL-RECLAIM-POST-002` The recovered free-list head MUST match pre-reclaim allocator state.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-WAL-RECLAIM-POST-003` The recovered `ready_region`, if any, MUST match pre-reclaim allocator
+state.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-WAL-RECLAIM-POST-005` Startup step 4 MUST recover the same effective WAL head after
+reclaim as before reclaim, using the current tail region's
+`WalRegionPrologue` plus the last valid tail-local
+`head(collection_id = 0, collection_type = wal, region_index = ...)`
+override, if any.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-WAL-RECLAIM-POST-006` WAL chain integrity MUST remain valid with no broken `link` path.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-WAL-RECLAIM-POST-007` The reclaimed region MUST be erased before reuse.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-WAL-RECLAIM-SAFE-001` Reclaim MUST NOT change replay result: the recovered `last_head` and
+`pending_updates` for every collection, the recovered
+`last_free_list_head`, reserved `ready_region`, ordered incomplete
+reclaim state, and reconstructed `free_list_tail`, after reclaim must
+match the pre-reclaim logical state.
+'''
+

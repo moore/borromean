@@ -1,0 +1,29 @@
+target = "spec/ring.md#requirements-format"
+
+# Requirements Format
+#
+# This specification keeps normative requirements adjacent to the text
+# that motivates them. Each normative requirement starts with a stable
+# identifier such as `RING-WAL-ENC-001` and uses explicit normative
+# language such as `MUST`, `MUST NOT`, `SHOULD`, or `MAY`.
+# 
+# These identifiers are intended to be the primary Duvet traceability
+# targets. The surrounding narrative is informative unless it also
+# includes a requirement identifier.
+
+[[spec]]
+level = "MUST"
+quote = '''
+Each normative requirement starts with a stable
+identifier such as `RING-WAL-ENC-001` and uses explicit normative
+language such as `MUST`, `MUST NOT`, `SHOULD`, or `MAY`.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+Each normative requirement starts with a stable
+identifier such as `RING-WAL-ENC-001` and uses explicit normative
+language such as `MUST`, `MUST NOT`, `SHOULD`, or `MAY`.
+'''
+

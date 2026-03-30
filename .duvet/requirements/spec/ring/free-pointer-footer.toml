@@ -1,0 +1,64 @@
+target = "spec/ring.md#free-pointer-footer"
+
+# Free-Pointer Footer
+#
+# ```rust
+# struct FreePointerFooter {
+#   next_tail: u32,
+#   footer_checksum: u32,
+# }
+# ```
+# 
+# The free-pointer footer occupies the final eight bytes of every data
+# region. It is interpreted only when the region is durably reachable
+# from the free-list chain.
+# 
+# 1. `RING-FREE-001` The free-pointer footer MUST occupy the final eight
+# bytes of the region.
+# 2. `RING-FREE-002` If all eight footer bytes equal `erased_byte`, the
+# footer is uninitialized and represents `next_tail = none`.
+# 3. `RING-FREE-003` Otherwise the footer MUST decode as
+# `next_tail:u32, footer_checksum:u32`, both little-endian, with
+# `footer_checksum` equal to CRC-32C over `next_tail`.
+# 4. `RING-FREE-004` A checksum-valid non-erased footer MUST decode to a
+# `u32 region_index` strictly less than `region_count`; any other value is
+# malformed.
+# 5. `RING-FREE-005` Wherever this specification says
+# `r.free_pointer.next_tail = x`, it means writing a complete
+# `FreePointerFooter` with `next_tail = x` and a matching
+# `footer_checksum`.
+# 6. `RING-FREE-006` While a region is allocated for live use, the bytes
+# in its free-pointer footer are uninterpreted stale data and MUST NOT be
+# used to infer free-list membership.
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-FREE-001` The free-pointer footer MUST occupy the final eight
+bytes of the region.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-FREE-003` Otherwise the footer MUST decode as
+`next_tail:u32, footer_checksum:u32`, both little-endian, with
+`footer_checksum` equal to CRC-32C over `next_tail`.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-FREE-004` A checksum-valid non-erased footer MUST decode to a
+`u32 region_index` strictly less than `region_count`; any other value is
+malformed.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-FREE-006` While a region is allocated for live use, the bytes
+in its free-pointer footer are uninterpreted stale data and MUST NOT be
+used to infer free-list membership.
+'''
+

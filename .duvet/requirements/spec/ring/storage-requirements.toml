@@ -1,0 +1,141 @@
+target = "spec/ring.md#storage-requirements"
+
+# Storage Requirements
+#
+# 1. `RING-STORAGE-001` Storage MUST begin with a static metadata region
+# that records version and configuration parameters that do not change
+# after initialization.
+# 2. `RING-STORAGE-002` Every region header MUST record the region
+# `sequence`, `collection_id`, `collection_format`, and a checksum over
+# the header itself.
+# 3. `RING-STORAGE-003` Each newly allocated region, whether for a user
+# collection or a newly initialized WAL region, MUST use
+# `sequence = max_seen_sequence + 1`, after which that value becomes the
+# new in-memory `max_seen_sequence`.
+# 4. `RING-STORAGE-004` Successful later region writes MUST preserve a
+# strictly monotonic `sequence` ordering even if crashes or abandoned
+# allocations leave gaps.
+# 5. `RING-STORAGE-005` Borromean core MUST reserve the canonical
+# `collection_format` value `wal_v1` for WAL regions, and user
+# collections MUST NOT use that identifier.
+# 6. `RING-STORAGE-006` A free region MUST be defined by membership in
+# the durable free-list chain rather than by a distinct on-disk header
+# encoding.
+# 7. `RING-STORAGE-007` The free-pointer footer of a region MUST NOT be
+# written while that region is allocated for live use.
+# 8. `RING-STORAGE-008` After a region is durably reachable from the
+# free-list chain, that region MUST NOT be erased until it is allocated
+# for reuse.
+# 9. `RING-STORAGE-009` A WAL region MUST have `collection_id = 0` and
+# `collection_format = wal_v1`.
+# 10. `RING-STORAGE-010` The metadata region MUST occupy exactly one
+# `region_size` span at storage offset `0`, MUST NOT be counted in
+# `region_count`, and data region `0` MUST begin immediately after that
+# metadata region.
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-STORAGE-001` Storage MUST begin with a static metadata region
+that records version and configuration parameters that do not change
+after initialization.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-STORAGE-002` Every region header MUST record the region
+`sequence`, `collection_id`, `collection_format`, and a checksum over
+the header itself.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-STORAGE-003` Each newly allocated region, whether for a user
+collection or a newly initialized WAL region, MUST use
+`sequence = max_seen_sequence + 1`, after which that value becomes the
+new in-memory `max_seen_sequence`.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-STORAGE-004` Successful later region writes MUST preserve a
+strictly monotonic `sequence` ordering even if crashes or abandoned
+allocations leave gaps.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-STORAGE-005` Borromean core MUST reserve the canonical
+`collection_format` value `wal_v1` for WAL regions, and user
+collections MUST NOT use that identifier.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-STORAGE-005` Borromean core MUST reserve the canonical
+`collection_format` value `wal_v1` for WAL regions, and user
+collections MUST NOT use that identifier.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-STORAGE-006` A free region MUST be defined by membership in
+the durable free-list chain rather than by a distinct on-disk header
+encoding.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-STORAGE-007` The free-pointer footer of a region MUST NOT be
+written while that region is allocated for live use.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-STORAGE-008` After a region is durably reachable from the
+free-list chain, that region MUST NOT be erased until it is allocated
+for reuse.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-STORAGE-009` A WAL region MUST have `collection_id = 0` and
+`collection_format = wal_v1`.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-STORAGE-010` The metadata region MUST occupy exactly one
+`region_size` span at storage offset `0`, MUST NOT be counted in
+`region_count`, and data region `0` MUST begin immediately after that
+metadata region.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-STORAGE-010` The metadata region MUST occupy exactly one
+`region_size` span at storage offset `0`, MUST NOT be counted in
+`region_count`, and data region `0` MUST begin immediately after that
+metadata region.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-STORAGE-010` The metadata region MUST occupy exactly one
+`region_size` span at storage offset `0`, MUST NOT be counted in
+`region_count`, and data region `0` MUST begin immediately after that
+metadata region.
+'''
+

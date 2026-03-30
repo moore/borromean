@@ -1,9 +1,8 @@
 use super::*;
 extern crate std;
-use crate::io::mem_io::MemIo;
-use crate::io::{Io, IoError};
+use crate::{MockFlash, Storage, StorageWorkspace};
 use proptest::prelude::*;
-use std::{string::String, vec, vec::Vec};
+use std::{vec, vec::Vec};
 
 fn vec_and_indexes() -> impl Strategy<Value = (Vec<u8>, usize, usize)> {
     prop::collection::vec(0..1u8, (ENTRY_REF_SIZE * 2)..(10 * ENTRY_REF_SIZE)).prop_flat_map(
@@ -55,6 +54,375 @@ proptest! {
 
 }
 
+#[test]
+//= spec/implementation.md#panic-requirements
+//# `RING-IMPL-PANIC-004` If a condition is believed to be impossible by construction, the implementation SHOULD encode that proof in types, control flow, or checked validation before the point of use rather than relying on a panic as a backstop.
+fn set_returns_buffer_too_small_when_map_storage_is_exhausted() {
+    const MAX_INDEXES: usize = 4;
+
+    let mut buffer = [0u8; 8];
+    let mut map = LsmMap::<i32, i32, MAX_INDEXES>::new(CollectionId(27), &mut buffer).unwrap();
+
+    assert!(matches!(map.set(1, 10), Err(MapError::BufferTooSmall)));
+}
+
+#[test]
+//= spec/implementation.md#memory-requirements
+//# `RING-IMPL-MEM-003` If the configured capacities are insufficient to open the store or complete an operation, the implementation MUST fail explicitly with a capacity-related error rather than silently allocate or truncate state.
+fn encode_snapshot_returns_buffer_too_small_when_output_capacity_is_insufficient() {
+    const BUFFER_SIZE: usize = 64;
+    const MAX_INDEXES: usize = 4;
+
+    let mut map_buffer = [0u8; BUFFER_SIZE];
+    let mut map = LsmMap::<i32, i32, MAX_INDEXES>::new(CollectionId(28), &mut map_buffer).unwrap();
+    map.set(1, 10).unwrap();
+    map.set(2, 20).unwrap();
+
+    let mut snapshot = [0u8; 8];
+    assert!(matches!(
+        map.encode_snapshot_into(&mut snapshot),
+        Err(MapError::BufferTooSmall)
+    ));
+}
+
+#[test]
+//= spec/ring.md#collection-head-state-machine
+//# `RING-FORMAT-003` The frontier MUST take precedence over older values in the durable basis.
+fn snapshot_round_trip_restores_logical_state() {
+    const BUFFER_SIZE: usize = 512;
+    const MAX_INDEXES: usize = 4;
+    let id = CollectionId(7);
+
+    let mut source_buffer = [0u8; BUFFER_SIZE];
+    let mut source = LsmMap::<i32, i32, MAX_INDEXES>::new(id, &mut source_buffer).unwrap();
+    source.set(1, 10).unwrap();
+    source.set(2, 20).unwrap();
+    source.delete(1).unwrap();
+
+    let mut snapshot = [0u8; BUFFER_SIZE];
+    let snapshot_len = source.encode_snapshot_into(&mut snapshot).unwrap();
+
+    let mut dest_buffer = [0u8; BUFFER_SIZE];
+    let mut restored = LsmMap::<i32, i32, MAX_INDEXES>::new(id, &mut dest_buffer).unwrap();
+    restored.load_snapshot(&snapshot[..snapshot_len]).unwrap();
+
+    assert_eq!(restored.get(&1).unwrap(), None);
+    assert_eq!(restored.get(&2).unwrap(), Some(20));
+}
+
+#[test]
+fn update_payload_round_trip_applies_frontier_change() {
+    const BUFFER_SIZE: usize = 512;
+    const MAX_INDEXES: usize = 4;
+    let id = CollectionId(9);
+
+    let mut buffer = [0u8; BUFFER_SIZE];
+    let mut map = LsmMap::<i32, i32, MAX_INDEXES>::new(id, &mut buffer).unwrap();
+
+    let mut set_payload = [0u8; 64];
+    let set_len = LsmMap::<i32, i32, MAX_INDEXES>::encode_update_into(
+        &MapUpdate::Set { key: 5, value: 42 },
+        &mut set_payload,
+    )
+    .unwrap();
+    map.apply_update_payload(&set_payload[..set_len]).unwrap();
+    assert_eq!(map.get(&5).unwrap(), Some(42));
+
+    let mut delete_payload = [0u8; 64];
+    let delete_len = LsmMap::<i32, i32, MAX_INDEXES>::encode_update_into(
+        &MapUpdate::Delete { key: 5 },
+        &mut delete_payload,
+    )
+    .unwrap();
+    map.apply_update_payload(&delete_payload[..delete_len]).unwrap();
+    assert_eq!(map.get(&5).unwrap(), None);
+}
+
+#[test]
+//= spec/ring.md#collection-head-state-machine
+//# `RING-FORMAT-014` For non-WAL collections, the pair `(collection_type, collection_format)` MUST identify a unique committed region payload format.
+fn region_round_trip_restores_logical_state() {
+    const BUFFER_SIZE: usize = 512;
+    const MAX_INDEXES: usize = 4;
+    let id = CollectionId(11);
+
+    let mut source_buffer = [0u8; BUFFER_SIZE];
+    let mut source = LsmMap::<i32, i32, MAX_INDEXES>::new(id, &mut source_buffer).unwrap();
+    source.set(3, 30).unwrap();
+    source.set(4, 40).unwrap();
+
+    let mut snapshot = [0u8; BUFFER_SIZE];
+    let snapshot_len = source.encode_snapshot_into(&mut snapshot).unwrap();
+    let mut region = [0u8; BUFFER_SIZE];
+    let region_len = source.encode_region_into(&mut region).unwrap();
+    assert_eq!(
+        usize::try_from(u32::from_le_bytes(region[..4].try_into().unwrap())).unwrap(),
+        snapshot_len
+    );
+    assert_eq!(&region[4..4 + snapshot_len], &snapshot[..snapshot_len]);
+
+    let mut dest_buffer = [0u8; BUFFER_SIZE];
+    let mut restored = LsmMap::<i32, i32, MAX_INDEXES>::new(id, &mut dest_buffer).unwrap();
+    let mut direct_buffer = [0u8; BUFFER_SIZE];
+    let mut direct = LsmMap::<i32, i32, MAX_INDEXES>::new(id, &mut direct_buffer).unwrap();
+    direct
+        .load_snapshot(&region[4..4 + snapshot_len])
+        .unwrap();
+    assert_eq!(direct.get(&3).unwrap(), Some(30));
+    assert_eq!(direct.get(&4).unwrap(), Some(40));
+    restored.load_region(&region[..region_len]).unwrap();
+
+    assert_eq!(restored.get(&3).unwrap(), Some(30));
+    assert_eq!(restored.get(&4).unwrap(), Some(40));
+}
+
+#[test]
+//= spec/ring.md
+//# RING-FORMAT-013 That collection specification MUST define, at minimum: the empty logical state established by `new_collection`; the exact bytes and interpretation of every supported committed-region `collection_format`; the exact bytes and interpretation of `snapshot` payloads; the exact bytes and interpretation of `update` payloads; the rules for applying updates and merging a durable basis with the in-memory frontier; and the collection-specific validation rules used when loading a basis or replaying WAL payloads.
+fn load_snapshot_rejects_unsorted_entry_refs() {
+    const BUFFER_SIZE: usize = 512;
+    const MAX_INDEXES: usize = 4;
+    let id = CollectionId(12);
+
+    let mut source_buffer = [0u8; BUFFER_SIZE];
+    let mut source = LsmMap::<i32, i32, MAX_INDEXES>::new(id, &mut source_buffer).unwrap();
+    source.set(1, 10).unwrap();
+    source.set(2, 20).unwrap();
+
+    let mut snapshot = [0u8; BUFFER_SIZE];
+    let snapshot_len = source.encode_snapshot_into(&mut snapshot).unwrap();
+
+    let refs_offset = snapshot_len - ENTRY_REF_SIZE * 2;
+    let mut first_ref = [0u8; ENTRY_REF_SIZE];
+    let mut second_ref = [0u8; ENTRY_REF_SIZE];
+    first_ref.copy_from_slice(&snapshot[refs_offset..refs_offset + ENTRY_REF_SIZE]);
+    second_ref.copy_from_slice(&snapshot[refs_offset + ENTRY_REF_SIZE..refs_offset + ENTRY_REF_SIZE * 2]);
+    snapshot[refs_offset..refs_offset + ENTRY_REF_SIZE].copy_from_slice(&second_ref);
+    snapshot[refs_offset + ENTRY_REF_SIZE..refs_offset + ENTRY_REF_SIZE * 2]
+        .copy_from_slice(&first_ref);
+
+    let mut dest_buffer = [0u8; BUFFER_SIZE];
+    let mut restored = LsmMap::<i32, i32, MAX_INDEXES>::new(id, &mut dest_buffer).unwrap();
+    assert!(matches!(
+        restored.load_snapshot(&snapshot[..snapshot_len]),
+        Err(MapError::SerializationError)
+    ));
+}
+
+#[test]
+//= spec/ring.md
+//# RING-FORMAT-013 That collection specification MUST define, at minimum: the empty logical state established by `new_collection`; the exact bytes and interpretation of every supported committed-region `collection_format`; the exact bytes and interpretation of `snapshot` payloads; the exact bytes and interpretation of `update` payloads; the rules for applying updates and merging a durable basis with the in-memory frontier; and the collection-specific validation rules used when loading a basis or replaying WAL payloads.
+fn load_snapshot_rejects_overlapping_entry_refs() {
+    const BUFFER_SIZE: usize = 512;
+    const MAX_INDEXES: usize = 4;
+    let id = CollectionId(13);
+
+    let mut source_buffer = [0u8; BUFFER_SIZE];
+    let mut source = LsmMap::<i32, i32, MAX_INDEXES>::new(id, &mut source_buffer).unwrap();
+    source.set(1, 10).unwrap();
+    source.set(2, 20).unwrap();
+
+    let mut snapshot = [0u8; BUFFER_SIZE];
+    let snapshot_len = source.encode_snapshot_into(&mut snapshot).unwrap();
+
+    let refs_offset = snapshot_len - ENTRY_REF_SIZE * 2;
+    let mut first_start_bytes = [0u8; ENTRY_REF_POINTER_SIZE];
+    let mut second_end_bytes = [0u8; ENTRY_REF_POINTER_SIZE];
+    first_start_bytes.copy_from_slice(&snapshot[refs_offset..refs_offset + ENTRY_REF_POINTER_SIZE]);
+    second_end_bytes.copy_from_slice(
+        &snapshot[refs_offset + ENTRY_REF_SIZE + ENTRY_REF_POINTER_SIZE
+            ..refs_offset + ENTRY_REF_SIZE * 2],
+    );
+    snapshot[refs_offset..refs_offset + ENTRY_REF_POINTER_SIZE].copy_from_slice(&first_start_bytes);
+    snapshot[refs_offset + ENTRY_REF_POINTER_SIZE..refs_offset + ENTRY_REF_SIZE]
+        .copy_from_slice(&second_end_bytes);
+
+    let mut dest_buffer = [0u8; BUFFER_SIZE];
+    let mut restored = LsmMap::<i32, i32, MAX_INDEXES>::new(id, &mut dest_buffer).unwrap();
+    assert!(matches!(
+        restored.load_snapshot(&snapshot[..snapshot_len]),
+        Err(MapError::SerializationError)
+    ));
+}
+
+#[test]
+//= spec/ring.md#collection-head-state-machine
+//# `RING-FORMAT-003` The frontier MUST take precedence over older values in the durable basis.
+fn storage_snapshot_replay_restores_map_frontier() {
+    const REGION_SIZE: usize = 512;
+    const REGION_COUNT: usize = 4;
+    const MAX_INDEXES: usize = 4;
+
+    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 1024>::new(0xff);
+    let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
+    let mut storage =
+        Storage::<8, 4>::format::<REGION_SIZE, REGION_COUNT, _>(&mut flash, &mut workspace, 1, 8, 0xa5)
+            .unwrap();
+    storage
+        .append_new_collection::<REGION_SIZE, REGION_COUNT, _>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(7),
+            CollectionType::MAP_CODE,
+        )
+        .unwrap();
+
+    let mut snapshot_buffer = [0u8; REGION_SIZE];
+    let mut source = LsmMap::<i32, i32, MAX_INDEXES>::new(CollectionId(7), &mut snapshot_buffer).unwrap();
+    source.set(1, 10).unwrap();
+    source.set(2, 20).unwrap();
+    source
+        .write_snapshot_to_storage::<REGION_SIZE, REGION_COUNT, _, 8, 4>(
+            storage.runtime_mut(),
+            &mut flash,
+            &mut workspace,
+        )
+        .unwrap();
+
+    let mut update_payload = [0u8; 64];
+    let update_len = LsmMap::<i32, i32, MAX_INDEXES>::encode_update_into(
+        &MapUpdate::Set { key: 2, value: 99 },
+        &mut update_payload,
+    )
+    .unwrap();
+    storage
+        .append_update::<REGION_SIZE, REGION_COUNT, _>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(7),
+            &update_payload[..update_len],
+        )
+        .unwrap();
+
+    let mut reopen_buffer = [0u8; REGION_SIZE];
+    let reopened = LsmMap::<i32, i32, MAX_INDEXES>::open_from_storage::<
+        REGION_SIZE,
+        REGION_COUNT,
+        _,
+        8,
+        4,
+    >(storage.runtime(), &mut flash, &mut workspace, CollectionId(7), &mut reopen_buffer)
+    .unwrap();
+
+    assert_eq!(reopened.get(&1).unwrap(), Some(10));
+    assert_eq!(reopened.get(&2).unwrap(), Some(99));
+}
+
+#[test]
+fn storage_visit_wal_records_exposes_map_collection_records() {
+    const REGION_SIZE: usize = 512;
+    const REGION_COUNT: usize = 4;
+    const MAX_INDEXES: usize = 4;
+
+    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 1024>::new(0xff);
+    let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
+    let mut storage =
+        Storage::<8, 4>::format::<REGION_SIZE, REGION_COUNT, _>(&mut flash, &mut workspace, 1, 8, 0xa5)
+            .unwrap();
+    storage
+        .append_new_collection::<REGION_SIZE, REGION_COUNT, _>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(7),
+            CollectionType::MAP_CODE,
+        )
+        .unwrap();
+
+    let mut snapshot_buffer = [0u8; REGION_SIZE];
+    let mut source = LsmMap::<i32, i32, MAX_INDEXES>::new(CollectionId(7), &mut snapshot_buffer).unwrap();
+    source.set(1, 10).unwrap();
+    source
+        .write_snapshot_to_storage::<REGION_SIZE, REGION_COUNT, _, 8, 4>(
+            storage.runtime_mut(),
+            &mut flash,
+            &mut workspace,
+        )
+        .unwrap();
+
+    let mut seen = [(crate::WalRecordType::WalRecovery, CollectionId(0)); 2];
+    let mut count = 0usize;
+    storage
+        .runtime()
+        .visit_wal_records::<REGION_SIZE, _, (), _>(&mut flash, &mut workspace, |_flash, record| {
+            let collection_id = match record {
+                crate::WalRecord::NewCollection { collection_id, .. }
+                | crate::WalRecord::Update { collection_id, .. }
+                | crate::WalRecord::Snapshot { collection_id, .. }
+                | crate::WalRecord::Head { collection_id, .. }
+                | crate::WalRecord::DropCollection { collection_id } => collection_id,
+                _ => CollectionId(0),
+            };
+            if count < seen.len() {
+                seen[count] = (record.record_type(), collection_id);
+            }
+            count += 1;
+            Ok(())
+        })
+        .unwrap();
+
+    assert_eq!(
+        seen,
+        [
+            (crate::WalRecordType::NewCollection, CollectionId(7)),
+            (crate::WalRecordType::Snapshot, CollectionId(7)),
+        ]
+    );
+}
+
+#[test]
+//= spec/ring.md#collection-head-state-machine
+//# `RING-FORMAT-005` Every user collection MUST remain log-structured: flushing mutable state writes a new immutable committed region segment instead of rewriting an existing live region in place.
+fn storage_region_flush_restores_map_basis() {
+    const REGION_SIZE: usize = 512;
+    const REGION_COUNT: usize = 4;
+    const MAX_INDEXES: usize = 4;
+
+    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 1024>::new(0xff);
+    let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
+    let mut storage =
+        Storage::<8, 4>::format::<REGION_SIZE, REGION_COUNT, _>(&mut flash, &mut workspace, 1, 8, 0xa5)
+            .unwrap();
+    storage
+        .append_new_collection::<REGION_SIZE, REGION_COUNT, _>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(9),
+            CollectionType::MAP_CODE,
+        )
+        .unwrap();
+
+    let mut map_buffer = [0u8; REGION_SIZE];
+    let mut map = LsmMap::<i32, i32, MAX_INDEXES>::new(CollectionId(9), &mut map_buffer).unwrap();
+    map.set(5, 50).unwrap();
+    map.set(7, 70).unwrap();
+
+    let region_index = map
+        .flush_to_storage::<REGION_SIZE, REGION_COUNT, _, 8, 4>(
+            storage.runtime_mut(),
+            &mut flash,
+            &mut workspace,
+        )
+        .unwrap();
+    assert_eq!(
+        storage.runtime().collections()[0].basis(),
+        crate::StartupCollectionBasis::Region(region_index)
+    );
+    assert_eq!(storage.runtime().ready_region(), None);
+
+    let mut reopen_buffer = [0u8; REGION_SIZE];
+    let reopened = LsmMap::<i32, i32, MAX_INDEXES>::open_from_storage::<
+        REGION_SIZE,
+        REGION_COUNT,
+        _,
+        8,
+        4,
+    >(storage.runtime(), &mut flash, &mut workspace, CollectionId(9), &mut reopen_buffer)
+    .unwrap();
+
+    assert_eq!(reopened.get(&5).unwrap(), Some(50));
+    assert_eq!(reopened.get(&7).unwrap(), Some(70));
+}
+
 fn k_v_vec(count: usize) -> impl Strategy<Value = Vec<(i32, i32)>> {
     prop::collection::vec((0..i32::MAX, 0..i32::MAX), count..(count + 1))
 }
@@ -67,19 +435,9 @@ proptest! {
         let mut buffer = vec![0u8; BUFFER_SIZE];
         let id = CollectionId(1);
 
-        const DATA_SIZE: usize = BUFFER_SIZE;
-        const MAX_HEADS: usize = 8;
-        const REGION_COUNT: usize = 4;
         const MAX_INDEXES: usize = 4;
 
-
-        let mut mem_io =
-            MemIo::<DATA_SIZE, MAX_HEADS, REGION_COUNT>::new().expect("Failed to create MemIo");
-
-        let mut io: Io<'_, MemIo<2048, 8, 4>, MAX_HEADS> =
-            Io::init(&mut mem_io, DATA_SIZE, REGION_COUNT).expect("Failed to initialize Io");
-
-        let mut map = LsmMap::<_, _, _, MAX_INDEXES>::init::<MAX_HEADS>(&mut io, id, buffer.as_mut_slice())
+        let mut map = LsmMap::<_, _, MAX_INDEXES>::new(id, buffer.as_mut_slice())
             .expect("Could not construct LsmMap.");
 
         let (mut last_key, mut last_value) = entries[0];
@@ -111,19 +469,9 @@ proptest! {
         let mut buffer = vec![0u8; BUFFER_SIZE];
         let id = CollectionId(1);
 
-        const DATA_SIZE: usize = BUFFER_SIZE;
-        const MAX_HEADS: usize = 8;
-        const REGION_COUNT: usize = 4;
         const MAX_INDEXES: usize = 4;
 
-
-        let mut mem_io =
-            MemIo::<DATA_SIZE, MAX_HEADS, REGION_COUNT>::new().expect("Failed to create MemIo");
-
-        let mut io: Io<'_, MemIo<2048, 8, 4>, MAX_HEADS> =
-            Io::init(&mut mem_io, DATA_SIZE, REGION_COUNT).expect("Failed to initialize Io");
-
-        let mut map = LsmMap::<_, _, _, MAX_INDEXES>::init::<MAX_HEADS>(&mut io, id, buffer.as_mut_slice())
+        let mut map = LsmMap::<_, _, MAX_INDEXES>::new(id, buffer.as_mut_slice())
             .expect("Could not construct LsmMap.");
 
 

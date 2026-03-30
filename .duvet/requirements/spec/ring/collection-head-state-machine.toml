@@ -1,0 +1,268 @@
+target = "spec/ring.md#collection-head-state-machine"
+
+# Collection Head State Machine
+#
+# Each tracked user collection is either durably dropped or has exactly
+# one logical current head after replay.
+# 
+# States:
+# 
+# 1. `EmptyHead`
+# Latest durable basis is the empty collection created by a
+# `new_collection(collection_id, collection_type)` record. The
+# collection has a tracked collection type, but no durable region head,
+# no durable WAL snapshot, and no updates in its durable basis.
+# 
+# 2. `InMemoryDirty`
+# Latest state is represented by a collection-defined in-memory
+# frontier layered over a durable basis. The frontier may be a full
+# materialization, but it may also be a compact delta or memtable that
+# supersedes data still stored in the durable basis.
+# 
+# 3. `WALSnapshotHead`
+# Latest durable head points to a WAL `snapshot` record.
+# 
+# 4. `RegionHead`
+# Latest durable head points to a committed collection region.
+# 
+# 5. `Dropped`
+# Latest durable basis is a `drop_collection(collection_id)` tombstone.
+# The collection id remains reserved and tracked, but the collection no
+# longer has a live durable basis, accepts no further mutations, and its
+# older durable bytes are reclaimable once physically detached. Any
+# region associated with the dropped collection may be appended to the
+# free list if it is not already present there.
+# 
+# Transitions:
+# 
+# 1. `NoCollection -> EmptyHead`
+# Write `new_collection(collection_id, collection_type)`.
+# Durable after the `new_collection` record is durable. The collection
+# starts in memory with tracked `collection_type`, no region basis, no
+# snapshot basis, and no pending updates.
+# 
+# 2. `EmptyHead -> InMemoryDirty`
+# Open a mutable empty working state for the collection and append new
+# updates to the WAL while updating that RAM state.
+# 
+# 3. `InMemoryDirty -> WALSnapshotHead`
+# Write `snapshot`.
+# Durable after the `snapshot` record is durable.
+# 
+# 4. `InMemoryDirty -> RegionHead`
+# Write `alloc_begin(region_index, free_list_head_after)`, write collection
+# region, then write `head(collection_id, collection_type, region_index)`.
+# Durable after the `head` record is durable.
+# 
+# 5. `WALSnapshotHead -> InMemoryDirty`
+# Load the snapshot into RAM as the mutable working state, then append
+# new updates to the WAL while updating that RAM state.
+# 
+# 6. `WALSnapshotHead -> RegionHead`
+# Write `alloc_begin(region_index, free_list_head_after)`, materialize
+# snapshot (plus any RAM updates) into that new region, then write
+# `head(collection_id, collection_type, region_index)`.
+# 
+# 7. `RegionHead -> InMemoryDirty`
+# Open a mutable frontier over the committed region basis and apply new
+# updates without requiring the full region contents to be loaded into
+# RAM first.
+# 
+# 8. `EmptyHead | InMemoryDirty | WALSnapshotHead | RegionHead -> Dropped`
+# Write `drop_collection(collection_id)`.
+# Durable after the `drop_collection` record is durable. Any pending WAL
+# updates for that collection are discarded from the durable basis, the
+# collection leaves the live namespace, and no later WAL record for that
+# collection id is valid.
+# 
+# ```mermaid
+# %%{init: {"flowchart": {"wrappingWidth": 180}} }%%
+# flowchart LR
+#     NoCollection([NoCollection])
+#     EmptyHead["`EmptyHead
+# durable basis: new_collection`"]
+#     InMemoryDirty["`InMemoryDirty
+# RAM frontier over durable basis`"]
+#     WALSnapshotHead["`WALSnapshotHead
+# durable head: snapshot`"]
+#     RegionHead["`RegionHead
+# durable head: committed region`"]
+#     Dropped(["`Dropped
+# durable tombstone`"])
+# 
+#     NoCollection -->|write new_collection record| EmptyHead
+#     EmptyHead -->|open state and append updates| InMemoryDirty
+#     InMemoryDirty -->|write snapshot| WALSnapshotHead
+#     InMemoryDirty -->|flush to committed region| RegionHead
+#     WALSnapshotHead -->|load snapshot and resume updates| InMemoryDirty
+#     WALSnapshotHead -->|materialize snapshot into region| RegionHead
+#     RegionHead -->|open frontier and resume updates| InMemoryDirty
+# 
+#     EmptyHead -->|write drop record| Dropped
+#     InMemoryDirty -->|write drop record| Dropped
+#     WALSnapshotHead -->|write drop record| Dropped
+#     RegionHead -->|write drop record| Dropped
+# ```
+# 
+# Collection format responsibility:
+# 
+# 1. `RING-FORMAT-001` Each non-WAL `collection_format` value is defined by the user
+# collection type that writes it; borromean core stores that value in the
+# region header but does not assign it global meaning.
+# 2. `RING-FORMAT-002` Each user collection format defines how reads merge the durable basis
+# with the in-memory frontier.
+# 3. `RING-FORMAT-003` The frontier MUST take precedence over older values in the durable
+# basis.
+# 4. `RING-FORMAT-004` Flush to `RegionHead` materializes the logical state produced by
+# that merge.
+# 5. `RING-FORMAT-005` Every user collection MUST remain log-structured:
+# flushing mutable state writes a new immutable committed region segment
+# instead of rewriting an existing live region in place. An LSM-style
+# layout with SSTable-like immutable regions is one valid way to satisfy
+# this requirement.
+# 6. `RING-FORMAT-006` A `WALSnapshotHead` MUST be loadable into RAM before that
+# collection accepts further mutations.
+# 7. `RING-FORMAT-007` For live user collections, the replay-tracked collection type is
+# fixed by the earliest retained type-bearing record for that collection
+# (`new_collection`, `snapshot`, or `head`). Historically this begins at
+# `new_collection`, but WAL reclaim may later remove that record.
+# 8. `RING-FORMAT-008` Every later retained type-bearing record for that collection MUST
+# carry the same `collection_type`, otherwise replay must treat the
+# mismatch as corruption.
+# 9. `RING-FORMAT-009` When a user collection implementation loads a committed region
+# basis, it validates that region's `collection_format` according to its
+# own rules.
+# 10. `RING-FORMAT-010` Borromean core reserves exactly one canonical
+# `collection_format`, `wal_v1`, for WAL regions. Every WAL region uses
+# `wal_v1`, and that identifier is not user-definable.
+# 11. `RING-FORMAT-011` Per-region format evolution remains allowed because region headers
+# carry `collection_format` independently of the collection's stable
+# type.
+# 12. `RING-FORMAT-012` Every non-WAL `collection_type` that may appear
+# durably on disk MUST have a corresponding normative collection
+# specification.
+# 13. `RING-FORMAT-013` That collection specification MUST define, at
+# minimum: the empty logical state established by `new_collection`; the
+# exact bytes and interpretation of every supported committed-region
+# `collection_format`; the exact bytes and interpretation of `snapshot`
+# payloads; the exact bytes and interpretation of `update` payloads; the
+# rules for applying updates and merging a durable basis with the
+# in-memory frontier; and the collection-specific validation rules used
+# when loading a basis or replaying WAL payloads.
+# 14. `RING-FORMAT-014` For non-WAL collections, the pair
+# `(collection_type, collection_format)` MUST identify a unique committed
+# region payload format.
+# 15. `RING-FORMAT-015` An implementation MUST NOT open a database
+# successfully if replay yields a live collection whose
+# `collection_type` is unsupported by that implementation.
+# 16. `RING-FORMAT-016` An implementation MUST NOT open a database
+# successfully if replay yields a live collection whose retained
+# committed-region basis, retained `snapshot` payload, or retained
+# post-basis `update` payloads are unsupported or invalid under that
+# collection's normative specification.
+# 17. `RING-FORMAT-017` A dropped tombstone for an unsupported
+# collection type may remain as inert replay state. Support for that old
+# collection type is not required unless a live basis or retained
+# post-basis updates still exist for it.
+# 
+# Invariants:
+# 
+# 1. `RING-INVARIANT-001` The active durable basis for a collection is the last valid basis
+# decision in replay order, where a basis decision is
+# `new_collection`, `snapshot`,
+# `drop_collection`, or
+# `head(collection_id, collection_type, region_index)`.
+# 2. `RING-INVARIANT-002` `new_collection`, `snapshot`,
+# `drop_collection`, and
+# `head(collection_id, collection_type, region_index)` records totally
+# order durable basis decisions per collection.
+# 3. `RING-INVARIANT-003` Any `new_collection`, `update`, `snapshot`, or `head` older than the
+# active basis for that collection is reclaimable.
+# 4. `RING-INVARIANT-004` If the active basis for a collection is `drop_collection`, then that
+# collection is logically absent from the live namespace and any older
+# durable basis or update bytes for that collection are reclaimable once
+# they are no longer physically reachable. Any region associated with
+# that dropped collection may then be added to the free list if it is
+# not already in the free-list chain.
+# 5. `RING-INVARIANT-005` Historical append validity and retained replay basis are distinct:
+# `new_collection` is required before later user-collection records are
+# appended, but reclaim may later remove it so replay reconstructs from
+# the earliest retained basis record instead.
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-FORMAT-003` The frontier MUST take precedence over older values in the durable
+basis.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-FORMAT-005` Every user collection MUST remain log-structured:
+flushing mutable state writes a new immutable committed region segment
+instead of rewriting an existing live region in place.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-FORMAT-006` A `WALSnapshotHead` MUST be loadable into RAM before that
+collection accepts further mutations.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-FORMAT-008` Every later retained type-bearing record for that collection MUST
+carry the same `collection_type`, otherwise replay must treat the
+mismatch as corruption.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-FORMAT-012` Every non-WAL `collection_type` that may appear
+durably on disk MUST have a corresponding normative collection
+specification.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-FORMAT-013` That collection specification MUST define, at
+minimum: the empty logical state established by `new_collection`; the
+exact bytes and interpretation of every supported committed-region
+`collection_format`; the exact bytes and interpretation of `snapshot`
+payloads; the exact bytes and interpretation of `update` payloads; the
+rules for applying updates and merging a durable basis with the
+in-memory frontier; and the collection-specific validation rules used
+when loading a basis or replaying WAL payloads.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-FORMAT-014` For non-WAL collections, the pair
+`(collection_type, collection_format)` MUST identify a unique committed
+region payload format.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-FORMAT-015` An implementation MUST NOT open a database
+successfully if replay yields a live collection whose
+`collection_type` is unsupported by that implementation.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-FORMAT-016` An implementation MUST NOT open a database
+successfully if replay yields a live collection whose retained
+committed-region basis, retained `snapshot` payload, or retained
+post-basis `update` payloads are unsupported or invalid under that
+collection's normative specification.
+'''
+

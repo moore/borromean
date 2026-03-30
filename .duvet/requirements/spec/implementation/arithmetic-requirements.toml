@@ -1,0 +1,63 @@
+target = "spec/implementation.md#arithmetic-requirements"
+
+# Arithmetic Requirements
+#
+# 1. `RING-IMPL-ARITH-001` Integer arithmetic that can affect storage
+# layout, region addressing, WAL offsets, lengths, indexes, capacities,
+# or sequence advancement MUST use checked arithmetic or an equivalent
+# construction that makes overflow and underflow impossible by
+# construction.
+# 2. `RING-IMPL-ARITH-002` If such arithmetic cannot be proven safe by
+# construction and a checked operation fails, the implementation MUST
+# return an explicit error rather than wrap, saturate, or silently
+# truncate.
+# 3. `RING-IMPL-ARITH-003` The implementation MUST NOT rely on wrapping
+# integer behavior for correctness unless a future disk-format
+# requirement explicitly defines modulo arithmetic for that field.
+# 4. `RING-IMPL-ARITH-004` Conversions between integer widths that may
+# lose information MUST be checked and MUST fail explicitly if the value
+# is out of range for the destination type.
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-IMPL-ARITH-001` Integer arithmetic that can affect storage
+layout, region addressing, WAL offsets, lengths, indexes, capacities,
+or sequence advancement MUST use checked arithmetic or an equivalent
+construction that makes overflow and underflow impossible by
+construction.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-IMPL-ARITH-002` If such arithmetic cannot be proven safe by
+construction and a checked operation fails, the implementation MUST
+return an explicit error rather than wrap, saturate, or silently
+truncate.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-IMPL-ARITH-003` The implementation MUST NOT rely on wrapping
+integer behavior for correctness unless a future disk-format
+requirement explicitly defines modulo arithmetic for that field.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-IMPL-ARITH-004` Conversions between integer widths that may
+lose information MUST be checked and MUST fail explicitly if the value
+is out of range for the destination type.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-IMPL-ARITH-004` Conversions between integer widths that may
+lose information MUST be checked and MUST fail explicitly if the value
+is out of range for the destination type.
+'''
+

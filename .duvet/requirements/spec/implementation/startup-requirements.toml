@@ -1,0 +1,47 @@
+target = "spec/implementation.md#startup-requirements"
+
+# Startup Requirements
+#
+# 1. `RING-IMPL-STARTUP-001` Opening storage MUST be implemented as an
+# operation that can suspend between device interactions without losing
+# its replay context.
+# 2. `RING-IMPL-STARTUP-002` Startup replay state MUST itself obey the
+# same no-allocation rule as steady-state operation.
+# 3. `RING-IMPL-STARTUP-003` If startup needs temporary decode storage,
+# that storage MUST come from a caller-provided workspace or other
+# bounded static storage.
+# 4. `RING-IMPL-STARTUP-004` Recovery of incomplete WAL rotation,
+# allocation, or reclaim state MUST be expressible through the same
+# operation framework used for normal foreground work.
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-IMPL-STARTUP-001` Opening storage MUST be implemented as an
+operation that can suspend between device interactions without losing
+its replay context.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-IMPL-STARTUP-002` Startup replay state MUST itself obey the
+same no-allocation rule as steady-state operation.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-IMPL-STARTUP-003` If startup needs temporary decode storage,
+that storage MUST come from a caller-provided workspace or other
+bounded static storage.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-IMPL-STARTUP-004` Recovery of incomplete WAL rotation,
+allocation, or reclaim state MUST be expressible through the same
+operation framework used for normal foreground work.
+'''
+

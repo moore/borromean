@@ -1,0 +1,62 @@
+target = "spec/implementation.md#memory-requirements"
+
+# Memory Requirements
+#
+# 1. `RING-IMPL-MEM-001` The maximum number of tracked collections,
+# heads, replay entries, and other bounded in-memory items MUST be an
+# explicit compile-time or constructor-time capacity.
+# 2. `RING-IMPL-MEM-002` Any operation that needs scratch space for
+# encoding, decoding, or staging MUST accept caller-provided buffers or
+# borrow dedicated storage from a caller-provided workspace object.
+# 3. `RING-IMPL-MEM-003` If the configured capacities are insufficient to
+# open the store or complete an operation, the implementation MUST fail
+# explicitly with a capacity-related error rather than silently allocate
+# or truncate state.
+# 4. `RING-IMPL-MEM-004` The implementation SHOULD avoid keeping
+# duplicate copies of large record payloads in memory when a borrowed
+# buffer or streaming decode is sufficient.
+# 5. `RING-IMPL-MEM-005` Buffer-size requirements that depend on disk
+# format constants MUST be derivable from public constants, associated
+# constants, or documented constructor contracts.
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-IMPL-MEM-001` The maximum number of tracked collections,
+heads, replay entries, and other bounded in-memory items MUST be an
+explicit compile-time or constructor-time capacity.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-IMPL-MEM-002` Any operation that needs scratch space for
+encoding, decoding, or staging MUST accept caller-provided buffers or
+borrow dedicated storage from a caller-provided workspace object.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-IMPL-MEM-003` If the configured capacities are insufficient to
+open the store or complete an operation, the implementation MUST fail
+explicitly with a capacity-related error rather than silently allocate
+or truncate state.
+'''
+
+[[spec]]
+level = "SHOULD"
+quote = '''
+`RING-IMPL-MEM-004` The implementation SHOULD avoid keeping
+duplicate copies of large record payloads in memory when a borrowed
+buffer or streaming decode is sufficient.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-IMPL-MEM-005` Buffer-size requirements that depend on disk
+format constants MUST be derivable from public constants, associated
+constants, or documented constructor contracts.
+'''
+

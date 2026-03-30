@@ -1,0 +1,68 @@
+target = "spec/implementation.md#architecture-requirements"
+
+# Architecture Requirements
+#
+# 1. `RING-IMPL-ARCH-001` `Storage` MUST own logical storage state and
+# configuration, but MUST NOT require long-lived ownership of the
+# backing I/O object.
+# 2. `RING-IMPL-ARCH-002` The backing I/O object MUST instead be passed
+# into operation entry points or operation builders so the same
+# `Storage` value can participate in externally driven async execution.
+# 3. `RING-IMPL-ARCH-003` WAL handling, region-management logic, and
+# collection-specific logic MUST remain separable modules with explicit
+# interfaces.
+# 4. `RING-IMPL-ARCH-004` Encoding and decoding code MUST be usable from
+# pure tests without requiring live device I/O.
+# 5. `RING-IMPL-ARCH-005` The implementation SHOULD model complex
+# multi-step procedures such as startup replay and reclaim as explicit
+# phase machines so that each durable transition is inspectable in code
+# review and testable in isolation.
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-IMPL-ARCH-001` `Storage` MUST own logical storage state and
+configuration, but MUST NOT require long-lived ownership of the
+backing I/O object.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-IMPL-ARCH-001` `Storage` MUST own logical storage state and
+configuration, but MUST NOT require long-lived ownership of the
+backing I/O object.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-IMPL-ARCH-002` The backing I/O object MUST instead be passed
+into operation entry points or operation builders so the same
+`Storage` value can participate in externally driven async execution.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-IMPL-ARCH-003` WAL handling, region-management logic, and
+collection-specific logic MUST remain separable modules with explicit
+interfaces.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-IMPL-ARCH-004` Encoding and decoding code MUST be usable from
+pure tests without requiring live device I/O.
+'''
+
+[[spec]]
+level = "SHOULD"
+quote = '''
+`RING-IMPL-ARCH-005` The implementation SHOULD model complex
+multi-step procedures such as startup replay and reclaim as explicit
+phase machines so that each durable transition is inspectable in code
+review and testable in isolation.
+'''
+

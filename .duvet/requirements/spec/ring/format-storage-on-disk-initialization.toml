@@ -1,0 +1,105 @@
+target = "spec/ring.md#format-storage-on-disk-initialization"
+
+# Format Storage (On-Disk Initialization)
+#
+# Formatting creates a valid empty store that can be opened by normal
+# startup replay without special recovery paths.
+# 
+# Preconditions:
+# 
+# 1. `RING-FORMAT-STORAGE-PRE-001` Backing storage MUST be writable and erasable at region granularity.
+# 2. `RING-FORMAT-STORAGE-PRE-002` `region_count >= 1`.
+# 3. `RING-FORMAT-STORAGE-PRE-003` Region `0` MUST be reserved as the initial WAL region.
+# 4. `RING-FORMAT-STORAGE-PRE-004` `wal_write_granule >= 1`.
+# 5. `RING-FORMAT-STORAGE-PRE-005` `wal_record_magic != erased_byte`.
+# 6. `RING-FORMAT-STORAGE-PRE-006` `region_count >= 2 + min_free_regions`.
+# This guarantees that after reserving region `0` for the WAL and
+# preserving the configured `min_free_regions` reserve, a freshly
+# formatted store still has at least one non-reserved free region
+# available for ordinary allocations.
+# There is intentionally no normative minimum usable `region_size`
+# enforced by borromean. Geometries that are formally formatable but too
+# small to leave useful payload after `Header`, free-pointer footer, WAL
+# prologue, and WAL-reserve overhead are treated as deployment mistakes
+# rather than format errors. As deployment guidance, choose
+# `region_size` so the fixed header plus footer consume less than 10% of
+# the region, and leave enough remaining room for the intended WAL and
+# collection payloads.
+# 
+# Procedure:
+# 
+# 1. `RING-FORMAT-STORAGE-001` Erase metadata area and all data regions.
+# 2. `RING-FORMAT-STORAGE-002` Write `StorageMetadata` (`storage_version`,
+# `region_size`, `region_count`, `min_free_regions`,
+# `wal_write_granule`, `erased_byte`, `wal_record_magic`,
+# `metadata_checksum`) and sync metadata.
+# 3. `RING-FORMAT-STORAGE-003` Initialize region `0` as WAL:
+# write valid `Header` with `collection_id = 0`,
+# `collection_format = wal_v1`, and `sequence = 0`,
+# write a valid `WalRegionPrologue` with `wal_head_region_index = 0`,
+# then sync region `0`.
+# 4. `RING-FORMAT-STORAGE-004` For each region `r` in `[1, region_count - 1]`:
+# leave the erased header and payload bytes otherwise uninterpreted, write
+# valid `FreePointerFooter { next_tail = r + 1, footer_checksum }` bytes
+# for every region except the last, leave the last region's free-pointer
+# footer uninitialized, and
+# sync `r`.
+# 5. `RING-FORMAT-STORAGE-005` Formatting is complete only after metadata and all initialized
+# regions are durable.
+# 
+# Postconditions:
+# 
+# 1. `RING-FORMAT-STORAGE-POST-001` WAL head and WAL tail MUST both be region `0`.
+# 2. `RING-FORMAT-STORAGE-POST-002` A user collection durable head MUST
+# NOT exist after formatting.
+# 3. `RING-FORMAT-STORAGE-POST-003` The free list MUST contain every non-WAL region in ascending region-index
+# order.
+# 4. `RING-FORMAT-STORAGE-POST-004` Because region `0` is reserved as the WAL, the initial durable
+# free-list head is region `1` iff `region_count >= 2`; otherwise the
+# durable free list is empty.
+# 
+# ```mermaid
+# %%{init: {"flowchart": {"wrappingWidth": 180}} }%%
+# flowchart LR
+#     Start([Format storage])
+#     Erase["`Erase metadata area and all regions`"]
+#     WriteMeta["`Write and sync storage metadata`"]
+#     InitWal["`Initialize and sync WAL region zero`"]
+#     InitFree["`Initialize free list chain in remaining regions`"]
+#     Fresh([Fresh formatted store])
+# 
+#     Start --> Erase --> WriteMeta --> InitWal --> InitFree --> Fresh
+# ```
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-FORMAT-STORAGE-PRE-001` Backing storage MUST be writable and erasable at region granularity.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-FORMAT-STORAGE-PRE-003` Region `0` MUST be reserved as the initial WAL region.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-FORMAT-STORAGE-POST-001` WAL head and WAL tail MUST both be region `0`.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-FORMAT-STORAGE-POST-002` A user collection durable head MUST
+NOT exist after formatting.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-FORMAT-STORAGE-POST-003` The free list MUST contain every non-WAL region in ascending region-index
+order.
+'''
+

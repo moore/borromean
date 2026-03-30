@@ -1,0 +1,65 @@
+target = "spec/implementation.md#core-requirements"
+
+# Core Requirements
+#
+# 1. `RING-IMPL-CORE-001` The core library crate MUST compile with
+# `#![no_std]`.
+# 2. `RING-IMPL-CORE-002` The core library crate MUST NOT depend on the
+# Rust `alloc` crate.
+# 3. `RING-IMPL-CORE-003` The core library crate MUST NOT depend on an
+# async runtime, executor, scheduler, or timer facility.
+# 4. `RING-IMPL-CORE-004` The implementation MUST preserve the durable
+# behavior defined by [spec/ring.md](ring.md); this specification MAY
+# constrain implementation structure but MUST NOT weaken ring-level
+# correctness requirements.
+# 5. `RING-IMPL-CORE-005` All memory required for normal operation MUST
+# come from caller-owned values, fixed-capacity fields, or stack frames
+# whose size is statically bounded by type parameters or API contracts.
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-IMPL-CORE-001` The core library crate MUST compile with
+`#![no_std]`.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-IMPL-CORE-002` The core library crate MUST NOT depend on the
+Rust `alloc` crate.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-IMPL-CORE-003` The core library crate MUST NOT depend on an
+async runtime, executor, scheduler, or timer facility.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-IMPL-CORE-004` The implementation MUST preserve the durable
+behavior defined by [spec/ring.md](ring.md); this specification MAY
+constrain implementation structure but MUST NOT weaken ring-level
+correctness requirements.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-IMPL-CORE-004` The implementation MUST preserve the durable
+behavior defined by [spec/ring.md](ring.md); this specification MAY
+constrain implementation structure but MUST NOT weaken ring-level
+correctness requirements.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-IMPL-CORE-005` All memory required for normal operation MUST
+come from caller-owned values, fixed-capacity fields, or stack frames
+whose size is statically bounded by type parameters or API contracts.
+'''
+

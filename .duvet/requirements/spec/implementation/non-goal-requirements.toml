@@ -1,0 +1,23 @@
+target = "spec/implementation.md#non-goal-requirements"
+
+# Non-Goal Requirements
+#
+# 1. `RING-IMPL-NONGOAL-001` Borromean core MUST NOT require a specific
+# embedded framework, RTOS, or async executor.
+# 2. `RING-IMPL-NONGOAL-002` Borromean core MUST NOT assume thread
+# support, background workers, or heap-backed task scheduling.
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-IMPL-NONGOAL-001` Borromean core MUST NOT require a specific
+embedded framework, RTOS, or async executor.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-IMPL-NONGOAL-002` Borromean core MUST NOT assume thread
+support, background workers, or heap-backed task scheduling.
+'''
+

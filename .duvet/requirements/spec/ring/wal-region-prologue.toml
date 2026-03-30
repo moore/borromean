@@ -1,0 +1,63 @@
+target = "spec/ring.md#wal-region-prologue"
+
+# WAL Region Prologue
+#
+# ```rust
+# struct WalRegionPrologue {
+#   wal_head_region_index: u32,
+#   prologue_checksum: u32,
+# }
+# ```
+# 
+# `WalRegionPrologue` is present only in WAL regions (regions whose valid
+# header has `collection_id = 0` and `collection_format = wal_v1`) and
+# occupies the first bytes of the region user-data area immediately after
+# the region `Header`.
+# 
+# `wal_head_region_index` is the durable WAL head that was current when
+# that WAL region was initialized. It must name a region index strictly
+# less than `region_count`. If startup finishes an incomplete WAL
+# rotation by initializing a missing/corrupt target region, it must write
+# the same already-determined WAL head into this field rather than
+# choosing a new value during recovery.
+# 
+# `prologue_checksum` validates the logical prologue contents. It covers
+# `wal_head_region_index` in the same byte order used on disk.
+# 
+# 1. `RING-PROLOGUE-001` `WalRegionPrologue` MUST be encoded as the exact
+# byte sequence of the fields shown above, in that order, with no
+# implicit padding.
+# 2. `RING-PROLOGUE-002` `prologue_checksum` MUST be CRC-32C over
+# `wal_head_region_index`.
+# 3. `RING-PROLOGUE-003` `wal_head_region_index` MUST be strictly less
+# than `region_count`.
+# 
+# Let `wal_record_area_offset` be the first offset within a WAL region
+# that is both greater than or equal to the end of `Header` plus
+# `WalRegionPrologue`, and aligned to `wal_write_granule`.
+# Replay scans candidate WAL record starts only at aligned offsets
+# greater than or equal to `wal_record_area_offset`, and new WAL appends
+# must begin at such offsets as well.
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-PROLOGUE-001` `WalRegionPrologue` MUST be encoded as the exact
+byte sequence of the fields shown above, in that order, with no
+implicit padding.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-PROLOGUE-002` `prologue_checksum` MUST be CRC-32C over
+`wal_head_region_index`.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-PROLOGUE-003` `wal_head_region_index` MUST be strictly less
+than `region_count`.
+'''
+

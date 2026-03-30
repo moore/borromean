@@ -1,0 +1,36 @@
+target = "spec/implementation.md#collection-requirements"
+
+# Collection Requirements
+#
+# 1. `RING-IMPL-COLL-001` Collection implementations MUST depend on the
+# shared storage engine for durability, ordering, and recovery rather
+# than duplicating those mechanisms ad hoc.
+# 2. `RING-IMPL-COLL-002` Collection-specific in-memory state MUST obey
+# the same explicit-capacity and no-allocation rules as borromean core.
+# 3. `RING-IMPL-COLL-003` A collection operation that needs I/O MUST be
+# drivable through the same runtime-agnostic future model as core
+# storage operations.
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-IMPL-COLL-001` Collection implementations MUST depend on the
+shared storage engine for durability, ordering, and recovery rather
+than duplicating those mechanisms ad hoc.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-IMPL-COLL-002` Collection-specific in-memory state MUST obey
+the same explicit-capacity and no-allocation rules as borromean core.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-IMPL-COLL-003` A collection operation that needs I/O MUST be
+drivable through the same runtime-agnostic future model as core
+storage operations.
+'''
+

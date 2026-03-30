@@ -1,0 +1,237 @@
+target = "spec/ring.md#core-requirements"
+
+# Core Requirements
+#
+# 1. `RING-CORE-001` Region starts and region sizes MUST be aligned to
+# the backing flash erase-block size so every region can be erased
+# independently.
+# 2. `RING-CORE-002` Each collection MUST be implemented as an
+# append-only data structure whose new writes are added to the head
+# region and whose storage can only be freed by truncating the tail.
+# 3. `RING-CORE-003` Borromean MUST reserve `collection_id = 0` for the
+# WAL, and all user collection identifiers MUST be nonzero stable 64-bit
+# nonces that are never recycled.
+# 4. `RING-CORE-004` Borromean core MUST reserve
+# `collection_type = wal` for `collection_id = 0`, and user collections
+# MUST NOT use that collection type.
+# 5. `RING-CORE-005` For user collections, append-time validity MUST
+# require a successful earlier
+# `new_collection(collection_id, collection_type)` before any later
+# record for that collection may be appended.
+# 6. `RING-CORE-006` For a live user collection, the earliest retained
+# type-bearing record seen during replay MUST establish the
+# replay-tracked `collection_type`, and every later valid type-bearing
+# record for that collection MUST carry the same `collection_type`.
+# 7. `RING-CORE-007` A `drop_collection(collection_id)` record that is
+# durable MUST tombstone that collection, MUST forbid later WAL records
+# for that `collection_id`, and MUST make older durable bytes reclaimable
+# once they are no longer physically reachable from live state.
+# 8. `RING-CORE-008` Borromean MUST model WAL-head movement as ordinary
+# `head(collection_id = 0, collection_type = wal, region_index = ...)`
+# records rather than a WAL-specific head record type.
+# 9. `RING-CORE-009` Any reclaim that frees a region MUST be tracked as a
+# WAL transaction bounded by durable `reclaim_begin(region_index)` and
+# `reclaim_end(region_index)` records.
+# 10. `RING-CORE-010` The durable free list MUST be FIFO so allocations
+# consume the oldest free regions first.
+# 11. `RING-CORE-011` Any operation that writes a newly allocated region
+# MUST first durably reserve that region with
+# `alloc_begin(region_index, free_list_head_after)`.
+# 12. `RING-CORE-012` The implementation MUST maintain
+# `min_free_regions >= max_in_memory_dirty_collections + 1`.
+# 13. `RING-CORE-013` Ordinary foreground allocations MUST NOT consume
+# the last `min_free_regions` free regions.
+# 14. `RING-CORE-014` If reclaim cannot restore at least
+# `min_free_regions` free regions, the database MUST treat ordinary
+# writes as out of space until space is freed or the store is migrated.
+# 15. `RING-CORE-015` Each collection's mutable in-memory update frontier
+# MUST have a bounded configured capacity.
+# 16. `RING-CORE-016` If applying another update would exceed that
+# capacity, the implementation MUST flush the collection's current
+# logical frontier into a newly allocated region, durably commit that
+# region as the collection head, and clear the in-memory frontier before
+# accepting further updates for that collection.
+# 17. `RING-CORE-017` After such a frontier-capacity flush, later updates
+# for that collection MUST accumulate in a fresh in-memory frontier
+# layered over the newly committed region head.
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-CORE-001` Region starts and region sizes MUST be aligned to
+the backing flash erase-block size so every region can be erased
+independently.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-CORE-002` Each collection MUST be implemented as an
+append-only data structure whose new writes are added to the head
+region and whose storage can only be freed by truncating the tail.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-CORE-003` Borromean MUST reserve `collection_id = 0` for the
+WAL, and all user collection identifiers MUST be nonzero stable 64-bit
+nonces that are never recycled.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-CORE-003` Borromean MUST reserve `collection_id = 0` for the
+WAL, and all user collection identifiers MUST be nonzero stable 64-bit
+nonces that are never recycled.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-CORE-004` Borromean core MUST reserve
+`collection_type = wal` for `collection_id = 0`, and user collections
+MUST NOT use that collection type.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-CORE-004` Borromean core MUST reserve
+`collection_type = wal` for `collection_id = 0`, and user collections
+MUST NOT use that collection type.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-CORE-005` For user collections, append-time validity MUST
+require a successful earlier
+`new_collection(collection_id, collection_type)` before any later
+record for that collection may be appended.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-CORE-006` For a live user collection, the earliest retained
+type-bearing record seen during replay MUST establish the
+replay-tracked `collection_type`, and every later valid type-bearing
+record for that collection MUST carry the same `collection_type`.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-CORE-006` For a live user collection, the earliest retained
+type-bearing record seen during replay MUST establish the
+replay-tracked `collection_type`, and every later valid type-bearing
+record for that collection MUST carry the same `collection_type`.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-CORE-007` A `drop_collection(collection_id)` record that is
+durable MUST tombstone that collection, MUST forbid later WAL records
+for that `collection_id`, and MUST make older durable bytes reclaimable
+once they are no longer physically reachable from live state.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-CORE-007` A `drop_collection(collection_id)` record that is
+durable MUST tombstone that collection, MUST forbid later WAL records
+for that `collection_id`, and MUST make older durable bytes reclaimable
+once they are no longer physically reachable from live state.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-CORE-007` A `drop_collection(collection_id)` record that is
+durable MUST tombstone that collection, MUST forbid later WAL records
+for that `collection_id`, and MUST make older durable bytes reclaimable
+once they are no longer physically reachable from live state.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-CORE-008` Borromean MUST model WAL-head movement as ordinary
+`head(collection_id = 0, collection_type = wal, region_index = ...)`
+records rather than a WAL-specific head record type.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-CORE-009` Any reclaim that frees a region MUST be tracked as a
+WAL transaction bounded by durable `reclaim_begin(region_index)` and
+`reclaim_end(region_index)` records.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-CORE-010` The durable free list MUST be FIFO so allocations
+consume the oldest free regions first.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-CORE-011` Any operation that writes a newly allocated region
+MUST first durably reserve that region with
+`alloc_begin(region_index, free_list_head_after)`.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-CORE-012` The implementation MUST maintain
+`min_free_regions >= max_in_memory_dirty_collections + 1`.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-CORE-013` Ordinary foreground allocations MUST NOT consume
+the last `min_free_regions` free regions.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-CORE-014` If reclaim cannot restore at least
+`min_free_regions` free regions, the database MUST treat ordinary
+writes as out of space until space is freed or the store is migrated.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-CORE-015` Each collection's mutable in-memory update frontier
+MUST have a bounded configured capacity.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-CORE-016` If applying another update would exceed that
+capacity, the implementation MUST flush the collection's current
+logical frontier into a newly allocated region, durably commit that
+region as the collection head, and clear the in-memory frontier before
+accepting further updates for that collection.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-CORE-017` After such a frontier-capacity flush, later updates
+for that collection MUST accumulate in a fresh in-memory frontier
+layered over the newly committed region head.
+'''
+

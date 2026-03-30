@@ -1,0 +1,236 @@
+target = "spec/ring.md#region-reclaim"
+
+# Region Reclaim
+#
+# Region reclaim appends a newly freed region to the tail of the free
+# list. If the free list was non-empty, reclaim must update the previous
+# tail region's `next_tail` pointer so the chain now ends at the newly
+# reclaimed region. Because reclaim removes a region from live metadata
+# before making it reachable from the free-list chain, it is always
+# modeled as a WAL-tracked transaction.
+# 
+# Normative append semantics:
+# 
+# 1. `RING-REGION-RECLAIM-SEM-001` Let `t_prev` be the value of `free_list_tail` before reclaim starts.
+# 2. `RING-REGION-RECLAIM-SEM-002` If `t_prev != none`, reclaim MUST durably write
+# `t_prev.free_pointer.next_tail = r` when freeing region `r`.
+# 3. `RING-REGION-RECLAIM-SEM-003` If `t_prev = none`, reclaim MUST NOT write any predecessor link and
+# MUST durably append `free_list_head(r)` and set `free_list_head = r`
+# and `free_list_tail = r`.
+# 4. `RING-REGION-RECLAIM-SEM-004` Reclaim is not complete until the predecessor-link write (when
+# required), or the `free_list_head(r)` record (when the free list was
+# empty), is durable; otherwise `r` is not yet a durable member of the
+# free list.
+# 
+# Preconditions:
+# 
+# 1. `RING-REGION-RECLAIM-PRE-001` `reclaim_begin(r)` MUST be durable in the WAL before any live metadata is
+# updated to stop referencing `r`.
+# 2. `RING-REGION-RECLAIM-PRE-002` After the detach step, the reclaimed region `r` MUST no longer be
+# reachable from any live collection head or live WAL state.
+# 3. `RING-REGION-RECLAIM-PRE-003` `r` MUST NOT already be reachable from the free-list chain, unless this
+# procedure is being re-entered during crash recovery.
+# 4. `RING-REGION-RECLAIM-PRE-004` If a current free-list tail exists, call it `t_prev`.
+# 
+# Procedure:
+# 
+# 1. `RING-REGION-RECLAIM-001` Ensure `reclaim_begin(r)` is durable. On the initial reclaim
+# attempt this means append and sync `reclaim_begin(r)`. On recovery
+# re-entry the existing durable record satisfies this step.
+# 2. `RING-REGION-RECLAIM-002` Durably perform any collection-head or WAL-head updates needed so
+# that `r` has no remaining live references.
+# 3. `RING-REGION-RECLAIM-003` If recovery finds that `r` is already reachable from the free-list
+# chain, skip to step 8.
+# 4. `RING-REGION-RECLAIM-004` Establish `r` as a free region without erasing it. In particular,
+# `r.free_pointer.next_tail` MUST still be uninitialized when `r` is
+# about to become the new free-list tail. If the region still has the
+# erased footer state from when it was allocated, no additional write to
+# `r` is required for this step.
+# 5. `RING-REGION-RECLAIM-005` If `t_prev` exists, write `t_prev.free_pointer.next_tail = r`.
+# This is the operation that links the previous free tail to the new
+# tail.
+# 6. `RING-REGION-RECLAIM-006` If `t_prev` exists, sync `t_prev` after writing `next_tail`.
+# 7. `RING-REGION-RECLAIM-007` If `t_prev` exists, update in-memory `free_list_tail = r`.
+# If no tail existed before step 5, append and sync `free_list_head(r)`,
+# then set both in-memory `free_list_head = r` and `free_list_tail = r`.
+# 8. `RING-REGION-RECLAIM-008` If recovery found `r` already reachable from the free-list chain,
+# update in-memory free-list state so it reflects `r` as the current
+# tail when needed.
+# 9. `RING-REGION-RECLAIM-009` Append and sync `reclaim_end(r)`.
+# 
+# Postconditions:
+# 
+# 1. `RING-REGION-RECLAIM-POST-001` The free-list chain MUST remain acyclic and FIFO-ordered.
+# 2. `RING-REGION-RECLAIM-POST-002` Exactly one new region (`r`) MUST be appended to the tail.
+# 3. `RING-REGION-RECLAIM-POST-003` If a prior tail existed, its `next_tail` pointer MUST now reference
+# `r`.
+# 4. `RING-REGION-RECLAIM-POST-004` `r.free_pointer.next_tail` MUST remain uninitialized after reclaim.
+# 5. `RING-REGION-RECLAIM-POST-005` If a prior tail existed, replay of free pointers MUST follow
+# `... -> t_prev -> r`, and `r` is recognized as the tail because its
+# free-pointer slot is uninitialized.
+# 6. `RING-REGION-RECLAIM-POST-006` If a prior tail existed, the only new durable predecessor link for
+# `r` is `t_prev.next_tail = r`, where `t_prev` is the free-list tail
+# from before reclaim.
+# 7. `RING-REGION-RECLAIM-POST-007` Replay either finds a matching `reclaim_end(r)` or can safely
+# re-enter the procedure and derive the same result without duplicating
+# `r` in the free-list chain.
+# 
+# ```mermaid
+# %%{init: {"flowchart": {"wrappingWidth": 180}} }%%
+# flowchart TD
+#     NeedFree([Need to reclaim region r])
+#     Begin["`Ensure reclaim begin record is durable`"]
+#     Detach["`Detach region r from live collection and WAL state`"]
+#     AlreadyFree{"`Region r already in free list?`"}
+#     Prep["`Keep region r as free tail candidate`"]
+#     PriorTail{"`Prior free list tail exists?`"}
+#     LinkPrev["`Write and sync previous tail next pointer`"]
+#     NewHead["`Append and sync free list head record`"]
+#     UpdateMem["`Update in memory free list head and tail`"]
+#     End["`Append and sync reclaim end record`"]
+#     Done([Reclaim complete])
+# 
+#     NeedFree --> Begin --> Detach --> AlreadyFree
+#     AlreadyFree -->|yes| UpdateMem
+#     AlreadyFree -->|no| Prep --> PriorTail
+#     PriorTail -->|yes| LinkPrev --> UpdateMem
+#     PriorTail -->|no| NewHead --> UpdateMem
+#     UpdateMem --> End --> Done
+# ```
+# 
+# Crash-safety ordering requirement:
+# 
+# 1. `RING-REGION-RECLAIM-ORDER-001` `reclaim_begin(r)` MUST be durable before any live metadata stops
+# referencing `r`.
+# 2. `RING-REGION-RECLAIM-ORDER-002` Before any durable write makes `r` reachable from `t_prev.next_tail`,
+# the implementation MUST ensure that `r` already has the correct
+# free-list-tail footer state, namely an uninitialized
+# `r.free_pointer.next_tail`.
+# 3. `RING-REGION-RECLAIM-ORDER-003` If `t_prev = none`, `free_list_head(r)` MUST be durable before
+# `reclaim_end(r)` is acknowledged.
+# 4. `RING-REGION-RECLAIM-ORDER-004` If `t_prev` exists, the `t_prev.next_tail = r` write MUST be synced before
+# `reclaim_end(r)` is acknowledged.
+# 5. `RING-REGION-RECLAIM-ORDER-005` The reclaim procedure MUST be idempotent across crashes between any
+# two steps above.
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-REGION-RECLAIM-SEM-002` If `t_prev != none`, reclaim MUST durably write
+`t_prev.free_pointer.next_tail = r` when freeing region `r`.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-REGION-RECLAIM-SEM-003` If `t_prev = none`, reclaim MUST NOT write any predecessor link and
+MUST durably append `free_list_head(r)` and set `free_list_head = r`
+and `free_list_tail = r`.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-REGION-RECLAIM-SEM-003` If `t_prev = none`, reclaim MUST NOT write any predecessor link and
+MUST durably append `free_list_head(r)` and set `free_list_head = r`
+and `free_list_tail = r`.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-REGION-RECLAIM-PRE-001` `reclaim_begin(r)` MUST be durable in the WAL before any live metadata is
+updated to stop referencing `r`.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-REGION-RECLAIM-PRE-002` After the detach step, the reclaimed region `r` MUST no longer be
+reachable from any live collection head or live WAL state.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-REGION-RECLAIM-PRE-003` `r` MUST NOT already be reachable from the free-list chain, unless this
+procedure is being re-entered during crash recovery.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+In particular,
+`r.free_pointer.next_tail` MUST still be uninitialized when `r` is
+about to become the new free-list tail.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-REGION-RECLAIM-POST-001` The free-list chain MUST remain acyclic and FIFO-ordered.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-REGION-RECLAIM-POST-002` Exactly one new region (`r`) MUST be appended to the tail.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-REGION-RECLAIM-POST-003` If a prior tail existed, its `next_tail` pointer MUST now reference
+`r`.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-REGION-RECLAIM-POST-004` `r.free_pointer.next_tail` MUST remain uninitialized after reclaim.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-REGION-RECLAIM-POST-005` If a prior tail existed, replay of free pointers MUST follow
+`...
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-REGION-RECLAIM-ORDER-001` `reclaim_begin(r)` MUST be durable before any live metadata stops
+referencing `r`.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-REGION-RECLAIM-ORDER-002` Before any durable write makes `r` reachable from `t_prev.next_tail`,
+the implementation MUST ensure that `r` already has the correct
+free-list-tail footer state, namely an uninitialized
+`r.free_pointer.next_tail`.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-REGION-RECLAIM-ORDER-003` If `t_prev = none`, `free_list_head(r)` MUST be durable before
+`reclaim_end(r)` is acknowledged.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-REGION-RECLAIM-ORDER-004` If `t_prev` exists, the `t_prev.next_tail = r` write MUST be synced before
+`reclaim_end(r)` is acknowledged.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-REGION-RECLAIM-ORDER-005` The reclaim procedure MUST be idempotent across crashes between any
+two steps above.
+'''
+

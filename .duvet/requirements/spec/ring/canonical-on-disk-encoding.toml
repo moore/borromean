@@ -1,0 +1,142 @@
+target = "spec/ring.md#canonical-on-disk-encoding"
+
+# Canonical On-Disk Encoding
+#
+# Borromean defines one canonical byte-level encoding so independently
+# written implementations can interoperate on the same media image.
+# 
+# 1. `RING-DISK-001` All fixed-width integer fields in `StorageMetadata`,
+# `Header`, `WalRegionPrologue`, free-pointer footers, and logical WAL
+# records MUST be encoded little-endian.
+# 2. `RING-DISK-002` The canonical scalar widths are:
+# `region_index: u32`, `region_size: u32`, `region_count: u32`,
+# `min_free_regions: u32`, `wal_write_granule: u32`,
+# `collection_id: u64`, `sequence: u64`, `payload_len: u32`,
+# `collection_type: u16`, `collection_format: u16`,
+# `erased_byte: u8`, and `wal_record_magic: u8`.
+# 3. `RING-DISK-003` `collection_type` is a stable global `u16`
+# namespace recorded durably in WAL records. Borromean core reserves
+# `0x0000` for `wal`, `0x0001` for `channel`, `0x0002` for `map`,
+# `0x0003..0x00ff` for future core-defined collection types,
+# `0x0100..0x7fff` for public extension collection types, and
+# `0x8000..0xffff` for private deployment-local collection types that are
+# not required to interoperate across deployments.
+# 4. `RING-DISK-004` `collection_format` is a stable per-region `u16`
+# namespace recorded durably in region headers. The pair
+# `(collection_type, collection_format)` identifies a concrete committed
+# region payload encoding. Borromean core reserves `collection_format =
+# 0x0000` globally for `wal_v1`; every non-WAL collection format MUST be
+# nonzero. For any non-WAL collection type, `0x0001..0x7fff` are stable
+# public format identifiers and `0x8000..0xffff` are private
+# deployment-local format identifiers.
+# 5. `RING-DISK-005` Optional region indexes carried inside logical WAL
+# records MUST be encoded as `OptRegionIndex`, a one-byte tag followed,
+# when the tag is `1`, by a `u32 region_index`. Tag `0` means `none`;
+# any other tag value is corruption.
+# 6. `RING-DISK-006` `metadata_checksum`, `header_checksum`,
+# `prologue_checksum`, `footer_checksum`, and `record_checksum` MUST all use the standard
+# CRC-32C (Castagnoli) parameters (`poly = 0x1edc6f41`,
+# `init = 0xffffffff`, `refin = true`, `refout = true`,
+# `xorout = 0xffffffff`) and MUST be stored little-endian.
+# 7. `RING-DISK-007` Unless a structure explicitly says otherwise, the
+# checksum for that structure MUST cover the exact logical bytes of every
+# earlier field in that structure, in on-disk order, and MUST exclude the
+# checksum field itself and any later padding.
+# 8. `RING-DISK-008` Struct-like layouts in this specification are exact
+# byte sequences with no implicit padding; the field order shown is the
+# on-disk order.
+# 
+# For WAL regions, the user-data area begins with a fixed
+# `WalRegionPrologue`. That prologue records the WAL head that was
+# current when the WAL region was initialized. WAL records do not begin
+# immediately after the region `Header`; they begin at the first
+# `wal_write_granule`-aligned byte after the end of the
+# `WalRegionPrologue`.
+# 
+# ```mermaid
+# block-beta
+#  columns 4
+#  Storage["Allocated Storage"]:4
+#  Meta["Storage Metadata"]
+#  R1["First Region"]
+#  e1["..."]
+#  R2["Last Region"]
+#  space:4
+#  block:exp:4
+#   h1["Header"]
+#   d1["User Data"]
+#   a1["Free Pointer"]
+#  end
+#  space:4
+#  block:header:4
+#   s1["Sequence Number"]
+#   cid["Collection Id"]
+#   type["Collection Format"]
+#   check["Header Checksum"]
+#  end
+#  R1 --> exp
+#  h1 --> header
+# ```
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-DISK-001` All fixed-width integer fields in `StorageMetadata`,
+`Header`, `WalRegionPrologue`, free-pointer footers, and logical WAL
+records MUST be encoded little-endian.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+Borromean core reserves `collection_format =
+0x0000` globally for `wal_v1`; every non-WAL collection format MUST be
+nonzero.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-DISK-005` Optional region indexes carried inside logical WAL
+records MUST be encoded as `OptRegionIndex`, a one-byte tag followed,
+when the tag is `1`, by a `u32 region_index`.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-DISK-006` `metadata_checksum`, `header_checksum`,
+`prologue_checksum`, `footer_checksum`, and `record_checksum` MUST all use the standard
+CRC-32C (Castagnoli) parameters (`poly = 0x1edc6f41`,
+`init = 0xffffffff`, `refin = true`, `refout = true`,
+`xorout = 0xffffffff`) and MUST be stored little-endian.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-DISK-006` `metadata_checksum`, `header_checksum`,
+`prologue_checksum`, `footer_checksum`, and `record_checksum` MUST all use the standard
+CRC-32C (Castagnoli) parameters (`poly = 0x1edc6f41`,
+`init = 0xffffffff`, `refin = true`, `refout = true`,
+`xorout = 0xffffffff`) and MUST be stored little-endian.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-DISK-007` Unless a structure explicitly says otherwise, the
+checksum for that structure MUST cover the exact logical bytes of every
+earlier field in that structure, in on-disk order, and MUST exclude the
+checksum field itself and any later padding.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-DISK-007` Unless a structure explicitly says otherwise, the
+checksum for that structure MUST cover the exact logical bytes of every
+earlier field in that structure, in on-disk order, and MUST exclude the
+checksum field itself and any later padding.
+'''
+

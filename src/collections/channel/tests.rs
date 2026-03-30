@@ -1,6 +1,5 @@
 use super::*;
 
-use crate::io::mem_io::MemRegionAddress;
 use crate::vec_like::VecLikeSlice;
 
 #[test]
@@ -17,7 +16,7 @@ fn test_new_channel() {
     let mut updates_data = [MemberId { id: 0 }; 1024];
     let mut updates = VecLikeSlice::new(&mut updates_data);
 
-    let mut pending_data: [_; 1024] = core::array::from_fn(|_| AddCommand::<MemRegionAddress, 8> {
+    let mut pending_data: [_; 1024] = core::array::from_fn(|_| AddCommand::<u32, 8> {
         prior: CommandAddress::zero(),
         sender_last: ChannelSequence(0),
         sequence: ChannelSequence(0),
@@ -57,7 +56,7 @@ fn test_add_member() {
     let mut updates_data = [MemberId { id: 0 }; 1];
     let mut updates = VecLikeSlice::new(&mut updates_data);
 
-    let mut pending_data = [AddCommand::<MemRegionAddress, 8> {
+    let mut pending_data = [AddCommand::<u32, 8> {
         prior: CommandAddress::zero(),
         sender_last: ChannelSequence(0),
         sequence: ChannelSequence(0),
@@ -98,7 +97,7 @@ fn test_add_member_limit() {
     let mut updates_data = [MemberId { id: 0 }; 1];
     let mut updates = VecLikeSlice::new(&mut updates_data);
 
-    let mut pending_data = [AddCommand::<MemRegionAddress, 8> {
+    let mut pending_data = [AddCommand::<u32, 8> {
         prior: CommandAddress::zero(),
         sender_last: ChannelSequence(0),
         sequence: ChannelSequence(0),
@@ -140,7 +139,7 @@ fn test_get_last_sequence() {
     let mut updates_data = [MemberId { id: 0 }; 1];
     let mut updates = VecLikeSlice::new(&mut updates_data);
 
-    let mut pending_data = [AddCommand::<MemRegionAddress, 8> {
+    let mut pending_data = [AddCommand::<u32, 8> {
         prior: CommandAddress::zero(),
         sender_last: ChannelSequence(0),
         sequence: ChannelSequence(0),
@@ -150,7 +149,7 @@ fn test_get_last_sequence() {
     }; 1];
     let mut pending = VecLikeSlice::new(&mut pending_data);
 
-    let mut channel = Channel::<_, _, _, _, 8, 1>::new(
+    let channel = Channel::<_, _, _, _, 8, 1>::new(
         id,
         initial_member,
         &mut pending,
@@ -184,7 +183,7 @@ fn test_get_next_sequence() {
     let mut updates_data = [MemberId { id: 0 }; 1];
     let mut updates = VecLikeSlice::new(&mut updates_data);
 
-    let mut pending_data = [AddCommand::<MemRegionAddress, 8> {
+    let mut pending_data = [AddCommand::<u32, 8> {
         prior: CommandAddress::zero(),
         sender_last: ChannelSequence(0),
         sequence: ChannelSequence(0),
@@ -226,7 +225,7 @@ fn test_duplicate_member_add() {
     let mut updates_data = [MemberId { id: 0 }; 1];
     let mut updates = VecLikeSlice::new(&mut updates_data);
 
-    let mut pending_data = [AddCommand::<MemRegionAddress, 8> {
+    let mut pending_data = [AddCommand::<u32, 8> {
         prior: CommandAddress::zero(),
         sender_last: ChannelSequence(0),
         sequence: ChannelSequence(0),

@@ -1,0 +1,82 @@
+target = "spec/ring.md#storage-metadata"
+
+# Storage Metadata
+#
+# ```rust
+# struct StorageMetadata {
+#   storage_version: u32,
+#   region_size: u32,
+#   region_count: u32,
+#   min_free_regions: u32,
+#   wal_write_granule: u32,
+#   erased_byte: u8,
+#   wal_record_magic: u8,
+#   metadata_checksum: u32,
+# }
+# ```
+# 
+# The `StorageMetadata` struct describes the version of the storage as
+# well as the size of each region in bytes, the number of regions in the
+# database, the configured `min_free_regions` reserve, the erased-flash
+# byte value, the minimum writable granule used to align WAL records, and
+# the WAL record magic byte. The stored `wal_record_magic` must differ
+# from `erased_byte`.
+# 
+# 1. `RING-META-001` The canonical on-disk `storage_version` defined by
+# this specification MUST be `1`.
+# 2. `RING-META-002` `StorageMetadata` MUST be encoded as the exact byte
+# sequence of the fields shown above, in that order, with no implicit
+# padding.
+# 3. `RING-META-003` `metadata_checksum` MUST be CRC-32C over every
+# earlier `StorageMetadata` field in on-disk order.
+# 4. `RING-META-004` Startup MUST reject the store if
+# `metadata_checksum` is invalid or if `storage_version` is unsupported.
+# 5. `RING-META-005` Any bytes in the metadata region after the encoded
+# `StorageMetadata` are reserved, MUST be left erased by formatting, and
+# MUST be ignored on read.
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-META-001` The canonical on-disk `storage_version` defined by
+this specification MUST be `1`.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-META-002` `StorageMetadata` MUST be encoded as the exact byte
+sequence of the fields shown above, in that order, with no implicit
+padding.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-META-003` `metadata_checksum` MUST be CRC-32C over every
+earlier `StorageMetadata` field in on-disk order.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-META-004` Startup MUST reject the store if
+`metadata_checksum` is invalid or if `storage_version` is unsupported.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-META-005` Any bytes in the metadata region after the encoded
+`StorageMetadata` are reserved, MUST be left erased by formatting, and
+MUST be ignored on read.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-META-005` Any bytes in the metadata region after the encoded
+`StorageMetadata` are reserved, MUST be left erased by formatting, and
+MUST be ignored on read.
+'''
+
