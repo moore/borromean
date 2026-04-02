@@ -363,6 +363,11 @@ This does not forbid helper code, fixtures, macros, or shared property
 generators. It only constrains how normative requirements are claimed
 by top-level tests.
 
+Verification structure should also preserve a clean separation between
+functional code and test code. Requirement-specific tests are part of
+the verification surface, not part of the production implementation
+module they exercise.
+
 ### Verification Requirements
 
 1. `RING-IMPL-TEST-001` Every normative requirement in
@@ -378,6 +383,10 @@ one requirement identifier.
 4. `RING-IMPL-TEST-004` When a requirement is verified by a
 compile-fail, compile-pass, or other non-runtime harness, that harness
 entry MUST still be dedicated to a single requirement identifier.
+5. `RING-IMPL-TEST-005` Automated test functions and compile-time test
+harness entries MUST be defined only in dedicated test modules or
+files rather than inside the functional implementation module they
+exercise.
 
 ## Non-Goals
 

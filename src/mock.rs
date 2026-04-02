@@ -58,6 +58,7 @@ pub enum MockOperation {
 
 pub struct MockFlash<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize> {
     metadata: Option<StorageMetadata>,
+    metadata_region: [u8; REGION_SIZE],
     regions: [[u8; REGION_SIZE]; REGION_COUNT],
     erased_byte: u8,
     log: Vec<MockOperation, MAX_LOG>,
@@ -69,6 +70,7 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize>
     pub fn new(erased_byte: u8) -> Self {
         Self {
             metadata: None,
+            metadata_region: [erased_byte; REGION_SIZE],
             regions: core::array::from_fn(|_| [erased_byte; REGION_SIZE]),
             erased_byte,
             log: Vec::new(),
@@ -77,6 +79,49 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize>
 
     pub fn metadata(&self) -> Option<&StorageMetadata> {
         self.metadata.as_ref()
+    }
+
+    pub fn read_storage(&self, offset: usize, buffer: &mut [u8]) -> Result<(), MockError> {
+        let total_len = REGION_SIZE
+            .checked_mul(REGION_COUNT + 1)
+            .ok_or(MockError::OutOfBounds)?;
+        let end = offset
+            .checked_add(buffer.len())
+            .ok_or(MockError::OutOfBounds)?;
+        if end > total_len {
+            return Err(MockError::OutOfBounds);
+        }
+
+        let mut remaining = buffer;
+        let mut current_offset = offset;
+        while !remaining.is_empty() {
+            let (source, source_offset) = if current_offset < REGION_SIZE {
+                (&self.metadata_region[..], current_offset)
+            } else {
+                let region_space_offset = current_offset - REGION_SIZE;
+                let region_index = region_space_offset / REGION_SIZE;
+                let region_offset = region_space_offset % REGION_SIZE;
+                let region = self
+                    .regions
+                    .get(region_index)
+                    .ok_or(MockError::OutOfBounds)?;
+                (&region[..], region_offset)
+            };
+
+            let available = source
+                .len()
+                .checked_sub(source_offset)
+                .ok_or(MockError::OutOfBounds)?;
+            let chunk_len = remaining.len().min(available);
+            remaining[..chunk_len]
+                .copy_from_slice(&source[source_offset..source_offset + chunk_len]);
+            remaining = &mut remaining[chunk_len..];
+            current_offset = current_offset
+                .checked_add(chunk_len)
+                .ok_or(MockError::OutOfBounds)?;
+        }
+
+        Ok(())
     }
 
     pub fn operations(&self) -> &[MockOperation] {
@@ -98,6 +143,13 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize>
 
     pub fn write_metadata(&mut self, metadata: StorageMetadata) -> Result<(), MockError> {
         self.log(MockOperation::WriteMetadata)?;
+        if REGION_SIZE < StorageMetadata::ENCODED_LEN {
+            return Err(MockError::OutOfBounds);
+        }
+        self.metadata_region.fill(self.erased_byte);
+        metadata
+            .encode_into(&mut self.metadata_region)
+            .map_err(|_| MockError::OutOfBounds)?;
         self.metadata = Some(metadata);
         Ok(())
     }
@@ -166,11 +218,12 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize>
     //= spec/ring.md#format-storage-on-disk-initialization
     //# RING-FORMAT-STORAGE-003 Initialize region `0` as WAL:
     //= spec/ring.md#format-storage-on-disk-initialization
-    //# RING-FORMAT-STORAGE-POST-001 WAL head and WAL tail MUST both be region `0`.
+    //# `RING-FORMAT-STORAGE-POST-001` WAL head and WAL tail MUST both be region `0`.
     //= spec/ring.md#format-storage-on-disk-initialization
     //# RING-FORMAT-STORAGE-POST-002 A user collection durable head MUST NOT exist after formatting.
     //= spec/ring.md#format-storage-on-disk-initialization
-    //# RING-FORMAT-STORAGE-POST-003 The free list MUST contain every non-WAL region in ascending region-index order.
+    //# `RING-FORMAT-STORAGE-POST-003` The free list MUST contain every non-WAL region in ascending region-index
+    //# order.
     pub fn format_empty_store(
         &mut self,
         min_free_regions: u32,
@@ -258,118 +311,4 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize>
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::disk::StorageMetadata;
-
-    #[test]
-    fn metadata_operations_are_logged() {
-        let mut flash = MockFlash::<64, 4, 8>::new(0xff);
-        let metadata = StorageMetadata::new(64, 4, 1, 4, 0xff, 0xa5).unwrap();
-
-        flash.write_metadata(metadata).unwrap();
-        let read_back = flash.read_metadata().unwrap();
-
-        assert_eq!(read_back, Some(metadata));
-        assert_eq!(
-            flash.operations(),
-            &[MockOperation::WriteMetadata, MockOperation::ReadMetadata]
-        );
-    }
-
-    #[test]
-    fn erase_write_read_and_sync_are_logged() {
-        let mut flash = MockFlash::<16, 2, 16>::new(0xff);
-
-        flash.write_region(1, 4, b"bor").unwrap();
-        let mut buffer = [0u8; 3];
-        flash.read_region(1, 4, &mut buffer).unwrap();
-        flash.erase_region(1).unwrap();
-        flash.sync().unwrap();
-
-        assert_eq!(&buffer, b"bor");
-        assert_eq!(
-            flash.operations(),
-            &[
-                MockOperation::WriteRegion {
-                    region_index: 1,
-                    offset: 4,
-                    len: 3,
-                },
-                MockOperation::ReadRegion {
-                    region_index: 1,
-                    offset: 4,
-                    len: 3,
-                },
-                MockOperation::EraseRegion { region_index: 1 },
-                MockOperation::Sync,
-            ]
-        );
-    }
-
-    #[test]
-    fn erase_restores_erased_bytes() {
-        let mut flash = MockFlash::<8, 1, 8>::new(0xff);
-        flash.write_region(0, 0, &[1, 2, 3, 4]).unwrap();
-        flash.erase_region(0).unwrap();
-
-        let mut buffer = [0u8; 8];
-        flash.read_region(0, 0, &mut buffer).unwrap();
-        assert_eq!(buffer, [0xff; 8]);
-    }
-
-    //= spec/ring.md#format-storage-on-disk-initialization
-    //# RING-FORMAT-STORAGE-PRE-006 `region_count >= 2 + min_free_regions`.
-    #[test]
-    fn format_empty_store_rejects_too_few_regions() {
-        let mut flash = MockFlash::<64, 2, 16>::new(0xff);
-        let error = flash.format_empty_store(1, 8, 0xa5).unwrap_err();
-        assert_eq!(
-            error,
-            MockFormatError::InsufficientRegions {
-                region_count: 2,
-                min_free_regions: 1,
-            }
-        );
-    }
-
-    //= spec/ring.md#format-storage-on-disk-initialization
-    //# RING-FORMAT-STORAGE-003 Initialize region `0` as WAL:
-    #[test]
-    fn format_empty_store_initializes_region_zero_as_wal() {
-        let mut flash = MockFlash::<64, 4, 32>::new(0xff);
-        flash.format_empty_store(1, 8, 0xa5).unwrap();
-
-        let header = Header::decode(&flash.region_bytes(0).unwrap()[..Header::ENCODED_LEN]).unwrap();
-        assert_eq!(header.collection_id, CollectionId(0));
-        assert_eq!(header.collection_format, WAL_V1_FORMAT);
-
-        let start = Header::ENCODED_LEN;
-        let end = start + WalRegionPrologue::ENCODED_LEN;
-        let prologue =
-            WalRegionPrologue::decode(&flash.region_bytes(0).unwrap()[start..end], 4).unwrap();
-        assert_eq!(prologue.wal_head_region_index, 0);
-    }
-
-    //= spec/ring.md#format-storage-on-disk-initialization
-    //# RING-FORMAT-STORAGE-POST-003 The free list MUST contain every non-WAL region in ascending region-index order.
-    #[test]
-    fn format_empty_store_populates_free_list_in_ascending_order() {
-        let mut flash = MockFlash::<64, 4, 32>::new(0xff);
-        let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
-
-        assert_eq!(flash.metadata(), Some(&metadata));
-
-        let footer_offset = 64 - FreePointerFooter::ENCODED_LEN;
-        let region1 =
-            FreePointerFooter::decode(&flash.region_bytes(1).unwrap()[footer_offset..], 0xff).unwrap();
-        let region2 =
-            FreePointerFooter::decode(&flash.region_bytes(2).unwrap()[footer_offset..], 0xff).unwrap();
-        let region3 =
-            FreePointerFooter::decode(&flash.region_bytes(3).unwrap()[footer_offset..], 0xff).unwrap();
-
-        assert_eq!(region1.next_tail, Some(2));
-        assert_eq!(region2.next_tail, Some(3));
-        assert_eq!(region3.next_tail, None);
-    }
-}
+mod tests;

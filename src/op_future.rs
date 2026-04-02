@@ -48,6 +48,8 @@ where
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+//= spec/implementation.md#operation-requirements
+//# `RING-IMPL-OP-004` Pure in-memory state mutations that make a later durable step mandatory MUST occur in an order that allows the same operation to be retried or reconstructed after reset.
 enum FlushMapPhase {
     ReserveRegion,
     WriteCommittedRegion {

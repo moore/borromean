@@ -15,6 +15,10 @@ target = "spec/implementation.md#verification-requirements"
 # 4. `RING-IMPL-TEST-004` When a requirement is verified by a
 # compile-fail, compile-pass, or other non-runtime harness, that harness
 # entry MUST still be dedicated to a single requirement identifier.
+# 5. `RING-IMPL-TEST-005` Automated test functions and compile-time test
+# harness entries MUST be defined only in dedicated test modules or
+# files rather than inside the functional implementation module they
+# exercise.
 
 [[spec]]
 level = "MUST"
@@ -47,5 +51,14 @@ quote = '''
 `RING-IMPL-TEST-004` When a requirement is verified by a
 compile-fail, compile-pass, or other non-runtime harness, that harness
 entry MUST still be dedicated to a single requirement identifier.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`RING-IMPL-TEST-005` Automated test functions and compile-time test
+harness entries MUST be defined only in dedicated test modules or
+files rather than inside the functional implementation module they
+exercise.
 '''
 

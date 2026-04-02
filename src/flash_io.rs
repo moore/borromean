@@ -9,6 +9,8 @@ use crate::{MockFlash, StorageMetadata};
 //# `RING-IMPL-IO-003` The borromean I/O abstraction MUST be usable without dynamic dispatch and without heap allocation.
 //= spec/implementation.md#i-o-requirements
 //# `RING-IMPL-IO-005` Borromean MUST treat wakeups, DMA completion, or interrupt delivery as an external concern of the caller-provided I/O implementation rather than as an internal runtime service.
+//= spec/ring.md#core-requirements
+//# `RING-CORE-001` Region starts and region sizes MUST be aligned to the backing flash erase-block size so every region can be erased independently.
 pub trait FlashIo {
     fn read_metadata(&mut self) -> Result<Option<StorageMetadata>, MockError>;
 

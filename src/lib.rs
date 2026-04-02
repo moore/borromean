@@ -127,6 +127,8 @@ pub trait Collection {
 
 //= spec/implementation.md#architecture-requirements
 //# `RING-IMPL-ARCH-001` `Storage` MUST own logical storage state and configuration, but MUST NOT require long-lived ownership of the backing I/O object.
+//= spec/implementation.md#core-requirements
+//# `RING-IMPL-CORE-004` The implementation MUST preserve the durable behavior defined by [spec/ring.md](ring.md); this specification MAY constrain implementation structure but MUST NOT weaken ring-level correctness requirements.
 pub struct Storage<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize> {
     state: StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
 }
