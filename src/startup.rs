@@ -118,8 +118,6 @@ impl StartupCollection {
 }
 
 #[derive(Debug)]
-//= spec/implementation.md#startup-requirements
-//# `RING-IMPL-STARTUP-002` Startup replay state MUST itself obey the same no-allocation rule as steady-state operation.
 pub struct StartupState<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize> {
     metadata: StorageMetadata,
     wal_head: u32,
@@ -220,8 +218,6 @@ pub(crate) struct StartupOpenPlan<
     const MAX_COLLECTIONS: usize,
     const MAX_PENDING_RECLAIMS: usize,
 > {
-    //= spec/implementation.md#startup-requirements
-    //# `RING-IMPL-STARTUP-003` If startup needs temporary decode storage, that storage MUST come from a caller-provided workspace or other bounded static storage.
     metadata: StorageMetadata,
     wal_head_candidate: u32,
     wal_tail: u32,

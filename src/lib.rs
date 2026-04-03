@@ -887,8 +887,6 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
         V: Debug + Serialize + for<'de> Deserialize<'de>,
     {
-        //= spec/implementation.md#collection-requirements
-        //# `RING-IMPL-COLL-003` A collection operation that needs I/O MUST be drivable through the same runtime-agnostic future model as core storage operations.
         run_once(move || {
             self.append_map_update::<REGION_SIZE, REGION_COUNT, IO, K, V, MAX_INDEXES>(
                 flash,
@@ -946,8 +944,6 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
         V: Debug + Serialize + for<'de> Deserialize<'de>,
     {
-        //= spec/implementation.md#collection-requirements
-        //# `RING-IMPL-COLL-003` A collection operation that needs I/O MUST be drivable through the same runtime-agnostic future model as core storage operations.
         FlushMapFuture::<
             MAX_COLLECTIONS,
             MAX_PENDING_RECLAIMS,

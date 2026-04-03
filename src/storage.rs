@@ -223,8 +223,6 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
     ) -> Result<u32, StorageRuntimeError> {
-        //= spec/implementation.md#collection-requirements
-        //# `RING-IMPL-COLL-001` Collection implementations MUST depend on the shared storage engine for durability, ordering, and recovery rather than duplicating those mechanisms ad hoc.
         //= spec/ring.md#core-requirements
         //# `RING-CORE-010` The durable free list MUST be FIFO so allocations consume the oldest free regions first.
         if let Some(region_index) = self.ready_region {

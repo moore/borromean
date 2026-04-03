@@ -16,12 +16,6 @@ pub struct RunOnce<F> {
     operation: Option<F>,
 }
 
-//= spec/implementation.md#operation-requirements
-//# `RING-IMPL-OP-001` A borromean future MUST NOT require spawning another borromean future in order to complete.
-//= spec/implementation.md#execution-requirements
-//# `RING-IMPL-EXEC-001` Every fallible storage operation that may require one or more device interactions MUST be expressible as a single future.
-//= spec/implementation.md#execution-requirements
-//# `RING-IMPL-EXEC-002` Borromean futures MUST make progress only when polled by the caller and when the caller-provided I/O object becomes ready; they MUST NOT rely on background tasks internal to borromean.
 pub fn run_once<F>(operation: F) -> RunOnce<F> {
     RunOnce {
         operation: Some(operation),
@@ -34,8 +28,6 @@ impl<F, T> Future for RunOnce<F>
 where
     F: FnOnce() -> T,
 {
-    //= spec/implementation.md#execution-requirements
-    //# `RING-IMPL-EXEC-003` A simple single-threaded poll-to-completion executor MUST be sufficient to drive any borromean operation future to completion.
     type Output = T;
 
     fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -48,8 +40,6 @@ where
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-//= spec/implementation.md#operation-requirements
-//# `RING-IMPL-OP-004` Pure in-memory state mutations that make a later durable step mandatory MUST occur in an order that allows the same operation to be retried or reconstructed after reset.
 enum FlushMapPhase {
     ReserveRegion,
     WriteCommittedRegion {
@@ -102,8 +92,6 @@ enum OpenStoragePhase<
     const MAX_COLLECTIONS: usize,
     const MAX_PENDING_RECLAIMS: usize,
 > {
-    //= spec/implementation.md#startup-requirements
-    //# `RING-IMPL-STARTUP-004` Recovery of incomplete WAL rotation, allocation, or reclaim state MUST be expressible through the same operation framework used for normal foreground work.
     Begin,
     RecoverRotation {
         plan: StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
@@ -142,8 +130,6 @@ where
     K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
     V: Debug + Serialize + for<'de> Deserialize<'de>,
 {
-    //= spec/implementation.md#execution-requirements
-    //# `RING-IMPL-EXEC-004` Borromean operations on a given `Storage` instance MUST require exclusive mutable access to that instance unless and until a separate concurrency specification defines stronger sharing rules.
     storage: &'a mut Storage<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
     flash: &'a mut IO,
     workspace: &'a mut StorageWorkspace<REGION_SIZE>,
@@ -222,8 +208,6 @@ pub struct OpenStorageFuture<
 where
     IO: FlashIo,
 {
-    //= spec/implementation.md#startup-requirements
-    //# `RING-IMPL-STARTUP-001` Opening storage MUST be implemented as an operation that can suspend between device interactions without losing its replay context.
     flash: &'a mut IO,
     workspace: &'a mut StorageWorkspace<REGION_SIZE>,
     phase: OpenStoragePhase<REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
@@ -619,10 +603,6 @@ where
                 previous_region,
                 region_index,
             } => {
-                //= spec/implementation.md#operation-requirements
-                //# `RING-IMPL-OP-005` Public operations SHOULD minimize the duration of
-                //# mutable borrows of large caller workspaces so embedded callers can
-                //# reuse buffers across sequential operations.
                 {
                     let (payload, _) = this.workspace.encode_buffers();
                     let used = this.map.encode_region_into(payload)?;
