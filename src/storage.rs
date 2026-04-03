@@ -115,10 +115,6 @@ pub(crate) struct WalHeadReclaimPlan<const MAX_COLLECTIONS: usize> {
 }
 
 #[derive(Debug)]
-//= spec/implementation.md#memory-requirements
-//# `RING-IMPL-MEM-001` The maximum number of tracked collections, heads, replay entries, and other bounded in-memory items MUST be an explicit compile-time or constructor-time capacity.
-//= spec/implementation.md#core-requirements
-//# `RING-IMPL-CORE-005` All memory required for normal operation MUST come from caller-owned values, fixed-capacity fields, or stack frames whose size is statically bounded by type parameters or API contracts.
 pub struct StorageRuntime<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize> {
     metadata: StorageMetadata,
     wal_head: u32,

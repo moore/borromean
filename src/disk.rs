@@ -39,8 +39,6 @@ pub struct StorageMetadata {
 }
 
 impl StorageMetadata {
-    //= spec/implementation.md#memory-requirements
-    //# `RING-IMPL-MEM-005` Buffer-size requirements that depend on disk format constants MUST be derivable from public constants, associated constants, or documented constructor contracts.
     pub const ENCODED_LEN: usize = size_of::<u32>() * 6 + size_of::<u8>() * 2;
 
     pub fn new(
@@ -166,8 +164,6 @@ pub struct Header {
 }
 
 impl Header {
-    //= spec/implementation.md#memory-requirements
-    //# `RING-IMPL-MEM-005` Buffer-size requirements that depend on disk format constants MUST be derivable from public constants, associated constants, or documented constructor contracts.
     pub const ENCODED_LEN: usize = size_of::<u64>() + size_of::<u64>() + size_of::<u16>() + size_of::<u32>();
 
     //= spec/ring.md#header
@@ -215,8 +211,6 @@ pub struct WalRegionPrologue {
 }
 
 impl WalRegionPrologue {
-    //= spec/implementation.md#memory-requirements
-    //# `RING-IMPL-MEM-005` Buffer-size requirements that depend on disk format constants MUST be derivable from public constants, associated constants, or documented constructor contracts.
     pub const ENCODED_LEN: usize = size_of::<u32>() * 2;
 
     //= spec/ring.md#wal-region-prologue
@@ -280,8 +274,6 @@ impl FreePointerFooter {
     //= spec/ring.md#free-pointer-footer
     //# `RING-FREE-001` The free-pointer footer MUST occupy the final eight
     //# bytes of the region.
-    //= spec/implementation.md#memory-requirements
-    //# `RING-IMPL-MEM-005` Buffer-size requirements that depend on disk format constants MUST be derivable from public constants, associated constants, or documented constructor contracts.
     pub const ENCODED_LEN: usize = size_of::<u32>() * 2;
 
     //= spec/ring.md#free-pointer-footer

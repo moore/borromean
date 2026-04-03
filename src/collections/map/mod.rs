@@ -293,8 +293,6 @@ enum SearchResult {
 }
 
 pub struct LsmMap<'a, K, V, const MAX_INDEXES: usize> {
-    //= spec/implementation.md#collection-requirements
-    //# `RING-IMPL-COLL-002` Collection-specific in-memory state MUST obey the same explicit-capacity and no-allocation rules as borromean core.
     //= spec/ring.md#core-requirements
     //# `RING-CORE-002` Each collection MUST be implemented as an append-only data structure whose new writes are added to the head region and whose storage can only be freed by truncating the tail.
     id: CollectionId,
@@ -833,10 +831,6 @@ where
         Ok(region_index)
     }
 
-    //= spec/implementation.md#memory-requirements
-    //# `RING-IMPL-MEM-004` The implementation SHOULD avoid keeping
-    //# duplicate copies of large record payloads in memory when a borrowed
-    //# buffer or streaming decode is sufficient.
     pub fn open_from_storage<
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,

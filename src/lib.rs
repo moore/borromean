@@ -730,10 +730,6 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         run_once(move || self.snapshot_map::<REGION_SIZE, REGION_COUNT, IO, K, V, MAX_INDEXES>(flash, workspace, map))
     }
 
-    //= spec/implementation.md#api-requirements
-    //# `RING-IMPL-API-004` The implementation SHOULD keep collection
-    //# operation APIs close to the prototype's explicit buffer-passing style
-    //# where that style avoids hidden allocation.
     pub fn append_map_update<
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
