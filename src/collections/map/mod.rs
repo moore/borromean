@@ -244,8 +244,6 @@ struct RecordOffset(usize);
 
 impl RecordOffset {
     fn increment(&mut self, amount: usize) -> Result<(), MapError> {
-        //= spec/implementation.md#arithmetic-requirements
-        //# `RING-IMPL-ARITH-003` The implementation MUST NOT rely on wrapping integer behavior for correctness unless a future disk-format requirement explicitly defines modulo arithmetic for that field.
         self.0 = self
             .0
             .checked_add(amount)
@@ -414,8 +412,6 @@ where
     }
 
     fn add_entry(&mut self, entry: &Entry<K, V>) -> Result<(RecordOffset, RecordOffset), MapError> {
-        //= spec/implementation.md#arithmetic-requirements
-        //# `RING-IMPL-ARITH-004` Conversions between integer widths that may lose information MUST be checked and MUST fail explicitly if the value is out of range for the destination type.
         let start = self.next_record_offset;
         let index_offset = self.next_record_index.offset(self.map)?;
         if start.0 >= index_offset {

@@ -10,8 +10,6 @@ use crate::{CollectionId, CollectionType, StartupCollectionBasis};
 use crate::StorageMetadata;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-//= spec/implementation.md#panic-requirements
-//# `RING-IMPL-PANIC-002` Recoverable failures and invariant violations that can be caused by external input or storage state MUST be reported through explicit error results rather than by panicking.
 pub enum StorageRuntimeError {
     Format(MockFormatError),
     Mock(MockError),
@@ -225,8 +223,6 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
     ) -> Result<u32, StorageRuntimeError> {
-        //= spec/implementation.md#arithmetic-requirements
-        //# `RING-IMPL-ARITH-001` Integer arithmetic that can affect storage layout, region addressing, WAL offsets, lengths, indexes, capacities, or sequence advancement MUST use checked arithmetic or an equivalent construction that makes overflow and underflow impossible by construction.
         //= spec/implementation.md#collection-requirements
         //# `RING-IMPL-COLL-001` Collection implementations MUST depend on the shared storage engine for durability, ordering, and recovery rather than duplicating those mechanisms ad hoc.
         //= spec/ring.md#core-requirements
@@ -277,8 +273,6 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         //# `RING-STORAGE-003` Each newly allocated region, whether for a user collection or a newly initialized WAL region, MUST use `sequence = max_seen_sequence + 1`, after which that value becomes the new in-memory `max_seen_sequence`.
         //= spec/ring.md#storage-requirements
         //# `RING-STORAGE-004` Successful later region writes MUST preserve a strictly monotonic `sequence` ordering even if crashes or abandoned allocations leave gaps.
-        //= spec/implementation.md#arithmetic-requirements
-        //# `RING-IMPL-ARITH-002` If such arithmetic cannot be proven safe by construction and a checked operation fails, the implementation MUST return an explicit error rather than wrap, saturate, or silently truncate.
         let payload_capacity = REGION_SIZE
             .checked_sub(Header::ENCODED_LEN)
             .and_then(|remaining| remaining.checked_sub(FreePointerFooter::ENCODED_LEN))

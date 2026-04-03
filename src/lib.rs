@@ -1,10 +1,6 @@
 //= spec/implementation.md#api-requirements
 //# `RING-IMPL-API-005` The implementation MAY provide optional helper adapters for common executors or embedded frameworks, but the core crate MUST remain usable without them.
 #![no_std]
-//= spec/implementation.md#panic-requirements
-//# `RING-IMPL-PANIC-001` The borromean core library and its non-test support code MUST be panic free for all input data, including invalid API inputs, corrupt on-storage state, exhausted capacities, and device errors.
-//= spec/implementation.md#panic-requirements
-//# `RING-IMPL-PANIC-003` Non-test code MUST NOT use `panic!`, `unwrap()`, `expect()`, `todo!()`, `unimplemented!()`, or `unreachable!()` in any path that can be reached from public APIs or from storage data under validation.
 #![cfg_attr(
     not(test),
     deny(
@@ -64,12 +60,6 @@ type CollectionIdCounter = u64;
 pub struct CollectionId(pub(crate) CollectionIdCounter);
 
 impl CollectionId {
-    //= spec/implementation.md#arithmetic-requirements
-    //# `RING-IMPL-ARITH-001` Integer arithmetic that can affect storage layout, region addressing, WAL offsets, lengths, indexes, capacities, or sequence advancement MUST use checked arithmetic or an equivalent construction that makes overflow and underflow impossible by construction.
-    //= spec/implementation.md#arithmetic-requirements
-    //# `RING-IMPL-ARITH-002` If such arithmetic cannot be proven safe by construction and a checked operation fails, the implementation MUST return an explicit error rather than wrap, saturate, or silently truncate.
-    //= spec/implementation.md#arithmetic-requirements
-    //# `RING-IMPL-ARITH-003` The implementation MUST NOT rely on wrapping integer behavior for correctness unless a future disk-format requirement explicitly defines modulo arithmetic for that field.
     pub fn to_le_bytes(&self) -> [u8; size_of::<CollectionIdCounter>()] {
         self.0.to_le_bytes()
     }
