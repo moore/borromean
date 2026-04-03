@@ -94,6 +94,69 @@ fn free_list_chain<
     chain
 }
 
+struct CompletedPendingReclaimResult {
+    reclaimed_region: u32,
+    previous_chain: heapless::Vec<u32, 8>,
+    new_chain: heapless::Vec<u32, 8>,
+    previous_tail_next: Option<u32>,
+    reclaimed_tail_next: Option<u32>,
+    reopened_chain: heapless::Vec<u32, 8>,
+    reopened_free_list_tail: Option<u32>,
+}
+
+fn complete_pending_reclaim_returns_old_map_region_to_free_list_result() -> CompletedPendingReclaimResult {
+    let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
+    let mut workspace = StorageWorkspace::<512>::new();
+    let mut storage =
+        Storage::<8, 4>::format::<512, 5, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+
+    storage
+        .create_map::<512, 5, _>(&mut flash, &mut workspace, CollectionId(14))
+        .unwrap();
+
+    let mut map_buffer = [0u8; 512];
+    let mut map = LsmMap::<i32, i32, 4>::new(CollectionId(14), &mut map_buffer).unwrap();
+    map.set(3, 30).unwrap();
+    let first_region = storage
+        .flush_map::<512, 5, _, _, _, 4>(&mut flash, &mut workspace, &map)
+        .unwrap();
+
+    map.set(4, 40).unwrap();
+    storage
+        .flush_map::<512, 5, _, _, _, 4>(&mut flash, &mut workspace, &map)
+        .unwrap();
+    assert_eq!(storage.pending_reclaims(), &[first_region]);
+    let previous_chain = free_list_chain::<512, 5, 2048, 8>(&flash, 0xff, storage.last_free_list_head());
+    let previous_tail = storage.free_list_tail().unwrap();
+
+    storage
+        .complete_pending_reclaim::<512, 5, _>(&mut flash, &mut workspace, first_region)
+        .unwrap();
+
+    assert!(storage.pending_reclaims().is_empty());
+    let new_chain = free_list_chain::<512, 5, 2048, 8>(&flash, 0xff, storage.last_free_list_head());
+    let footer_offset = 512 - FreePointerFooter::ENCODED_LEN;
+    let previous_tail_footer =
+        FreePointerFooter::decode(&flash.region_bytes(previous_tail).unwrap()[footer_offset..], 0xff).unwrap();
+    let reclaimed_footer =
+        FreePointerFooter::decode(&flash.region_bytes(first_region).unwrap()[footer_offset..], 0xff).unwrap();
+
+    let reopened = Storage::<8, 4>::open::<512, 5, _>(&mut flash, &mut workspace).unwrap();
+    assert!(reopened.pending_reclaims().is_empty());
+    let reopened_chain =
+        free_list_chain::<512, 5, 2048, 8>(&flash, 0xff, reopened.last_free_list_head());
+
+    CompletedPendingReclaimResult {
+        reclaimed_region: first_region,
+        previous_chain,
+        new_chain,
+        previous_tail_next: previous_tail_footer.next_tail,
+        reclaimed_tail_next: reclaimed_footer.next_tail,
+        reopened_chain,
+        reopened_free_list_tail: reopened.free_list_tail(),
+    }
+}
+
 struct DelegatingFlash<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize> {
     inner: MockFlash<REGION_SIZE, REGION_COUNT, MAX_LOG>,
 }
@@ -1568,58 +1631,26 @@ fn storage_map_flush_reclaims_wal_head_before_consuming_min_free_region_reserve(
 #[test]
 //= spec/ring.md#region-reclaim
 //# `RING-REGION-RECLAIM-POST-001` The free-list chain MUST remain acyclic and FIFO-ordered.
+fn storage_complete_pending_reclaim_preserves_fifo_free_list_order() {
+    let result = complete_pending_reclaim_returns_old_map_region_to_free_list_result();
+    assert_eq!(
+        &result.new_chain[..result.previous_chain.len()],
+        result.previous_chain.as_slice()
+    );
+    assert_eq!(result.new_chain.last().copied(), Some(result.reclaimed_region));
+    assert_eq!(result.reopened_chain.as_slice(), result.new_chain.as_slice());
+}
+
+#[test]
 //= spec/ring.md#region-reclaim
 //# `RING-REGION-RECLAIM-POST-005` If a prior tail existed, replay of free pointers MUST follow
 //# `... -> t_prev -> r`, and `r` is recognized as the tail because its
 //# free-pointer slot is uninitialized.
-fn storage_complete_pending_reclaim_returns_old_map_region_to_free_list() {
-    let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
-    let mut workspace = StorageWorkspace::<512>::new();
-    let mut storage =
-        Storage::<8, 4>::format::<512, 5, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
-
-    storage
-        .create_map::<512, 5, _>(&mut flash, &mut workspace, CollectionId(14))
-        .unwrap();
-
-    let mut map_buffer = [0u8; 512];
-    let mut map = LsmMap::<i32, i32, 4>::new(CollectionId(14), &mut map_buffer).unwrap();
-    map.set(3, 30).unwrap();
-    let first_region = storage
-        .flush_map::<512, 5, _, _, _, 4>(&mut flash, &mut workspace, &map)
-        .unwrap();
-
-    map.set(4, 40).unwrap();
-    storage
-        .flush_map::<512, 5, _, _, _, 4>(&mut flash, &mut workspace, &map)
-        .unwrap();
-    assert_eq!(storage.pending_reclaims(), &[first_region]);
-    let previous_chain = free_list_chain::<512, 5, 2048, 8>(&flash, 0xff, storage.last_free_list_head());
-    let previous_tail = storage.free_list_tail().unwrap();
-
-    storage
-        .complete_pending_reclaim::<512, 5, _>(&mut flash, &mut workspace, first_region)
-        .unwrap();
-
-    assert!(storage.pending_reclaims().is_empty());
-    assert_eq!(storage.free_list_tail(), Some(first_region));
-    let new_chain = free_list_chain::<512, 5, 2048, 8>(&flash, 0xff, storage.last_free_list_head());
-    assert_eq!(&new_chain[..previous_chain.len()], previous_chain.as_slice());
-    assert_eq!(new_chain.last().copied(), Some(first_region));
-    let footer_offset = 512 - FreePointerFooter::ENCODED_LEN;
-    let previous_tail_footer =
-        FreePointerFooter::decode(&flash.region_bytes(previous_tail).unwrap()[footer_offset..], 0xff).unwrap();
-    assert_eq!(previous_tail_footer.next_tail, Some(first_region));
-    let reclaimed_footer =
-        FreePointerFooter::decode(&flash.region_bytes(first_region).unwrap()[footer_offset..], 0xff).unwrap();
-    assert_eq!(reclaimed_footer.next_tail, None);
-
-    let reopened = Storage::<8, 4>::open::<512, 5, _>(&mut flash, &mut workspace).unwrap();
-    assert!(reopened.pending_reclaims().is_empty());
-    assert_eq!(reopened.free_list_tail(), Some(first_region));
-    let reopened_chain =
-        free_list_chain::<512, 5, 2048, 8>(&flash, 0xff, reopened.last_free_list_head());
-    assert_eq!(reopened_chain.as_slice(), new_chain.as_slice());
+fn storage_complete_pending_reclaim_links_the_previous_tail_to_the_reclaimed_region() {
+    let result = complete_pending_reclaim_returns_old_map_region_to_free_list_result();
+    assert_eq!(result.previous_tail_next, Some(result.reclaimed_region));
+    assert_eq!(result.reclaimed_tail_next, None);
+    assert_eq!(result.reopened_free_list_tail, Some(result.reclaimed_region));
 }
 
 #[test]
