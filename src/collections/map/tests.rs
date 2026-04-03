@@ -140,6 +140,85 @@ fn update_payload_round_trip_applies_frontier_change() {
 
 #[test]
 //= spec/ring.md#collection-head-state-machine
+//# `RING-FORMAT-013` That collection specification MUST define, at
+//# minimum: the empty logical state established by `new_collection`; the
+//# exact bytes and interpretation of every supported committed-region
+//# `collection_format`; the exact bytes and interpretation of `snapshot`
+//# payloads; the exact bytes and interpretation of `update` payloads; the
+//# rules for applying updates and merging a durable basis with the
+//# in-memory frontier; and the collection-specific validation rules used
+//# when loading a basis or replaying WAL payloads.
+fn map_collection_format_covers_empty_state_snapshot_update_region_and_validation() {
+    const BUFFER_SIZE: usize = 512;
+    const MAX_INDEXES: usize = 4;
+    let id = CollectionId(10);
+
+    {
+        let mut empty_buffer = [0u8; BUFFER_SIZE];
+        let empty = LsmMap::<i32, i32, MAX_INDEXES>::new(id, &mut empty_buffer).unwrap();
+        assert_eq!(empty.get(&1).unwrap(), None);
+    }
+
+    let mut source_buffer = [0u8; BUFFER_SIZE];
+    let mut source = LsmMap::<i32, i32, MAX_INDEXES>::new(id, &mut source_buffer).unwrap();
+    source.set(1, 10).unwrap();
+    source.set(2, 20).unwrap();
+
+    let mut update_payload = [0u8; 64];
+    let update_len = LsmMap::<i32, i32, MAX_INDEXES>::encode_update_into(
+        &MapUpdate::Set { key: 2, value: 99 },
+        &mut update_payload,
+    )
+    .unwrap();
+
+    let mut snapshot = [0u8; BUFFER_SIZE];
+    let snapshot_len = source.encode_snapshot_into(&mut snapshot).unwrap();
+    let mut from_snapshot_buffer = [0u8; BUFFER_SIZE];
+    let mut from_snapshot = LsmMap::<i32, i32, MAX_INDEXES>::new(id, &mut from_snapshot_buffer).unwrap();
+    from_snapshot.load_snapshot(&snapshot[..snapshot_len]).unwrap();
+    assert_eq!(from_snapshot.get(&1).unwrap(), Some(10));
+    assert_eq!(from_snapshot.get(&2).unwrap(), Some(20));
+
+    from_snapshot
+        .apply_update_payload(&update_payload[..update_len])
+        .unwrap();
+    assert_eq!(from_snapshot.get(&1).unwrap(), Some(10));
+    assert_eq!(from_snapshot.get(&2).unwrap(), Some(99));
+
+    let mut region = [0u8; BUFFER_SIZE];
+    let region_len = source.encode_region_into(&mut region).unwrap();
+    assert_eq!(
+        usize::try_from(u32::from_le_bytes(region[..4].try_into().unwrap())).unwrap(),
+        snapshot_len
+    );
+    let mut from_region_buffer = [0u8; BUFFER_SIZE];
+    let mut from_region = LsmMap::<i32, i32, MAX_INDEXES>::new(id, &mut from_region_buffer).unwrap();
+    from_region.load_region(&region[..region_len]).unwrap();
+    assert_eq!(from_region.get(&1).unwrap(), Some(10));
+    assert_eq!(from_region.get(&2).unwrap(), Some(20));
+
+    let mut invalid_snapshot = snapshot;
+    let refs_offset = snapshot_len - ENTRY_REF_SIZE * 2;
+    let mut first_ref = [0u8; ENTRY_REF_SIZE];
+    let mut second_ref = [0u8; ENTRY_REF_SIZE];
+    first_ref.copy_from_slice(&invalid_snapshot[refs_offset..refs_offset + ENTRY_REF_SIZE]);
+    second_ref.copy_from_slice(
+        &invalid_snapshot[refs_offset + ENTRY_REF_SIZE..refs_offset + ENTRY_REF_SIZE * 2],
+    );
+    invalid_snapshot[refs_offset..refs_offset + ENTRY_REF_SIZE].copy_from_slice(&second_ref);
+    invalid_snapshot[refs_offset + ENTRY_REF_SIZE..refs_offset + ENTRY_REF_SIZE * 2]
+        .copy_from_slice(&first_ref);
+
+    let mut invalid_buffer = [0u8; BUFFER_SIZE];
+    let mut invalid = LsmMap::<i32, i32, MAX_INDEXES>::new(id, &mut invalid_buffer).unwrap();
+    assert!(matches!(
+        invalid.load_snapshot(&invalid_snapshot[..snapshot_len]),
+        Err(MapError::SerializationError)
+    ));
+}
+
+#[test]
+//= spec/ring.md#collection-head-state-machine
 //# `RING-FORMAT-014` For non-WAL collections, the pair `(collection_type, collection_format)` MUST identify a unique committed region payload format.
 fn region_round_trip_restores_logical_state() {
     const BUFFER_SIZE: usize = 512;
@@ -177,8 +256,6 @@ fn region_round_trip_restores_logical_state() {
 }
 
 #[test]
-//= spec/ring.md
-//# RING-FORMAT-013 That collection specification MUST define, at minimum: the empty logical state established by `new_collection`; the exact bytes and interpretation of every supported committed-region `collection_format`; the exact bytes and interpretation of `snapshot` payloads; the exact bytes and interpretation of `update` payloads; the rules for applying updates and merging a durable basis with the in-memory frontier; and the collection-specific validation rules used when loading a basis or replaying WAL payloads.
 fn load_snapshot_rejects_unsorted_entry_refs() {
     const BUFFER_SIZE: usize = 512;
     const MAX_INDEXES: usize = 4;
@@ -210,8 +287,6 @@ fn load_snapshot_rejects_unsorted_entry_refs() {
 }
 
 #[test]
-//= spec/ring.md
-//# RING-FORMAT-013 That collection specification MUST define, at minimum: the empty logical state established by `new_collection`; the exact bytes and interpretation of every supported committed-region `collection_format`; the exact bytes and interpretation of `snapshot` payloads; the exact bytes and interpretation of `update` payloads; the rules for applying updates and merging a durable basis with the in-memory frontier; and the collection-specific validation rules used when loading a basis or replaying WAL payloads.
 fn load_snapshot_rejects_overlapping_entry_refs() {
     const BUFFER_SIZE: usize = 512;
     const MAX_INDEXES: usize = 4;

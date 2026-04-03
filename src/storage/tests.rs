@@ -1,4 +1,5 @@
 use super::*;
+use core::mem::size_of;
 use crate::wal_record::encode_record_into;
 use crate::{CollectionId, CollectionType, Header, StartupCollectionBasis, WalRecord};
 use crate::MockFlash;
@@ -94,6 +95,105 @@ fn format_returns_fresh_runtime_state() {
     assert_eq!(state.ready_region(), None);
     assert!(state.collections().is_empty());
     assert!(state.pending_reclaims().is_empty());
+}
+
+//= spec/ring.md#format-storage-on-disk-initialization
+//# `RING-FORMAT-STORAGE-POST-002` A user collection durable head MUST
+//# NOT exist after formatting.
+#[test]
+fn format_starts_with_no_user_collection_durable_head() {
+    let mut flash = MockFlash::<128, 4, 64>::new(0xff);
+    let state = format::<128, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+
+    assert!(state.collections().is_empty());
+    assert_eq!(state.tracked_user_collection_count(), 0);
+}
+
+//= spec/ring.md#core-requirements
+//# `RING-CORE-003` Borromean MUST reserve `collection_id = 0` for the
+//# WAL, and all user collection identifiers MUST be nonzero stable 64-bit
+//# nonces that are never recycled.
+#[test]
+fn user_collection_ids_are_nonzero_u64_values_and_are_not_recycled() {
+    assert_eq!(size_of::<CollectionId>(), size_of::<u64>());
+
+    let mut flash = MockFlash::<256, 4, 128>::new(0xff);
+    let mut workspace = StorageWorkspace::<256>::new();
+    let mut state = format::<256, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+
+    assert_eq!(
+        state.append_new_collection::<256, 4, _>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(0),
+            CollectionType::MAP_CODE,
+        ),
+        Err(StorageRuntimeError::ReservedCollectionId(CollectionId(0)))
+    );
+
+    state
+        .append_new_collection::<256, 4, _>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(7),
+            CollectionType::MAP_CODE,
+        )
+        .unwrap();
+    state
+        .append_drop_collection::<256, 4, _>(&mut flash, &mut workspace, CollectionId(7))
+        .unwrap();
+
+    assert_eq!(
+        state.append_new_collection::<256, 4, _>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(7),
+            CollectionType::MAP_CODE,
+        ),
+        Err(StorageRuntimeError::DuplicateCollection(CollectionId(7)))
+    );
+}
+
+//= spec/ring.md#core-requirements
+//# `RING-CORE-004` Borromean core MUST reserve
+//# `collection_type = wal` for `collection_id = 0`, and user collections
+//# MUST NOT use that collection type.
+#[test]
+fn wal_collection_type_is_reserved_for_collection_id_zero() {
+    assert_eq!(
+        StorageRuntime::<8, 4>::validate_supported_head_collection_type(
+            CollectionId(0),
+            CollectionType::WAL_CODE,
+        ),
+        Ok(())
+    );
+    assert_eq!(
+        StorageRuntime::<8, 4>::validate_supported_head_collection_type(
+            CollectionId(0),
+            CollectionType::MAP_CODE,
+        ),
+        Err(StorageRuntimeError::CollectionTypeMismatch {
+            collection_id: CollectionId(0),
+            expected: CollectionType::WAL_CODE,
+            actual: CollectionType::MAP_CODE,
+        })
+    );
+
+    let mut flash = MockFlash::<256, 4, 128>::new(0xff);
+    let mut workspace = StorageWorkspace::<256>::new();
+    let mut state = format::<256, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+
+    assert_eq!(
+        state.append_new_collection::<256, 4, _>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(7),
+            CollectionType::WAL_CODE,
+        ),
+        Err(StorageRuntimeError::UnsupportedCollectionType(
+            CollectionType::WAL_CODE
+        ))
+    );
 }
 
 #[test]

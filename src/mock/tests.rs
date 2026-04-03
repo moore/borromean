@@ -1,6 +1,22 @@
 use super::*;
 use crate::disk::StorageMetadata;
 
+//= spec/ring.md#format-storage-on-disk-initialization
+//# `RING-FORMAT-STORAGE-PRE-001` Backing storage MUST be writable and erasable at region granularity.
+#[test]
+fn mock_flash_supports_region_granularity_write_and_erase() {
+    let mut flash = MockFlash::<8, 2, 16>::new(0xff);
+    flash.write_region(0, 0, &[1, 2, 3, 4]).unwrap();
+
+    let mut buffer = [0u8; 8];
+    flash.read_region(0, 0, &mut buffer).unwrap();
+    assert_eq!(buffer[..4], [1, 2, 3, 4]);
+
+    flash.erase_region(0).unwrap();
+    flash.read_region(0, 0, &mut buffer).unwrap();
+    assert_eq!(buffer, [0xff; 8]);
+}
+
 #[test]
 fn metadata_operations_are_logged() {
     let mut flash = MockFlash::<64, 4, 8>::new(0xff);
@@ -73,23 +89,15 @@ fn format_empty_store_rejects_too_few_regions() {
 }
 
 //= spec/ring.md#format-storage-on-disk-initialization
-//# RING-FORMAT-STORAGE-003 Initialize region `0` as WAL:
-//= spec/ring.md#format-storage-on-disk-initialization
-//# `RING-FORMAT-STORAGE-POST-001` WAL head and WAL tail MUST both be region `0`.
+//# `RING-FORMAT-STORAGE-PRE-003` Region `0` MUST be reserved as the initial WAL region.
 #[test]
-fn format_empty_store_initializes_region_zero_as_wal() {
+fn format_empty_store_reserves_region_zero_as_initial_wal_region() {
     let mut flash = MockFlash::<64, 4, 32>::new(0xff);
     flash.format_empty_store(1, 8, 0xa5).unwrap();
 
     let header = Header::decode(&flash.region_bytes(0).unwrap()[..Header::ENCODED_LEN]).unwrap();
     assert_eq!(header.collection_id, CollectionId(0));
     assert_eq!(header.collection_format, WAL_V1_FORMAT);
-
-    let start = Header::ENCODED_LEN;
-    let end = start + WalRegionPrologue::ENCODED_LEN;
-    let prologue =
-        WalRegionPrologue::decode(&flash.region_bytes(0).unwrap()[start..end], 4).unwrap();
-    assert_eq!(prologue.wal_head_region_index, 0);
 }
 
 //= spec/ring.md#format-storage-on-disk-initialization

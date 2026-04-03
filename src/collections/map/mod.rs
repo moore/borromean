@@ -304,8 +304,6 @@ where
     K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
     V: Debug + Serialize + for<'de> Deserialize<'de>,
 {
-    //= spec/implementation.md#architecture-requirements
-    //# RING-IMPL-ARCH-003 WAL handling, region-management logic, and collection-specific logic MUST remain separable modules with explicit interfaces.
     pub fn new(
         id: CollectionId,
         buffer: &'a mut [u8],
@@ -448,8 +446,6 @@ where
             .ok_or(MapError::SerializationError)
     }
 
-    //= spec/ring.md#collection-head-state-machine
-    //# RING-FORMAT-013 That collection specification MUST define, at minimum: the empty logical state established by `new_collection`; the exact bytes and interpretation of every supported committed-region `collection_format`; the exact bytes and interpretation of `snapshot` payloads; the exact bytes and interpretation of `update` payloads; the rules for applying updates and merging a durable basis with the in-memory frontier; and the collection-specific validation rules used when loading a basis or replaying WAL payloads.
     pub fn encode_snapshot_into(&self, snapshot: &mut [u8]) -> Result<usize, MapError> {
         let snapshot_len = self.snapshot_len()?;
         if snapshot.len() < snapshot_len {

@@ -3,8 +3,6 @@ use core::mem::size_of;
 
 use crc::{Crc, CRC_32_ISCSI};
 
-//= spec/ring.md#canonical-on-disk-encoding
-//# RING-DISK-006 `metadata_checksum`, `header_checksum`, `prologue_checksum`, `footer_checksum`, and `record_checksum` MUST all use the standard CRC-32C (Castagnoli) parameters (`poly = 0x1edc6f41`, `init = 0xffffffff`, `refin = true`, `refout = true`, `xorout = 0xffffffff`) and MUST be stored little-endian.
 const CRC32C: Crc<u32> = Crc::<u32>::new(&CRC_32_ISCSI);
 
 //= spec/ring.md#storage-metadata
@@ -369,8 +367,6 @@ fn ensure_len(buffer: &[u8], len: usize) -> Result<(), DiskError> {
     Ok(())
 }
 
-//= spec/ring.md#canonical-on-disk-encoding
-//# RING-DISK-001 All fixed-width integer fields in `StorageMetadata`, `Header`, `WalRegionPrologue`, free-pointer footers, and logical WAL records MUST be encoded little-endian.
 fn write_u8(buffer: &mut [u8], offset: usize, value: u8) -> Result<usize, DiskError> {
     ensure_len(buffer, offset + size_of::<u8>())?;
     buffer[offset] = value;
@@ -402,8 +398,6 @@ fn read_u8(buffer: &[u8], offset: &mut usize) -> Result<u8, DiskError> {
     Ok(value)
 }
 
-//= spec/ring.md#canonical-on-disk-encoding
-//# RING-DISK-007 Unless a structure explicitly says otherwise, the checksum for that structure MUST cover the exact logical bytes of every earlier field in that structure, in on-disk order, and MUST exclude the checksum field itself and any later padding.
 fn read_u16(buffer: &[u8], offset: &mut usize) -> Result<u16, DiskError> {
     let bytes = read_array::<2>(buffer, offset)?;
     Ok(u16::from_le_bytes(bytes))

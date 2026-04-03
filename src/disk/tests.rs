@@ -1,7 +1,130 @@
 use super::*;
 
+//= spec/ring.md#canonical-on-disk-encoding
+//# `RING-DISK-001` All fixed-width integer fields in `StorageMetadata`,
+//# `Header`, `WalRegionPrologue`, free-pointer footers, and logical WAL
+//# records MUST be encoded little-endian.
+#[test]
+fn disk_structures_encode_fixed_width_fields_little_endian() {
+    let metadata = StorageMetadata::new(0x1122_3344, 0x5566_7788, 0x0102_0304, 0x0506_0708, 0xaa, 0xbb)
+        .unwrap();
+    let mut metadata_bytes = [0u8; StorageMetadata::ENCODED_LEN];
+    metadata.encode_into(&mut metadata_bytes).unwrap();
+    let expected_metadata_prefix = [
+        1u32.to_le_bytes().as_slice(),
+        0x1122_3344u32.to_le_bytes().as_slice(),
+        0x5566_7788u32.to_le_bytes().as_slice(),
+        0x0102_0304u32.to_le_bytes().as_slice(),
+        0x0506_0708u32.to_le_bytes().as_slice(),
+        &[0xaa],
+        &[0xbb],
+    ]
+    .concat();
+    assert_eq!(
+        &metadata_bytes[..expected_metadata_prefix.len()],
+        expected_metadata_prefix.as_slice()
+    );
+
+    let header = Header {
+        sequence: 0x0102_0304_0506_0708,
+        collection_id: CollectionId(0x1112_1314_1516_1718),
+        collection_format: 0x191a,
+    };
+    let mut header_bytes = [0u8; Header::ENCODED_LEN];
+    header.encode_into(&mut header_bytes).unwrap();
+    let expected_header_prefix = [
+        0x0102_0304_0506_0708u64.to_le_bytes().as_slice(),
+        0x1112_1314_1516_1718u64.to_le_bytes().as_slice(),
+        0x191au16.to_le_bytes().as_slice(),
+    ]
+    .concat();
+    assert_eq!(&header_bytes[..expected_header_prefix.len()], expected_header_prefix.as_slice());
+
+    let prologue = WalRegionPrologue {
+        wal_head_region_index: 0x0b0c_0d0e,
+    };
+    let mut prologue_bytes = [0u8; WalRegionPrologue::ENCODED_LEN];
+    prologue.encode_into(&mut prologue_bytes, 0x0f10_1112).unwrap();
+    assert_eq!(
+        &prologue_bytes[..size_of::<u32>()],
+        0x0b0c_0d0eu32.to_le_bytes().as_slice()
+    );
+
+    let footer = FreePointerFooter {
+        next_tail: Some(0x2122_2324),
+    };
+    let mut footer_bytes = [0u8; FreePointerFooter::ENCODED_LEN];
+    footer.encode_into(&mut footer_bytes, 0xff).unwrap();
+    assert_eq!(
+        &footer_bytes[..size_of::<u32>()],
+        0x2122_2324u32.to_le_bytes().as_slice()
+    );
+}
+
+//= spec/ring.md#canonical-on-disk-encoding
+//# `RING-DISK-006` `metadata_checksum`, `header_checksum`,
+//# `prologue_checksum`, `footer_checksum`, and `record_checksum` MUST all use the standard
+//# CRC-32C (Castagnoli) parameters (`poly = 0x1edc6f41`,
+//# `init = 0xffffffff`, `refin = true`, `refout = true`,
+//# `xorout = 0xffffffff`) and MUST be stored little-endian.
+#[test]
+fn disk_structure_checksums_use_crc32c_and_store_little_endian_bytes() {
+    assert_eq!(crc32(b"123456789"), 0xe306_9283);
+
+    let metadata = StorageMetadata::new(4096, 32, 3, 8, 0xff, 0xa5).unwrap();
+    let mut metadata_bytes = [0u8; StorageMetadata::ENCODED_LEN];
+    metadata.encode_into(&mut metadata_bytes).unwrap();
+    let metadata_checksum_offset = StorageMetadata::ENCODED_LEN - size_of::<u32>();
+    assert_eq!(
+        &metadata_bytes[metadata_checksum_offset..],
+        crc32(&metadata_bytes[..metadata_checksum_offset])
+            .to_le_bytes()
+            .as_slice()
+    );
+
+    let header = Header {
+        sequence: 9,
+        collection_id: CollectionId(7),
+        collection_format: WAL_V1_FORMAT,
+    };
+    let mut header_bytes = [0u8; Header::ENCODED_LEN];
+    header.encode_into(&mut header_bytes).unwrap();
+    let header_checksum_offset = Header::ENCODED_LEN - size_of::<u32>();
+    assert_eq!(
+        &header_bytes[header_checksum_offset..],
+        crc32(&header_bytes[..header_checksum_offset])
+            .to_le_bytes()
+            .as_slice()
+    );
+
+    let prologue = WalRegionPrologue {
+        wal_head_region_index: 3,
+    };
+    let mut prologue_bytes = [0u8; WalRegionPrologue::ENCODED_LEN];
+    prologue.encode_into(&mut prologue_bytes, 8).unwrap();
+    let prologue_checksum_offset = WalRegionPrologue::ENCODED_LEN - size_of::<u32>();
+    assert_eq!(
+        &prologue_bytes[prologue_checksum_offset..],
+        crc32(&prologue_bytes[..prologue_checksum_offset])
+            .to_le_bytes()
+            .as_slice()
+    );
+
+    let footer = FreePointerFooter { next_tail: Some(11) };
+    let mut footer_bytes = [0u8; FreePointerFooter::ENCODED_LEN];
+    footer.encode_into(&mut footer_bytes, 0xff).unwrap();
+    let footer_checksum_offset = FreePointerFooter::ENCODED_LEN - size_of::<u32>();
+    assert_eq!(
+        &footer_bytes[footer_checksum_offset..],
+        crc32(&footer_bytes[..footer_checksum_offset])
+            .to_le_bytes()
+            .as_slice()
+    );
+}
+
 //= spec/ring.md#storage-metadata
-//# RING-META-001 The canonical on-disk `storage_version` defined by this specification MUST be `1`.
+//# `RING-META-001` The canonical on-disk `storage_version` defined by
+//# this specification MUST be `1`.
 #[test]
 fn storage_metadata_uses_storage_version_1() {
     let metadata = StorageMetadata::new(4096, 32, 3, 8, 0xff, 0xa5).unwrap();
@@ -9,7 +132,9 @@ fn storage_metadata_uses_storage_version_1() {
 }
 
 //= spec/ring.md#storage-metadata
-//# RING-META-002 `StorageMetadata` MUST be encoded as the exact byte sequence of the fields shown above, in that order, with no implicit padding.
+//# `RING-META-002` `StorageMetadata` MUST be encoded as the exact byte
+//# sequence of the fields shown above, in that order, with no implicit
+//# padding.
 #[test]
 fn storage_metadata_encodes_fields_in_canonical_order() {
     let metadata = StorageMetadata::new(4096, 32, 3, 8, 0xff, 0xa5).unwrap();
@@ -31,7 +156,8 @@ fn storage_metadata_encodes_fields_in_canonical_order() {
 }
 
 //= spec/ring.md#storage-metadata
-//# RING-META-003 `metadata_checksum` MUST be CRC-32C over every earlier `StorageMetadata` field in on-disk order.
+//# `RING-META-003` `metadata_checksum` MUST be CRC-32C over every
+//# earlier `StorageMetadata` field in on-disk order.
 #[test]
 fn storage_metadata_checksum_covers_prior_fields() {
     let metadata = StorageMetadata::new(4096, 32, 3, 8, 0xff, 0xa5).unwrap();
@@ -46,7 +172,8 @@ fn storage_metadata_checksum_covers_prior_fields() {
 }
 
 //= spec/ring.md#storage-metadata
-//# RING-META-004 Startup MUST reject the store if `metadata_checksum` is invalid or if `storage_version` is unsupported.
+//# `RING-META-004` Startup MUST reject the store if
+//# `metadata_checksum` is invalid or if `storage_version` is unsupported.
 #[test]
 fn storage_metadata_decode_rejects_bad_checksum() {
     let metadata = StorageMetadata::new(4096, 32, 3, 8, 0xff, 0xa5).unwrap();
@@ -71,7 +198,9 @@ fn storage_metadata_decode_ignores_reserved_trailing_bytes() {
 }
 
 //= spec/ring.md#header
-//# RING-HEADER-001 `Header` MUST be encoded as the exact byte sequence of the fields shown above, in that order, with no implicit padding.
+//# `RING-HEADER-001` `Header` MUST be encoded as the exact byte
+//# sequence of the fields shown above, in that order, with no implicit
+//# padding.
 #[test]
 fn header_encodes_fields_in_canonical_order() {
     let header = Header {
@@ -92,7 +221,8 @@ fn header_encodes_fields_in_canonical_order() {
 }
 
 //= spec/ring.md#header
-//# RING-HEADER-002 `header_checksum` MUST be CRC-32C over `sequence`, `collection_id`, and `collection_format` in on-disk order.
+//# `RING-HEADER-002` `header_checksum` MUST be CRC-32C over `sequence`,
+//# `collection_id`, and `collection_format` in on-disk order.
 #[test]
 fn header_checksum_covers_prefix_fields() {
     let header = Header {
@@ -111,7 +241,9 @@ fn header_checksum_covers_prefix_fields() {
 }
 
 //= spec/ring.md#wal-region-prologue
-//# RING-PROLOGUE-001 `WalRegionPrologue` MUST be encoded as the exact byte sequence of the fields shown above, in that order, with no implicit padding.
+//# `RING-PROLOGUE-001` `WalRegionPrologue` MUST be encoded as the exact
+//# byte sequence of the fields shown above, in that order, with no
+//# implicit padding.
 #[test]
 fn wal_prologue_encodes_fields_in_canonical_order() {
     let prologue = WalRegionPrologue {
@@ -124,7 +256,8 @@ fn wal_prologue_encodes_fields_in_canonical_order() {
 }
 
 //= spec/ring.md#wal-region-prologue
-//# RING-PROLOGUE-002 `prologue_checksum` MUST be CRC-32C over `wal_head_region_index`.
+//# `RING-PROLOGUE-002` `prologue_checksum` MUST be CRC-32C over
+//# `wal_head_region_index`.
 #[test]
 fn wal_prologue_checksum_covers_head_region_index() {
     let prologue = WalRegionPrologue {
@@ -141,7 +274,8 @@ fn wal_prologue_checksum_covers_head_region_index() {
 }
 
 //= spec/ring.md#wal-region-prologue
-//# RING-PROLOGUE-003 `wal_head_region_index` MUST be strictly less than `region_count`.
+//# `RING-PROLOGUE-003` `wal_head_region_index` MUST be strictly less
+//# than `region_count`.
 #[test]
 fn wal_prologue_rejects_out_of_range_head() {
     let prologue = WalRegionPrologue {
@@ -160,7 +294,9 @@ fn wal_prologue_rejects_out_of_range_head() {
 }
 
 //= spec/ring.md#free-pointer-footer
-//# RING-FREE-003 Otherwise the footer MUST decode as `next_tail:u32, footer_checksum:u32`, both little-endian, with `footer_checksum` equal to CRC-32C over `next_tail`.
+//# `RING-FREE-003` Otherwise the footer MUST decode as
+//# `next_tail:u32, footer_checksum:u32`, both little-endian, with
+//# `footer_checksum` equal to CRC-32C over `next_tail`.
 #[test]
 fn free_pointer_footer_uses_crc32c_for_non_erased_value() {
     let footer = FreePointerFooter { next_tail: Some(11) };
@@ -185,6 +321,28 @@ fn free_pointer_footer_none_uses_erased_bytes() {
     assert!(buffer.iter().all(|byte| *byte == 0xff));
     let decoded = FreePointerFooter::decode(&buffer, 0xff).unwrap();
     assert_eq!(decoded, footer);
+}
+
+//= spec/ring.md#free-pointer-footer
+//# `RING-FREE-004` A checksum-valid non-erased footer MUST decode to a
+//# `u32 region_index` strictly less than `region_count`; any other value is
+//# malformed.
+#[test]
+fn free_pointer_footer_rejects_region_index_at_or_above_region_count() {
+    let footer = FreePointerFooter {
+        next_tail: Some(4),
+    };
+    let mut buffer = [0u8; FreePointerFooter::ENCODED_LEN];
+    footer.encode_into(&mut buffer, 0xff).unwrap();
+
+    let error = FreePointerFooter::decode_with_region_count(&buffer, 0xff, 4).unwrap_err();
+    assert_eq!(
+        error,
+        DiskError::InvalidRegionIndex {
+            region_index: 4,
+            region_count: 4,
+        }
+    );
 }
 
 #[test]

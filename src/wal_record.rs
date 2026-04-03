@@ -5,8 +5,6 @@ use crc::{Crc, CRC_32_ISCSI};
 use crate::disk::{DiskError, StorageMetadata};
 use crate::CollectionId;
 
-//= spec/ring.md#canonical-on-disk-encoding
-//# RING-DISK-006 `metadata_checksum`, `header_checksum`, `prologue_checksum`, `footer_checksum`, and `record_checksum` MUST all use the standard CRC-32C (Castagnoli) parameters (`poly = 0x1edc6f41`, `init = 0xffffffff`, `refin = true`, `refout = true`, `xorout = 0xffffffff`) and MUST be stored little-endian.
 const CRC32C: Crc<u32> = Crc::<u32>::new(&CRC_32_ISCSI);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -677,8 +675,6 @@ fn opt_region_index_len(region_index: Option<u32>) -> usize {
     1 + usize::from(region_index.is_some()) * size_of::<u32>()
 }
 
-//= spec/ring.md#canonical-on-disk-encoding
-//# RING-DISK-005 Optional region indexes carried inside logical WAL records MUST be encoded as `OptRegionIndex`, a one-byte tag followed, when the tag is `1`, by a `u32 region_index`.
 fn write_opt_region_index(
     buffer: &mut [u8],
     offset: usize,
@@ -740,8 +736,6 @@ fn ensure_len(buffer: &[u8], needed: usize) -> Result<(), WalRecordError> {
     Ok(())
 }
 
-//= spec/ring.md#canonical-on-disk-encoding
-//# RING-DISK-001 All fixed-width integer fields in `StorageMetadata`, `Header`, `WalRegionPrologue`, free-pointer footers, and logical WAL records MUST be encoded little-endian.
 fn write_u8(buffer: &mut [u8], offset: usize, value: u8) -> Result<usize, WalRecordError> {
     ensure_len(buffer, offset + size_of::<u8>())?;
     buffer[offset] = value;

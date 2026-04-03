@@ -18,6 +18,142 @@ fn encode_logical(record: WalRecord<'_>) -> ([u8; 128], usize) {
     (logical, logical_len)
 }
 
+//= spec/ring.md#canonical-on-disk-encoding
+//# `RING-DISK-001` All fixed-width integer fields in `StorageMetadata`,
+//# `Header`, `WalRegionPrologue`, free-pointer footers, and logical WAL
+//# records MUST be encoded little-endian.
+#[test]
+fn logical_wal_records_encode_fixed_width_fields_little_endian() {
+    let (logical, logical_len) = encode_logical(WalRecord::Head {
+        collection_id: CollectionId(0x0102_0304_0506_0708),
+        collection_type: crate::CollectionType::MAP_CODE,
+        region_index: 0x0a0b_0c0d,
+    });
+
+    assert_eq!(logical[0], WalRecordType::Head.code());
+    assert_eq!(
+        &logical[1..1 + size_of::<u64>()],
+        0x0102_0304_0506_0708u64.to_le_bytes().as_slice()
+    );
+    assert_eq!(
+        &logical[1 + size_of::<u64>()..1 + size_of::<u64>() + size_of::<u16>()],
+        crate::CollectionType::MAP_CODE.to_le_bytes().as_slice()
+    );
+    assert_eq!(
+        &logical[1 + size_of::<u64>() + size_of::<u16>()
+            ..1 + size_of::<u64>() + size_of::<u16>() + size_of::<u32>()],
+        (size_of::<u32>() as u32).to_le_bytes().as_slice()
+    );
+    assert_eq!(
+        &logical[1 + size_of::<u64>() + size_of::<u16>() + size_of::<u32>()
+            ..1 + size_of::<u64>() + size_of::<u16>() + size_of::<u32>() + size_of::<u32>()],
+        0x0a0b_0c0du32.to_le_bytes().as_slice()
+    );
+    assert_eq!(
+        logical_len,
+        1 + size_of::<u64>() + size_of::<u16>() + 3 * size_of::<u32>()
+    );
+}
+
+//= spec/ring.md#canonical-on-disk-encoding
+//# `RING-DISK-005` Optional region indexes carried inside logical WAL
+//# records MUST be encoded as `OptRegionIndex`, a one-byte tag followed,
+//# when the tag is `1`, by a `u32 region_index`.
+#[test]
+fn optional_region_indexes_use_a_tag_then_little_endian_region_index() {
+    let (free_list_head_none, free_list_head_none_len) =
+        encode_logical(WalRecord::FreeListHead { region_index: None });
+    assert_eq!(&free_list_head_none[1..1 + size_of::<u32>()], &1u32.to_le_bytes());
+    assert_eq!(free_list_head_none[1 + size_of::<u32>()], 0);
+    assert_eq!(free_list_head_none_len, 1 + 2 * size_of::<u32>() + size_of::<u8>());
+
+    let (alloc_begin_some, alloc_begin_some_len) = encode_logical(WalRecord::AllocBegin {
+        region_index: 3,
+        free_list_head_after: Some(0x1122_3344),
+    });
+    let opt_offset = 1 + 2 * size_of::<u32>();
+    assert_eq!(alloc_begin_some[opt_offset], 1);
+    assert_eq!(
+        &alloc_begin_some[opt_offset + size_of::<u8>()..opt_offset + size_of::<u8>() + size_of::<u32>()],
+        0x1122_3344u32.to_le_bytes().as_slice()
+    );
+    assert_eq!(
+        alloc_begin_some_len,
+        1 + 4 * size_of::<u32>() + size_of::<u8>()
+    );
+}
+
+//= spec/ring.md#canonical-on-disk-encoding
+//# `RING-DISK-006` `metadata_checksum`, `header_checksum`,
+//# `prologue_checksum`, `footer_checksum`, and `record_checksum` MUST all use the standard
+//# CRC-32C (Castagnoli) parameters (`poly = 0x1edc6f41`,
+//# `init = 0xffffffff`, `refin = true`, `refout = true`,
+//# `xorout = 0xffffffff`) and MUST be stored little-endian.
+#[test]
+fn logical_record_checksums_use_crc32c_and_store_little_endian_bytes() {
+    assert_eq!(crc32(b"123456789"), 0xe306_9283);
+
+    let payload = [0xaa, 0xbb];
+    let (logical, logical_len) = encode_logical(WalRecord::Snapshot {
+        collection_id: CollectionId(7),
+        collection_type: crate::CollectionType::MAP_CODE,
+        payload: &payload,
+    });
+
+    let checksum_offset = logical_len - size_of::<u32>();
+    assert_eq!(
+        &logical[checksum_offset..logical_len],
+        crc32(&logical[..checksum_offset]).to_le_bytes().as_slice()
+    );
+}
+
+//= spec/ring.md#canonical-on-disk-encoding
+//# `RING-DISK-007` Unless a structure explicitly says otherwise, the
+//# checksum for that structure MUST cover the exact logical bytes of every
+//# earlier field in that structure, in on-disk order, and MUST exclude the
+//# checksum field itself and any later padding.
+#[test]
+fn record_checksums_cover_prior_logical_bytes_but_exclude_checksum_and_padding() {
+    let record = WalRecord::Update {
+        collection_id: CollectionId(0x0102_0304_0506_0708),
+        payload: &[0x11, 0x22, 0x33],
+    };
+    let (logical, logical_len) = encode_logical(record);
+    let checksum_offset = logical_len - size_of::<u32>();
+    let stored_checksum = u32::from_le_bytes(logical[checksum_offset..logical_len].try_into().unwrap());
+
+    assert_eq!(stored_checksum, crc32(&logical[..checksum_offset]));
+    assert_ne!(stored_checksum, crc32(&logical[..logical_len]));
+
+    let metadata_8 = metadata(8);
+    let metadata_16 = metadata(16);
+    let (physical_8, encoded_len_8) = encode_physical(record, metadata_8);
+    let (physical_16, encoded_len_16) = encode_physical(record, metadata_16);
+    assert!(encoded_len_16 > encoded_len_8);
+    let mut decode_scratch_8 = [0u8; 128];
+    assert_eq!(
+        decode_record(
+            &physical_8[..encoded_len_8],
+            metadata_8,
+            &mut decode_scratch_8
+        )
+        .unwrap()
+        .record,
+        record
+    );
+    let mut decode_scratch_16 = [0u8; 128];
+    assert_eq!(
+        decode_record(
+            &physical_16[..encoded_len_16],
+            metadata_16,
+            &mut decode_scratch_16
+        )
+        .unwrap()
+        .record,
+        record
+    );
+}
+
 //= spec/ring.md#wal-record-types
 //# RING-WAL-ENC-003 After the leading `record_magic`, the rest of the physical WAL record is encoded with deterministic byte-stuffing over the logical WAL record bytes:
 #[test]
