@@ -1,14 +1,15 @@
 extern crate std;
 
 use crate::{
-    CollectionId, LsmMap, MockFlash, Storage, StorageMetadata, StorageWorkspace, WalRecord,
-    encode_record_into,
+    CollectionId, FlashIo, LsmMap, MapUpdate, MockError, MockFlash, MockFormatError,
+    MockOperation, Storage, StorageMetadata, StorageWorkspace, WalRecord, encode_record_into,
 };
 use self::std::collections::BTreeSet;
 use self::std::fs;
 use self::std::format;
 use self::std::path::{Path, PathBuf};
 use self::std::string::{String, ToString};
+use self::std::vec;
 use self::std::vec::Vec;
 
 fn collect_rust_sources(dir: &Path, files: &mut Vec<PathBuf>) {
@@ -280,6 +281,16 @@ fn collect_normative_requirement_items(spec_path: &Path) -> Vec<String> {
     items
 }
 
+fn collect_normative_requirement_ids(spec_path: &Path) -> Vec<String> {
+    let mut ids = Vec::new();
+    for item in collect_normative_requirement_items(spec_path) {
+        for id in extract_requirement_ids(&item) {
+            push_unique(&mut ids, id);
+        }
+    }
+    ids
+}
+
 fn assert_spec_requirement_format(spec_path: &Path, expected_prefix: &str) {
     let items = collect_normative_requirement_items(spec_path);
     assert!(!items.is_empty(), "no normative requirement items found in {}", spec_path.display());
@@ -299,6 +310,208 @@ fn assert_spec_requirement_format(spec_path: &Path, expected_prefix: &str) {
             spec_path.display()
         );
     }
+}
+
+fn repo_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+}
+
+fn read_repo_file(relative: &str) -> String {
+    fs::read_to_string(repo_root().join(relative)).unwrap()
+}
+
+fn strip_comment_lines(source: &str) -> String {
+    source
+        .lines()
+        .filter(|line| {
+            let trimmed = line.trim_start();
+            !(trimmed.starts_with("//") || trimmed.starts_with('#'))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn dependency_names(manifest: &str, section: &str) -> BTreeSet<String> {
+    let section_header = format!("[{section}]");
+    let mut names = BTreeSet::new();
+    let mut in_section = false;
+
+    for line in manifest.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            in_section = trimmed == section_header;
+            continue;
+        }
+        if !in_section || trimmed.is_empty() {
+            continue;
+        }
+
+        let Some((name, _)) = trimmed.split_once('=') else {
+            continue;
+        };
+        names.insert(name.trim().to_string());
+    }
+
+    names
+}
+
+fn non_test_source_files() -> Vec<PathBuf> {
+    let src_root = repo_root().join("src");
+    let mut files = Vec::new();
+    collect_rust_sources(&src_root, &mut files);
+    files
+        .into_iter()
+        .filter(|path| !is_dedicated_test_file(path))
+        .collect()
+}
+
+fn non_test_sources_without_comments() -> Vec<(PathBuf, String)> {
+    non_test_source_files()
+        .into_iter()
+        .map(|path| {
+            let source = fs::read_to_string(&path).unwrap();
+            (path, strip_comment_lines(&source))
+        })
+        .collect()
+}
+
+fn flash_io_method_names() -> Vec<String> {
+    let source = read_repo_file("src/flash_io.rs");
+    let mut in_trait = false;
+    let mut names = Vec::new();
+
+    for line in source.lines() {
+        let trimmed = line.trim();
+        if trimmed == "pub trait FlashIo {" {
+            in_trait = true;
+            continue;
+        }
+        if !in_trait {
+            continue;
+        }
+        if trimmed == "}" {
+            break;
+        }
+        if let Some(name) = extract_fn_name(trimmed) {
+            names.push(name);
+        }
+    }
+
+    names
+}
+
+struct ForwardingFlash<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize> {
+    inner: MockFlash<REGION_SIZE, REGION_COUNT, MAX_LOG>,
+}
+
+impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize>
+    ForwardingFlash<REGION_SIZE, REGION_COUNT, MAX_LOG>
+{
+    fn new(erased_byte: u8) -> Self {
+        Self {
+            inner: MockFlash::new(erased_byte),
+        }
+    }
+}
+
+impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize> FlashIo
+    for ForwardingFlash<REGION_SIZE, REGION_COUNT, MAX_LOG>
+{
+    fn read_metadata(&mut self) -> Result<Option<StorageMetadata>, MockError> {
+        self.inner.read_metadata()
+    }
+
+    fn write_metadata(&mut self, metadata: StorageMetadata) -> Result<(), MockError> {
+        self.inner.write_metadata(metadata)
+    }
+
+    fn read_region(
+        &mut self,
+        region_index: u32,
+        offset: usize,
+        buffer: &mut [u8],
+    ) -> Result<(), MockError> {
+        self.inner.read_region(region_index, offset, buffer)
+    }
+
+    fn write_region(
+        &mut self,
+        region_index: u32,
+        offset: usize,
+        data: &[u8],
+    ) -> Result<(), MockError> {
+        self.inner.write_region(region_index, offset, data)
+    }
+
+    fn erase_region(&mut self, region_index: u32) -> Result<(), MockError> {
+        self.inner.erase_region(region_index)
+    }
+
+    fn sync(&mut self) -> Result<(), MockError> {
+        self.inner.sync()
+    }
+
+    fn format_empty_store(
+        &mut self,
+        min_free_regions: u32,
+        wal_write_granule: u32,
+        wal_record_magic: u8,
+    ) -> Result<StorageMetadata, MockFormatError> {
+        self.inner
+            .format_empty_store(min_free_regions, wal_write_granule, wal_record_magic)
+    }
+}
+
+//= spec/implementation.md#verification-requirements
+//# `RING-IMPL-TEST-001` Every normative requirement in
+//# [spec/ring.md](ring.md) or this specification MUST have at least one
+//# dedicated automated test function or dedicated compile-time test case
+//# whose primary purpose is to verify that single requirement.
+//= spec/implementation.md#verification-requirements
+//= type=test
+//# `RING-IMPL-TEST-001` Every normative requirement in
+//# [spec/ring.md](ring.md) or this specification MUST have at least one
+//# dedicated automated test function or dedicated compile-time test case
+//# whose primary purpose is to verify that single requirement.
+#[test]
+fn every_normative_requirement_has_a_dedicated_test_or_harness_entry() {
+    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut traced_files = Vec::new();
+    collect_rust_sources(&repo_root.join("src"), &mut traced_files);
+    let mut covered = BTreeSet::new();
+
+    for relative in ["tests", "ui", "compile"] {
+        let root = repo_root.join(relative);
+        if root.exists() {
+            collect_rust_sources(&root, &mut traced_files);
+        }
+    }
+
+    for path in traced_files {
+        let source = fs::read_to_string(&path).unwrap();
+        for line in source.lines() {
+            if !line.trim().starts_with("//#") {
+                continue;
+            }
+            for id in extract_requirement_ids(line) {
+                covered.insert(id);
+            }
+        }
+    }
+
+    let mut missing = Vec::new();
+    for spec in ["spec/ring.md", "spec/implementation.md"] {
+        for id in collect_normative_requirement_ids(&repo_root.join(spec)) {
+            if !covered.contains(&id) {
+                missing.push(id);
+            }
+        }
+    }
+
+    assert!(
+        missing.is_empty(),
+        "normative requirements without dedicated test or harness coverage: {missing:?}"
+    );
 }
 
 //= spec/implementation.md#verification-requirements
@@ -431,6 +644,373 @@ fn implementation_spec_requirements_use_stable_identifiers_and_normative_languag
 fn ring_spec_requirements_use_stable_identifiers_and_normative_language() {
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
     assert_spec_requirement_format(&repo_root.join("spec/ring.md"), "RING-");
+}
+
+//= spec/implementation.md#core-requirements
+//# `RING-IMPL-CORE-001` The core library crate MUST compile with
+//# `#![no_std]`.
+#[test]
+fn core_library_crate_declares_no_std() {
+    let lib = read_repo_file("src/lib.rs");
+    assert!(lib.contains("#![no_std]"));
+}
+
+//= spec/implementation.md#core-requirements
+//# `RING-IMPL-CORE-002` The core library crate MUST NOT depend on the
+//# Rust `alloc` crate.
+#[test]
+fn core_library_crate_avoids_alloc_dependency_and_usage() {
+    let manifest = strip_comment_lines(&read_repo_file("Cargo.toml"));
+    let dependencies = dependency_names(&manifest, "dependencies");
+    assert!(!dependencies.contains("alloc"));
+
+    for (path, source) in non_test_sources_without_comments() {
+        assert!(
+            !source.contains("alloc::"),
+            "non-test source unexpectedly references alloc in {}",
+            path.display()
+        );
+        assert!(
+            !source.contains("extern crate alloc"),
+            "non-test source unexpectedly imports alloc in {}",
+            path.display()
+        );
+    }
+}
+
+//= spec/implementation.md#core-requirements
+//# `RING-IMPL-CORE-003` The core library crate MUST NOT depend on an
+//# async runtime, executor, scheduler, or timer facility.
+#[test]
+fn core_library_crate_has_no_async_runtime_or_timer_dependencies() {
+    let manifest = strip_comment_lines(&read_repo_file("Cargo.toml"));
+    let dependencies = dependency_names(&manifest, "dependencies");
+    for banned in [
+        "tokio",
+        "async-std",
+        "smol",
+        "glommio",
+        "embassy-executor",
+        "async-executor",
+        "futures-executor",
+        "futures-timer",
+    ] {
+        assert!(
+            !dependencies.contains(banned),
+            "unexpected runtime-style dependency {banned}"
+        );
+    }
+
+    for (path, source) in non_test_sources_without_comments() {
+        for banned in [
+            "tokio::",
+            "async_std::",
+            "smol::",
+            "glommio::",
+            "embassy_executor::",
+            "futures_timer::",
+        ] {
+            assert!(
+                !source.contains(banned),
+                "non-test source unexpectedly references {banned} in {}",
+                path.display()
+            );
+        }
+    }
+}
+
+//= spec/implementation.md#non-goal-requirements
+//# `RING-IMPL-NONGOAL-001` Borromean core MUST NOT require a specific
+//# embedded framework, RTOS, or async executor.
+#[test]
+fn core_library_crate_requires_no_embedded_framework_or_rtos_dependency() {
+    let manifest = strip_comment_lines(&read_repo_file("Cargo.toml"));
+    let dependencies = dependency_names(&manifest, "dependencies");
+    for dependency in dependencies {
+        assert!(
+            ![
+                "embassy",
+                "rtic",
+                "freertos",
+                "zephyr",
+                "esp-idf",
+                "esp_idf",
+                "arduino",
+            ]
+            .iter()
+            .any(|prefix| dependency.starts_with(prefix)),
+            "unexpected framework or RTOS dependency {dependency}"
+        );
+    }
+}
+
+//= spec/implementation.md#non-goal-requirements
+//# `RING-IMPL-NONGOAL-002` Borromean core MUST NOT assume thread
+//# support, background workers, or heap-backed task scheduling.
+#[test]
+fn core_library_crate_assumes_no_threads_or_background_workers() {
+    for (path, source) in non_test_sources_without_comments() {
+        for banned in [
+            "std::thread",
+            "thread::spawn",
+            "spawn_blocking",
+            "JoinHandle",
+            "crossbeam",
+            "tokio::spawn",
+            "async_std::task::spawn",
+            "std::sync::mpsc",
+        ] {
+            assert!(
+                !source.contains(banned),
+                "non-test source unexpectedly references {banned} in {}",
+                path.display()
+            );
+        }
+    }
+}
+
+//= spec/implementation.md#architecture-requirements
+//# `RING-IMPL-ARCH-002` The backing I/O object MUST instead be passed
+//# into operation entry points or operation builders so the same
+//# `Storage` value can participate in externally driven async execution.
+#[test]
+fn storage_public_entry_points_take_backing_io_from_callers() {
+    let lib = strip_comment_lines(&read_repo_file("src/lib.rs"));
+    assert!(
+        lib.contains("pub struct Storage<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize> {")
+    );
+    assert!(!lib.contains("pub struct Storage<IO"));
+
+    for signature in [
+        "pub fn format_future<",
+        "pub fn format<",
+        "pub fn open_future<'a",
+        "pub fn open<const",
+        "pub fn create_map_future<",
+        "pub fn append_map_update_future<",
+        "pub fn flush_map_future<",
+        "pub fn drop_map_future<",
+    ] {
+        assert!(lib.contains(signature), "missing public entry point {signature}");
+    }
+
+    assert!(lib.contains("flash: &'a mut IO"));
+    assert!(lib.contains("flash: &mut IO"));
+}
+
+//= spec/implementation.md#api-requirements
+//# `RING-IMPL-API-002` The public API MUST allow a caller to drive the
+//# same storage engine from either blocking test shims or asynchronous
+//# device adapters without changing borromean correctness logic.
+#[test]
+fn blocking_and_future_entry_points_produce_equivalent_storage_state() {
+    const REGION_SIZE: usize = 256;
+    const REGION_COUNT: usize = 5;
+    let mut blocking_flash = MockFlash::<REGION_SIZE, REGION_COUNT, 2048>::new(0xff);
+    let mut blocking_workspace = StorageWorkspace::<REGION_SIZE>::new();
+    let mut blocking = Storage::<8, 4>::format::<REGION_SIZE, REGION_COUNT, _>(
+        &mut blocking_flash,
+        &mut blocking_workspace,
+        1,
+        8,
+        0xa5,
+    )
+    .unwrap();
+
+    let mut future_flash = MockFlash::<REGION_SIZE, REGION_COUNT, 2048>::new(0xff);
+    let mut future_workspace = StorageWorkspace::<REGION_SIZE>::new();
+    let mut future_driven = super::poll_until_ready(Storage::<8, 4>::format_future::<
+        REGION_SIZE,
+        REGION_COUNT,
+        _,
+    >(
+        &mut future_flash,
+        &mut future_workspace,
+        1,
+        8,
+        0xa5,
+    ), 16)
+    .unwrap();
+
+    blocking
+        .create_map::<REGION_SIZE, REGION_COUNT, _>(
+            &mut blocking_flash,
+            &mut blocking_workspace,
+            CollectionId(61),
+        )
+        .unwrap();
+    super::poll_until_ready(future_driven.create_map_future::<REGION_SIZE, REGION_COUNT, _>(
+        &mut future_flash,
+        &mut future_workspace,
+        CollectionId(61),
+    ), 16)
+    .unwrap();
+
+    let mut blocking_payload = [0u8; 64];
+    let mut future_payload = [0u8; 64];
+    blocking
+        .append_map_update::<REGION_SIZE, REGION_COUNT, _, u16, u16, 8>(
+            &mut blocking_flash,
+            &mut blocking_workspace,
+            CollectionId(61),
+            &MapUpdate::Set { key: 7, value: 70 },
+            &mut blocking_payload,
+        )
+        .unwrap();
+    super::poll_until_ready(
+        future_driven.append_map_update_future::<REGION_SIZE, REGION_COUNT, _, u16, u16, 8>(
+            &mut future_flash,
+            &mut future_workspace,
+            CollectionId(61),
+            &MapUpdate::Set { key: 7, value: 70 },
+            &mut future_payload,
+        ),
+        16,
+    )
+    .unwrap();
+
+    let reopened_blocking =
+        Storage::<8, 4>::open::<REGION_SIZE, REGION_COUNT, _>(&mut blocking_flash, &mut blocking_workspace)
+            .unwrap();
+    let reopened_future = super::poll_until_ready(Storage::<8, 4>::open_future::<
+        REGION_SIZE,
+        REGION_COUNT,
+        _,
+    >(&mut future_flash, &mut future_workspace), 16)
+    .unwrap();
+
+    assert_eq!(reopened_blocking.metadata(), reopened_future.metadata());
+    assert_eq!(reopened_blocking.collections(), reopened_future.collections());
+    assert_eq!(reopened_blocking.pending_reclaims(), reopened_future.pending_reclaims());
+    assert_eq!(reopened_blocking.last_free_list_head(), reopened_future.last_free_list_head());
+    assert_eq!(reopened_blocking.free_list_tail(), reopened_future.free_list_tail());
+
+    let mut blocking_map_buffer = [0u8; REGION_SIZE];
+    let blocking_map = reopened_blocking
+        .open_map::<REGION_SIZE, REGION_COUNT, _, u16, u16, 8>(
+            &mut blocking_flash,
+            &mut blocking_workspace,
+            CollectionId(61),
+            &mut blocking_map_buffer,
+        )
+        .unwrap();
+    let mut future_map_buffer = [0u8; REGION_SIZE];
+    let future_map = reopened_future
+        .open_map::<REGION_SIZE, REGION_COUNT, _, u16, u16, 8>(
+            &mut future_flash,
+            &mut future_workspace,
+            CollectionId(61),
+            &mut future_map_buffer,
+        )
+        .unwrap();
+    assert_eq!(blocking_map.get(&7).unwrap(), Some(70));
+    assert_eq!(future_map.get(&7).unwrap(), Some(70));
+}
+
+//= spec/implementation.md#i-o-requirements
+//# `RING-IMPL-IO-001` The borromean I/O abstraction MUST expose only
+//# the primitive operations needed to satisfy [spec/ring.md](ring.md):
+//# region or metadata reads, writes, erases, and durability barriers.
+#[test]
+fn flash_io_trait_exposes_only_primitive_storage_operations() {
+    let methods = flash_io_method_names();
+    assert_eq!(
+        methods,
+        vec![
+            "read_metadata".to_string(),
+            "write_metadata".to_string(),
+            "read_region".to_string(),
+            "write_region".to_string(),
+            "erase_region".to_string(),
+            "sync".to_string(),
+            "format_empty_store".to_string(),
+        ]
+    );
+}
+
+//= spec/implementation.md#i-o-requirements
+//# `RING-IMPL-IO-002` The borromean I/O abstraction MUST be generic
+//# over the caller's concrete transport or flash driver type.
+#[test]
+fn flash_io_trait_accepts_caller_defined_driver_types() {
+    const REGION_SIZE: usize = 256;
+    const REGION_COUNT: usize = 5;
+    let mut flash = ForwardingFlash::<REGION_SIZE, REGION_COUNT, 2048>::new(0xff);
+    let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
+    let mut storage =
+        Storage::<8, 4>::format::<REGION_SIZE, REGION_COUNT, _>(&mut flash, &mut workspace, 1, 8, 0xa5)
+            .unwrap();
+    storage
+        .create_map::<REGION_SIZE, REGION_COUNT, _>(&mut flash, &mut workspace, CollectionId(62))
+        .unwrap();
+    assert_eq!(storage.collections()[0].collection_id(), CollectionId(62));
+}
+
+//= spec/implementation.md#i-o-requirements
+//# `RING-IMPL-IO-003` The borromean I/O abstraction MUST be usable
+//# without dynamic dispatch and without heap allocation.
+#[test]
+fn flash_io_trait_avoids_dynamic_dispatch_surfaces() {
+    for (path, source) in non_test_sources_without_comments() {
+        for banned in [
+            "dyn FlashIo",
+            "Box<dyn FlashIo",
+            "&dyn FlashIo",
+            "Arc<dyn FlashIo",
+            "Rc<dyn FlashIo",
+        ] {
+            assert!(
+                !source.contains(banned),
+                "non-test source unexpectedly references {banned} in {}",
+                path.display()
+            );
+        }
+    }
+}
+
+//= spec/implementation.md#i-o-requirements
+//# `RING-IMPL-IO-004` If the target medium does not require an
+//# explicit durability barrier, the I/O abstraction MAY implement sync as
+//# a zero-cost completed operation.
+#[test]
+fn mock_flash_sync_can_complete_immediately() {
+    let mut flash = MockFlash::<128, 4, 8>::new(0xff);
+    flash.clear_operations();
+    flash.sync().unwrap();
+    assert_eq!(flash.operations(), &[MockOperation::Sync]);
+}
+
+//= spec/implementation.md#i-o-requirements
+//# `RING-IMPL-IO-005` Borromean MUST treat wakeups, DMA completion, or
+//# interrupt delivery as an external concern of the caller-provided I/O
+//# implementation rather than as an internal runtime service.
+#[test]
+fn flash_io_surface_leaves_wakeup_and_interrupt_delivery_external() {
+    for name in flash_io_method_names() {
+        for forbidden in ["wake", "waker", "callback", "interrupt", "dma", "register"] {
+            assert!(
+                !name.contains(forbidden),
+                "FlashIo unexpectedly exposes runtime-style hook {name}"
+            );
+        }
+    }
+
+    for relative in ["src/flash_io.rs", "src/lib.rs", "src/op_future.rs"] {
+        let source = strip_comment_lines(&read_repo_file(relative));
+        for forbidden in [
+            "register_waker",
+            "callback",
+            "interrupt",
+            "dma",
+            "tokio::spawn",
+            "async_std::task::spawn",
+        ] {
+            assert!(
+                !source.contains(forbidden),
+                "unexpected runtime-owned I/O concern {forbidden} in {relative}"
+            );
+        }
+    }
 }
 
 //= spec/implementation.md#architecture-requirements

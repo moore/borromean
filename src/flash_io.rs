@@ -1,14 +1,6 @@
 use crate::mock::{MockError, MockFormatError};
 use crate::{MockFlash, StorageMetadata};
 
-//= spec/implementation.md#i-o-requirements
-//# `RING-IMPL-IO-001` The borromean I/O abstraction MUST expose only the primitive operations needed to satisfy [spec/ring.md](ring.md): region or metadata reads, writes, erases, and durability barriers.
-//= spec/implementation.md#i-o-requirements
-//# `RING-IMPL-IO-002` The borromean I/O abstraction MUST be generic over the caller's concrete transport or flash driver type.
-//= spec/implementation.md#i-o-requirements
-//# `RING-IMPL-IO-003` The borromean I/O abstraction MUST be usable without dynamic dispatch and without heap allocation.
-//= spec/implementation.md#i-o-requirements
-//# `RING-IMPL-IO-005` Borromean MUST treat wakeups, DMA completion, or interrupt delivery as an external concern of the caller-provided I/O implementation rather than as an internal runtime service.
 //= spec/ring.md#core-requirements
 //# `RING-CORE-001` Region starts and region sizes MUST be aligned to the backing flash erase-block size so every region can be erased independently.
 pub trait FlashIo {

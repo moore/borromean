@@ -63,6 +63,10 @@ pub enum StorageRuntimeError {
         free_regions: u32,
         min_free_regions: u32,
     },
+    TooManyDirtyFrontiers {
+        dirty_frontiers: usize,
+        min_free_regions: u32,
+    },
     CommittedRegionTooLarge {
         payload_len: usize,
         capacity: usize,

@@ -201,10 +201,6 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize>
         Ok(())
     }
 
-    //= spec/implementation.md#i-o-requirements
-    //# `RING-IMPL-IO-004` If the target medium does not require an
-    //# explicit durability barrier, the I/O abstraction MAY implement sync as
-    //# a zero-cost completed operation.
     pub fn sync(&mut self) -> Result<(), MockError> {
         self.log(MockOperation::Sync)
     }

@@ -1150,6 +1150,92 @@ fn storage_map_api_restores_snapshot_and_updates() {
 
 #[test]
 //= spec/ring.md#core-requirements
+//# `RING-CORE-012` The implementation MUST maintain
+//# `min_free_regions >= max_in_memory_dirty_collections + 1`.
+//= spec/ring.md#core-requirements
+//= type=test
+//# `RING-CORE-012` The implementation MUST maintain
+//# `min_free_regions >= max_in_memory_dirty_collections + 1`.
+fn storage_map_frontiers_do_not_exceed_the_configured_dirty_collection_reserve() {
+    const REGION_SIZE: usize = 512;
+    const REGION_COUNT: usize = 6;
+    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 4096>::new(0xff);
+    let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
+    let mut storage =
+        Storage::<8, 4>::format::<REGION_SIZE, REGION_COUNT, _>(
+            &mut flash,
+            &mut workspace,
+            2,
+            8,
+            0xa5,
+        )
+        .unwrap();
+
+    storage
+        .create_map::<REGION_SIZE, REGION_COUNT, _>(&mut flash, &mut workspace, CollectionId(48))
+        .unwrap();
+    storage
+        .create_map::<REGION_SIZE, REGION_COUNT, _>(&mut flash, &mut workspace, CollectionId(49))
+        .unwrap();
+
+    let mut first_buffer = [0u8; 128];
+    let mut second_buffer = [0u8; 128];
+    let mut first_map = LsmMap::<u16, u16, 8>::new(CollectionId(48), &mut first_buffer).unwrap();
+    let mut second_map = LsmMap::<u16, u16, 8>::new(CollectionId(49), &mut second_buffer).unwrap();
+    let mut payload_buffer = [0u8; 64];
+
+    storage
+        .update_map_frontier::<REGION_SIZE, REGION_COUNT, _, u16, u16, 8>(
+            &mut flash,
+            &mut workspace,
+            &mut first_map,
+            &MapUpdate::Set { key: 1, value: 10 },
+            &mut payload_buffer,
+        )
+        .unwrap();
+
+    let error = storage
+        .update_map_frontier::<REGION_SIZE, REGION_COUNT, _, u16, u16, 8>(
+            &mut flash,
+            &mut workspace,
+            &mut second_map,
+            &MapUpdate::Set { key: 2, value: 20 },
+            &mut payload_buffer,
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        MapStorageError::Storage(StorageRuntimeError::TooManyDirtyFrontiers {
+            dirty_frontiers: 2,
+            min_free_regions: 2,
+        })
+    ));
+    assert_eq!(first_map.get(&1).unwrap(), Some(10));
+    assert_eq!(second_map.get(&2).unwrap(), None);
+
+    storage
+        .flush_map::<REGION_SIZE, REGION_COUNT, _, u16, u16, 8>(
+            &mut flash,
+            &mut workspace,
+            &first_map,
+        )
+        .unwrap();
+
+    storage
+        .update_map_frontier::<REGION_SIZE, REGION_COUNT, _, u16, u16, 8>(
+            &mut flash,
+            &mut workspace,
+            &mut second_map,
+            &MapUpdate::Set { key: 2, value: 20 },
+            &mut payload_buffer,
+        )
+        .unwrap();
+    assert_eq!(second_map.get(&2).unwrap(), Some(20));
+}
+
+#[test]
+//= spec/ring.md#core-requirements
 //# `RING-CORE-016` If applying another update would exceed that
 //# capacity, the implementation MUST flush the collection's current
 //# logical frontier into a newly allocated region, durably commit that
@@ -1165,7 +1251,7 @@ fn storage_map_frontier_overflow_flushes_and_commits_a_new_region_head() {
         Storage::<8, 4>::format::<REGION_SIZE, REGION_COUNT, _>(
             &mut flash,
             &mut workspace,
-            1,
+            2,
             8,
             0xa5,
         )
@@ -1276,7 +1362,7 @@ fn storage_map_frontier_continues_accumulating_updates_after_an_overflow_flush()
         Storage::<8, 4>::format::<REGION_SIZE, REGION_COUNT, _>(
             &mut flash,
             &mut workspace,
-            1,
+            2,
             8,
             0xa5,
         )
@@ -1787,7 +1873,14 @@ fn storage_reopen_after_replacement_recovers_singleton_free_list_for_reclaimed_r
 
 #[test]
 //= spec/ring.md#region-reclaim
-//# In particular,
+//# `RING-REGION-RECLAIM-004` Establish `r` as a free region without
+//# erasing it. In particular,
+//# `r.free_pointer.next_tail` MUST still be uninitialized when `r` is
+//# about to become the new free-list tail.
+//= spec/ring.md#region-reclaim
+//= type=test
+//# `RING-REGION-RECLAIM-004` Establish `r` as a free region without
+//# erasing it. In particular,
 //# `r.free_pointer.next_tail` MUST still be uninitialized when `r` is
 //# about to become the new free-list tail.
 fn storage_reopen_after_replacement_leaves_new_free_list_tail_uninitialized() {

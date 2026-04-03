@@ -1,15 +1,5 @@
-//= spec/implementation.md#core-requirements
-//# `RING-IMPL-CORE-001` The core library crate MUST compile with `#![no_std]`.
-//= spec/implementation.md#core-requirements
-//# `RING-IMPL-CORE-002` The core library crate MUST NOT depend on the Rust `alloc` crate.
-//= spec/implementation.md#core-requirements
-//# `RING-IMPL-CORE-003` The core library crate MUST NOT depend on an async runtime, executor, scheduler, or timer facility.
 //= spec/implementation.md#api-requirements
 //# `RING-IMPL-API-005` The implementation MAY provide optional helper adapters for common executors or embedded frameworks, but the core crate MUST remain usable without them.
-//= spec/implementation.md#non-goal-requirements
-//# `RING-IMPL-NONGOAL-001` Borromean core MUST NOT require a specific embedded framework, RTOS, or async executor.
-//= spec/implementation.md#non-goal-requirements
-//# `RING-IMPL-NONGOAL-002` Borromean core MUST NOT assume thread support, background workers, or heap-backed task scheduling.
 #![no_std]
 //= spec/implementation.md#panic-requirements
 //# `RING-IMPL-PANIC-001` The borromean core library and its non-test support code MUST be panic free for all input data, including invalid API inputs, corrupt on-storage state, exhausted capacities, and device errors.
@@ -62,6 +52,7 @@ pub use vec_like::*;
 
 use core::fmt::Debug;
 use core::future::Future;
+use heapless::Vec;
 use serde::{Deserialize, Serialize};
 
 type CollectionIdCounter = u64;
@@ -127,6 +118,7 @@ pub trait Collection {
 //# `RING-IMPL-CORE-004` The implementation MUST preserve the durable behavior defined by [spec/ring.md](ring.md); this specification MAY constrain implementation structure but MUST NOT weaken ring-level correctness requirements.
 pub struct Storage<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize> {
     state: StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+    dirty_frontiers: Vec<CollectionId, MAX_COLLECTIONS>,
 }
 
 #[derive(Debug)]
@@ -159,8 +151,6 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
 {
     //= spec/implementation.md#api-requirements
     //# `RING-IMPL-API-001` Public entry points for format, open, replay, and mutating collection operations MUST make their workspace and I/O dependencies explicit in the function signature.
-    //= spec/implementation.md#architecture-requirements
-    //# `RING-IMPL-ARCH-002` The backing I/O object MUST instead be passed into operation entry points or operation builders so the same `Storage` value can participate in externally driven async execution.
     pub fn format_future<
         'a,
         const REGION_SIZE: usize,
@@ -203,11 +193,10 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
                 MAX_COLLECTIONS,
                 MAX_PENDING_RECLAIMS,
             >(flash, workspace, min_free_regions, wal_write_granule, wal_record_magic)?,
+            dirty_frontiers: Vec::new(),
         })
     }
 
-    //= spec/implementation.md#api-requirements
-    //# `RING-IMPL-API-002` The public API MUST allow a caller to drive the same storage engine from either blocking test shims or asynchronous device adapters without changing borromean correctness logic.
     pub fn open_future<'a, const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
         flash: &'a mut IO,
         workspace: &'a mut StorageWorkspace<REGION_SIZE>,
@@ -233,6 +222,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
                 MAX_COLLECTIONS,
                 MAX_PENDING_RECLAIMS,
             >(flash, workspace)?,
+            dirty_frontiers: Vec::new(),
         };
         storage.validate_live_collections::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace)?;
         Ok(storage)
@@ -330,7 +320,63 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
     pub(crate) fn from_runtime(
         state: StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
     ) -> Self {
-        Self { state }
+        Self {
+            state,
+            dirty_frontiers: Vec::new(),
+        }
+    }
+
+    fn dirty_frontier_is_active(&self, collection_id: CollectionId) -> bool {
+        self.dirty_frontiers.contains(&collection_id)
+    }
+
+    fn ensure_dirty_frontier_budget(
+        &self,
+        collection_id: CollectionId,
+    ) -> Result<(), StorageRuntimeError> {
+        if self.dirty_frontier_is_active(collection_id) {
+            return Ok(());
+        }
+
+        let dirty_after = self
+            .dirty_frontiers
+            .len()
+            .checked_add(1)
+            .ok_or(StorageRuntimeError::TooManyTrackedCollections)?;
+        let required_min_free_regions = u32::try_from(
+            dirty_after
+                .checked_add(1)
+                .ok_or(StorageRuntimeError::TooManyTrackedCollections)?,
+        )
+        .map_err(|_| StorageRuntimeError::TooManyTrackedCollections)?;
+        if required_min_free_regions > self.state.metadata().min_free_regions {
+            return Err(StorageRuntimeError::TooManyDirtyFrontiers {
+                dirty_frontiers: dirty_after,
+                min_free_regions: self.state.metadata().min_free_regions,
+            });
+        }
+
+        Ok(())
+    }
+
+    fn mark_dirty_frontier(&mut self, collection_id: CollectionId) -> Result<(), StorageRuntimeError> {
+        if self.dirty_frontier_is_active(collection_id) {
+            return Ok(());
+        }
+
+        self.dirty_frontiers
+            .push(collection_id)
+            .map_err(|_| StorageRuntimeError::TooManyTrackedCollections)
+    }
+
+    fn clear_dirty_frontier(&mut self, collection_id: CollectionId) {
+        if let Some(index) = self
+            .dirty_frontiers
+            .iter()
+            .position(|candidate| *candidate == collection_id)
+        {
+            self.dirty_frontiers.remove(index);
+        }
     }
 
     pub fn append_new_collection<
@@ -658,7 +704,9 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
             IO,
             MAX_COLLECTIONS,
             MAX_PENDING_RECLAIMS,
-        >(&mut self.state, flash, workspace)
+        >(&mut self.state, flash, workspace)?;
+        self.clear_dirty_frontier(map.id());
+        Ok(())
     }
 
     pub fn snapshot_map_future<
@@ -775,6 +823,8 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
                 actual: collection.collection_type(),
             });
         }
+        self.ensure_dirty_frontier_budget(collection_id)
+            .map_err(MapStorageError::from)?;
 
         let used = LsmMap::<K, V, MAX_INDEXES>::encode_update_into(update, payload_buffer)?;
         let mut checkpoint = {
@@ -826,6 +876,8 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
             return Err(error.into());
         }
 
+        self.mark_dirty_frontier(collection_id)
+            .map_err(MapStorageError::from)?;
         Ok(())
     }
 
@@ -879,13 +931,15 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
         V: Debug + Serialize + for<'de> Deserialize<'de>,
     {
-        map.flush_to_storage::<
+        let region_index = map.flush_to_storage::<
             REGION_SIZE,
             REGION_COUNT,
             IO,
             MAX_COLLECTIONS,
             MAX_PENDING_RECLAIMS,
-        >(&mut self.state, flash, workspace)
+        >(&mut self.state, flash, workspace)?;
+        self.clear_dirty_frontier(map.id());
+        Ok(region_index)
     }
 
     pub fn flush_map_future<
@@ -949,13 +1003,16 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
             });
         }
 
-        self.state
+        let reclaim = self
+            .state
             .drop_collection_and_begin_reclaim::<REGION_SIZE, REGION_COUNT, IO>(
                 flash,
                 workspace,
                 collection_id,
             )
-            .map_err(MapStorageError::from)
+            .map_err(MapStorageError::from)?;
+        self.clear_dirty_frontier(collection_id);
+        Ok(reclaim)
     }
 
     pub fn drop_map_future<
