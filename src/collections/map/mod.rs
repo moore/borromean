@@ -92,6 +92,13 @@ pub const MAP_REGION_V1_FORMAT: u16 = 1;
 pub const EMPTY_MAP_SNAPSHOT: [u8; SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE] =
     [0u8; SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE];
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MapCheckpoint {
+    record_count: u32,
+    next_record_offset: usize,
+    next_record_index: usize,
+}
+
 #[derive(Debug)]
 pub enum MapStorageError {
     Map(MapError),
@@ -428,11 +435,16 @@ where
     pub fn snapshot_len(&self) -> Result<usize, MapError> {
         let entry_count =
             usize::try_from(self.record_count.0).map_err(|_| MapError::SerializationError)?;
-        let entry_bytes_len = self
-            .next_record_offset
-            .0
-            .checked_sub(ENTRY_COUNT_SIZE)
-            .ok_or(MapError::SerializationError)?;
+        let mut entry_bytes_len = 0usize;
+        for index in 0..entry_count {
+            let entry_ref = EntryRef::read(self.map, RecordIndex::new(index))?;
+            let start = usize::from(entry_ref.start);
+            let end = usize::from(entry_ref.end);
+            let encoded_len = end.checked_sub(start).ok_or(MapError::SerializationError)?;
+            entry_bytes_len = entry_bytes_len
+                .checked_add(encoded_len)
+                .ok_or(MapError::SerializationError)?;
+        }
         SNAPSHOT_ENTRY_COUNT_SIZE
             .checked_add(SNAPSHOT_ENTRY_BYTES_LEN_SIZE)
             .and_then(|len| len.checked_add(entry_bytes_len))
@@ -455,32 +467,61 @@ where
         let entry_count_bytes = self.record_count.0.to_le_bytes();
         snapshot[..SNAPSHOT_ENTRY_COUNT_SIZE].copy_from_slice(&entry_count_bytes);
 
-        let entry_bytes_len = self
-            .next_record_offset
-            .0
-            .checked_sub(ENTRY_COUNT_SIZE)
+        let entry_count =
+            usize::try_from(self.record_count.0).map_err(|_| MapError::SerializationError)?;
+        let refs_len = entry_count
+            .checked_mul(ENTRY_REF_SIZE)
             .ok_or(MapError::SerializationError)?;
+        let refs_staging_start = snapshot_len
+            .checked_sub(refs_len)
+            .ok_or(MapError::SerializationError)?;
+        let mut entry_bytes_len = 0usize;
+        let mut compact_offset = ENTRY_COUNT_SIZE;
+        let entries_offset = SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE;
+        let mut write_offset = entries_offset;
+
+        for index in 0..entry_count {
+            let entry_ref = EntryRef::read(self.map, RecordIndex::new(index))?;
+            let start = usize::from(entry_ref.start);
+            let end = usize::from(entry_ref.end);
+            let entry_len = end.checked_sub(start).ok_or(MapError::SerializationError)?;
+
+            let next_write_offset = write_offset
+                .checked_add(entry_len)
+                .ok_or(MapError::SerializationError)?;
+            if next_write_offset > refs_staging_start {
+                return Err(MapError::BufferTooSmall);
+            }
+            snapshot[write_offset..next_write_offset].copy_from_slice(&self.map[start..end]);
+
+            let compact_end = compact_offset
+                .checked_add(entry_len)
+                .ok_or(MapError::SerializationError)?;
+            let compact_start_ref: RefType = compact_offset
+                .try_into()
+                .map_err(|_| MapError::SerializationError)?;
+            let compact_end_ref: RefType = compact_end
+                .try_into()
+                .map_err(|_| MapError::SerializationError)?;
+            let ref_offset = refs_staging_start + index * ENTRY_REF_SIZE;
+            snapshot[ref_offset..ref_offset + ENTRY_REF_POINTER_SIZE]
+                .copy_from_slice(&compact_start_ref.to_le_bytes());
+            snapshot[ref_offset + ENTRY_REF_POINTER_SIZE..ref_offset + ENTRY_REF_SIZE]
+                .copy_from_slice(&compact_end_ref.to_le_bytes());
+
+            entry_bytes_len = entry_bytes_len
+                .checked_add(entry_len)
+                .ok_or(MapError::SerializationError)?;
+            compact_offset = compact_end;
+            write_offset = next_write_offset;
+        }
+
         let entry_bytes_len_u32 =
             u32::try_from(entry_bytes_len).map_err(|_| MapError::SerializationError)?;
         let entry_bytes_len_offset = SNAPSHOT_ENTRY_COUNT_SIZE;
         snapshot[entry_bytes_len_offset..entry_bytes_len_offset + SNAPSHOT_ENTRY_BYTES_LEN_SIZE]
             .copy_from_slice(&entry_bytes_len_u32.to_le_bytes());
-
-        let entries_offset = SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE;
-        let entries_end = entries_offset + entry_bytes_len;
-        snapshot[entries_offset..entries_end]
-            .copy_from_slice(&self.map[ENTRY_COUNT_SIZE..self.next_record_offset.0]);
-
-        let entry_count =
-            usize::try_from(self.record_count.0).map_err(|_| MapError::SerializationError)?;
-        for index in 0..entry_count {
-            let entry_ref = EntryRef::read(self.map, RecordIndex::new(index))?;
-            let ref_offset = entries_end + index * ENTRY_REF_SIZE;
-            snapshot[ref_offset..ref_offset + ENTRY_REF_POINTER_SIZE]
-                .copy_from_slice(&entry_ref.start.to_le_bytes());
-            snapshot[ref_offset + ENTRY_REF_POINTER_SIZE..ref_offset + ENTRY_REF_SIZE]
-                .copy_from_slice(&entry_ref.end.to_le_bytes());
-        }
+        snapshot.copy_within(refs_staging_start..snapshot_len, entries_offset + entry_bytes_len);
 
         Ok(snapshot_len)
     }
@@ -595,6 +636,40 @@ where
         }
 
         self.load_snapshot(&region_payload[REGION_SNAPSHOT_LEN_SIZE..snapshot_end])
+    }
+
+    pub(crate) fn checkpoint_into(&self, scratch: &mut [u8]) -> Result<MapCheckpoint, MapError> {
+        if scratch.len() < self.map.len() {
+            return Err(MapError::BufferTooSmall);
+        }
+
+        scratch[..self.map.len()].copy_from_slice(self.map);
+        Ok(MapCheckpoint {
+            record_count: self.record_count.0,
+            next_record_offset: self.next_record_offset.0,
+            next_record_index: self.next_record_index.0,
+        })
+    }
+
+    pub(crate) fn restore_from_checkpoint(
+        &mut self,
+        checkpoint: MapCheckpoint,
+        scratch: &[u8],
+    ) -> Result<(), MapError> {
+        if scratch.len() < self.map.len() {
+            return Err(MapError::BufferTooSmall);
+        }
+
+        self.map.copy_from_slice(&scratch[..self.map.len()]);
+        self.record_count = EntryCount(checkpoint.record_count);
+        self.next_record_offset = RecordOffset(checkpoint.next_record_offset);
+        self.next_record_index = RecordIndex::new(checkpoint.next_record_index);
+        Ok(())
+    }
+
+    pub(crate) fn compact_in_place(&mut self, snapshot: &mut [u8]) -> Result<(), MapError> {
+        let snapshot_len = self.encode_snapshot_into(snapshot)?;
+        self.load_snapshot(&snapshot[..snapshot_len])
     }
 
     pub fn encode_update_into(update: &MapUpdate<K, V>, payload: &mut [u8]) -> Result<usize, MapError> {
@@ -779,8 +854,6 @@ where
         //# `RING-FORMAT-006` A `WALSnapshotHead` MUST be loadable into RAM before that collection accepts further mutations.
         //= spec/ring.md#collection-head-state-machine
         //# `RING-FORMAT-008` Every later retained type-bearing record for that collection MUST carry the same `collection_type`, otherwise replay must treat the mismatch as corruption.
-        //= spec/ring.md#collection-head-state-machine
-        //# `RING-FORMAT-016` An implementation MUST NOT open a database successfully if replay yields a live collection whose retained committed-region basis, retained `snapshot` payload, or retained post-basis `update` payloads are unsupported or invalid under that collection's normative specification.
         let Some(collection) = storage
             .collections()
             .iter()

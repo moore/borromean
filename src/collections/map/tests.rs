@@ -321,6 +321,49 @@ fn load_snapshot_rejects_overlapping_entry_refs() {
 }
 
 #[test]
+//= spec/ring.md#core-requirements
+//# `RING-CORE-015` Each collection's mutable in-memory update frontier
+//# MUST have a bounded configured capacity.
+fn mutable_map_frontier_capacity_is_bounded_by_its_configured_buffer() {
+    let min_capacity_for_three_updates = (ENTRY_COUNT_SIZE..256)
+        .find(|capacity| {
+            let mut buffer = vec![0u8; *capacity];
+            let mut map = LsmMap::<u16, u16, 8>::new(CollectionId(30), &mut buffer).unwrap();
+            map.set(1, 10).is_ok() && map.set(1, 20).is_ok() && map.set(1, 30).is_ok()
+        })
+        .expect("expected a bounded capacity for three updates");
+
+    let mut bounded_buffer = vec![0u8; min_capacity_for_three_updates];
+    let mut bounded_map =
+        LsmMap::<u16, u16, 8>::new(CollectionId(31), &mut bounded_buffer).unwrap();
+    bounded_map.set(1, 10).unwrap();
+    bounded_map.set(1, 20).unwrap();
+    bounded_map.set(1, 30).unwrap();
+    assert!(matches!(
+        bounded_map.set(1, 40),
+        Err(MapError::BufferTooSmall)
+    ));
+
+    let min_capacity_for_four_updates = (ENTRY_COUNT_SIZE..256)
+        .find(|capacity| {
+            let mut buffer = vec![0u8; *capacity];
+            let mut map = LsmMap::<u16, u16, 8>::new(CollectionId(32), &mut buffer).unwrap();
+            map.set(1, 10).is_ok()
+                && map.set(1, 20).is_ok()
+                && map.set(1, 30).is_ok()
+                && map.set(1, 40).is_ok()
+        })
+        .expect("expected a bounded capacity for four updates");
+
+    let mut larger_buffer = vec![0u8; min_capacity_for_four_updates];
+    let mut larger_map = LsmMap::<u16, u16, 8>::new(CollectionId(32), &mut larger_buffer).unwrap();
+    larger_map.set(1, 10).unwrap();
+    larger_map.set(1, 20).unwrap();
+    larger_map.set(1, 30).unwrap();
+    larger_map.set(1, 40).unwrap();
+}
+
+#[test]
 //= spec/ring.md#collection-head-state-machine
 //# `RING-FORMAT-003` The frontier MUST take precedence over older values in the durable basis.
 fn storage_snapshot_replay_restores_map_frontier() {
@@ -381,6 +424,123 @@ fn storage_snapshot_replay_restores_map_frontier() {
 
     assert_eq!(reopened.get(&1).unwrap(), Some(10));
     assert_eq!(reopened.get(&2).unwrap(), Some(99));
+}
+
+#[test]
+//= spec/ring.md#collection-head-state-machine
+//# `RING-FORMAT-016` An implementation MUST NOT open a database
+//# successfully if replay yields a live collection whose retained
+//# committed-region basis, retained `snapshot` payload, or retained
+//# post-basis `update` payloads are unsupported or invalid under that
+//# collection's normative specification.
+fn open_from_storage_rejects_invalid_retained_region_snapshot_and_update_payloads() {
+    {
+        let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
+        let mut workspace = StorageWorkspace::<512>::new();
+        let mut storage =
+            Storage::<8, 4>::format::<512, 5, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+
+        storage
+            .create_map::<512, 5, _>(&mut flash, &mut workspace, CollectionId(40))
+            .unwrap();
+
+        let region_index = storage
+            .runtime_mut()
+            .reserve_next_region::<512, 5, _>(&mut flash, &mut workspace)
+            .unwrap();
+        storage
+            .runtime()
+            .write_committed_region::<512, 5, _>(
+                &mut flash,
+                region_index,
+                CollectionId(40),
+                MAP_REGION_V1_FORMAT,
+                &[1, 2, 3],
+            )
+            .unwrap();
+        storage
+            .append_head::<512, 5, _>(
+                &mut flash,
+                &mut workspace,
+                CollectionId(40),
+                CollectionType::MAP_CODE,
+                region_index,
+            )
+            .unwrap();
+
+        let reopened = Storage::<8, 4>::open::<512, 5, _>(&mut flash, &mut workspace).unwrap();
+        let mut reopen_buffer = [0u8; 512];
+        let result = reopened.open_map::<512, 5, _, i32, i32, 4>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(40),
+            &mut reopen_buffer,
+        );
+        assert!(matches!(
+            result,
+            Err(MapStorageError::Map(MapError::SerializationError))
+        ));
+    }
+
+    {
+        let mut flash = MockFlash::<512, 4, 1024>::new(0xff);
+        let mut workspace = StorageWorkspace::<512>::new();
+        let mut storage =
+            Storage::<8, 4>::format::<512, 4, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+
+        storage
+            .create_map::<512, 4, _>(&mut flash, &mut workspace, CollectionId(41))
+            .unwrap();
+        storage
+            .append_snapshot::<512, 4, _>(
+                &mut flash,
+                &mut workspace,
+                CollectionId(41),
+                CollectionType::MAP_CODE,
+                &[1],
+            )
+            .unwrap();
+
+        let reopened = Storage::<8, 4>::open::<512, 4, _>(&mut flash, &mut workspace).unwrap();
+        let mut reopen_buffer = [0u8; 512];
+        let result = reopened.open_map::<512, 4, _, i32, i32, 4>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(41),
+            &mut reopen_buffer,
+        );
+        assert!(matches!(
+            result,
+            Err(MapStorageError::Map(MapError::SerializationError))
+        ));
+    }
+
+    {
+        let mut flash = MockFlash::<512, 4, 1024>::new(0xff);
+        let mut workspace = StorageWorkspace::<512>::new();
+        let mut storage =
+            Storage::<8, 4>::format::<512, 4, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+
+        storage
+            .create_map::<512, 4, _>(&mut flash, &mut workspace, CollectionId(42))
+            .unwrap();
+        storage
+            .append_update::<512, 4, _>(&mut flash, &mut workspace, CollectionId(42), &[0xff])
+            .unwrap();
+
+        let reopened = Storage::<8, 4>::open::<512, 4, _>(&mut flash, &mut workspace).unwrap();
+        let mut reopen_buffer = [0u8; 512];
+        let result = reopened.open_map::<512, 4, _, i32, i32, 4>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(42),
+            &mut reopen_buffer,
+        );
+        assert!(matches!(
+            result,
+            Err(MapStorageError::Map(MapError::SerializationError))
+        ));
+    }
 }
 
 #[test]

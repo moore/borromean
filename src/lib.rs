@@ -737,6 +737,98 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
             .map_err(MapStorageError::from)
     }
 
+    pub fn update_map_frontier<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+        K,
+        V,
+        const MAX_INDEXES: usize,
+    >(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        map: &mut LsmMap<'_, K, V, MAX_INDEXES>,
+        update: &MapUpdate<K, V>,
+        payload_buffer: &mut [u8],
+    ) -> Result<(), MapStorageError>
+    where
+        K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
+        V: Debug + Serialize + for<'de> Deserialize<'de>,
+    {
+        let collection_id = map.id();
+        let Some(collection) = self
+            .state
+            .collections()
+            .iter()
+            .find(|collection| collection.collection_id() == collection_id)
+        else {
+            return Err(MapStorageError::UnknownCollection(collection_id));
+        };
+        if collection.basis() == StartupCollectionBasis::Dropped {
+            return Err(MapStorageError::DroppedCollection(collection_id));
+        }
+        if collection.collection_type() != Some(CollectionType::MAP_CODE) {
+            return Err(MapStorageError::CollectionTypeMismatch {
+                collection_id,
+                expected: CollectionType::MAP_CODE,
+                actual: collection.collection_type(),
+            });
+        }
+
+        let used = LsmMap::<K, V, MAX_INDEXES>::encode_update_into(update, payload_buffer)?;
+        let mut checkpoint = {
+            let (checkpoint_buffer, _) = workspace.encode_buffers();
+            map.checkpoint_into(checkpoint_buffer)?
+        };
+
+        match map.apply_update_payload(&payload_buffer[..used]) {
+            Ok(()) => {}
+            Err(MapError::BufferTooSmall) => {
+                {
+                    let (checkpoint_buffer, _) = workspace.encode_buffers();
+                    map.restore_from_checkpoint(checkpoint, checkpoint_buffer)?;
+                }
+
+                self.flush_map::<REGION_SIZE, REGION_COUNT, IO, K, V, MAX_INDEXES>(
+                    flash,
+                    workspace,
+                    map,
+                )?;
+
+                checkpoint = {
+                    let (checkpoint_buffer, _) = workspace.encode_buffers();
+                    map.compact_in_place(checkpoint_buffer)?;
+                    map.checkpoint_into(checkpoint_buffer)?
+                };
+
+                if let Err(error) = map.apply_update_payload(&payload_buffer[..used]) {
+                    let (checkpoint_buffer, _) = workspace.encode_buffers();
+                    map.restore_from_checkpoint(checkpoint, checkpoint_buffer)?;
+                    return Err(error.into());
+                }
+            }
+            Err(error) => {
+                let (checkpoint_buffer, _) = workspace.encode_buffers();
+                map.restore_from_checkpoint(checkpoint, checkpoint_buffer)?;
+                return Err(error.into());
+            }
+        }
+
+        if let Err(error) = self.state.append_update_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
+            flash,
+            workspace,
+            collection_id,
+            &payload_buffer[..used],
+        ) {
+            let (checkpoint_buffer, _) = workspace.encode_buffers();
+            map.restore_from_checkpoint(checkpoint, checkpoint_buffer)?;
+            return Err(error.into());
+        }
+
+        Ok(())
+    }
+
     pub fn append_map_update_future<
         'a,
         const REGION_SIZE: usize,

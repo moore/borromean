@@ -2,6 +2,8 @@ use super::*;
 use core::future::Future;
 use core::pin::{Pin, pin};
 use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
+extern crate std;
+use std::vec;
 
 mod traceability;
 
@@ -92,6 +94,17 @@ fn free_list_chain<
 
     assert!(current.is_none(), "free-list chain should terminate");
     chain
+}
+
+fn smallest_map_capacity_for_repeated_updates(update_count: usize) -> usize {
+    (4..256)
+        .find(|capacity| {
+            let mut buffer = vec![0u8; *capacity];
+            let mut map = LsmMap::<u16, u16, 8>::new(CollectionId(200), &mut buffer).unwrap();
+            (0..update_count)
+                .all(|index| map.set(1, u16::try_from(index).unwrap()).is_ok())
+        })
+        .expect("expected a bounded map capacity within the search range")
 }
 
 struct CompletedPendingReclaimResult {
@@ -1133,6 +1146,321 @@ fn storage_map_api_restores_snapshot_and_updates() {
 
     assert_eq!(reopened.get(&1).unwrap(), Some(10));
     assert_eq!(reopened.get(&2).unwrap(), Some(99));
+}
+
+#[test]
+//= spec/ring.md#core-requirements
+//# `RING-CORE-016` If applying another update would exceed that
+//# capacity, the implementation MUST flush the collection's current
+//# logical frontier into a newly allocated region, durably commit that
+//# region as the collection head, and clear the in-memory frontier before
+//# accepting further updates for that collection.
+fn storage_map_frontier_overflow_flushes_and_commits_a_new_region_head() {
+    const REGION_SIZE: usize = 512;
+    const REGION_COUNT: usize = 6;
+    let capacity = smallest_map_capacity_for_repeated_updates(3);
+    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 4096>::new(0xff);
+    let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
+    let mut storage =
+        Storage::<8, 4>::format::<REGION_SIZE, REGION_COUNT, _>(
+            &mut flash,
+            &mut workspace,
+            1,
+            8,
+            0xa5,
+        )
+        .unwrap();
+
+    storage
+        .create_map::<REGION_SIZE, REGION_COUNT, _>(&mut flash, &mut workspace, CollectionId(46))
+        .unwrap();
+
+    let mut map_buffer = vec![0u8; capacity];
+    let mut map = LsmMap::<u16, u16, 8>::new(CollectionId(46), &mut map_buffer).unwrap();
+    let mut payload_buffer = [0u8; 64];
+
+    storage
+        .update_map_frontier::<REGION_SIZE, REGION_COUNT, _, u16, u16, 8>(
+            &mut flash,
+            &mut workspace,
+            &mut map,
+            &MapUpdate::Set { key: 1, value: 10 },
+            &mut payload_buffer,
+        )
+        .unwrap();
+    storage
+        .update_map_frontier::<REGION_SIZE, REGION_COUNT, _, u16, u16, 8>(
+            &mut flash,
+            &mut workspace,
+            &mut map,
+            &MapUpdate::Set { key: 1, value: 20 },
+            &mut payload_buffer,
+        )
+        .unwrap();
+    storage
+        .update_map_frontier::<REGION_SIZE, REGION_COUNT, _, u16, u16, 8>(
+            &mut flash,
+            &mut workspace,
+            &mut map,
+            &MapUpdate::Set { key: 1, value: 30 },
+            &mut payload_buffer,
+        )
+        .unwrap();
+
+    assert_eq!(storage.collections()[0].basis(), StartupCollectionBasis::Empty);
+
+    storage
+        .update_map_frontier::<REGION_SIZE, REGION_COUNT, _, u16, u16, 8>(
+            &mut flash,
+            &mut workspace,
+            &mut map,
+            &MapUpdate::Set { key: 1, value: 40 },
+            &mut payload_buffer,
+        )
+        .unwrap();
+
+    let StartupCollectionBasis::Region(region_index) = storage.collections()[0].basis() else {
+        panic!("frontier overflow should commit a durable region head");
+    };
+
+    let mut seen = [WalRecordType::WalRecovery; 7];
+    let mut count = 0usize;
+    storage
+        .runtime()
+        .visit_wal_records::<REGION_SIZE, _, (), _>(&mut flash, &mut workspace, |_flash, record| {
+            seen[count] = record.record_type();
+            count += 1;
+            Ok(())
+        })
+        .unwrap();
+
+    assert_eq!(count, 7);
+    assert_eq!(
+        seen,
+        [
+            WalRecordType::NewCollection,
+            WalRecordType::Update,
+            WalRecordType::Update,
+            WalRecordType::Update,
+            WalRecordType::AllocBegin,
+            WalRecordType::Head,
+            WalRecordType::Update,
+        ]
+    );
+
+    let mut reopen_buffer = [0u8; REGION_SIZE];
+    let reopened = storage
+        .open_map::<REGION_SIZE, REGION_COUNT, _, u16, u16, 8>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(46),
+            &mut reopen_buffer,
+        )
+        .unwrap();
+    assert_eq!(storage.collections()[0].basis(), StartupCollectionBasis::Region(region_index));
+    assert_eq!(reopened.get(&1).unwrap(), Some(40));
+}
+
+#[test]
+//= spec/ring.md#core-requirements
+//# `RING-CORE-017` After such a frontier-capacity flush, later updates
+//# for that collection MUST accumulate in a fresh in-memory frontier
+//# layered over the newly committed region head.
+fn storage_map_frontier_continues_accumulating_updates_after_an_overflow_flush() {
+    const REGION_SIZE: usize = 512;
+    const REGION_COUNT: usize = 6;
+    let capacity = smallest_map_capacity_for_repeated_updates(3);
+    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 4096>::new(0xff);
+    let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
+    let mut storage =
+        Storage::<8, 4>::format::<REGION_SIZE, REGION_COUNT, _>(
+            &mut flash,
+            &mut workspace,
+            1,
+            8,
+            0xa5,
+        )
+        .unwrap();
+
+    storage
+        .create_map::<REGION_SIZE, REGION_COUNT, _>(&mut flash, &mut workspace, CollectionId(47))
+        .unwrap();
+
+    let mut map_buffer = vec![0u8; capacity];
+    let mut map = LsmMap::<u16, u16, 8>::new(CollectionId(47), &mut map_buffer).unwrap();
+    let mut payload_buffer = [0u8; 64];
+
+    for value in [10u16, 20, 30] {
+        storage
+            .update_map_frontier::<REGION_SIZE, REGION_COUNT, _, u16, u16, 8>(
+                &mut flash,
+                &mut workspace,
+                &mut map,
+                &MapUpdate::Set { key: 1, value },
+                &mut payload_buffer,
+            )
+            .unwrap();
+    }
+
+    storage
+        .update_map_frontier::<REGION_SIZE, REGION_COUNT, _, u16, u16, 8>(
+            &mut flash,
+            &mut workspace,
+            &mut map,
+            &MapUpdate::Set { key: 1, value: 40 },
+            &mut payload_buffer,
+        )
+        .unwrap();
+
+    let StartupCollectionBasis::Region(head_after_flush) = storage.collections()[0].basis() else {
+        panic!("overflow flush should leave the collection on a committed region head");
+    };
+
+    storage
+        .update_map_frontier::<REGION_SIZE, REGION_COUNT, _, u16, u16, 8>(
+            &mut flash,
+            &mut workspace,
+            &mut map,
+            &MapUpdate::Set { key: 2, value: 50 },
+            &mut payload_buffer,
+        )
+        .unwrap();
+
+    assert_eq!(
+        storage.collections()[0].basis(),
+        StartupCollectionBasis::Region(head_after_flush)
+    );
+    assert_eq!(map.get(&1).unwrap(), Some(40));
+    assert_eq!(map.get(&2).unwrap(), Some(50));
+
+    let mut reopen_buffer = [0u8; REGION_SIZE];
+    let reopened = storage
+        .open_map::<REGION_SIZE, REGION_COUNT, _, u16, u16, 8>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(47),
+            &mut reopen_buffer,
+        )
+        .unwrap();
+    assert_eq!(reopened.get(&1).unwrap(), Some(40));
+    assert_eq!(reopened.get(&2).unwrap(), Some(50));
+}
+
+#[test]
+//= spec/ring.md#startup-replay-algorithm
+//# `RING-STARTUP-027` If replay yields a live collection whose
+//# retained committed-region basis, retained `snapshot` payload, or
+//# retained post-basis `update` payloads are unsupported or invalid under
+//# that collection's normative specification, startup MUST fail before
+//# open succeeds.
+fn storage_open_path_rejects_invalid_retained_map_region_snapshot_and_update_payloads() {
+    {
+        let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
+        let mut workspace = StorageWorkspace::<512>::new();
+        let mut storage =
+            Storage::<8, 4>::format::<512, 5, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+
+        storage
+            .create_map::<512, 5, _>(&mut flash, &mut workspace, CollectionId(43))
+            .unwrap();
+
+        let region_index = storage
+            .runtime_mut()
+            .reserve_next_region::<512, 5, _>(&mut flash, &mut workspace)
+            .unwrap();
+        storage
+            .runtime()
+            .write_committed_region::<512, 5, _>(
+                &mut flash,
+                region_index,
+                CollectionId(43),
+                MAP_REGION_V1_FORMAT,
+                &[1, 2, 3],
+            )
+            .unwrap();
+        storage
+            .append_head::<512, 5, _>(
+                &mut flash,
+                &mut workspace,
+                CollectionId(43),
+                CollectionType::MAP_CODE,
+                region_index,
+            )
+            .unwrap();
+
+        let reopened = Storage::<8, 4>::open::<512, 5, _>(&mut flash, &mut workspace).unwrap();
+        let mut reopen_buffer = [0u8; 512];
+        let result = reopened.open_map::<512, 5, _, i32, i32, 4>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(43),
+            &mut reopen_buffer,
+        );
+        assert!(matches!(
+            result,
+            Err(MapStorageError::Map(MapError::SerializationError))
+        ));
+    }
+
+    {
+        let mut flash = MockFlash::<512, 4, 1024>::new(0xff);
+        let mut workspace = StorageWorkspace::<512>::new();
+        let mut storage =
+            Storage::<8, 4>::format::<512, 4, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+
+        storage
+            .create_map::<512, 4, _>(&mut flash, &mut workspace, CollectionId(44))
+            .unwrap();
+        storage
+            .append_snapshot::<512, 4, _>(
+                &mut flash,
+                &mut workspace,
+                CollectionId(44),
+                CollectionType::MAP_CODE,
+                &[1],
+            )
+            .unwrap();
+
+        let reopened = Storage::<8, 4>::open::<512, 4, _>(&mut flash, &mut workspace).unwrap();
+        let mut reopen_buffer = [0u8; 512];
+        let result = reopened.open_map::<512, 4, _, i32, i32, 4>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(44),
+            &mut reopen_buffer,
+        );
+        assert!(matches!(
+            result,
+            Err(MapStorageError::Map(MapError::SerializationError))
+        ));
+    }
+
+    {
+        let mut flash = MockFlash::<512, 4, 1024>::new(0xff);
+        let mut workspace = StorageWorkspace::<512>::new();
+        let mut storage =
+            Storage::<8, 4>::format::<512, 4, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+
+        storage
+            .create_map::<512, 4, _>(&mut flash, &mut workspace, CollectionId(45))
+            .unwrap();
+        storage
+            .append_update::<512, 4, _>(&mut flash, &mut workspace, CollectionId(45), &[0xff])
+            .unwrap();
+
+        let reopened = Storage::<8, 4>::open::<512, 4, _>(&mut flash, &mut workspace).unwrap();
+        let mut reopen_buffer = [0u8; 512];
+        let result = reopened.open_map::<512, 4, _, i32, i32, 4>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(45),
+            &mut reopen_buffer,
+        );
+        assert!(matches!(
+            result,
+            Err(MapStorageError::Map(MapError::SerializationError))
+        ));
+    }
 }
 
 #[test]

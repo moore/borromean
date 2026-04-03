@@ -368,6 +368,31 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         )
     }
 
+    pub(crate) fn append_update_with_rotation<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        collection_id: CollectionId,
+        payload: &[u8],
+    ) -> Result<(), StorageRuntimeError> {
+        let collection = self
+            .find_collection(collection_id)
+            .ok_or(StorageRuntimeError::UnknownCollection(collection_id))?;
+        if collection.basis() == StartupCollectionBasis::Dropped {
+            return Err(StorageRuntimeError::DroppedCollection(collection_id));
+        }
+
+        self.append_record_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
+            flash,
+            workspace,
+            WalRecord::Update { collection_id, payload },
+        )
+    }
+
     pub fn append_snapshot<
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
