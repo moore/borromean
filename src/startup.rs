@@ -232,26 +232,6 @@ pub(crate) struct StartupOpenPlan<
     pending_wal_recovery_boundary: bool,
 }
 
-//= spec/ring.md#startup-replay-algorithm
-//# RING-STARTUP-001 Read `StorageMetadata`, validate `metadata_checksum`, and validate static geometry (`region_size`, `region_count`, `min_free_regions`, `erased_byte`, `wal_write_granule`, `wal_record_magic`, and storage version support).
-//= spec/ring.md#startup-replay-algorithm
-//# RING-STARTUP-002 Scan all regions, collect candidate WAL regions (`collection_id == 0` plus `collection_format = wal_v1`) with valid headers, and track `max_seen_sequence` as the largest `sequence` value seen in any valid region header.
-//= spec/ring.md#startup-replay-algorithm
-//# RING-STARTUP-003 Select WAL tail as the unique candidate WAL region with the largest valid sequence. If no candidate WAL region exists, or if multiple candidate WAL regions share that largest valid sequence, return an error.
-//= spec/ring.md#startup-replay-algorithm
-//# RING-STARTUP-004 Read and validate the `WalRegionPrologue` stored at the start of the tail region's user-data area, and use its `wal_head_region_index` as the initial WAL-head candidate. Then scan that tail region using the same aligned candidate-start and record-validation rules defined in step 6, and let the last valid `head(collection_id = 0, collection_type = wal, region_index)` record override that candidate.
-//= spec/ring.md#startup-replay-algorithm
-//# RING-STARTUP-005 Walk the WAL region chain from the resulting WAL head to tail using `link` records.
-//= spec/ring.md#startup-replay-algorithm
-//# RING-STARTUP-006 Parse records in WAL order (region order, then offset order).
-//= spec/ring.md#startup-replay-algorithm
-//# RING-STARTUP-020 Initialize allocator state from `last_free_list_head`.
-//= spec/ring.md#startup-replay-algorithm
-//# RING-STARTUP-021 Reconstruct runtime `free_list_tail` by following free-pointer links starting at `last_free_list_head` until reaching a free region whose free-pointer slot is uninitialized.
-//= spec/ring.md#startup-replay-algorithm
-//# RING-STARTUP-022 If `ready_region` is set, hold it in memory as the next region to use before consuming another free-list entry.
-//= spec/ring.md#startup-replay-algorithm
-//# RING-STARTUP-023 Keep `max_seen_sequence` as the runtime source of the next region sequence.
 pub fn open_formatted_store<
     const REGION_SIZE: usize,
     const REGION_COUNT: usize,

@@ -154,8 +154,8 @@ fn storage_facade_preserves_ring_behavior_through_delegating_entry_points() {
     for ring_trace in [
         "RING-CORE-010",
         "RING-CORE-011",
-        "RING-STARTUP-001",
-        "RING-STARTUP-005",
+        "RING-STARTUP-007",
+        "RING-STARTUP-026",
         "RING-FORMAT-005",
         "RING-FORMAT-006",
     ] {
