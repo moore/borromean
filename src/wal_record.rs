@@ -258,8 +258,6 @@ pub fn decode_record<'a>(
     metadata: StorageMetadata,
     logical_scratch: &'a mut [u8],
 ) -> Result<DecodedWalRecord<'a>, WalRecordError> {
-    //= spec/ring.md#wal-record-types
-    //# `RING-WAL-ENC-002` `record_magic` MUST equal the storage's configured `wal_record_magic`, and `wal_record_magic` must not equal `erased_byte`, the byte value returned by erased flash.
     metadata.validate()?;
     ensure_len(input, 1)?;
     if input[0] != metadata.wal_record_magic {

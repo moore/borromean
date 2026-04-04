@@ -19,6 +19,73 @@ fn encode_logical(record: WalRecord<'_>) -> ([u8; 128], usize) {
 }
 
 //= spec/ring.md#canonical-on-disk-encoding
+//# `RING-DISK-002` The canonical scalar widths are:
+//# `region_index: u32`, `region_size: u32`, `region_count: u32`,
+//# `min_free_regions: u32`, `wal_write_granule: u32`,
+//# `collection_id: u64`, `sequence: u64`, `payload_len: u32`,
+//# `collection_type: u16`, `collection_format: u16`,
+//# `erased_byte: u8`, and `wal_record_magic: u8`.
+#[test]
+fn canonical_scalar_widths_match_storage_header_and_wal_field_sizes() {
+    let metadata = metadata(16);
+    assert_eq!(core::mem::size_of_val(&metadata.storage_version), size_of::<u32>());
+    assert_eq!(core::mem::size_of_val(&metadata.region_size), size_of::<u32>());
+    assert_eq!(core::mem::size_of_val(&metadata.region_count), size_of::<u32>());
+    assert_eq!(core::mem::size_of_val(&metadata.min_free_regions), size_of::<u32>());
+    assert_eq!(core::mem::size_of_val(&metadata.wal_write_granule), size_of::<u32>());
+    assert_eq!(core::mem::size_of_val(&metadata.erased_byte), size_of::<u8>());
+    assert_eq!(core::mem::size_of_val(&metadata.wal_record_magic), size_of::<u8>());
+
+    let header = crate::Header {
+        sequence: 9,
+        collection_id: CollectionId(7),
+        collection_format: crate::MAP_REGION_V1_FORMAT,
+    };
+    assert_eq!(core::mem::size_of_val(&header.sequence), size_of::<u64>());
+    assert_eq!(CollectionId(7).to_le_bytes().len(), size_of::<u64>());
+    assert_eq!(core::mem::size_of_val(&header.collection_format), size_of::<u16>());
+
+    let (logical, logical_len) = encode_logical(WalRecord::Head {
+        collection_id: CollectionId(7),
+        collection_type: crate::CollectionType::MAP_CODE,
+        region_index: 3,
+    });
+    assert_eq!(
+        logical_len,
+        1 + size_of::<u64>() + size_of::<u16>() + 3 * size_of::<u32>()
+    );
+    assert_eq!(
+        &logical[1 + size_of::<u64>() + size_of::<u16>()
+            ..1 + size_of::<u64>() + size_of::<u16>() + size_of::<u32>()],
+        (size_of::<u32>() as u32).to_le_bytes().as_slice()
+    );
+}
+
+//= spec/ring.md#canonical-on-disk-encoding
+//# `RING-DISK-003` `collection_type` is a stable global `u16`
+//# namespace recorded durably in WAL records. Borromean core reserves
+//# `0x0000` for `wal`, `0x0001` for `channel`, `0x0002` for `map`,
+//# `0x0003..0x00ff` for future core-defined collection types,
+//# `0x0100..0x7fff` for public extension collection types, and
+//# `0x8000..0xffff` for private deployment-local collection types that
+//# are not required to interoperate across deployments.
+#[test]
+fn collection_type_codes_use_reserved_global_namespace() {
+    assert_eq!(crate::CollectionType::Wal.stable_code(), Some(crate::CollectionType::WAL_CODE));
+    assert_eq!(
+        crate::CollectionType::Channel.stable_code(),
+        Some(crate::CollectionType::CHANNEL_CODE)
+    );
+    assert_eq!(crate::CollectionType::Map.stable_code(), Some(crate::CollectionType::MAP_CODE));
+    assert_eq!(crate::CollectionType::Uninitialized.stable_code(), None);
+    assert_eq!(crate::CollectionType::Free.stable_code(), None);
+
+    assert_eq!(crate::CollectionType::WAL_CODE, 0);
+    assert_eq!(crate::CollectionType::CHANNEL_CODE, 1);
+    assert_eq!(crate::CollectionType::MAP_CODE, 2);
+}
+
+//= spec/ring.md#canonical-on-disk-encoding
 //# `RING-DISK-001` All fixed-width integer fields in `StorageMetadata`,
 //# `Header`, `WalRegionPrologue`, free-pointer footers, and logical WAL
 //# records MUST be encoded little-endian.
@@ -178,6 +245,31 @@ fn encoded_record_begins_with_record_magic() {
     let metadata = metadata(16);
     let (physical, _encoded_len) = encode_physical(WalRecord::WalRecovery, metadata);
     assert_eq!(physical[0], 0xa5);
+}
+
+//= spec/ring.md#wal-record-types
+//# `RING-WAL-ENC-002` `record_magic` MUST equal the storage's configured
+//# `wal_record_magic`, and `wal_record_magic` must not equal
+//# `erased_byte`, the byte value returned by erased flash.
+#[test]
+fn wal_record_magic_must_match_storage_configuration_and_differ_from_erased_byte() {
+    let error = StorageMetadata::new(128, 8, 1, 16, 0xff, 0xff).unwrap_err();
+    assert_eq!(error, DiskError::InvalidWalRecordMagic);
+
+    let metadata = metadata(16);
+    let (mut physical, encoded_len) = encode_physical(WalRecord::WalRecovery, metadata);
+    let wrong_magic = metadata.wal_record_magic ^ 0x01;
+    physical[0] = wrong_magic;
+
+    let mut logical = [0u8; 128];
+    let error = decode_record(&physical[..encoded_len], metadata, &mut logical).unwrap_err();
+    assert_eq!(
+        error,
+        WalRecordError::InvalidRecordMagic {
+            found: wrong_magic,
+            expected: metadata.wal_record_magic,
+        }
+    );
 }
 
 //= spec/ring.md#wal-record-types

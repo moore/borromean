@@ -52,8 +52,6 @@ use serde::{Deserialize, Serialize};
 type CollectionIdCounter = u64;
 
 /// Newtype for collection identifiers
-//= spec/ring.md#canonical-on-disk-encoding
-//# RING-DISK-002 The canonical scalar widths are: `region_index: u32`, `region_size: u32`, `region_count: u32`, `min_free_regions: u32`, `wal_write_granule: u32`, `collection_id: u64`, `sequence: u64`, `payload_len: u32`, `collection_type: u16`, `collection_format: u16`, `erased_byte: u8`, and `wal_record_magic: u8`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, PartialOrd, Ord)]
 pub struct CollectionId(pub(crate) CollectionIdCounter);
 
@@ -69,8 +67,6 @@ impl CollectionId {
 }
 
 /// Represents different types of collections that can be stored
-//= spec/ring.md#canonical-on-disk-encoding
-//# RING-DISK-003 `collection_type` is a stable global `u16` namespace recorded durably in WAL records. Borromean core reserves `0x0000` for `wal`, `0x0001` for `channel`, `0x0002` for `map`, `0x0003..0x00ff` for future core-defined collection types, `0x0100..0x7fff` for public extension collection types, and `0x8000..0xffff` for private deployment-local collection types that are not required to interoperate across deployments.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CollectionType {
     Uninitialized,

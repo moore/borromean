@@ -111,6 +111,15 @@ fn format_empty_store_populates_free_list_in_ascending_order() {
     assert_eq!(flash.metadata(), Some(&metadata));
 
     let footer_offset = 64 - FreePointerFooter::ENCODED_LEN;
+    assert!(flash.region_bytes(1).unwrap()[..footer_offset]
+        .iter()
+        .all(|byte| *byte == 0xff));
+    assert!(flash.region_bytes(2).unwrap()[..footer_offset]
+        .iter()
+        .all(|byte| *byte == 0xff));
+    assert!(flash.region_bytes(3).unwrap()[..footer_offset]
+        .iter()
+        .all(|byte| *byte == 0xff));
     let region1 =
         FreePointerFooter::decode(&flash.region_bytes(1).unwrap()[footer_offset..], 0xff).unwrap();
     let region2 =
@@ -121,6 +130,25 @@ fn format_empty_store_populates_free_list_in_ascending_order() {
     assert_eq!(region1.next_tail, Some(2));
     assert_eq!(region2.next_tail, Some(3));
     assert_eq!(region3.next_tail, None);
+}
+
+//= spec/ring.md#free-pointer-footer
+//# `RING-FREE-001` The free-pointer footer MUST occupy the final eight
+//# bytes of the region.
+#[test]
+fn format_empty_store_writes_free_pointer_footer_in_final_eight_bytes() {
+    let mut flash = MockFlash::<64, 4, 32>::new(0xff);
+    flash.format_empty_store(1, 8, 0xa5).unwrap();
+
+    let footer_offset = 64 - FreePointerFooter::ENCODED_LEN;
+    assert_eq!(footer_offset + FreePointerFooter::ENCODED_LEN, 64);
+    assert!(flash.region_bytes(1).unwrap()[..footer_offset]
+        .iter()
+        .all(|byte| *byte == 0xff));
+
+    let footer =
+        FreePointerFooter::decode(&flash.region_bytes(1).unwrap()[footer_offset..], 0xff).unwrap();
+    assert_eq!(footer.next_tail, Some(2));
 }
 
 //= spec/ring.md#storage-metadata
@@ -160,4 +188,21 @@ fn format_empty_store_places_region_zero_immediately_after_metadata_region() {
     let header = Header::decode(&header_bytes).unwrap();
     assert_eq!(header.collection_id, CollectionId(0));
     assert_eq!(header.collection_format, WAL_V1_FORMAT);
+}
+
+//= spec/ring.md#storage-requirements
+//# `RING-STORAGE-001` Storage MUST begin with a static metadata region that records version and configuration parameters that do not change after initialization.
+#[test]
+fn format_empty_store_begins_with_static_metadata_region() {
+    let mut flash = MockFlash::<64, 4, 32>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+
+    let mut metadata_region = [0u8; 64];
+    flash.read_storage(0, &mut metadata_region).unwrap();
+    assert_eq!(StorageMetadata::decode(&metadata_region).unwrap(), metadata);
+
+    let mut region_zero_prefix = [0u8; Header::ENCODED_LEN];
+    flash.read_storage(64, &mut region_zero_prefix).unwrap();
+    let wal_header = Header::decode(&region_zero_prefix).unwrap();
+    assert_eq!(wal_header.collection_id, CollectionId(0));
 }

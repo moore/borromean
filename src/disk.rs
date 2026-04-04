@@ -6,12 +6,7 @@ use crc::{Crc, CRC_32_ISCSI};
 const CRC32C: Crc<u32> = Crc::<u32>::new(&CRC_32_ISCSI);
 
 //= spec/ring.md#storage-metadata
-//# RING-META-001 The canonical on-disk `storage_version` defined by this specification MUST be `1`.
 pub const STORAGE_VERSION: u32 = 1;
-//= spec/ring.md#canonical-on-disk-encoding
-//# RING-DISK-004 `collection_format` is a stable per-region `u16` namespace recorded durably in region headers. The pair `(collection_type, collection_format)` identifies a concrete committed region payload encoding. Borromean core reserves `collection_format = 0x0000` globally for `wal_v1`; every non-WAL collection format MUST be nonzero.
-//= spec/ring.md#storage-requirements
-//# `RING-STORAGE-005` Borromean core MUST reserve the canonical `collection_format` value `wal_v1` for WAL regions, and user collections MUST NOT use that identifier.
 pub const WAL_V1_FORMAT: u16 = 0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,8 +21,6 @@ pub enum DiskError {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-//= spec/ring.md#storage-requirements
-//# `RING-STORAGE-001` Storage MUST begin with a static metadata region that records version and configuration parameters that do not change after initialization.
 pub struct StorageMetadata {
     pub storage_version: u32,
     pub region_size: u32,
@@ -63,8 +56,6 @@ impl StorageMetadata {
     }
 
     pub fn validate(&self) -> Result<(), DiskError> {
-        //= spec/ring.md#wal-record-types
-        //# `RING-WAL-ENC-002` `record_magic` MUST equal the storage's configured `wal_record_magic`, and `wal_record_magic` must not equal `erased_byte`, the byte value returned by erased flash.
         if self.storage_version != STORAGE_VERSION {
             return Err(DiskError::UnsupportedStorageVersion(self.storage_version));
         }
@@ -80,10 +71,6 @@ impl StorageMetadata {
         Ok(())
     }
 
-    //= spec/ring.md#storage-metadata
-    //# RING-META-002 `StorageMetadata` MUST be encoded as the exact byte sequence of the fields shown above, in that order, with no implicit padding.
-    //= spec/ring.md#storage-metadata
-    //# RING-META-003 `metadata_checksum` MUST be CRC-32C over every earlier `StorageMetadata` field in on-disk order.
     pub fn encode_into(&self, buffer: &mut [u8]) -> Result<usize, DiskError> {
         if buffer.len() < Self::ENCODED_LEN {
             return Err(DiskError::BufferTooSmall {
@@ -108,8 +95,6 @@ impl StorageMetadata {
         Ok(offset)
     }
 
-    //= spec/ring.md#storage-metadata
-    //# RING-META-004 Startup MUST reject the store if `metadata_checksum` is invalid or if `storage_version` is unsupported.
     pub fn decode(buffer: &[u8]) -> Result<Self, DiskError> {
         ensure_len(buffer, Self::ENCODED_LEN)?;
 
@@ -155,8 +140,6 @@ impl StorageMetadata {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-//= spec/ring.md#storage-requirements
-//# `RING-STORAGE-002` Every region header MUST record the region `sequence`, `collection_id`, `collection_format`, and a checksum over the header itself.
 pub struct Header {
     pub sequence: u64,
     pub collection_id: CollectionId,
@@ -166,10 +149,6 @@ pub struct Header {
 impl Header {
     pub const ENCODED_LEN: usize = size_of::<u64>() + size_of::<u64>() + size_of::<u16>() + size_of::<u32>();
 
-    //= spec/ring.md#header
-    //# RING-HEADER-001 `Header` MUST be encoded as the exact byte sequence of the fields shown above, in that order, with no implicit padding.
-    //= spec/ring.md#header
-    //# RING-HEADER-002 `header_checksum` MUST be CRC-32C over `sequence`, `collection_id`, and `collection_format` in on-disk order.
     pub fn encode_into(&self, buffer: &mut [u8]) -> Result<usize, DiskError> {
         ensure_len(buffer, Self::ENCODED_LEN)?;
 
@@ -213,12 +192,6 @@ pub struct WalRegionPrologue {
 impl WalRegionPrologue {
     pub const ENCODED_LEN: usize = size_of::<u32>() * 2;
 
-    //= spec/ring.md#wal-region-prologue
-    //# RING-PROLOGUE-001 `WalRegionPrologue` MUST be encoded as the exact byte sequence of the fields shown above, in that order, with no implicit padding.
-    //= spec/ring.md#wal-region-prologue
-    //# RING-PROLOGUE-002 `prologue_checksum` MUST be CRC-32C over `wal_head_region_index`.
-    //= spec/ring.md#wal-region-prologue
-    //# RING-PROLOGUE-003 `wal_head_region_index` MUST be strictly less than `region_count`.
     pub fn encode_into(
         &self,
         buffer: &mut [u8],
@@ -271,15 +244,8 @@ pub struct FreePointerFooter {
 }
 
 impl FreePointerFooter {
-    //= spec/ring.md#free-pointer-footer
-    //# `RING-FREE-001` The free-pointer footer MUST occupy the final eight
-    //# bytes of the region.
     pub const ENCODED_LEN: usize = size_of::<u32>() * 2;
 
-    //= spec/ring.md#free-pointer-footer
-    //# RING-FREE-002 If all eight footer bytes equal `erased_byte`, the footer is uninitialized and represents `next_tail = none`.
-    //= spec/ring.md#free-pointer-footer
-    //# RING-FREE-003 Otherwise the footer MUST decode as `next_tail:u32, footer_checksum:u32`, both little-endian, with `footer_checksum` equal to CRC-32C over `next_tail`.
     pub fn encode_into(
         &self,
         buffer: &mut [u8],
@@ -329,8 +295,6 @@ impl FreePointerFooter {
         erased_byte: u8,
         region_count: u32,
     ) -> Result<Self, DiskError> {
-        //= spec/ring.md#free-pointer-footer
-        //# RING-FREE-004 A checksum-valid non-erased footer MUST decode to a `u32 region_index` strictly less than `region_count`; any other value is malformed.
         let footer = Self::decode(buffer, erased_byte)?;
         if let Some(next_tail) = footer.next_tail {
             if next_tail >= region_count {

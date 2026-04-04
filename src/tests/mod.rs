@@ -254,6 +254,64 @@ fn rotate_wal_tail_for_collection(
     }
 }
 
+fn wal_and_map_region_formats() -> (Header, Header) {
+    let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
+    let mut workspace = StorageWorkspace::<512>::new();
+    let mut storage =
+        Storage::<8, 4>::format::<512, 5, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+
+    let wal_header = Header::decode(&flash.region_bytes(0).unwrap()[..Header::ENCODED_LEN]).unwrap();
+
+    storage
+        .create_map::<512, 5, _>(&mut flash, &mut workspace, CollectionId(43))
+        .unwrap();
+
+    let mut map_buffer = [0u8; 512];
+    let mut map = LsmMap::<i32, i32, 4>::new(CollectionId(43), &mut map_buffer).unwrap();
+    map.set(3, 30).unwrap();
+
+    let region_index = storage
+        .flush_map::<512, 5, _, _, _, 4>(&mut flash, &mut workspace, &map)
+        .unwrap();
+    let map_header =
+        Header::decode(&flash.region_bytes(region_index).unwrap()[..Header::ENCODED_LEN]).unwrap();
+
+    (wal_header, map_header)
+}
+
+//= spec/ring.md#canonical-on-disk-encoding
+//# `RING-DISK-004` `collection_format` is a stable per-region `u16`
+//# namespace recorded durably in region headers. The pair
+//# `(collection_type, collection_format)` identifies a concrete
+//# committed region payload encoding. Borromean core reserves
+//# `collection_format = 0x0000` globally for `wal_v1`; every non-WAL
+//# collection format MUST be nonzero.
+#[test]
+fn wal_and_map_regions_use_distinct_collection_format_namespace_values() {
+    let (wal_header, map_header) = wal_and_map_region_formats();
+
+    assert_eq!(WAL_V1_FORMAT, 0);
+    assert_eq!(wal_header.collection_id, CollectionId(0));
+    assert_eq!(wal_header.collection_format, WAL_V1_FORMAT);
+    assert_eq!(map_header.collection_id, CollectionId(43));
+    assert_eq!(map_header.collection_format, MAP_REGION_V1_FORMAT);
+    assert_ne!(MAP_REGION_V1_FORMAT, WAL_V1_FORMAT);
+    assert!(map_header.collection_format > 0);
+}
+
+//= spec/ring.md#storage-requirements
+//# `RING-STORAGE-005` Borromean core MUST reserve the canonical
+//# `collection_format` value `wal_v1` for WAL regions, and user
+//# collections MUST NOT use that identifier.
+#[test]
+fn wal_v1_collection_format_is_reserved_to_wal_regions() {
+    let (wal_header, map_header) = wal_and_map_region_formats();
+
+    assert_eq!(wal_header.collection_format, WAL_V1_FORMAT);
+    assert_eq!(wal_header.collection_id, CollectionId(0));
+    assert_ne!(map_header.collection_format, WAL_V1_FORMAT);
+}
+
 fn setup_storage_with_stale_wal_head() -> (
     MockFlash<512, 6, 4096>,
     StorageWorkspace<512>,

@@ -240,6 +240,24 @@ fn header_checksum_covers_prefix_fields() {
     assert_eq!(u32::from_le_bytes(checksum_bytes), expected);
 }
 
+//= spec/ring.md#storage-requirements
+//# `RING-STORAGE-002` Every region header MUST record the region
+//# `sequence`, `collection_id`, `collection_format`, and a checksum over
+//# the header itself.
+#[test]
+fn header_round_trips_sequence_collection_id_collection_format_and_checksum() {
+    let header = Header {
+        sequence: 0x0102_0304_0506_0708,
+        collection_id: CollectionId(0x1112_1314_1516_1718),
+        collection_format: 0x191a,
+    };
+    let mut buffer = [0u8; Header::ENCODED_LEN];
+    let used = header.encode_into(&mut buffer).unwrap();
+
+    assert_eq!(used, Header::ENCODED_LEN);
+    assert_eq!(Header::decode(&buffer).unwrap(), header);
+}
+
 //= spec/ring.md#wal-region-prologue
 //# `RING-PROLOGUE-001` `WalRegionPrologue` MUST be encoded as the exact
 //# byte sequence of the fields shown above, in that order, with no
