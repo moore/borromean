@@ -267,10 +267,6 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         collection_format: u16,
         payload: &[u8],
     ) -> Result<(), StorageRuntimeError> {
-        //= spec/ring.md#storage-requirements
-        //# `RING-STORAGE-003` Each newly allocated region, whether for a user collection or a newly initialized WAL region, MUST use `sequence = max_seen_sequence + 1`, after which that value becomes the new in-memory `max_seen_sequence`.
-        //= spec/ring.md#storage-requirements
-        //# `RING-STORAGE-004` Successful later region writes MUST preserve a strictly monotonic `sequence` ordering even if crashes or abandoned allocations leave gaps.
         let payload_capacity = REGION_SIZE
             .checked_sub(Header::ENCODED_LEN)
             .and_then(|remaining| remaining.checked_sub(FreePointerFooter::ENCODED_LEN))
@@ -1921,10 +1917,6 @@ fn read_free_pointer_successor<
     metadata: StorageMetadata,
     region_index: u32,
 ) -> Result<Option<u32>, StorageRuntimeError> {
-    //= spec/ring.md#storage-requirements
-    //# `RING-STORAGE-006` A free region MUST be defined by membership in the durable free-list chain rather than by a distinct on-disk header encoding.
-    //= spec/ring.md#free-pointer-footer
-    //# `RING-FREE-006` While a region is allocated for live use, the bytes in its free-pointer footer are uninterpreted stale data and MUST NOT be used to infer free-list membership.
     let footer_offset = usize::try_from(metadata.region_size)
         .map_err(|_| StorageRuntimeError::WalRotationRequired)?
         - FreePointerFooter::ENCODED_LEN;
@@ -1950,12 +1942,6 @@ fn initialize_wal_region<
     sequence: u64,
     wal_head: u32,
 ) -> Result<(), StorageRuntimeError> {
-    //= spec/ring.md#storage-requirements
-    //# `RING-STORAGE-003` Each newly allocated region, whether for a user collection or a newly initialized WAL region, MUST use `sequence = max_seen_sequence + 1`, after which that value becomes the new in-memory `max_seen_sequence`.
-    //= spec/ring.md#storage-requirements
-    //# `RING-STORAGE-004` Successful later region writes MUST preserve a strictly monotonic `sequence` ordering even if crashes or abandoned allocations leave gaps.
-    //= spec/ring.md#storage-requirements
-    //# `RING-STORAGE-009` A WAL region MUST have `collection_id = 0` and `collection_format = wal_v1`.
     //= spec/ring.md#wal-reclaim-eligibility
     //# `RING-WAL-RECLAIM-POST-007` The reclaimed region MUST be erased before reuse.
     //= spec/ring.md#wal-record-types
@@ -1990,10 +1976,6 @@ fn write_free_pointer_footer<const REGION_SIZE: usize, IO: FlashIo>(
     region_index: u32,
     next_tail: Option<u32>,
 ) -> Result<(), StorageRuntimeError> {
-    //= spec/ring.md#storage-requirements
-    //# `RING-STORAGE-007` The free-pointer footer of a region MUST NOT be written while that region is allocated for live use.
-    //= spec/ring.md#storage-requirements
-    //# `RING-STORAGE-008` After a region is durably reachable from the free-list chain, that region MUST NOT be erased until it is allocated for reuse.
     let footer = FreePointerFooter { next_tail };
     let mut footer_bytes = [0u8; FreePointerFooter::ENCODED_LEN];
     footer

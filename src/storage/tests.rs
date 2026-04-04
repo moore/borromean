@@ -1,7 +1,7 @@
 use super::*;
 use core::mem::size_of;
 use crate::wal_record::encode_record_into;
-use crate::{CollectionId, CollectionType, Header, StartupCollectionBasis, WalRecord};
+use crate::{CollectionId, CollectionType, Header, MockOperation, StartupCollectionBasis, WalRecord, WalRegionPrologue};
 use crate::MockFlash;
 use crate::StorageWorkspace;
 
@@ -80,6 +80,90 @@ fn init_user_region_header<
     let mut header_bytes = [0u8; Header::ENCODED_LEN];
     header.encode_into(&mut header_bytes).unwrap();
     flash.write_region(region_index, 0, &header_bytes).unwrap();
+}
+
+struct CommittedRegionSequenceProgress {
+    first_region: u32,
+    first_sequence: u64,
+    max_seen_after_first: u64,
+    second_region: u32,
+    second_sequence: u64,
+    max_seen_after_second: u64,
+}
+
+fn committed_region_sequence_progress() -> CommittedRegionSequenceProgress {
+    let mut flash = MockFlash::<512, 6, 1024>::new(0xff);
+    let mut workspace = StorageWorkspace::<512>::new();
+    let mut state = format::<512, 6, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+
+    state
+        .append_new_collection::<512, 6, _>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(7),
+            CollectionType::MAP_CODE,
+        )
+        .unwrap();
+
+    let first_region = state
+        .reserve_next_region::<512, 6, _>(&mut flash, &mut workspace)
+        .unwrap();
+    state
+        .write_committed_region::<512, 6, _>(
+            &mut flash,
+            first_region,
+            CollectionId(7),
+            crate::MAP_REGION_V1_FORMAT,
+            &[1, 2, 3],
+        )
+        .unwrap();
+    let first_sequence = read_header_from_flash::<512, 6, _>(&mut flash, first_region)
+        .unwrap()
+        .sequence;
+    state
+        .append_head::<512, 6, _>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(7),
+            CollectionType::MAP_CODE,
+            first_region,
+        )
+        .unwrap();
+    let max_seen_after_first = state.max_seen_sequence();
+
+    let second_region = state
+        .reserve_next_region::<512, 6, _>(&mut flash, &mut workspace)
+        .unwrap();
+    state
+        .write_committed_region::<512, 6, _>(
+            &mut flash,
+            second_region,
+            CollectionId(7),
+            crate::MAP_REGION_V1_FORMAT,
+            &[4, 5, 6],
+        )
+        .unwrap();
+    let second_sequence = read_header_from_flash::<512, 6, _>(&mut flash, second_region)
+        .unwrap()
+        .sequence;
+    state
+        .append_head::<512, 6, _>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(7),
+            CollectionType::MAP_CODE,
+            second_region,
+        )
+        .unwrap();
+
+    CommittedRegionSequenceProgress {
+        first_region,
+        first_sequence,
+        max_seen_after_first,
+        second_region,
+        second_sequence,
+        max_seen_after_second: state.max_seen_sequence(),
+    }
 }
 
 #[test]
@@ -529,6 +613,213 @@ fn append_rotation_start_and_finish_move_to_new_tail() {
     assert_eq!(state.ready_region(), None);
     assert_eq!(state.last_free_list_head(), Some(2));
     assert_eq!(state.max_seen_sequence(), 1);
+}
+
+//= spec/ring.md#storage-requirements
+//# `RING-STORAGE-003` Each newly allocated region, whether for a user
+//# collection or a newly initialized WAL region, MUST use
+//# `sequence = max_seen_sequence + 1`, after which that value becomes the
+//# new in-memory `max_seen_sequence`.
+#[test]
+fn committed_region_allocations_advance_sequence_from_max_seen_sequence() {
+    let progress = committed_region_sequence_progress();
+
+    assert_eq!(progress.first_region, 1);
+    assert_eq!(progress.first_sequence, 1);
+    assert_eq!(progress.max_seen_after_first, progress.first_sequence);
+
+    assert_eq!(progress.second_region, 2);
+    assert_eq!(progress.second_sequence, progress.max_seen_after_first + 1);
+    assert_eq!(progress.max_seen_after_second, progress.second_sequence);
+}
+
+//= spec/ring.md#storage-requirements
+//# `RING-STORAGE-003` Each newly allocated region, whether for a user
+//# collection or a newly initialized WAL region, MUST use
+//# `sequence = max_seen_sequence + 1`, after which that value becomes the
+//# new in-memory `max_seen_sequence`.
+#[test]
+fn wal_rotation_initializes_the_next_wal_region_at_max_seen_sequence_plus_one() {
+    let mut flash = MockFlash::<128, 4, 128>::new(0xff);
+    let mut workspace = StorageWorkspace::<128>::new();
+    let mut state = format::<128, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+
+    let next_region = state
+        .append_wal_rotation_start::<128, 4, _>(&mut flash, &mut workspace)
+        .unwrap();
+    state
+        .append_wal_rotation_finish::<128, 4, _>(&mut flash, &mut workspace, next_region)
+        .unwrap();
+
+    let header = read_header_from_flash::<128, 4, _>(&mut flash, next_region).unwrap();
+    assert_eq!(header.sequence, 1);
+    assert_eq!(state.max_seen_sequence(), header.sequence);
+}
+
+//= spec/ring.md#storage-requirements
+//# `RING-STORAGE-004` Successful later region writes MUST preserve a
+//# strictly monotonic `sequence` ordering even if crashes or abandoned
+//# allocations leave gaps.
+#[test]
+fn later_region_writes_keep_sequence_numbers_strictly_monotonic() {
+    let progress = committed_region_sequence_progress();
+
+    assert!(progress.first_sequence < progress.second_sequence);
+    assert!(progress.max_seen_after_first < progress.max_seen_after_second);
+}
+
+//= spec/ring.md#storage-requirements
+//# `RING-STORAGE-006` A free region MUST be defined by membership in the
+//# durable free-list chain rather than by a distinct on-disk header
+//# encoding.
+#[test]
+fn free_region_membership_is_defined_by_the_free_list_chain() {
+    let mut flash = MockFlash::<512, 5, 256>::new(0xff);
+    let mut workspace = StorageWorkspace::<512>::new();
+    let mut state = format::<512, 5, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+
+    let reserved_region = state
+        .reserve_next_region::<512, 5, _>(&mut flash, &mut workspace)
+        .unwrap();
+
+    assert_eq!(reserved_region, 1);
+    assert!(!state
+        .region_is_on_free_list::<512, 5, _>(&mut flash, reserved_region)
+        .unwrap());
+    assert!(state.region_is_on_free_list::<512, 5, _>(&mut flash, 2).unwrap());
+}
+
+//= spec/ring.md#free-pointer-footer
+//# `RING-FREE-006` While a region is allocated for live use, the bytes
+//# in its free-pointer footer are uninterpreted stale data and MUST NOT
+//# be used to infer free-list membership.
+#[test]
+fn stale_footer_bytes_do_not_make_a_reserved_region_free() {
+    let mut flash = MockFlash::<512, 5, 256>::new(0xff);
+    let mut workspace = StorageWorkspace::<512>::new();
+    let mut state = format::<512, 5, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+
+    let reserved_region = state
+        .reserve_next_region::<512, 5, _>(&mut flash, &mut workspace)
+        .unwrap();
+    let stale_successor = read_free_pointer_successor::<512, 5, _>(
+        &mut flash,
+        state.metadata(),
+        reserved_region,
+    )
+    .unwrap();
+
+    assert_eq!(reserved_region, 1);
+    assert_eq!(stale_successor, Some(2));
+    assert!(!state
+        .region_is_on_free_list::<512, 5, _>(&mut flash, reserved_region)
+        .unwrap());
+    assert_eq!(state.ready_region(), Some(reserved_region));
+}
+
+//= spec/ring.md#storage-requirements
+//# `RING-STORAGE-007` The free-pointer footer of a region MUST NOT be
+//# written while that region is allocated for live use.
+#[test]
+fn committed_region_writes_do_not_write_a_live_free_pointer_footer() {
+    let mut flash = MockFlash::<512, 5, 256>::new(0xff);
+    let mut workspace = StorageWorkspace::<512>::new();
+    let mut state = format::<512, 5, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+
+    state
+        .append_new_collection::<512, 5, _>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(7),
+            CollectionType::MAP_CODE,
+        )
+        .unwrap();
+    let region_index = state
+        .reserve_next_region::<512, 5, _>(&mut flash, &mut workspace)
+        .unwrap();
+
+    flash.clear_operations();
+    state
+        .write_committed_region::<512, 5, _>(
+            &mut flash,
+            region_index,
+            CollectionId(7),
+            crate::MAP_REGION_V1_FORMAT,
+            &[1, 2, 3],
+        )
+        .unwrap();
+
+    assert_eq!(
+        flash.operations(),
+        &[
+            MockOperation::EraseRegion { region_index },
+            MockOperation::WriteRegion {
+                region_index,
+                offset: 0,
+                len: Header::ENCODED_LEN,
+            },
+            MockOperation::WriteRegion {
+                region_index,
+                offset: Header::ENCODED_LEN,
+                len: 3,
+            },
+            MockOperation::Sync,
+        ]
+    );
+}
+
+//= spec/ring.md#storage-requirements
+//# `RING-STORAGE-008` After a region is durably reachable from the
+//# free-list chain, that region MUST NOT be erased until it is allocated
+//# for reuse.
+#[test]
+fn free_regions_are_erased_only_when_reused() {
+    let mut flash = MockFlash::<512, 5, 256>::new(0xff);
+    let mut workspace = StorageWorkspace::<512>::new();
+    let mut state = format::<512, 5, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+
+    flash.clear_operations();
+    let region_index = state
+        .reserve_next_region::<512, 5, _>(&mut flash, &mut workspace)
+        .unwrap();
+    assert!(!flash
+        .operations()
+        .contains(&MockOperation::EraseRegion { region_index }));
+
+    flash.clear_operations();
+    state
+        .write_committed_region::<512, 5, _>(
+            &mut flash,
+            region_index,
+            CollectionId(7),
+            crate::MAP_REGION_V1_FORMAT,
+            &[9],
+        )
+        .unwrap();
+    assert!(flash
+        .operations()
+        .contains(&MockOperation::EraseRegion { region_index }));
+}
+
+//= spec/ring.md#storage-requirements
+//# `RING-STORAGE-009` A WAL region MUST have `collection_id = 0` and
+//# `collection_format = wal_v1`.
+#[test]
+fn initialized_wal_regions_use_reserved_wal_header_fields() {
+    let mut flash = MockFlash::<128, 4, 32>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+
+    initialize_wal_region::<128, 4, _>(&mut flash, metadata, 1, 7, 0).unwrap();
+
+    let header = read_header_from_flash::<128, 4, _>(&mut flash, 1).unwrap();
+    assert_eq!(header.sequence, 7);
+    assert_eq!(header.collection_id, CollectionId(0));
+    assert_eq!(header.collection_format, WAL_V1_FORMAT);
+
+    let mut prologue_bytes = [0u8; WalRegionPrologue::ENCODED_LEN];
+    flash.read_region(1, Header::ENCODED_LEN, &mut prologue_bytes).unwrap();
+    let prologue = WalRegionPrologue::decode(&prologue_bytes, metadata.region_count).unwrap();
+    assert_eq!(prologue.wal_head_region_index, 0);
 }
 
 #[test]
