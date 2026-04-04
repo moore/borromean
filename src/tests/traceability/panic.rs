@@ -25,13 +25,18 @@ fn corrupt_storage_inputs_return_errors_instead_of_panicking() {
     let mut header_bytes = [0u8; Header::ENCODED_LEN];
     header.encode_into(&mut header_bytes).unwrap();
     header_bytes[Header::ENCODED_LEN - 1] ^= 0x01;
-    assert!(matches!(Header::decode(&header_bytes), Err(DiskError::InvalidChecksum)));
+    assert!(matches!(
+        Header::decode(&header_bytes),
+        Err(DiskError::InvalidChecksum)
+    ));
 
     let prologue = WalRegionPrologue {
         wal_head_region_index: 0,
     };
     let mut prologue_bytes = [0u8; WalRegionPrologue::ENCODED_LEN];
-    prologue.encode_into(&mut prologue_bytes, metadata.region_count).unwrap();
+    prologue
+        .encode_into(&mut prologue_bytes, metadata.region_count)
+        .unwrap();
     prologue_bytes[WalRegionPrologue::ENCODED_LEN - 1] ^= 0x01;
     assert!(matches!(
         WalRegionPrologue::decode(&prologue_bytes, metadata.region_count),
@@ -40,7 +45,9 @@ fn corrupt_storage_inputs_return_errors_instead_of_panicking() {
 
     let footer = FreePointerFooter { next_tail: Some(2) };
     let mut footer_bytes = [0u8; FreePointerFooter::ENCODED_LEN];
-    footer.encode_into(&mut footer_bytes, metadata.erased_byte).unwrap();
+    footer
+        .encode_into(&mut footer_bytes, metadata.erased_byte)
+        .unwrap();
     footer_bytes[FreePointerFooter::ENCODED_LEN - 1] ^= 0x01;
     assert!(matches!(
         FreePointerFooter::decode(&footer_bytes, metadata.erased_byte),

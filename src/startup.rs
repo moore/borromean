@@ -1,9 +1,13 @@
 use heapless::Vec;
 
-use crate::disk::{DiskError, FreePointerFooter, Header, StorageMetadata, WalRegionPrologue, WAL_V1_FORMAT};
+use crate::disk::{
+    DiskError, FreePointerFooter, Header, StorageMetadata, WalRegionPrologue, WAL_V1_FORMAT,
+};
 use crate::flash_io::FlashIo;
 use crate::mock::MockError;
-use crate::wal_record::{decode_record, encode_record_into, encoded_record_len, WalRecord, WalRecordError};
+use crate::wal_record::{
+    decode_record, encode_record_into, encoded_record_len, WalRecord, WalRecordError,
+};
 use crate::workspace::StorageWorkspace;
 use crate::{CollectionId, CollectionType};
 
@@ -250,24 +254,14 @@ pub fn open_formatted_store<
         MAX_PENDING_RECLAIMS,
     >(flash, workspace)?;
     recover_open_rotation::<REGION_SIZE, IO, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>(
-        flash,
-        workspace,
-        &mut plan,
+        flash, workspace, &mut plan,
     )?;
-    discover_open_wal_chain::<
-        REGION_SIZE,
-        REGION_COUNT,
-        IO,
-        MAX_COLLECTIONS,
-        MAX_PENDING_RECLAIMS,
-    >(flash, workspace, &mut plan)?;
-    replay_open_wal_chain::<
-        REGION_SIZE,
-        REGION_COUNT,
-        IO,
-        MAX_COLLECTIONS,
-        MAX_PENDING_RECLAIMS,
-    >(flash, workspace, &mut plan)?;
+    discover_open_wal_chain::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>(
+        flash, workspace, &mut plan,
+    )?;
+    replay_open_wal_chain::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>(
+        flash, workspace, &mut plan,
+    )?;
     finish_open_formatted_store::<
         REGION_SIZE,
         REGION_COUNT,
@@ -287,7 +281,9 @@ pub(crate) fn begin_open_formatted_store<
     flash: &mut IO,
     workspace: &mut StorageWorkspace<REGION_SIZE>,
 ) -> Result<StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>, StartupError> {
-    let metadata = flash.read_metadata()?.ok_or(StartupError::MissingMetadata)?;
+    let metadata = flash
+        .read_metadata()?
+        .ok_or(StartupError::MissingMetadata)?;
     metadata.validate()?;
 
     let (known_tail, max_seen_sequence) = locate_wal_tail::<REGION_SIZE, _>(flash, metadata)?;
@@ -326,7 +322,11 @@ pub(crate) fn begin_open_formatted_store<
         max_seen_sequence,
         wal_chain: Vec::new(),
         collections: Vec::new(),
-        last_free_list_head: if metadata.region_count >= 2 { Some(1) } else { None },
+        last_free_list_head: if metadata.region_count >= 2 {
+            Some(1)
+        } else {
+            None
+        },
         ready_region: None,
         pending_reclaims: Vec::new(),
         wal_append_offset: usize::try_from(metadata.region_size)
@@ -452,10 +452,7 @@ pub(crate) fn finish_open_formatted_store<
     })
 }
 
-fn locate_wal_tail<
-    const REGION_SIZE: usize,
-    IO: FlashIo,
->(
+fn locate_wal_tail<const REGION_SIZE: usize, IO: FlashIo>(
     flash: &mut IO,
     metadata: StorageMetadata,
 ) -> Result<(u32, u64), StartupError> {
@@ -491,10 +488,7 @@ fn locate_wal_tail<
     Ok((wal_tail, max_seen_sequence))
 }
 
-fn recover_incomplete_rotation<
-    const REGION_SIZE: usize,
-    IO: FlashIo,
->(
+fn recover_incomplete_rotation<const REGION_SIZE: usize, IO: FlashIo>(
     flash: &mut IO,
     workspace: &mut StorageWorkspace<REGION_SIZE>,
     metadata: StorageMetadata,
@@ -578,13 +572,13 @@ fn recover_incomplete_rotation<
                 next_region_index: region_index,
                 expected_sequence,
             };
-            let encoded_len = encode_record_into(
-                link_record,
-                metadata,
-                physical_scratch,
-                logical_scratch,
+            let encoded_len =
+                encode_record_into(link_record, metadata, physical_scratch, logical_scratch)?;
+            flash.write_region(
+                known_tail,
+                aligned_end_offset,
+                &physical_scratch[..encoded_len],
             )?;
-            flash.write_region(known_tail, aligned_end_offset, &physical_scratch[..encoded_len])?;
             flash.sync()?;
 
             initialize_wal_region::<REGION_SIZE, IO>(
@@ -601,10 +595,7 @@ fn recover_incomplete_rotation<
     }
 }
 
-fn initialize_wal_region<
-    const REGION_SIZE: usize,
-    IO: FlashIo,
->(
+fn initialize_wal_region<const REGION_SIZE: usize, IO: FlashIo>(
     flash: &mut IO,
     metadata: StorageMetadata,
     region_index: u32,
@@ -670,11 +661,13 @@ fn walk_wal_chain<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: Flash
             next_region_index,
             expected_sequence,
             ..
-        } = scan
-            .last_valid_record
-            .ok_or(StartupError::BrokenWalChain { region_index: current })?
+        } = scan.last_valid_record.ok_or(StartupError::BrokenWalChain {
+            region_index: current,
+        })?
         else {
-            return Err(StartupError::BrokenWalChain { region_index: current });
+            return Err(StartupError::BrokenWalChain {
+                region_index: current,
+            });
         };
 
         ensure_region_index_in_range(next_region_index, metadata.region_count)?;
@@ -692,14 +685,12 @@ fn walk_wal_chain<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: Flash
         current = next_region_index;
     }
 
-    Err(StartupError::BrokenWalChain { region_index: current })
+    Err(StartupError::BrokenWalChain {
+        region_index: current,
+    })
 }
 
-fn scan_wal_region<
-    const REGION_SIZE: usize,
-    IO: FlashIo,
-    F,
->(
+fn scan_wal_region<const REGION_SIZE: usize, IO: FlashIo, F>(
     flash: &mut IO,
     workspace: &mut StorageWorkspace<REGION_SIZE>,
     metadata: StorageMetadata,
@@ -708,11 +699,7 @@ fn scan_wal_region<
     mut on_record: F,
 ) -> Result<RegionScanResult, StartupError>
 where
-    F: FnMut(
-        &mut IO,
-        usize,
-        WalRecord<'_>,
-    ) -> Result<(), StartupError>,
+    F: FnMut(&mut IO, usize, WalRecord<'_>) -> Result<(), StartupError>,
 {
     //= spec/ring.md#durability-and-crash-semantics
     //# `RING-DURABILITY-003` Replay MUST treat partially written records as torn and ignore them using checksum validation and WAL tail recovery rules.
@@ -732,7 +719,8 @@ where
     //# All replay walks, decoders, and collection-format handlers MUST remain bounded by configured storage geometry and record sizes.
     ensure_region_index_in_range(region_index, metadata.region_count)?;
 
-    let region_size = usize::try_from(metadata.region_size).map_err(|_| StartupError::LengthOverflow)?;
+    let region_size =
+        usize::try_from(metadata.region_size).map_err(|_| StartupError::LengthOverflow)?;
     let granule =
         usize::try_from(metadata.wal_write_granule).map_err(|_| StartupError::LengthOverflow)?;
     let (region_bytes, logical_scratch) = workspace.scan_buffers();
@@ -786,12 +774,22 @@ where
             }
         };
 
-        if pending_boundary_open && decoded.record.record_type() != crate::WalRecordType::WalRecovery {
-            return Err(StartupError::UnexpectedRecordAfterCorruption { region_index, offset });
+        if pending_boundary_open
+            && decoded.record.record_type() != crate::WalRecordType::WalRecovery
+        {
+            return Err(StartupError::UnexpectedRecordAfterCorruption {
+                region_index,
+                offset,
+            });
         }
 
-        if decoded.record.record_type() == crate::WalRecordType::WalRecovery && !pending_boundary_open {
-            return Err(StartupError::UnexpectedWalRecovery { region_index, offset });
+        if decoded.record.record_type() == crate::WalRecordType::WalRecovery
+            && !pending_boundary_open
+        {
+            return Err(StartupError::UnexpectedWalRecovery {
+                region_index,
+                offset,
+            });
         }
 
         if let WalRecord::Head {
@@ -851,11 +849,7 @@ where
     })
 }
 
-fn apply_record<
-    IO: FlashIo,
-    const MAX_COLLECTIONS: usize,
-    const MAX_PENDING_RECLAIMS: usize,
->(
+fn apply_record<IO: FlashIo, const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>(
     _flash: &mut IO,
     metadata: StorageMetadata,
     record: WalRecord<'_>,
@@ -1063,7 +1057,10 @@ fn apply_record<
         }
         WalRecord::ReclaimEnd { region_index } => {
             ensure_region_index_in_range(region_index, metadata.region_count)?;
-            let Some(index) = pending_reclaims.iter().position(|pending| *pending == region_index) else {
+            let Some(index) = pending_reclaims
+                .iter()
+                .position(|pending| *pending == region_index)
+            else {
                 return Err(StartupError::InvalidReclaimEnd(region_index));
             };
             pending_reclaims.remove(index);
@@ -1074,9 +1071,7 @@ fn apply_record<
     Ok(())
 }
 
-fn read_region_header<
-    IO: FlashIo,
->(
+fn read_region_header<IO: FlashIo>(
     flash: &mut IO,
     region_index: u32,
 ) -> Result<Header, StartupError> {
@@ -1085,9 +1080,7 @@ fn read_region_header<
     Header::decode(&header_bytes).map_err(StartupError::from)
 }
 
-fn read_wal_prologue<
-    IO: FlashIo,
->(
+fn read_wal_prologue<IO: FlashIo>(
     flash: &mut IO,
     region_index: u32,
     region_count: u32,
@@ -1097,9 +1090,7 @@ fn read_wal_prologue<
     WalRegionPrologue::decode(&prologue_bytes, region_count).map_err(StartupError::from)
 }
 
-fn read_strict_wal_region<
-    IO: FlashIo,
->(
+fn read_strict_wal_region<IO: FlashIo>(
     flash: &mut IO,
     region_index: u32,
     region_count: u32,
@@ -1114,9 +1105,7 @@ fn read_strict_wal_region<
     Ok(header)
 }
 
-fn has_valid_wal_target<
-    IO: FlashIo,
->(
+fn has_valid_wal_target<IO: FlashIo>(
     flash: &mut IO,
     region_index: u32,
     expected_sequence: u64,
@@ -1196,7 +1185,10 @@ fn ensure_region_index_in_range(region_index: u32, region_count: u32) -> Result<
     Ok(())
 }
 
-fn find_collection(collections: &[StartupCollection], collection_id: CollectionId) -> Option<usize> {
+fn find_collection(
+    collections: &[StartupCollection],
+    collection_id: CollectionId,
+) -> Option<usize> {
     collections
         .iter()
         .position(|collection| collection.collection_id == collection_id)
@@ -1210,9 +1202,7 @@ fn find_collection_mut<const MAX_COLLECTIONS: usize>(
     collections.get_mut(index)
 }
 
-fn reconstruct_free_list_tail<
-    IO: FlashIo,
->(
+fn reconstruct_free_list_tail<IO: FlashIo>(
     flash: &mut IO,
     metadata: StorageMetadata,
     free_list_head: Option<u32>,
@@ -1225,9 +1215,10 @@ fn reconstruct_free_list_tail<
         return Ok(None);
     };
 
-    let footer_offset = usize::try_from(metadata.region_size)
-        .map_err(|_| StartupError::InvalidFreeListChain { region_index: current_region })?
-        - FreePointerFooter::ENCODED_LEN;
+    let footer_offset =
+        usize::try_from(metadata.region_size).map_err(|_| StartupError::InvalidFreeListChain {
+            region_index: current_region,
+        })? - FreePointerFooter::ENCODED_LEN;
     let mut footer_bytes = [0u8; FreePointerFooter::ENCODED_LEN];
 
     for _visited in 0..metadata.region_count {

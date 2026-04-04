@@ -129,12 +129,7 @@ impl From<MapStorageError> for StorageOpenError {
 impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
     Storage<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>
 {
-    pub fn format_future<
-        'a,
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO: FlashIo,
-    >(
+    pub fn format_future<'a, const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
         flash: &'a mut IO,
         workspace: &'a mut StorageWorkspace<REGION_SIZE>,
         min_free_regions: u32,
@@ -152,11 +147,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         })
     }
 
-    pub fn format<
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO: FlashIo,
-    >(
+    pub fn format<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
         min_free_regions: u32,
@@ -170,7 +161,13 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
                 IO,
                 MAX_COLLECTIONS,
                 MAX_PENDING_RECLAIMS,
-            >(flash, workspace, min_free_regions, wal_write_granule, wal_record_magic)?,
+            >(
+                flash,
+                workspace,
+                min_free_regions,
+                wal_write_granule,
+                wal_record_magic,
+            )?,
             dirty_frontiers: Vec::new(),
         })
     }
@@ -337,7 +334,10 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         Ok(())
     }
 
-    fn mark_dirty_frontier(&mut self, collection_id: CollectionId) -> Result<(), StorageRuntimeError> {
+    fn mark_dirty_frontier(
+        &mut self,
+        collection_id: CollectionId,
+    ) -> Result<(), StorageRuntimeError> {
         if self.dirty_frontier_is_active(collection_id) {
             return Ok(());
         }
@@ -377,31 +377,22 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
             )
     }
 
-    pub fn append_update<
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO: FlashIo,
-    >(
+    pub fn append_update<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
         &mut self,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
         collection_id: CollectionId,
         payload: &[u8],
     ) -> Result<(), StorageRuntimeError> {
-        self.state
-            .append_update::<REGION_SIZE, REGION_COUNT, IO>(
-                flash,
-                workspace,
-                collection_id,
-                payload,
-            )
+        self.state.append_update::<REGION_SIZE, REGION_COUNT, IO>(
+            flash,
+            workspace,
+            collection_id,
+            payload,
+        )
     }
 
-    pub fn append_snapshot<
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO: FlashIo,
-    >(
+    pub fn append_snapshot<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
         &mut self,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
@@ -409,21 +400,16 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         collection_type: u16,
         payload: &[u8],
     ) -> Result<(), StorageRuntimeError> {
-        self.state
-            .append_snapshot::<REGION_SIZE, REGION_COUNT, IO>(
-                flash,
-                workspace,
-                collection_id,
-                collection_type,
-                payload,
-            )
+        self.state.append_snapshot::<REGION_SIZE, REGION_COUNT, IO>(
+            flash,
+            workspace,
+            collection_id,
+            collection_type,
+            payload,
+        )
     }
 
-    pub fn append_head<
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO: FlashIo,
-    >(
+    pub fn append_head<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
         &mut self,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
@@ -431,14 +417,13 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         collection_type: u16,
         region_index: u32,
     ) -> Result<(), StorageRuntimeError> {
-        self.state
-            .append_head::<REGION_SIZE, REGION_COUNT, IO>(
-                flash,
-                workspace,
-                collection_id,
-                collection_type,
-                region_index,
-            )
+        self.state.append_head::<REGION_SIZE, REGION_COUNT, IO>(
+            flash,
+            workspace,
+            collection_id,
+            collection_type,
+            region_index,
+        )
     }
 
     pub fn append_drop_collection<
@@ -459,11 +444,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
             )
     }
 
-    pub fn append_alloc_begin<
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO: FlashIo,
-    >(
+    pub fn append_alloc_begin<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
         &mut self,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
@@ -490,11 +471,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         region_index: Option<u32>,
     ) -> Result<(), StorageRuntimeError> {
         self.state
-            .append_free_list_head::<REGION_SIZE, REGION_COUNT, IO>(
-                flash,
-                workspace,
-                region_index,
-            )
+            .append_free_list_head::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace, region_index)
     }
 
     pub fn append_reclaim_begin<
@@ -508,36 +485,20 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         region_index: u32,
     ) -> Result<(), StorageRuntimeError> {
         self.state
-            .append_reclaim_begin::<REGION_SIZE, REGION_COUNT, IO>(
-                flash,
-                workspace,
-                region_index,
-            )
+            .append_reclaim_begin::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace, region_index)
     }
 
-    pub fn append_reclaim_end<
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO: FlashIo,
-    >(
+    pub fn append_reclaim_end<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
         &mut self,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
         region_index: u32,
     ) -> Result<(), StorageRuntimeError> {
         self.state
-            .append_reclaim_end::<REGION_SIZE, REGION_COUNT, IO>(
-                flash,
-                workspace,
-                region_index,
-            )
+            .append_reclaim_end::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace, region_index)
     }
 
-    pub fn reclaim_wal_head<
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO: FlashIo,
-    >(
+    pub fn reclaim_wal_head<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
         &mut self,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
@@ -583,11 +544,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
             )
     }
 
-    pub fn append_wal_recovery<
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO: FlashIo,
-    >(
+    pub fn append_wal_recovery<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
         &mut self,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
@@ -627,11 +584,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
             )
     }
 
-    pub fn create_map<
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO: FlashIo,
-    >(
+    pub fn create_map<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
         &mut self,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
@@ -656,7 +609,9 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         workspace: &'a mut StorageWorkspace<REGION_SIZE>,
         collection_id: CollectionId,
     ) -> impl Future<Output = Result<(), StorageRuntimeError>> + 'a {
-        run_once(move || self.create_map::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace, collection_id))
+        run_once(move || {
+            self.create_map::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace, collection_id)
+        })
     }
 
     pub fn snapshot_map<
@@ -705,7 +660,11 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
         V: Debug + Serialize + for<'de> Deserialize<'de>,
     {
-        run_once(move || self.snapshot_map::<REGION_SIZE, REGION_COUNT, IO, K, V, MAX_INDEXES>(flash, workspace, map))
+        run_once(move || {
+            self.snapshot_map::<REGION_SIZE, REGION_COUNT, IO, K, V, MAX_INDEXES>(
+                flash, workspace, map,
+            )
+        })
     }
 
     pub fn append_map_update<
@@ -813,9 +772,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
                 }
 
                 self.flush_map::<REGION_SIZE, REGION_COUNT, IO, K, V, MAX_INDEXES>(
-                    flash,
-                    workspace,
-                    map,
+                    flash, workspace, map,
                 )?;
 
                 checkpoint = {
@@ -837,12 +794,15 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
             }
         }
 
-        if let Err(error) = self.state.append_update_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
-            flash,
-            workspace,
-            collection_id,
-            &payload_buffer[..used],
-        ) {
+        if let Err(error) = self
+            .state
+            .append_update_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
+                flash,
+                workspace,
+                collection_id,
+                &payload_buffer[..used],
+            )
+        {
             let (checkpoint_buffer, _) = workspace.encode_buffers();
             map.restore_from_checkpoint(checkpoint, checkpoint_buffer)?;
             return Err(error.into());
@@ -942,11 +902,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         >::new(self, flash, workspace, map)
     }
 
-    pub fn drop_map<
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO: FlashIo,
-    >(
+    pub fn drop_map<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
         &mut self,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
@@ -983,18 +939,15 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         Ok(reclaim)
     }
 
-    pub fn drop_map_future<
-        'a,
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO: FlashIo,
-    >(
+    pub fn drop_map_future<'a, const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
         &'a mut self,
         flash: &'a mut IO,
         workspace: &'a mut StorageWorkspace<REGION_SIZE>,
         collection_id: CollectionId,
     ) -> impl Future<Output = Result<Option<u32>, MapStorageError>> + 'a {
-        run_once(move || self.drop_map::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace, collection_id))
+        run_once(move || {
+            self.drop_map::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace, collection_id)
+        })
     }
 
     pub fn open_map<

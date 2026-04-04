@@ -62,7 +62,9 @@ fn open_future_preserves_replay_context_across_pending_polls() {
 fn startup_replay_state_uses_fixed_capacity_storage_without_heap_allocation() {
     let startup = strip_comment_lines(&read_repo_file("src/startup.rs"));
 
-    assert!(startup.contains("pub struct StartupState<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>"));
+    assert!(startup.contains(
+        "pub struct StartupState<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>"
+    ));
     assert!(startup.contains("collections: Vec<StartupCollection, MAX_COLLECTIONS>"));
     assert!(startup.contains("pending_reclaims: Vec<u32, MAX_PENDING_RECLAIMS>"));
     assert!(startup.contains("wal_chain: Vec<u32, REGION_COUNT>"));
@@ -90,10 +92,15 @@ fn startup_decode_and_scan_paths_take_workspace_backing_from_callers() {
         "pub(crate) fn discover_open_wal_chain<",
         "pub(crate) fn replay_open_wal_chain<",
     ] {
-        assert!(startup.contains(signature), "missing startup workspace contract {signature}");
+        assert!(
+            startup.contains(signature),
+            "missing startup workspace contract {signature}"
+        );
     }
 
-    assert!(startup.contains("let (physical_scratch, logical_scratch) = workspace.encode_buffers();"));
+    assert!(
+        startup.contains("let (physical_scratch, logical_scratch) = workspace.encode_buffers();")
+    );
     assert!(startup.contains("let (region_bytes, logical_scratch) = workspace.scan_buffers();"));
     assert!(startup.contains("metadata: StorageMetadata"));
     assert!(startup.contains("wal_chain: Vec<u32, REGION_COUNT>"));
@@ -108,13 +115,19 @@ fn startup_recovery_runs_inside_the_same_operation_phase_framework() {
     let lib = strip_comment_lines(&read_repo_file("src/lib.rs"));
     let op_future = strip_comment_lines(&read_repo_file("src/op_future.rs"));
 
-    assert!(lib.contains("pub fn open_future<'a, const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>("));
+    assert!(lib.contains(
+        "pub fn open_future<'a, const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>("
+    ));
     assert!(lib.contains("OpenStorageFuture::<"));
     assert!(op_future.contains("enum OpenStoragePhase<"));
     assert!(op_future.contains("RecoverRotation {"));
     assert!(op_future.contains("RecoverPendingReclaims {"));
     assert!(op_future.contains("crate::startup::recover_open_rotation::<"));
-    assert!(op_future.contains("runtime.recover_pending_reclaims::<REGION_SIZE, REGION_COUNT, IO>("));
+    assert!(
+        op_future.contains("runtime.recover_pending_reclaims::<REGION_SIZE, REGION_COUNT, IO>(")
+    );
     assert!(op_future.contains("this.phase = OpenStoragePhase::RecoverRotation { plan };"));
-    assert!(op_future.contains("this.phase = OpenStoragePhase::RecoverPendingReclaims { runtime };"));
+    assert!(
+        op_future.contains("this.phase = OpenStoragePhase::RecoverPendingReclaims { runtime };")
+    );
 }

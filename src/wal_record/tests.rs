@@ -28,13 +28,34 @@ fn encode_logical(record: WalRecord<'_>) -> ([u8; 128], usize) {
 #[test]
 fn canonical_scalar_widths_match_storage_header_and_wal_field_sizes() {
     let metadata = metadata(16);
-    assert_eq!(core::mem::size_of_val(&metadata.storage_version), size_of::<u32>());
-    assert_eq!(core::mem::size_of_val(&metadata.region_size), size_of::<u32>());
-    assert_eq!(core::mem::size_of_val(&metadata.region_count), size_of::<u32>());
-    assert_eq!(core::mem::size_of_val(&metadata.min_free_regions), size_of::<u32>());
-    assert_eq!(core::mem::size_of_val(&metadata.wal_write_granule), size_of::<u32>());
-    assert_eq!(core::mem::size_of_val(&metadata.erased_byte), size_of::<u8>());
-    assert_eq!(core::mem::size_of_val(&metadata.wal_record_magic), size_of::<u8>());
+    assert_eq!(
+        core::mem::size_of_val(&metadata.storage_version),
+        size_of::<u32>()
+    );
+    assert_eq!(
+        core::mem::size_of_val(&metadata.region_size),
+        size_of::<u32>()
+    );
+    assert_eq!(
+        core::mem::size_of_val(&metadata.region_count),
+        size_of::<u32>()
+    );
+    assert_eq!(
+        core::mem::size_of_val(&metadata.min_free_regions),
+        size_of::<u32>()
+    );
+    assert_eq!(
+        core::mem::size_of_val(&metadata.wal_write_granule),
+        size_of::<u32>()
+    );
+    assert_eq!(
+        core::mem::size_of_val(&metadata.erased_byte),
+        size_of::<u8>()
+    );
+    assert_eq!(
+        core::mem::size_of_val(&metadata.wal_record_magic),
+        size_of::<u8>()
+    );
 
     let header = crate::Header {
         sequence: 9,
@@ -43,7 +64,10 @@ fn canonical_scalar_widths_match_storage_header_and_wal_field_sizes() {
     };
     assert_eq!(core::mem::size_of_val(&header.sequence), size_of::<u64>());
     assert_eq!(CollectionId(7).to_le_bytes().len(), size_of::<u64>());
-    assert_eq!(core::mem::size_of_val(&header.collection_format), size_of::<u16>());
+    assert_eq!(
+        core::mem::size_of_val(&header.collection_format),
+        size_of::<u16>()
+    );
 
     let (logical, logical_len) = encode_logical(WalRecord::Head {
         collection_id: CollectionId(7),
@@ -71,12 +95,18 @@ fn canonical_scalar_widths_match_storage_header_and_wal_field_sizes() {
 //# are not required to interoperate across deployments.
 #[test]
 fn collection_type_codes_use_reserved_global_namespace() {
-    assert_eq!(crate::CollectionType::Wal.stable_code(), Some(crate::CollectionType::WAL_CODE));
+    assert_eq!(
+        crate::CollectionType::Wal.stable_code(),
+        Some(crate::CollectionType::WAL_CODE)
+    );
     assert_eq!(
         crate::CollectionType::Channel.stable_code(),
         Some(crate::CollectionType::CHANNEL_CODE)
     );
-    assert_eq!(crate::CollectionType::Map.stable_code(), Some(crate::CollectionType::MAP_CODE));
+    assert_eq!(
+        crate::CollectionType::Map.stable_code(),
+        Some(crate::CollectionType::MAP_CODE)
+    );
     assert_eq!(crate::CollectionType::Uninitialized.stable_code(), None);
     assert_eq!(crate::CollectionType::Free.stable_code(), None);
 
@@ -130,9 +160,15 @@ fn logical_wal_records_encode_fixed_width_fields_little_endian() {
 fn optional_region_indexes_use_a_tag_then_little_endian_region_index() {
     let (free_list_head_none, free_list_head_none_len) =
         encode_logical(WalRecord::FreeListHead { region_index: None });
-    assert_eq!(&free_list_head_none[1..1 + size_of::<u32>()], &1u32.to_le_bytes());
+    assert_eq!(
+        &free_list_head_none[1..1 + size_of::<u32>()],
+        &1u32.to_le_bytes()
+    );
     assert_eq!(free_list_head_none[1 + size_of::<u32>()], 0);
-    assert_eq!(free_list_head_none_len, 1 + 2 * size_of::<u32>() + size_of::<u8>());
+    assert_eq!(
+        free_list_head_none_len,
+        1 + 2 * size_of::<u32>() + size_of::<u8>()
+    );
 
     let (alloc_begin_some, alloc_begin_some_len) = encode_logical(WalRecord::AllocBegin {
         region_index: 3,
@@ -141,7 +177,8 @@ fn optional_region_indexes_use_a_tag_then_little_endian_region_index() {
     let opt_offset = 1 + 2 * size_of::<u32>();
     assert_eq!(alloc_begin_some[opt_offset], 1);
     assert_eq!(
-        &alloc_begin_some[opt_offset + size_of::<u8>()..opt_offset + size_of::<u8>() + size_of::<u32>()],
+        &alloc_begin_some
+            [opt_offset + size_of::<u8>()..opt_offset + size_of::<u8>() + size_of::<u32>()],
         0x1122_3344u32.to_le_bytes().as_slice()
     );
     assert_eq!(
@@ -187,7 +224,8 @@ fn record_checksums_cover_prior_logical_bytes_but_exclude_checksum_and_padding()
     };
     let (logical, logical_len) = encode_logical(record);
     let checksum_offset = logical_len - size_of::<u32>();
-    let stored_checksum = u32::from_le_bytes(logical[checksum_offset..logical_len].try_into().unwrap());
+    let stored_checksum =
+        u32::from_le_bytes(logical[checksum_offset..logical_len].try_into().unwrap());
 
     assert_eq!(stored_checksum, crc32(&logical[..checksum_offset]));
     assert_ne!(stored_checksum, crc32(&logical[..logical_len]));
@@ -279,7 +317,10 @@ fn decode_rejects_non_escape_padding_bytes() {
     let metadata = metadata(16);
     let (mut physical, encoded_len) = encode_physical(WalRecord::WalRecovery, metadata);
     let escape_codes = WalEscapeCodes::derive(metadata.erased_byte, metadata.wal_record_magic);
-    assert_eq!(physical[encoded_len - 1], escape_codes.wal_escape_code_escape);
+    assert_eq!(
+        physical[encoded_len - 1],
+        escape_codes.wal_escape_code_escape
+    );
     physical[encoded_len - 1] = 0x00;
 
     let mut decode_scratch = [0u8; 128];
@@ -488,9 +529,8 @@ fn record_checksum_covers_logical_prefix_bytes() {
 
     let checksum_offset = logical_len - size_of::<u32>();
     let expected_checksum = crc32(&logical[..checksum_offset]);
-    let checksum_bytes: [u8; size_of::<u32>()] = logical[checksum_offset..logical_len]
-        .try_into()
-        .unwrap();
+    let checksum_bytes: [u8; size_of::<u32>()] =
+        logical[checksum_offset..logical_len].try_into().unwrap();
     assert_eq!(u32::from_le_bytes(checksum_bytes), expected_checksum);
 }
 

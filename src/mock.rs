@@ -226,7 +226,8 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize>
         wal_write_granule: u32,
         wal_record_magic: u8,
     ) -> Result<StorageMetadata, MockFormatError> {
-        let region_size = u32::try_from(REGION_SIZE).map_err(|_| MockFormatError::RegionSizeTooLarge)?;
+        let region_size =
+            u32::try_from(REGION_SIZE).map_err(|_| MockFormatError::RegionSizeTooLarge)?;
         let region_count =
             u32::try_from(REGION_COUNT).map_err(|_| MockFormatError::RegionCountTooLarge)?;
 
@@ -290,16 +291,16 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize>
     }
 
     fn region(&self, region_index: u32) -> Result<&[u8; REGION_SIZE], MockError> {
-        let index =
-            usize::try_from(region_index).map_err(|_| MockError::InvalidRegionIndex(region_index))?;
+        let index = usize::try_from(region_index)
+            .map_err(|_| MockError::InvalidRegionIndex(region_index))?;
         self.regions
             .get(index)
             .ok_or(MockError::InvalidRegionIndex(region_index))
     }
 
     fn region_mut(&mut self, region_index: u32) -> Result<&mut [u8; REGION_SIZE], MockError> {
-        let index =
-            usize::try_from(region_index).map_err(|_| MockError::InvalidRegionIndex(region_index))?;
+        let index = usize::try_from(region_index)
+            .map_err(|_| MockError::InvalidRegionIndex(region_index))?;
         self.regions
             .get_mut(index)
             .ok_or(MockError::InvalidRegionIndex(region_index))

@@ -43,9 +43,9 @@ fn bounded_runtime_state_uses_explicit_capacity_parameters() {
     let startup = strip_comment_lines(&read_repo_file("src/startup.rs"));
     let map = strip_comment_lines(&read_repo_file("src/collections/map/mod.rs"));
 
-    assert!(
-        lib.contains("pub struct Storage<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>")
-    );
+    assert!(lib.contains(
+        "pub struct Storage<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>"
+    ));
     assert!(lib.contains("dirty_frontiers: Vec<CollectionId, MAX_COLLECTIONS>"));
     assert!(
         storage.contains(
@@ -78,7 +78,9 @@ fn scratch_space_enters_through_workspace_or_caller_buffers() {
     assert!(lib.contains("payload_buffer: &'a mut [u8]"));
     assert!(storage.contains("let (physical, logical) = workspace.encode_buffers();"));
     assert!(storage.contains("let (region_bytes, logical_scratch) = workspace.scan_buffers();"));
-    assert!(startup.contains("let (physical_scratch, logical_scratch) = workspace.encode_buffers();"));
+    assert!(
+        startup.contains("let (physical_scratch, logical_scratch) = workspace.encode_buffers();")
+    );
     assert!(startup.contains("let (region_bytes, logical_scratch) = workspace.scan_buffers();"));
     assert!(workspace.contains("pub struct StorageWorkspace<const REGION_SIZE: usize>"));
     assert!(workspace.contains("region_bytes: [u8; REGION_SIZE]"));
@@ -91,7 +93,10 @@ fn scratch_space_enters_through_workspace_or_caller_buffers() {
         "scratch: &mut [u8]",
         "payload: &mut [u8]",
     ] {
-        assert!(map.contains(signature), "missing caller buffer signature {signature}");
+        assert!(
+            map.contains(signature),
+            "missing caller buffer signature {signature}"
+        );
     }
 }
 
@@ -123,7 +128,10 @@ fn map_storage_paths_reuse_borrowed_buffers_for_payload_data() {
 //# constants, or documented constructor contracts.
 #[test]
 fn disk_format_buffer_sizes_are_exposed_by_constants_or_workspace_contracts() {
-    assert_eq!(StorageMetadata::ENCODED_LEN, size_of::<u32>() * 6 + size_of::<u8>() * 2);
+    assert_eq!(
+        StorageMetadata::ENCODED_LEN,
+        size_of::<u32>() * 6 + size_of::<u8>() * 2
+    );
     assert_eq!(
         Header::ENCODED_LEN,
         size_of::<u64>() + size_of::<u64>() + size_of::<u16>() + size_of::<u32>()
@@ -172,5 +180,7 @@ fn collection_update_api_keeps_explicit_payload_buffer_passing() {
     assert!(lib.contains("pub fn append_map_update_future<"));
     assert!(lib.contains("payload_buffer: &mut [u8]"));
     assert!(lib.contains("payload_buffer: &'a mut [u8]"));
-    assert!(lib.contains("LsmMap::<K, V, MAX_INDEXES>::encode_update_into(update, payload_buffer)?;"));
+    assert!(
+        lib.contains("LsmMap::<K, V, MAX_INDEXES>::encode_update_into(update, payload_buffer)?;")
+    );
 }

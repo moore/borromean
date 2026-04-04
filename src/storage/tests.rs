@@ -1,9 +1,12 @@
 use super::*;
-use core::mem::size_of;
 use crate::wal_record::encode_record_into;
-use crate::{CollectionId, CollectionType, Header, MockOperation, StartupCollectionBasis, WalRecord, WalRegionPrologue};
 use crate::MockFlash;
 use crate::StorageWorkspace;
+use crate::{
+    CollectionId, CollectionType, Header, MockOperation, StartupCollectionBasis, WalRecord,
+    WalRegionPrologue,
+};
+use core::mem::size_of;
 
 fn format<
     const REGION_SIZE: usize,
@@ -43,11 +46,7 @@ fn open<
     )
 }
 
-fn append_wal_record<
-    const REGION_SIZE: usize,
-    const REGION_COUNT: usize,
-    const MAX_LOG: usize,
->(
+fn append_wal_record<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize>(
     flash: &mut MockFlash<REGION_SIZE, REGION_COUNT, MAX_LOG>,
     metadata: StorageMetadata,
     region_index: u32,
@@ -57,7 +56,9 @@ fn append_wal_record<
     let mut physical = [0u8; REGION_SIZE];
     let mut logical = [0u8; REGION_SIZE];
     let used = encode_record_into(record, metadata, &mut physical, &mut logical).unwrap();
-    flash.write_region(region_index, offset, &physical[..used]).unwrap();
+    flash
+        .write_region(region_index, offset, &physical[..used])
+        .unwrap();
     offset + used
 }
 
@@ -164,6 +165,145 @@ fn committed_region_sequence_progress() -> CommittedRegionSequenceProgress {
         second_sequence,
         max_seen_after_second: state.max_seen_sequence(),
     }
+}
+
+//= spec/ring.md#core-requirements
+//# `RING-CORE-010` The durable free list MUST be FIFO so allocations
+//# consume the oldest free regions first.
+#[test]
+fn reserve_next_region_consumes_the_oldest_free_regions_first() {
+    let progress = committed_region_sequence_progress();
+
+    assert_eq!(progress.first_region, 1);
+    assert_eq!(progress.second_region, 2);
+}
+
+//= spec/ring.md#core-requirements
+//# `RING-CORE-011` Any operation that writes a newly allocated region
+//# MUST first durably reserve that region with
+//# `alloc_begin(region_index, free_list_head_after)`.
+#[test]
+fn committed_region_write_uses_a_region_previously_reserved_by_alloc_begin() {
+    let mut flash = MockFlash::<512, 5, 256>::new(0xff);
+    let mut workspace = StorageWorkspace::<512>::new();
+    let mut state = format::<512, 5, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+
+    state
+        .append_new_collection::<512, 5, _>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(7),
+            CollectionType::MAP_CODE,
+        )
+        .unwrap();
+    let region_index = state
+        .reserve_next_region::<512, 5, _>(&mut flash, &mut workspace)
+        .unwrap();
+
+    let mut saw_alloc_begin = false;
+    state
+        .visit_wal_records::<512, _, (), _>(&mut flash, &mut workspace, |_flash, record| {
+            if let WalRecord::AllocBegin {
+                region_index: alloc_region,
+                free_list_head_after,
+            } = record
+            {
+                if alloc_region == region_index {
+                    assert_eq!(free_list_head_after, Some(2));
+                    saw_alloc_begin = true;
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+
+    assert!(saw_alloc_begin);
+    state
+        .write_committed_region::<512, 5, _>(
+            &mut flash,
+            region_index,
+            CollectionId(7),
+            crate::MAP_REGION_V1_FORMAT,
+            &[1, 2, 3],
+        )
+        .unwrap();
+}
+
+//= spec/ring.md#durability-and-crash-semantics
+//# `RING-ALLOC-001` Any operation that writes a newly allocated region
+//# MUST first make `alloc_begin(region_index, free_list_head_after)`
+//# durable.
+#[test]
+fn committed_region_write_waits_for_alloc_begin_sync() {
+    let mut flash = MockFlash::<512, 5, 256>::new(0xff);
+    let mut workspace = StorageWorkspace::<512>::new();
+    let mut state = format::<512, 5, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+
+    state
+        .append_new_collection::<512, 5, _>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(7),
+            CollectionType::MAP_CODE,
+        )
+        .unwrap();
+
+    flash.clear_operations();
+    let region_index = state
+        .reserve_next_region::<512, 5, _>(&mut flash, &mut workspace)
+        .unwrap();
+    state
+        .write_committed_region::<512, 5, _>(
+            &mut flash,
+            region_index,
+            CollectionId(7),
+            crate::MAP_REGION_V1_FORMAT,
+            &[1, 2, 3],
+        )
+        .unwrap();
+
+    let erase_index = flash
+        .operations()
+        .iter()
+        .position(|operation| *operation == MockOperation::EraseRegion { region_index })
+        .unwrap();
+    let alloc_sync_index = flash.operations()[..erase_index]
+        .iter()
+        .rposition(|operation| *operation == MockOperation::Sync)
+        .unwrap();
+
+    assert!(
+        flash.operations()[..alloc_sync_index]
+            .iter()
+            .any(|operation| matches!(
+                operation,
+                MockOperation::WriteRegion {
+                    region_index: 0,
+                    ..
+                }
+            )),
+        "expected alloc_begin WAL write before sync"
+    );
+}
+
+//= spec/ring.md#wal-record-types
+//# `RING-REPLAY-ASSUME-004` Any operation that consumes a free-list
+//# head MUST first make the allocator advance durable with
+//# `alloc_begin(region_index, free_list_head_after)`.
+#[test]
+fn reopen_after_alloc_begin_recovers_the_advanced_allocator_state() {
+    let mut flash = MockFlash::<512, 5, 256>::new(0xff);
+    let mut workspace = StorageWorkspace::<512>::new();
+    let mut state = format::<512, 5, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+
+    let region_index = state
+        .reserve_next_region::<512, 5, _>(&mut flash, &mut workspace)
+        .unwrap();
+    let reopened = open::<512, 5, _, 8, 4>(&mut flash).unwrap();
+
+    assert_eq!(reopened.ready_region(), Some(region_index));
+    assert_eq!(reopened.last_free_list_head(), Some(2));
+    assert_eq!(reopened.free_list_tail(), Some(4));
 }
 
 #[test]
@@ -379,7 +519,10 @@ fn open_returns_replayed_collection_runtime_state() {
         state.collections()[0].collection_type(),
         Some(CollectionType::MAP_CODE)
     );
-    assert_eq!(state.collections()[0].basis(), StartupCollectionBasis::Region(2));
+    assert_eq!(
+        state.collections()[0].basis(),
+        StartupCollectionBasis::Region(2)
+    );
     assert_eq!(state.collections()[0].pending_update_count(), 0);
 }
 
@@ -442,7 +585,10 @@ fn open_discards_pending_reclaims_for_still_live_regions() {
 
     let state = open::<256, 4, _, 8, 4>(&mut flash).unwrap();
 
-    assert_eq!(state.collections()[0].basis(), StartupCollectionBasis::Region(2));
+    assert_eq!(
+        state.collections()[0].basis(),
+        StartupCollectionBasis::Region(2)
+    );
     assert!(state.pending_reclaims().is_empty());
 }
 
@@ -466,7 +612,10 @@ fn append_new_collection_and_update_refresh_runtime_state() {
 
     assert_eq!(state.collections().len(), 1);
     assert_eq!(state.collections()[0].collection_id(), CollectionId(7));
-    assert_eq!(state.collections()[0].basis(), StartupCollectionBasis::Empty);
+    assert_eq!(
+        state.collections()[0].basis(),
+        StartupCollectionBasis::Empty
+    );
     assert_eq!(state.collections()[0].pending_update_count(), 1);
 }
 
@@ -686,7 +835,9 @@ fn free_region_membership_is_defined_by_the_free_list_chain() {
     assert!(!state
         .region_is_on_free_list::<512, 5, _>(&mut flash, reserved_region)
         .unwrap());
-    assert!(state.region_is_on_free_list::<512, 5, _>(&mut flash, 2).unwrap());
+    assert!(state
+        .region_is_on_free_list::<512, 5, _>(&mut flash, 2)
+        .unwrap());
 }
 
 //= spec/ring.md#free-pointer-footer
@@ -702,12 +853,9 @@ fn stale_footer_bytes_do_not_make_a_reserved_region_free() {
     let reserved_region = state
         .reserve_next_region::<512, 5, _>(&mut flash, &mut workspace)
         .unwrap();
-    let stale_successor = read_free_pointer_successor::<512, 5, _>(
-        &mut flash,
-        state.metadata(),
-        reserved_region,
-    )
-    .unwrap();
+    let stale_successor =
+        read_free_pointer_successor::<512, 5, _>(&mut flash, state.metadata(), reserved_region)
+            .unwrap();
 
     assert_eq!(reserved_region, 1);
     assert_eq!(stale_successor, Some(2));
@@ -817,9 +965,41 @@ fn initialized_wal_regions_use_reserved_wal_header_fields() {
     assert_eq!(header.collection_format, WAL_V1_FORMAT);
 
     let mut prologue_bytes = [0u8; WalRegionPrologue::ENCODED_LEN];
-    flash.read_region(1, Header::ENCODED_LEN, &mut prologue_bytes).unwrap();
+    flash
+        .read_region(1, Header::ENCODED_LEN, &mut prologue_bytes)
+        .unwrap();
     let prologue = WalRegionPrologue::decode(&prologue_bytes, metadata.region_count).unwrap();
     assert_eq!(prologue.wal_head_region_index, 0);
+}
+
+//= spec/ring.md#wal-reclaim-eligibility
+//# `RING-WAL-RECLAIM-POST-007` The reclaimed region MUST be erased
+//# before reuse.
+#[test]
+fn initialized_wal_region_erases_the_reclaimed_region_before_reuse() {
+    let mut flash = MockFlash::<128, 4, 32>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+
+    flash.clear_operations();
+    initialize_wal_region::<128, 4, _>(&mut flash, metadata, 1, 7, 0).unwrap();
+
+    assert_eq!(
+        flash.operations(),
+        &[
+            MockOperation::EraseRegion { region_index: 1 },
+            MockOperation::WriteRegion {
+                region_index: 1,
+                offset: 0,
+                len: Header::ENCODED_LEN,
+            },
+            MockOperation::WriteRegion {
+                region_index: 1,
+                offset: Header::ENCODED_LEN,
+                len: WalRegionPrologue::ENCODED_LEN,
+            },
+            MockOperation::Sync,
+        ]
+    );
 }
 
 #[test]

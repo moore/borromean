@@ -113,7 +113,10 @@ fn shared_test_helpers_remain_untraced() {
     let mut offenders = Vec::new();
     for path in collect_dedicated_test_files(&src_root) {
         for helper in parse_traced_helpers(&path) {
-            offenders.push(format!("{} -> {:?}", helper.location, helper.requirement_ids));
+            offenders.push(format!(
+                "{} -> {:?}",
+                helper.location, helper.requirement_ids
+            ));
         }
     }
 

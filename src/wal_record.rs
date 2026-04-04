@@ -10,8 +10,14 @@ const CRC32C: Crc<u32> = Crc::<u32>::new(&CRC_32_ISCSI);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WalRecordError {
     Disk(DiskError),
-    BufferTooSmall { needed: usize, available: usize },
-    InvalidRecordMagic { found: u8, expected: u8 },
+    BufferTooSmall {
+        needed: usize,
+        available: usize,
+    },
+    InvalidRecordMagic {
+        found: u8,
+        expected: u8,
+    },
     InvalidEscapeSequence(u8),
     InvalidPadding(u8),
     InvalidRecordType(u8),
@@ -215,8 +221,8 @@ pub fn encode_record_into(
     metadata.validate()?;
 
     let logical_len = encode_logical_record(record, logical_scratch)?;
-    let granule =
-        usize::try_from(metadata.wal_write_granule).map_err(|_| DiskError::InvalidWalWriteGranule)?;
+    let granule = usize::try_from(metadata.wal_write_granule)
+        .map_err(|_| DiskError::InvalidWalWriteGranule)?;
     let escape_codes = WalEscapeCodes::derive(metadata.erased_byte, metadata.wal_record_magic);
 
     ensure_len(output, 1)?;
@@ -224,8 +230,13 @@ pub fn encode_record_into(
 
     let mut physical_offset = 1usize;
     for logical_byte in logical_scratch[..logical_len].iter().copied() {
-        physical_offset =
-            encode_logical_byte(logical_byte, output, physical_offset, metadata, escape_codes)?;
+        physical_offset = encode_logical_byte(
+            logical_byte,
+            output,
+            physical_offset,
+            metadata,
+            escape_codes,
+        )?;
     }
 
     let aligned_end = align_up(physical_offset, granule)?;
@@ -267,8 +278,8 @@ pub fn decode_record<'a>(
         });
     }
 
-    let granule =
-        usize::try_from(metadata.wal_write_granule).map_err(|_| DiskError::InvalidWalWriteGranule)?;
+    let granule = usize::try_from(metadata.wal_write_granule)
+        .map_err(|_| DiskError::InvalidWalWriteGranule)?;
     let escape_codes = WalEscapeCodes::derive(metadata.erased_byte, metadata.wal_record_magic);
 
     let mut physical_offset = 1usize;
@@ -284,7 +295,8 @@ pub fn decode_record<'a>(
             }
         }
 
-        let logical_byte = decode_logical_byte(input, &mut physical_offset, metadata, escape_codes)?;
+        let logical_byte =
+            decode_logical_byte(input, &mut physical_offset, metadata, escape_codes)?;
         ensure_len(logical_scratch, logical_offset + 1)?;
         logical_scratch[logical_offset] = logical_byte;
         logical_offset += 1;
@@ -450,11 +462,7 @@ fn encode_logical_record(
             next_region_index,
             expected_sequence,
         } => {
-            offset = write_u32(
-                buffer,
-                offset,
-                (size_of::<u32>() + size_of::<u64>()) as u32,
-            )?;
+            offset = write_u32(buffer, offset, (size_of::<u32>() + size_of::<u64>()) as u32)?;
             offset = write_u32(buffer, offset, next_region_index)?;
             offset = write_u64(buffer, offset, expected_sequence)?;
         }
@@ -687,10 +695,7 @@ fn write_opt_region_index(
     }
 }
 
-fn read_opt_region_index(
-    buffer: &[u8],
-    offset: &mut usize,
-) -> Result<Option<u32>, WalRecordError> {
+fn read_opt_region_index(buffer: &[u8], offset: &mut usize) -> Result<Option<u32>, WalRecordError> {
     match read_u8(buffer, offset)? {
         0 => Ok(None),
         1 => Ok(Some(read_u32(buffer, offset)?)),
@@ -699,7 +704,8 @@ fn read_opt_region_index(
 }
 
 fn read_payload<'a>(buffer: &'a [u8], offset: &mut usize) -> Result<&'a [u8], WalRecordError> {
-    let payload_len = usize::try_from(read_u32(buffer, offset)?).map_err(|_| WalRecordError::LengthOverflow)?;
+    let payload_len =
+        usize::try_from(read_u32(buffer, offset)?).map_err(|_| WalRecordError::LengthOverflow)?;
     let end = offset
         .checked_add(payload_len)
         .ok_or(WalRecordError::LengthOverflow)?;

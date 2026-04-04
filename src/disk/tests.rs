@@ -6,8 +6,15 @@ use super::*;
 //# records MUST be encoded little-endian.
 #[test]
 fn disk_structures_encode_fixed_width_fields_little_endian() {
-    let metadata = StorageMetadata::new(0x1122_3344, 0x5566_7788, 0x0102_0304, 0x0506_0708, 0xaa, 0xbb)
-        .unwrap();
+    let metadata = StorageMetadata::new(
+        0x1122_3344,
+        0x5566_7788,
+        0x0102_0304,
+        0x0506_0708,
+        0xaa,
+        0xbb,
+    )
+    .unwrap();
     let mut metadata_bytes = [0u8; StorageMetadata::ENCODED_LEN];
     metadata.encode_into(&mut metadata_bytes).unwrap();
     let expected_metadata_prefix = [
@@ -38,13 +45,18 @@ fn disk_structures_encode_fixed_width_fields_little_endian() {
         0x191au16.to_le_bytes().as_slice(),
     ]
     .concat();
-    assert_eq!(&header_bytes[..expected_header_prefix.len()], expected_header_prefix.as_slice());
+    assert_eq!(
+        &header_bytes[..expected_header_prefix.len()],
+        expected_header_prefix.as_slice()
+    );
 
     let prologue = WalRegionPrologue {
         wal_head_region_index: 0x0b0c_0d0e,
     };
     let mut prologue_bytes = [0u8; WalRegionPrologue::ENCODED_LEN];
-    prologue.encode_into(&mut prologue_bytes, 0x0f10_1112).unwrap();
+    prologue
+        .encode_into(&mut prologue_bytes, 0x0f10_1112)
+        .unwrap();
     assert_eq!(
         &prologue_bytes[..size_of::<u32>()],
         0x0b0c_0d0eu32.to_le_bytes().as_slice()
@@ -110,7 +122,9 @@ fn disk_structure_checksums_use_crc32c_and_store_little_endian_bytes() {
             .as_slice()
     );
 
-    let footer = FreePointerFooter { next_tail: Some(11) };
+    let footer = FreePointerFooter {
+        next_tail: Some(11),
+    };
     let mut footer_bytes = [0u8; FreePointerFooter::ENCODED_LEN];
     footer.encode_into(&mut footer_bytes, 0xff).unwrap();
     let footer_checksum_offset = FreePointerFooter::ENCODED_LEN - size_of::<u32>();
@@ -317,7 +331,9 @@ fn wal_prologue_rejects_out_of_range_head() {
 //# `footer_checksum` equal to CRC-32C over `next_tail`.
 #[test]
 fn free_pointer_footer_uses_crc32c_for_non_erased_value() {
-    let footer = FreePointerFooter { next_tail: Some(11) };
+    let footer = FreePointerFooter {
+        next_tail: Some(11),
+    };
     let mut buffer = [0u8; FreePointerFooter::ENCODED_LEN];
     footer.encode_into(&mut buffer, 0xff).unwrap();
 
@@ -347,9 +363,7 @@ fn free_pointer_footer_none_uses_erased_bytes() {
 //# malformed.
 #[test]
 fn free_pointer_footer_rejects_region_index_at_or_above_region_count() {
-    let footer = FreePointerFooter {
-        next_tail: Some(4),
-    };
+    let footer = FreePointerFooter { next_tail: Some(4) };
     let mut buffer = [0u8; FreePointerFooter::ENCODED_LEN];
     footer.encode_into(&mut buffer, 0xff).unwrap();
 

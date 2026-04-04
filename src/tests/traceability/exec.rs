@@ -144,8 +144,10 @@ fn operation_futures_advance_only_when_polled_and_without_internal_runtime_hooks
     call_count.set(0);
 
     {
-        let future =
-            Storage::<8, 4>::open_future::<REGION_SIZE, REGION_COUNT, _>(&mut flash, &mut workspace);
+        let future = Storage::<8, 4>::open_future::<REGION_SIZE, REGION_COUNT, _>(
+            &mut flash,
+            &mut workspace,
+        );
         let mut future = pin!(future);
 
         assert_eq!(call_count.get(), 0);
@@ -191,13 +193,7 @@ fn single_threaded_poll_loop_drives_operation_futures_to_completion() {
         REGION_SIZE,
         REGION_COUNT,
         _,
-    >(
-        &mut flash,
-        &mut workspace,
-        1,
-        8,
-        0xa5,
-    ))
+    >(&mut flash, &mut workspace, 1, 8, 0xa5))
     .unwrap();
 
     super::super::poll_ready(storage.create_map_future::<REGION_SIZE, REGION_COUNT, _>(
@@ -264,15 +260,16 @@ fn operation_futures_require_exclusive_mutable_storage_access() {
         "pub fn flush_map_future<",
         "pub fn drop_map_future<",
     ] {
-        assert!(lib.contains(signature), "missing mutably-borrowed entry point {signature}");
+        assert!(
+            lib.contains(signature),
+            "missing mutably-borrowed entry point {signature}"
+        );
     }
 
     assert!(lib.contains("&'a mut self,"));
     assert!(lib.contains("flash: &'a mut IO"));
     assert!(lib.contains("workspace: &'a mut StorageWorkspace<REGION_SIZE>"));
-    assert!(
-        op_future.contains("storage: &'a mut Storage<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>")
-    );
+    assert!(op_future.contains("storage: &'a mut Storage<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>"));
 
     for banned in [
         "&'a Storage<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>",

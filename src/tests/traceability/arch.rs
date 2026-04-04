@@ -31,8 +31,13 @@ fn wal_region_management_and_collection_logic_stay_separate_modules() {
     let metadata = StorageMetadata::new(128, 4, 1, 8, 0xff, 0xa5).unwrap();
     let mut physical = [0u8; 128];
     let mut logical = [0u8; 128];
-    let encoded_len =
-        encode_record_into(WalRecord::WalRecovery, metadata, &mut physical, &mut logical).unwrap();
+    let encoded_len = encode_record_into(
+        WalRecord::WalRecovery,
+        metadata,
+        &mut physical,
+        &mut logical,
+    )
+    .unwrap();
     assert!(encoded_len > 0);
 
     let mut flash = MockFlash::<128, 4, 256>::new(0xff);
@@ -80,7 +85,9 @@ fn encoding_and_decoding_round_trip_from_plain_byte_buffers() {
 
     let footer = FreePointerFooter { next_tail: Some(3) };
     let mut footer_bytes = [0u8; FreePointerFooter::ENCODED_LEN];
-    footer.encode_into(&mut footer_bytes, metadata.erased_byte).unwrap();
+    footer
+        .encode_into(&mut footer_bytes, metadata.erased_byte)
+        .unwrap();
     assert_eq!(
         FreePointerFooter::decode(&footer_bytes, metadata.erased_byte).unwrap(),
         footer

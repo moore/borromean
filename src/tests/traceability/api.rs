@@ -7,9 +7,9 @@ use super::*;
 #[test]
 fn storage_public_entry_points_take_backing_io_from_callers() {
     let lib = strip_comment_lines(&read_repo_file("src/lib.rs"));
-    assert!(
-        lib.contains("pub struct Storage<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize> {")
-    );
+    assert!(lib.contains(
+        "pub struct Storage<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize> {"
+    ));
     assert!(!lib.contains("pub struct Storage<IO"));
 
     for signature in [
@@ -22,7 +22,10 @@ fn storage_public_entry_points_take_backing_io_from_callers() {
         "pub fn flush_map_future<",
         "pub fn drop_map_future<",
     ] {
-        assert!(lib.contains(signature), "missing public entry point {signature}");
+        assert!(
+            lib.contains(signature),
+            "missing public entry point {signature}"
+        );
     }
 
     assert!(lib.contains("flash: &'a mut IO"));
@@ -50,17 +53,16 @@ fn blocking_and_future_entry_points_produce_equivalent_storage_state() {
 
     let mut future_flash = MockFlash::<REGION_SIZE, REGION_COUNT, 2048>::new(0xff);
     let mut future_workspace = StorageWorkspace::<REGION_SIZE>::new();
-    let mut future_driven = super::super::poll_until_ready(Storage::<8, 4>::format_future::<
-        REGION_SIZE,
-        REGION_COUNT,
-        _,
-    >(
-        &mut future_flash,
-        &mut future_workspace,
-        1,
-        8,
-        0xa5,
-    ), 16)
+    let mut future_driven = super::super::poll_until_ready(
+        Storage::<8, 4>::format_future::<REGION_SIZE, REGION_COUNT, _>(
+            &mut future_flash,
+            &mut future_workspace,
+            1,
+            8,
+            0xa5,
+        ),
+        16,
+    )
     .unwrap();
 
     blocking
@@ -70,11 +72,14 @@ fn blocking_and_future_entry_points_produce_equivalent_storage_state() {
             CollectionId(61),
         )
         .unwrap();
-    super::super::poll_until_ready(future_driven.create_map_future::<REGION_SIZE, REGION_COUNT, _>(
-        &mut future_flash,
-        &mut future_workspace,
-        CollectionId(61),
-    ), 16)
+    super::super::poll_until_ready(
+        future_driven.create_map_future::<REGION_SIZE, REGION_COUNT, _>(
+            &mut future_flash,
+            &mut future_workspace,
+            CollectionId(61),
+        ),
+        16,
+    )
     .unwrap();
 
     let mut blocking_payload = [0u8; 64];
@@ -100,21 +105,37 @@ fn blocking_and_future_entry_points_produce_equivalent_storage_state() {
     )
     .unwrap();
 
-    let reopened_blocking =
-        Storage::<8, 4>::open::<REGION_SIZE, REGION_COUNT, _>(&mut blocking_flash, &mut blocking_workspace)
-            .unwrap();
-    let reopened_future = super::super::poll_until_ready(Storage::<8, 4>::open_future::<
-        REGION_SIZE,
-        REGION_COUNT,
-        _,
-    >(&mut future_flash, &mut future_workspace), 16)
+    let reopened_blocking = Storage::<8, 4>::open::<REGION_SIZE, REGION_COUNT, _>(
+        &mut blocking_flash,
+        &mut blocking_workspace,
+    )
+    .unwrap();
+    let reopened_future = super::super::poll_until_ready(
+        Storage::<8, 4>::open_future::<REGION_SIZE, REGION_COUNT, _>(
+            &mut future_flash,
+            &mut future_workspace,
+        ),
+        16,
+    )
     .unwrap();
 
     assert_eq!(reopened_blocking.metadata(), reopened_future.metadata());
-    assert_eq!(reopened_blocking.collections(), reopened_future.collections());
-    assert_eq!(reopened_blocking.pending_reclaims(), reopened_future.pending_reclaims());
-    assert_eq!(reopened_blocking.last_free_list_head(), reopened_future.last_free_list_head());
-    assert_eq!(reopened_blocking.free_list_tail(), reopened_future.free_list_tail());
+    assert_eq!(
+        reopened_blocking.collections(),
+        reopened_future.collections()
+    );
+    assert_eq!(
+        reopened_blocking.pending_reclaims(),
+        reopened_future.pending_reclaims()
+    );
+    assert_eq!(
+        reopened_blocking.last_free_list_head(),
+        reopened_future.last_free_list_head()
+    );
+    assert_eq!(
+        reopened_blocking.free_list_tail(),
+        reopened_future.free_list_tail()
+    );
 
     let mut blocking_map_buffer = [0u8; REGION_SIZE];
     let blocking_map = reopened_blocking

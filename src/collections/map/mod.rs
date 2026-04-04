@@ -27,8 +27,7 @@ mod tests;
 //
 // we write the index in backwards order so that we can implement merge join efficiently.
 
-
-// We can store merged maps larger than a single segment by building up a skip list as 
+// We can store merged maps larger than a single segment by building up a skip list as
 // we merge. This works because we will never have to do inserts in to the skip list as we
 // merge ordered maps. Can we even optimize this by stopping the merge and reusing previous
 // Segments if we end up wit only one map to merge?
@@ -39,8 +38,7 @@ mod tests;
 // question is should we always merge all maps in a merge or try and maintain something like
 // each layer doubling in size?
 //
-// In this approach the head of the map is alway the log. 
-
+// In this approach the head of the map is alway the log.
 
 #[derive(Debug)]
 pub enum MapError {
@@ -307,10 +305,7 @@ where
     K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
     V: Debug + Serialize + for<'de> Deserialize<'de>,
 {
-    pub fn new(
-        id: CollectionId,
-        buffer: &'a mut [u8],
-    ) -> Result<Self, MapError> {
+    pub fn new(id: CollectionId, buffer: &'a mut [u8]) -> Result<Self, MapError> {
         let record_count = EntryCount(0);
         let next_record_offset = RecordOffset(ENTRY_COUNT_SIZE);
         let next_record_index = RecordIndex(0);
@@ -515,7 +510,10 @@ where
         let entry_bytes_len_offset = SNAPSHOT_ENTRY_COUNT_SIZE;
         snapshot[entry_bytes_len_offset..entry_bytes_len_offset + SNAPSHOT_ENTRY_BYTES_LEN_SIZE]
             .copy_from_slice(&entry_bytes_len_u32.to_le_bytes());
-        snapshot.copy_within(refs_staging_start..snapshot_len, entries_offset + entry_bytes_len);
+        snapshot.copy_within(
+            refs_staging_start..snapshot_len,
+            entries_offset + entry_bytes_len,
+        );
 
         Ok(snapshot_len)
     }
@@ -529,8 +527,7 @@ where
 
         let snapshot_len_u32 =
             u32::try_from(snapshot_len).map_err(|_| MapError::SerializationError)?;
-        region_payload[..REGION_SNAPSHOT_LEN_SIZE]
-            .copy_from_slice(&snapshot_len_u32.to_le_bytes());
+        region_payload[..REGION_SNAPSHOT_LEN_SIZE].copy_from_slice(&snapshot_len_u32.to_le_bytes());
         self.encode_snapshot_into(
             &mut region_payload[REGION_SNAPSHOT_LEN_SIZE..REGION_SNAPSHOT_LEN_SIZE + snapshot_len],
         )?;
@@ -551,7 +548,8 @@ where
         let mut entry_bytes_len_bytes = [0u8; SNAPSHOT_ENTRY_BYTES_LEN_SIZE];
         let entry_bytes_len_offset = SNAPSHOT_ENTRY_COUNT_SIZE;
         entry_bytes_len_bytes.copy_from_slice(
-            &snapshot[entry_bytes_len_offset..entry_bytes_len_offset + SNAPSHOT_ENTRY_BYTES_LEN_SIZE],
+            &snapshot
+                [entry_bytes_len_offset..entry_bytes_len_offset + SNAPSHOT_ENTRY_BYTES_LEN_SIZE],
         );
         let entry_bytes_len = usize::try_from(u32::from_le_bytes(entry_bytes_len_bytes))
             .map_err(|_| MapError::SerializationError)?;
@@ -568,7 +566,8 @@ where
         let next_record_offset = ENTRY_COUNT_SIZE
             .checked_add(entry_bytes_len)
             .ok_or(MapError::SerializationError)?;
-        let refs_start = SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE + entry_bytes_len;
+        let refs_start =
+            SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE + entry_bytes_len;
         let index_bytes = entry_count
             .checked_mul(ENTRY_REF_SIZE)
             .ok_or(MapError::SerializationError)?;
@@ -584,8 +583,9 @@ where
 
         self.map.fill(0);
         record_count.write(self.map);
-        self.map[ENTRY_COUNT_SIZE..next_record_offset]
-            .copy_from_slice(&snapshot[SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE..refs_start]);
+        self.map[ENTRY_COUNT_SIZE..next_record_offset].copy_from_slice(
+            &snapshot[SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE..refs_start],
+        );
         for index in 0..entry_count {
             let ref_offset = refs_start + index * ENTRY_REF_SIZE;
             let mut start_bytes = [0u8; ENTRY_REF_POINTER_SIZE];
@@ -666,7 +666,10 @@ where
         self.load_snapshot(&snapshot[..snapshot_len])
     }
 
-    pub fn encode_update_into(update: &MapUpdate<K, V>, payload: &mut [u8]) -> Result<usize, MapError> {
+    pub fn encode_update_into(
+        update: &MapUpdate<K, V>,
+        payload: &mut [u8],
+    ) -> Result<usize, MapError> {
         Ok(to_slice(update, payload)?.len())
     }
 

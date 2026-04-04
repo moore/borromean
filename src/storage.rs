@@ -4,10 +4,12 @@ use crate::disk::{FreePointerFooter, Header, WalRegionPrologue, WAL_V1_FORMAT};
 use crate::flash_io::FlashIo;
 use crate::mock::{MockError, MockFormatError};
 use crate::startup::{open_formatted_store, StartupCollection, StartupError, StartupState};
-use crate::wal_record::{decode_record, encode_record_into, WalRecord, WalRecordError, WalRecordType};
+use crate::wal_record::{
+    decode_record, encode_record_into, WalRecord, WalRecordError, WalRecordType,
+};
 use crate::workspace::StorageWorkspace;
-use crate::{CollectionId, CollectionType, StartupCollectionBasis};
 use crate::StorageMetadata;
+use crate::{CollectionId, CollectionType, StartupCollectionBasis};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StorageRuntimeError {
@@ -140,7 +142,9 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
             return Err(StorageRuntimeError::ReservedCollectionId(collection_id));
         }
         if collection_type != CollectionType::MAP_CODE {
-            return Err(StorageRuntimeError::UnsupportedCollectionType(collection_type));
+            return Err(StorageRuntimeError::UnsupportedCollectionType(
+                collection_type,
+            ));
         }
         Ok(())
     }
@@ -214,17 +218,11 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
             .count()
     }
 
-    pub fn reserve_next_region<
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO: FlashIo,
-    >(
+    pub fn reserve_next_region<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
         &mut self,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
     ) -> Result<u32, StorageRuntimeError> {
-        //= spec/ring.md#core-requirements
-        //# `RING-CORE-010` The durable free list MUST be FIFO so allocations consume the oldest free regions first.
         if let Some(region_index) = self.ready_region {
             return Ok(region_index);
         }
@@ -329,11 +327,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         )
     }
 
-    pub fn append_update<
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO: FlashIo,
-    >(
+    pub fn append_update<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
         &mut self,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
@@ -352,7 +346,10 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         self.append_record::<REGION_SIZE, REGION_COUNT, IO>(
             flash,
             workspace,
-            WalRecord::Update { collection_id, payload },
+            WalRecord::Update {
+                collection_id,
+                payload,
+            },
         )
     }
 
@@ -377,15 +374,14 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         self.append_record_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
             flash,
             workspace,
-            WalRecord::Update { collection_id, payload },
+            WalRecord::Update {
+                collection_id,
+                payload,
+            },
         )
     }
 
-    pub fn append_snapshot<
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO: FlashIo,
-    >(
+    pub fn append_snapshot<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
         &mut self,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
@@ -484,11 +480,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         Ok(previous_region)
     }
 
-    pub fn append_head<
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO: FlashIo,
-    >(
+    pub fn append_head<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
         &mut self,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
@@ -515,9 +507,9 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
 
         let header = read_header_from_flash::<REGION_SIZE, REGION_COUNT, IO>(flash, region_index)
             .map_err(|_| StorageRuntimeError::InvalidHeadTarget {
-                collection_id,
-                region_index,
-            })?;
+            collection_id,
+            region_index,
+        })?;
         if header.collection_id != collection_id {
             return Err(StorageRuntimeError::InvalidHeadTarget {
                 collection_id,
@@ -536,23 +528,13 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         )
     }
 
-    pub fn append_alloc_begin<
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO: FlashIo,
-    >(
+    pub fn append_alloc_begin<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
         &mut self,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
         region_index: u32,
         free_list_head_after: Option<u32>,
     ) -> Result<(), StorageRuntimeError> {
-        //= spec/ring.md#core-requirements
-        //# `RING-CORE-011` Any operation that writes a newly allocated region MUST first durably reserve that region with `alloc_begin(region_index, free_list_head_after)`.
-        //= spec/ring.md#durability-and-crash-semantics
-        //# `RING-ALLOC-001` Any operation that writes a newly allocated region MUST first make `alloc_begin(region_index, free_list_head_after)` durable.
-        //= spec/ring.md#wal-record-types
-        //# `RING-REPLAY-ASSUME-004` Any operation that consumes a free-list head MUST first make the allocator advance durable with `alloc_begin(region_index, free_list_head_after)`.
         if let Some(ready_region) = self.ready_region {
             return Err(StorageRuntimeError::DoubleReadyRegion(ready_region));
         }
@@ -585,10 +567,6 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
     ) -> Result<(), StorageRuntimeError> {
         //= spec/ring.md#core-requirements
         //# `RING-CORE-009` Any reclaim that frees a region MUST be tracked as a WAL transaction bounded by durable `reclaim_begin(region_index)` and `reclaim_end(region_index)` records.
-        //= spec/ring.md#region-reclaim
-        //# `RING-REGION-RECLAIM-PRE-001` `reclaim_begin(r)` MUST be durable in the WAL before any live metadata is updated to stop referencing `r`.
-        //= spec/ring.md#region-reclaim
-        //# `RING-REGION-RECLAIM-ORDER-001` `reclaim_begin(r)` MUST be durable before any live metadata stops referencing `r`.
         if self.pending_reclaims.contains(&region_index) {
             return Err(StorageRuntimeError::DuplicatePendingReclaim(region_index));
         }
@@ -600,11 +578,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         )
     }
 
-    pub fn append_reclaim_end<
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO: FlashIo,
-    >(
+    pub fn append_reclaim_end<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
         &mut self,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
@@ -623,11 +597,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         )
     }
 
-    pub fn reclaim_wal_head<
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO: FlashIo,
-    >(
+    pub fn reclaim_wal_head<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
         &mut self,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
@@ -639,13 +609,10 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
             plan.old_head,
         )?;
         self.preserve_free_list_head_for_wal_head_reclaim::<REGION_SIZE, REGION_COUNT, IO>(
-            flash,
-            workspace,
+            flash, workspace,
         )?;
         self.copy_live_wal_head_reclaim_state::<REGION_SIZE, REGION_COUNT, IO>(
-            flash,
-            workspace,
-            &plan,
+            flash, workspace, &plan,
         )?;
         self.commit_wal_head_reclaim::<REGION_SIZE, REGION_COUNT, IO>(
             flash,
@@ -670,24 +637,6 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         workspace: &mut StorageWorkspace<REGION_SIZE>,
         region_index: u32,
     ) -> Result<(), StorageRuntimeError> {
-        //= spec/ring.md#region-reclaim
-        //# `RING-REGION-RECLAIM-SEM-002` If `t_prev != none`, reclaim MUST durably write `t_prev.free_pointer.next_tail = r` when freeing region `r`.
-        //= spec/ring.md#region-reclaim
-        //# `RING-REGION-RECLAIM-SEM-003` If `t_prev = none`, reclaim MUST NOT write any predecessor link and MUST durably append `free_list_head(r)` and set `free_list_head = r` and `free_list_tail = r`.
-        //= spec/ring.md#region-reclaim
-        //# `RING-REGION-RECLAIM-POST-001` The free-list chain MUST remain acyclic and FIFO-ordered.
-        //= spec/ring.md#region-reclaim
-        //# `RING-REGION-RECLAIM-POST-002` Exactly one new region (`r`) MUST be appended to the tail.
-        //= spec/ring.md#region-reclaim
-        //# `RING-REGION-RECLAIM-POST-003` If a prior tail existed, its `next_tail` pointer MUST now reference `r`.
-        //= spec/ring.md#region-reclaim
-        //# `RING-REGION-RECLAIM-POST-004` `r.free_pointer.next_tail` MUST remain uninitialized after reclaim.
-        //= spec/ring.md#region-reclaim
-        //# `RING-REGION-RECLAIM-ORDER-002` Before any durable write makes `r` reachable from `t_prev.next_tail`, the implementation MUST ensure that `r` already has the correct free-list-tail footer state, namely an uninitialized `r.free_pointer.next_tail`.
-        //= spec/ring.md#region-reclaim
-        //# `RING-REGION-RECLAIM-ORDER-003` If `t_prev = none`, `free_list_head(r)` MUST be durable before `reclaim_end(r)` is acknowledged.
-        //= spec/ring.md#region-reclaim
-        //# `RING-REGION-RECLAIM-ORDER-004` If `t_prev` exists, the `t_prev.next_tail = r` write MUST be synced before `reclaim_end(r)` is acknowledged.
         if !self.pending_reclaims.contains(&region_index) {
             return Err(StorageRuntimeError::InvalidReclaimEnd(region_index));
         }
@@ -736,11 +685,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         )
     }
 
-    pub fn append_wal_recovery<
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO: FlashIo,
-    >(
+    pub fn append_wal_recovery<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
         &mut self,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
@@ -748,7 +693,11 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         if !self.pending_wal_recovery_boundary {
             return Err(StorageRuntimeError::WalRecoveryNotNeeded);
         }
-        self.append_record::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace, WalRecord::WalRecovery)
+        self.append_record::<REGION_SIZE, REGION_COUNT, IO>(
+            flash,
+            workspace,
+            WalRecord::WalRecovery,
+        )
     }
 
     pub fn append_wal_rotation_start<
@@ -873,11 +822,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
             .find(|collection| collection.collection_id() == collection_id)
     }
 
-    fn append_record<
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO: FlashIo,
-    >(
+    fn append_record<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
         &mut self,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
@@ -908,11 +853,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         }
     }
 
-    fn write_record_and_reopen<
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO: FlashIo,
-    >(
+    fn write_record_and_reopen<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
         &mut self,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
@@ -929,11 +870,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         Ok(())
     }
 
-    fn write_record_raw<
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO: FlashIo,
-    >(
+    fn write_record_raw<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
         &mut self,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
@@ -953,7 +890,11 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
             return Err(StorageRuntimeError::WalRotationRequired);
         }
 
-        flash.write_region(self.wal_tail, self.wal_append_offset, &physical[..encoded_len])?;
+        flash.write_region(
+            self.wal_tail,
+            self.wal_append_offset,
+            &physical[..encoded_len],
+        )?;
         flash.sync()?;
         Ok(())
     }
@@ -980,7 +921,11 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
                 Ok(()) => {
                     {
                         let (physical, _) = workspace.encode_buffers();
-                        flash.read_region(source_region, source_offset, &mut physical[..encoded_len])?;
+                        flash.read_region(
+                            source_region,
+                            source_offset,
+                            &mut physical[..encoded_len],
+                        )?;
                         flash.write_region(
                             self.wal_tail,
                             self.wal_append_offset,
@@ -1018,7 +963,9 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
     ) -> Result<(), StorageRuntimeError> {
         let payload = match collection_type {
             crate::CollectionType::MAP_CODE => crate::EMPTY_MAP_SNAPSHOT.as_slice(),
-            other => return Err(StorageRuntimeError::WalHeadReclaimUnsupportedCollectionType(other)),
+            other => {
+                return Err(StorageRuntimeError::WalHeadReclaimUnsupportedCollectionType(other))
+            }
         };
 
         self.append_record_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
@@ -1032,11 +979,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         )
     }
 
-    fn ensure_append_reserve<
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO: FlashIo,
-    >(
+    fn ensure_append_reserve<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
         &self,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
         flash: &mut IO,
@@ -1107,11 +1050,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         Ok(())
     }
 
-    fn rotate_wal_tail<
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO: FlashIo,
-    >(
+    fn rotate_wal_tail<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
         &mut self,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
@@ -1124,8 +1063,6 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
             next_region_index,
         )
     }
-
-
 
     fn rotation_reserves<const REGION_SIZE: usize, const REGION_COUNT: usize>(
         &self,
@@ -1230,20 +1167,25 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
                                 collection_type,
                             })
                         }
-                        other => Err(StorageRuntimeError::WalHeadReclaimUnsupportedCollectionType(other)),
+                        other => {
+                            Err(StorageRuntimeError::WalHeadReclaimUnsupportedCollectionType(other))
+                        }
                     };
                 }
                 Ok(WalHeadReclaimAction::Skip)
             }
-            WalRecord::Update { collection_id, .. } => Ok(if active_collections.contains(&collection_id)
-            {
-                WalHeadReclaimAction::CopyEncoded
-            } else {
-                WalHeadReclaimAction::Skip
-            }),
+            WalRecord::Update { collection_id, .. } => {
+                Ok(if active_collections.contains(&collection_id) {
+                    WalHeadReclaimAction::CopyEncoded
+                } else {
+                    WalHeadReclaimAction::Skip
+                })
+            }
             WalRecord::Snapshot { collection_id, .. } => {
                 let should_copy = find_collection_in(original_collections, collection_id)
-                    .is_some_and(|collection| collection.basis() == StartupCollectionBasis::WalSnapshot);
+                    .is_some_and(|collection| {
+                        collection.basis() == StartupCollectionBasis::WalSnapshot
+                    });
                 if should_copy {
                     activate_collection(active_collections, collection_id)?;
                 }
@@ -1270,9 +1212,10 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
                 region_index,
                 ..
             } => {
-                let should_copy = find_collection_in(original_collections, collection_id).is_some_and(
-                    |collection| collection.basis() == StartupCollectionBasis::Region(region_index),
-                );
+                let should_copy = find_collection_in(original_collections, collection_id)
+                    .is_some_and(|collection| {
+                        collection.basis() == StartupCollectionBasis::Region(region_index)
+                    });
                 if should_copy {
                     activate_collection(active_collections, collection_id)?;
                 }
@@ -1282,16 +1225,15 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
                     WalHeadReclaimAction::Skip
                 })
             }
-            WalRecord::DropCollection { collection_id } => Ok(if find_collection_in(
-                original_collections,
-                collection_id,
-            )
-            .is_some_and(|collection| collection.basis() == StartupCollectionBasis::Dropped)
-            {
-                WalHeadReclaimAction::CopyEncoded
-            } else {
-                WalHeadReclaimAction::Skip
-            }),
+            WalRecord::DropCollection { collection_id } => Ok(
+                if find_collection_in(original_collections, collection_id)
+                    .is_some_and(|collection| collection.basis() == StartupCollectionBasis::Dropped)
+                {
+                    WalHeadReclaimAction::CopyEncoded
+                } else {
+                    WalHeadReclaimAction::Skip
+                },
+            ),
             WalRecord::Link { .. }
             | WalRecord::FreeListHead { .. }
             | WalRecord::ReclaimBegin { .. }
@@ -1350,10 +1292,6 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
     ) -> Result<(), StorageRuntimeError> {
-        //= spec/ring.md#core-requirements
-        //# `RING-CORE-013` Ordinary foreground allocations MUST NOT consume the last `min_free_regions` free regions.
-        //= spec/ring.md#core-requirements
-        //# `RING-CORE-014` If reclaim cannot restore at least `min_free_regions` free regions, the database MUST treat ordinary writes as out of space until space is freed or the store is migrated.
         for _ in 0..self.metadata.region_count {
             let free_regions = self.free_region_count::<REGION_SIZE, REGION_COUNT, IO>(flash)?;
             if free_regions > self.metadata.min_free_regions {
@@ -1390,8 +1328,6 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
     ) -> Result<WalHeadReclaimPlan<MAX_COLLECTIONS>, StorageRuntimeError> {
-        //= spec/ring.md#wal-reclaim-eligibility
-        //# `RING-WAL-RECLAIM-PRE-001` The candidate region MUST be the head of the WAL.
         if self.wal_head == self.wal_tail {
             return Err(StorageRuntimeError::WalHeadReclaimRequiresMultipleWalRegions);
         }
@@ -1399,7 +1335,9 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
             return Err(StorageRuntimeError::WalHeadReclaimBlockedByRecoveryBoundary);
         }
         if let Some(region_index) = self.ready_region {
-            return Err(StorageRuntimeError::WalHeadReclaimBlockedByReadyRegion(region_index));
+            return Err(StorageRuntimeError::WalHeadReclaimBlockedByReadyRegion(
+                region_index,
+            ));
         }
         if !self.pending_reclaims.is_empty() {
             return Err(StorageRuntimeError::WalHeadReclaimBlockedByPendingReclaims);
@@ -1470,10 +1408,6 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         workspace: &mut StorageWorkspace<REGION_SIZE>,
         plan: &WalHeadReclaimPlan<MAX_COLLECTIONS>,
     ) -> Result<(), StorageRuntimeError> {
-        //= spec/ring.md#wal-reclaim-eligibility
-        //# `RING-WAL-RECLAIM-PRE-002` For every live record in the candidate, an equivalent live state MUST be already represented durably outside the candidate (typically by newer `snapshot`, `drop_collection`, or by `head(collection_id, collection_type, region_index)` plus newer updates).
-        //= spec/ring.md#wal-reclaim-eligibility
-        //# `RING-WAL-RECLAIM-POST-001` No collection's `H(c)`, `B(c)`, or live post-basis updates MUST NOT depend on bytes in the reclaimed region.
         let mut active_collections = Vec::<CollectionId, MAX_COLLECTIONS>::new();
         let metadata = self.metadata;
         let region_size = usize::try_from(metadata.region_size)
@@ -1552,16 +1486,6 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         workspace: &mut StorageWorkspace<REGION_SIZE>,
         new_head: u32,
     ) -> Result<(), StorageRuntimeError> {
-        //= spec/ring.md#wal-reclaim-eligibility
-        //# `RING-WAL-RECLAIM-PRE-003` After planned metadata updates, startup replay MUST still be able to walk a valid WAL chain from head to tail.
-        //= spec/ring.md#wal-reclaim-eligibility
-        //# `RING-WAL-RECLAIM-POST-005` Startup step 4 MUST recover the same effective WAL head after
-        //# reclaim as before reclaim, using the current tail region's
-        //# `WalRegionPrologue` plus the last valid tail-local
-        //# `head(collection_id = 0, collection_type = wal, region_index = ...)`
-        //# override, if any.
-        //= spec/ring.md#wal-reclaim-eligibility
-        //# `RING-WAL-RECLAIM-POST-006` WAL chain integrity MUST remain valid with no broken `link` path.
         self.append_record_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
             flash,
             workspace,
@@ -1573,11 +1497,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         )
     }
 
-    fn free_region_count<
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO: FlashIo,
-    >(
+    fn free_region_count<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
         &self,
         flash: &mut IO,
     ) -> Result<u32, StorageRuntimeError> {
@@ -1604,10 +1524,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         Ok(count)
     }
 
-    fn region_reachable_from_live_state<
-        const REGION_SIZE: usize,
-        IO: FlashIo,
-    >(
+    fn region_reachable_from_live_state<const REGION_SIZE: usize, IO: FlashIo>(
         &self,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
@@ -1629,11 +1546,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         )
     }
 
-    fn region_is_on_free_list<
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO: FlashIo,
-    >(
+    fn region_is_on_free_list<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
         &self,
         flash: &mut IO,
         target_region_index: u32,
@@ -1717,12 +1630,7 @@ impl<E> From<StorageRuntimeError> for StorageVisitError<E> {
 impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
     StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>
 {
-    pub fn visit_wal_records<
-        const REGION_SIZE: usize,
-        IO: FlashIo,
-        E,
-        F,
-    >(
+    pub fn visit_wal_records<const REGION_SIZE: usize, IO: FlashIo, E, F>(
         &self,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
@@ -1758,8 +1666,9 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
                     break;
                 }
 
-                let decoded = decode_record(&region_bytes[offset..limit], metadata, logical_scratch)
-                    .map_err(StorageRuntimeError::from)?;
+                let decoded =
+                    decode_record(&region_bytes[offset..limit], metadata, logical_scratch)
+                        .map_err(StorageRuntimeError::from)?;
                 let record = decoded.record;
                 let encoded_len = decoded.encoded_len;
                 if let WalRecord::Link {
@@ -1786,7 +1695,9 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
 
             current_region = next_region.ok_or_else(|| {
                 StorageVisitError::Storage(StorageRuntimeError::Startup(
-                    StartupError::BrokenWalChain { region_index: current_region },
+                    StartupError::BrokenWalChain {
+                        region_index: current_region,
+                    },
                 ))
             })?;
         }
@@ -1852,15 +1763,20 @@ pub(crate) fn reopen_without_reclaim_recovery<
     flash: &mut IO,
     workspace: &mut StorageWorkspace<REGION_SIZE>,
 ) -> Result<StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>, StorageRuntimeError> {
-    let startup =
-        open_formatted_store::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>(
-            flash,
-            workspace,
-        )?;
+    let startup = open_formatted_store::<
+        REGION_SIZE,
+        REGION_COUNT,
+        IO,
+        MAX_COLLECTIONS,
+        MAX_PENDING_RECLAIMS,
+    >(flash, workspace)?;
     from_startup_state(startup)
 }
 
-pub(crate) fn from_startup_state<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>(
+pub(crate) fn from_startup_state<
+    const MAX_COLLECTIONS: usize,
+    const MAX_PENDING_RECLAIMS: usize,
+>(
     startup: StartupState<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
 ) -> Result<StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>, StorageRuntimeError> {
     let mut collections = Vec::new();
@@ -1892,25 +1808,18 @@ pub(crate) fn from_startup_state<const MAX_COLLECTIONS: usize, const MAX_PENDING
     })
 }
 
-fn read_header_from_flash<
-    const REGION_SIZE: usize,
-    const REGION_COUNT: usize,
-    IO: FlashIo,
->(
+fn read_header_from_flash<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
     flash: &mut IO,
     region_index: u32,
 ) -> Result<crate::Header, StorageRuntimeError> {
     let mut header_bytes = [0u8; crate::Header::ENCODED_LEN];
-    flash.read_region(region_index, 0, &mut header_bytes)
+    flash
+        .read_region(region_index, 0, &mut header_bytes)
         .map_err(StorageRuntimeError::Mock)?;
     crate::Header::decode(&header_bytes).map_err(|error| StorageRuntimeError::Startup(error.into()))
 }
 
-fn read_free_pointer_successor<
-    const REGION_SIZE: usize,
-    const REGION_COUNT: usize,
-    IO: FlashIo,
->(
+fn read_free_pointer_successor<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
     flash: &mut IO,
     metadata: StorageMetadata,
     region_index: u32,
@@ -1929,19 +1838,13 @@ fn read_free_pointer_successor<
     Ok(footer.next_tail)
 }
 
-fn initialize_wal_region<
-    const REGION_SIZE: usize,
-    const REGION_COUNT: usize,
-    IO: FlashIo,
->(
+fn initialize_wal_region<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
     flash: &mut IO,
     metadata: StorageMetadata,
     region_index: u32,
     sequence: u64,
     wal_head: u32,
 ) -> Result<(), StorageRuntimeError> {
-    //= spec/ring.md#wal-reclaim-eligibility
-    //# `RING-WAL-RECLAIM-POST-007` The reclaimed region MUST be erased before reuse.
     //= spec/ring.md#wal-record-types
     //# `RING-REPLAY-ASSUME-001` A WAL region MUST be erased before reuse.
     flash.erase_region(region_index)?;
@@ -1952,7 +1855,8 @@ fn initialize_wal_region<
         collection_format: WAL_V1_FORMAT,
     };
     let mut header_bytes = [0u8; Header::ENCODED_LEN];
-    header.encode_into(&mut header_bytes)
+    header
+        .encode_into(&mut header_bytes)
         .map_err(|error| StorageRuntimeError::Startup(error.into()))?;
     flash.write_region(region_index, 0, &header_bytes)?;
 
@@ -2036,8 +1940,12 @@ fn find_link_target_in_wal_region<const REGION_SIZE: usize, IO: FlashIo>(
             return Ok(None);
         }
 
-        let decoded = decode_record(&region_bytes[offset..region_size], metadata, logical_scratch)
-            .map_err(StorageRuntimeError::from)?;
+        let decoded = decode_record(
+            &region_bytes[offset..region_size],
+            metadata,
+            logical_scratch,
+        )
+        .map_err(StorageRuntimeError::from)?;
         if let WalRecord::Link {
             next_region_index, ..
         } = decoded.record

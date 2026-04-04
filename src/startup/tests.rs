@@ -20,11 +20,7 @@ fn open_formatted_store<
     )
 }
 
-fn append_wal_record<
-    const REGION_SIZE: usize,
-    const REGION_COUNT: usize,
-    const MAX_LOG: usize,
->(
+fn append_wal_record<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize>(
     flash: &mut MockFlash<REGION_SIZE, REGION_COUNT, MAX_LOG>,
     metadata: StorageMetadata,
     region_index: u32,
@@ -34,15 +30,13 @@ fn append_wal_record<
     let mut physical = [0u8; REGION_SIZE];
     let mut logical = [0u8; REGION_SIZE];
     let used = encode_record_into(record, metadata, &mut physical, &mut logical).unwrap();
-    flash.write_region(region_index, offset, &physical[..used]).unwrap();
+    flash
+        .write_region(region_index, offset, &physical[..used])
+        .unwrap();
     offset + used
 }
 
-fn init_wal_region<
-    const REGION_SIZE: usize,
-    const REGION_COUNT: usize,
-    const MAX_LOG: usize,
->(
+fn init_wal_region<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize>(
     flash: &mut MockFlash<REGION_SIZE, REGION_COUNT, MAX_LOG>,
     region_index: u32,
     sequence: u64,
@@ -64,7 +58,9 @@ fn init_wal_region<
         wal_head_region_index,
     };
     let mut prologue_bytes = [0u8; WalRegionPrologue::ENCODED_LEN];
-    prologue.encode_into(&mut prologue_bytes, region_count).unwrap();
+    prologue
+        .encode_into(&mut prologue_bytes, region_count)
+        .unwrap();
     flash
         .write_region(region_index, Header::ENCODED_LEN, &prologue_bytes)
         .unwrap();
@@ -288,7 +284,9 @@ fn open_formatted_store_rejects_invalid_free_list_chain() {
     let mut flash = MockFlash::<64, 4, 32>::new(0xff);
     flash.format_empty_store(1, 8, 0xa5).unwrap();
 
-    let footer = FreePointerFooter { next_tail: Some(99) };
+    let footer = FreePointerFooter {
+        next_tail: Some(99),
+    };
     let mut footer_bytes = [0u8; FreePointerFooter::ENCODED_LEN];
     footer.encode_into(&mut footer_bytes, 0xff).unwrap();
     flash
@@ -296,7 +294,10 @@ fn open_formatted_store_rejects_invalid_free_list_chain() {
         .unwrap();
 
     let error = open_formatted_store::<64, 4, _, 8, 4>(&mut flash).unwrap_err();
-    assert_eq!(error, StartupError::InvalidFreeListChain { region_index: 1 });
+    assert_eq!(
+        error,
+        StartupError::InvalidFreeListChain { region_index: 1 }
+    );
 }
 
 #[test]
@@ -399,7 +400,10 @@ fn open_formatted_store_accepts_committed_region_head_basis() {
     assert_eq!(state.tracked_user_collection_count(), 1);
     assert_eq!(state.collections().len(), 1);
     assert_eq!(state.collections()[0].collection_id(), CollectionId(7));
-    assert_eq!(state.collections()[0].basis(), StartupCollectionBasis::Region(2));
+    assert_eq!(
+        state.collections()[0].basis(),
+        StartupCollectionBasis::Region(2)
+    );
     assert_eq!(
         state.collections()[0].collection_type(),
         Some(CollectionType::MAP_CODE)
@@ -462,7 +466,10 @@ fn open_formatted_store_accepts_reclaimed_historical_head_after_replacement() {
     let state = open_formatted_store::<256, 5, _, 8, 4>(&mut flash).unwrap();
 
     assert_eq!(state.collections().len(), 1);
-    assert_eq!(state.collections()[0].basis(), StartupCollectionBasis::Region(2));
+    assert_eq!(
+        state.collections()[0].basis(),
+        StartupCollectionBasis::Region(2)
+    );
     assert!(state.pending_reclaims().is_empty());
     assert_eq!(state.free_list_tail(), Some(1));
 }
@@ -508,7 +515,10 @@ fn open_formatted_store_tracks_pending_updates_on_empty_collection_basis() {
     assert_eq!(state.tracked_user_collection_count(), 1);
     assert_eq!(state.collections().len(), 1);
     assert_eq!(state.collections()[0].collection_id(), CollectionId(7));
-    assert_eq!(state.collections()[0].basis(), StartupCollectionBasis::Empty);
+    assert_eq!(
+        state.collections()[0].basis(),
+        StartupCollectionBasis::Empty
+    );
     assert_eq!(state.collections()[0].pending_update_count(), 2);
 }
 
@@ -643,7 +653,10 @@ fn open_formatted_store_recovers_rotation_after_link() {
 
     assert_eq!(state.wal_head(), 0);
     assert_eq!(state.wal_tail(), 1);
-    assert_eq!(state.wal_append_offset(), metadata.wal_record_area_offset().unwrap());
+    assert_eq!(
+        state.wal_append_offset(),
+        metadata.wal_record_area_offset().unwrap()
+    );
     assert_eq!(state.last_free_list_head(), Some(2));
     assert_eq!(state.free_list_tail(), Some(3));
     assert_eq!(state.ready_region(), None);
@@ -666,7 +679,8 @@ fn open_formatted_store_recovers_rotation_before_link() {
     };
     let mut physical = [0u8; 160];
     let mut logical = [0u8; 160];
-    let alloc_len = encoded_record_len(alloc_record, metadata, &mut physical, &mut logical).unwrap();
+    let alloc_len =
+        encoded_record_len(alloc_record, metadata, &mut physical, &mut logical).unwrap();
     let link_len = encoded_record_len(
         WalRecord::Link {
             next_region_index: 1,
@@ -691,19 +705,16 @@ fn open_formatted_store_recovers_rotation_before_link() {
         offset = append_wal_record(&mut flash, metadata, 0, offset, filler_record);
     }
 
-    append_wal_record(
-        &mut flash,
-        metadata,
-        0,
-        offset,
-        alloc_record,
-    );
+    append_wal_record(&mut flash, metadata, 0, offset, alloc_record);
 
     let state = open_formatted_store::<160, 4, _, 8, 4>(&mut flash).unwrap();
 
     assert_eq!(state.wal_head(), 0);
     assert_eq!(state.wal_tail(), 1);
-    assert_eq!(state.wal_append_offset(), metadata.wal_record_area_offset().unwrap());
+    assert_eq!(
+        state.wal_append_offset(),
+        metadata.wal_record_area_offset().unwrap()
+    );
     assert_eq!(state.last_free_list_head(), Some(2));
     assert_eq!(state.free_list_tail(), Some(3));
     assert_eq!(state.ready_region(), None);

@@ -82,17 +82,9 @@ fn core_library_crate_requires_no_embedded_framework_or_rtos_dependency() {
     let dependencies = dependency_names(&manifest, "dependencies");
     for dependency in dependencies {
         assert!(
-            ![
-                "embassy",
-                "rtic",
-                "freertos",
-                "zephyr",
-                "esp-idf",
-                "esp_idf",
-                "arduino",
-            ]
-            .iter()
-            .any(|prefix| dependency.starts_with(prefix)),
+            !["embassy", "rtic", "freertos", "zephyr", "esp-idf", "esp_idf", "arduino",]
+                .iter()
+                .any(|prefix| dependency.starts_with(prefix)),
             "unexpected framework or RTOS dependency {dependency}"
         );
     }
@@ -152,8 +144,8 @@ fn storage_facade_preserves_ring_behavior_through_delegating_entry_points() {
     let startup_src = read_repo_file("src/startup.rs");
     let map_src = read_repo_file("src/collections/map/mod.rs");
     for ring_trace in [
-        "RING-CORE-010",
-        "RING-CORE-011",
+        "RING-CORE-009",
+        "RING-REPLAY-ASSUME-001",
         "RING-STARTUP-007",
         "RING-STARTUP-026",
         "RING-FORMAT-005",

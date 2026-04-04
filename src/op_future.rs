@@ -5,12 +5,12 @@ use core::pin::Pin;
 use core::task::{Context, Poll};
 use serde::{Deserialize, Serialize};
 
+use crate::startup::StartupOpenPlan;
+use crate::storage::WalHeadReclaimPlan;
 use crate::{
     CollectionType, FlashIo, LsmMap, MapStorageError, StartupCollectionBasis, Storage,
     StorageRuntimeError, StorageWorkspace,
 };
-use crate::storage::WalHeadReclaimPlan;
-use crate::startup::StartupOpenPlan;
 
 pub struct RunOnce<F> {
     operation: Option<F>,
@@ -114,8 +114,7 @@ pub struct FlushMapFuture<
     K,
     V,
     const MAX_INDEXES: usize,
->
-where
+> where
     IO: FlashIo,
     K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
     V: Debug + Serialize + for<'de> Deserialize<'de>,
@@ -177,8 +176,7 @@ pub struct ReclaimWalHeadFuture<
     const REGION_SIZE: usize,
     const REGION_COUNT: usize,
     IO,
->
-where
+> where
     IO: FlashIo,
 {
     storage: &'a mut Storage<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
@@ -194,8 +192,7 @@ pub struct OpenStorageFuture<
     const REGION_SIZE: usize,
     const REGION_COUNT: usize,
     IO,
->
-where
+> where
     IO: FlashIo,
 {
     flash: &'a mut IO,
@@ -210,14 +207,7 @@ impl<
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
         IO,
-    > ReclaimWalHeadFuture<
-        'a,
-        MAX_COLLECTIONS,
-        MAX_PENDING_RECLAIMS,
-        REGION_SIZE,
-        REGION_COUNT,
-        IO,
-    >
+    > ReclaimWalHeadFuture<'a, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS, REGION_SIZE, REGION_COUNT, IO>
 where
     IO: FlashIo,
 {
@@ -242,14 +232,7 @@ impl<
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
         IO,
-    > OpenStorageFuture<
-        'a,
-        MAX_COLLECTIONS,
-        MAX_PENDING_RECLAIMS,
-        REGION_SIZE,
-        REGION_COUNT,
-        IO,
-    >
+    > OpenStorageFuture<'a, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS, REGION_SIZE, REGION_COUNT, IO>
 where
     IO: FlashIo,
 {
@@ -291,14 +274,7 @@ impl<
         const REGION_COUNT: usize,
         IO,
     > Unpin
-    for OpenStorageFuture<
-        'a,
-        MAX_COLLECTIONS,
-        MAX_PENDING_RECLAIMS,
-        REGION_SIZE,
-        REGION_COUNT,
-        IO,
-    >
+    for OpenStorageFuture<'a, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS, REGION_SIZE, REGION_COUNT, IO>
 where
     IO: FlashIo,
 {
@@ -405,14 +381,7 @@ impl<
         const REGION_COUNT: usize,
         IO,
     > Future
-    for OpenStorageFuture<
-        'a,
-        MAX_COLLECTIONS,
-        MAX_PENDING_RECLAIMS,
-        REGION_SIZE,
-        REGION_COUNT,
-        IO,
-    >
+    for OpenStorageFuture<'a, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS, REGION_SIZE, REGION_COUNT, IO>
 where
     IO: FlashIo,
 {
@@ -596,13 +565,15 @@ where
                 {
                     let (payload, _) = this.workspace.encode_buffers();
                     let used = this.map.encode_region_into(payload)?;
-                    this.storage.state.write_committed_region::<REGION_SIZE, REGION_COUNT, IO>(
-                        this.flash,
-                        region_index,
-                        this.map.id(),
-                        crate::MAP_REGION_V1_FORMAT,
-                        &payload[..used],
-                    )?;
+                    this.storage
+                        .state
+                        .write_committed_region::<REGION_SIZE, REGION_COUNT, IO>(
+                            this.flash,
+                            region_index,
+                            this.map.id(),
+                            crate::MAP_REGION_V1_FORMAT,
+                            &payload[..used],
+                        )?;
                 }
                 this.phase = match previous_region {
                     Some(previous_region) => FlushMapPhase::BeginPreviousRegionReclaim {

@@ -11,12 +11,21 @@ pub const WAL_V1_FORMAT: u16 = 0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiskError {
-    BufferTooSmall { needed: usize, available: usize },
+    BufferTooSmall {
+        needed: usize,
+        available: usize,
+    },
     InvalidChecksum,
     InvalidWalRecordMagic,
     InvalidWalWriteGranule,
-    InvalidRegionIndex { region_index: u32, region_count: u32 },
-    InvalidWalHeadRegionIndex { region_index: u32, region_count: u32 },
+    InvalidRegionIndex {
+        region_index: u32,
+        region_count: u32,
+    },
+    InvalidWalHeadRegionIndex {
+        region_index: u32,
+        region_count: u32,
+    },
     UnsupportedStorageVersion(u32),
 }
 
@@ -147,7 +156,8 @@ pub struct Header {
 }
 
 impl Header {
-    pub const ENCODED_LEN: usize = size_of::<u64>() + size_of::<u64>() + size_of::<u16>() + size_of::<u32>();
+    pub const ENCODED_LEN: usize =
+        size_of::<u64>() + size_of::<u64>() + size_of::<u16>() + size_of::<u32>();
 
     pub fn encode_into(&self, buffer: &mut [u8]) -> Result<usize, DiskError> {
         ensure_len(buffer, Self::ENCODED_LEN)?;
@@ -192,11 +202,7 @@ pub struct WalRegionPrologue {
 impl WalRegionPrologue {
     pub const ENCODED_LEN: usize = size_of::<u32>() * 2;
 
-    pub fn encode_into(
-        &self,
-        buffer: &mut [u8],
-        region_count: u32,
-    ) -> Result<usize, DiskError> {
+    pub fn encode_into(&self, buffer: &mut [u8], region_count: u32) -> Result<usize, DiskError> {
         if self.wal_head_region_index >= region_count {
             return Err(DiskError::InvalidWalHeadRegionIndex {
                 region_index: self.wal_head_region_index,
@@ -246,11 +252,7 @@ pub struct FreePointerFooter {
 impl FreePointerFooter {
     pub const ENCODED_LEN: usize = size_of::<u32>() * 2;
 
-    pub fn encode_into(
-        &self,
-        buffer: &mut [u8],
-        erased_byte: u8,
-    ) -> Result<usize, DiskError> {
+    pub fn encode_into(&self, buffer: &mut [u8], erased_byte: u8) -> Result<usize, DiskError> {
         ensure_len(buffer, Self::ENCODED_LEN)?;
 
         match self.next_tail {

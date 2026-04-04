@@ -1,5 +1,5 @@
-use super::*;
 use super::std::vec;
+use super::*;
 
 //= spec/implementation.md#i-o-requirements
 //# `RING-IMPL-IO-001` The borromean I/O abstraction MUST expose only
@@ -31,9 +31,14 @@ fn flash_io_trait_accepts_caller_defined_driver_types() {
     const REGION_COUNT: usize = 5;
     let mut flash = ForwardingFlash::<REGION_SIZE, REGION_COUNT, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
-    let mut storage =
-        Storage::<8, 4>::format::<REGION_SIZE, REGION_COUNT, _>(&mut flash, &mut workspace, 1, 8, 0xa5)
-            .unwrap();
+    let mut storage = Storage::<8, 4>::format::<REGION_SIZE, REGION_COUNT, _>(
+        &mut flash,
+        &mut workspace,
+        1,
+        8,
+        0xa5,
+    )
+    .unwrap();
     storage
         .create_map::<REGION_SIZE, REGION_COUNT, _>(&mut flash, &mut workspace, CollectionId(62))
         .unwrap();

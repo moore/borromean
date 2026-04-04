@@ -110,7 +110,8 @@ fn flush_future_keeps_collection_basis_on_previous_state_until_head_commit() {
 
     let previous_region = {
         let mut previous_buffer = [0u8; 512];
-        let mut previous = LsmMap::<u16, u16, 8>::new(CollectionId(82), &mut previous_buffer).unwrap();
+        let mut previous =
+            LsmMap::<u16, u16, 8>::new(CollectionId(82), &mut previous_buffer).unwrap();
         previous.set(1, 10).unwrap();
         storage
             .flush_map::<512, 5, _, _, _, 8>(&mut flash, &mut workspace, &previous)

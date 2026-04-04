@@ -301,7 +301,8 @@ impl<
     ) -> Result<ChannelCommand<A, PAYLOAD_MAX, CHECKPOINT_MAX>, ChannelError> {
         let sender_last = self.get_last_sequence(&author)?;
         let sequence = self.get_next_sequence();
-        let command = AddCommand::into_command(prior, sender_last, sequence, author, message_id, payload);
+        let command =
+            AddCommand::into_command(prior, sender_last, sequence, author, message_id, payload);
         self.apply_command(&command)?;
 
         Ok(command)

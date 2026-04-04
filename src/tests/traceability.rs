@@ -1,16 +1,16 @@
 extern crate std;
 
-use crate::{
-    CollectionId, DiskError, FlashIo, FreePointerFooter, Header, LsmMap, MapUpdate, MockError,
-    MockFlash, MockFormatError, MockOperation, Storage, StorageMetadata, StorageWorkspace,
-    WalRecord, WalRegionPrologue, decode_record, encode_record_into,
-};
 use self::std::collections::BTreeSet;
-use self::std::fs;
 use self::std::format;
+use self::std::fs;
 use self::std::path::{Path, PathBuf};
 use self::std::string::{String, ToString};
 use self::std::vec::Vec;
+use crate::{
+    decode_record, encode_record_into, CollectionId, DiskError, FlashIo, FreePointerFooter, Header,
+    LsmMap, MapUpdate, MockError, MockFlash, MockFormatError, MockOperation, Storage,
+    StorageMetadata, StorageWorkspace, WalRecord, WalRegionPrologue,
+};
 
 fn collect_rust_sources(dir: &Path, files: &mut Vec<PathBuf>) {
     for entry in fs::read_dir(dir).unwrap() {
@@ -293,7 +293,11 @@ fn collect_normative_requirement_ids(spec_path: &Path) -> Vec<String> {
 
 fn assert_spec_requirement_format(spec_path: &Path, expected_prefix: &str) {
     let items = collect_normative_requirement_items(spec_path);
-    assert!(!items.is_empty(), "no normative requirement items found in {}", spec_path.display());
+    assert!(
+        !items.is_empty(),
+        "no normative requirement items found in {}",
+        spec_path.display()
+    );
 
     for item in items {
         assert!(

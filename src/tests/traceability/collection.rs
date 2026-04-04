@@ -9,11 +9,14 @@ fn map_collection_paths_delegate_durability_ordering_and_recovery_to_shared_stor
     let lib = strip_comment_lines(&read_repo_file("src/lib.rs"));
     let map = strip_comment_lines(&read_repo_file("src/collections/map/mod.rs"));
 
-    assert!(map.contains("use crate::storage::{StorageRuntime, StorageRuntimeError, StorageVisitError};"));
+    assert!(map
+        .contains("use crate::storage::{StorageRuntime, StorageRuntimeError, StorageVisitError};"));
     assert!(map.contains("storage: &mut StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>"));
     assert!(map.contains("storage: &StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>"));
     assert!(map.contains("storage.append_snapshot::<REGION_SIZE, REGION_COUNT, IO>("));
-    assert!(map.contains("storage.reserve_next_region::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace)?;"));
+    assert!(map.contains(
+        "storage.reserve_next_region::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace)?;"
+    ));
     assert!(map.contains("storage.write_committed_region::<REGION_SIZE, REGION_COUNT, IO>("));
     assert!(map.contains("storage.append_reclaim_begin::<REGION_SIZE, REGION_COUNT, IO>("));
     assert!(map.contains("storage.append_head::<REGION_SIZE, REGION_COUNT, IO>("));

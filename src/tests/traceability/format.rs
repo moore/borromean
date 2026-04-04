@@ -7,10 +7,7 @@ use super::*;
 #[test]
 fn implementation_spec_requirements_use_stable_identifiers_and_normative_language() {
     let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    assert_spec_requirement_format(
-        &repo_root.join("spec/implementation.md"),
-        "RING-IMPL-",
-    );
+    assert_spec_requirement_format(&repo_root.join("spec/implementation.md"), "RING-IMPL-");
 }
 
 //= spec/ring.md#requirements-format
