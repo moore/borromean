@@ -56,11 +56,6 @@ enum FlushMapPhase {
     Done,
 }
 
-//= spec/implementation.md#architecture-requirements
-//# `RING-IMPL-ARCH-005` The implementation SHOULD model complex
-//# multi-step procedures such as startup replay and reclaim as explicit
-//# phase machines so that each durable transition is inspectable in code
-//# review and testable in isolation.
 #[derive(Debug)]
 enum ReclaimWalHeadPhase<const MAX_COLLECTIONS: usize> {
     Plan,
@@ -82,11 +77,6 @@ enum ReclaimWalHeadPhase<const MAX_COLLECTIONS: usize> {
     Done,
 }
 
-//= spec/implementation.md#architecture-requirements
-//# `RING-IMPL-ARCH-005` The implementation SHOULD model complex
-//# multi-step procedures such as startup replay and reclaim as explicit
-//# phase machines so that each durable transition is inspectable in code
-//# review and testable in isolation.
 enum OpenStoragePhase<
     const REGION_COUNT: usize,
     const MAX_COLLECTIONS: usize,

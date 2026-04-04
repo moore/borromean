@@ -1173,11 +1173,6 @@ fn validate_live_collection_types(collections: &[StartupCollection]) -> Result<(
             continue;
         }
 
-        //= spec/implementation.md#panic-requirements
-        //# `RING-IMPL-PANIC-004` If a condition is believed to be impossible by
-        //# construction, the implementation SHOULD encode that proof in types,
-        //# control flow, or checked validation before the point of use rather than
-        //# relying on a panic as a backstop.
         let Some(collection_type) = collection.collection_type else {
             return Err(StartupError::UnsupportedLiveCollectionType(0xffff));
         };

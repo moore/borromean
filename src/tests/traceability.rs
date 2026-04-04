@@ -3,7 +3,7 @@ extern crate std;
 use crate::{
     CollectionId, DiskError, FlashIo, FreePointerFooter, Header, LsmMap, MapUpdate, MockError,
     MockFlash, MockFormatError, MockOperation, Storage, StorageMetadata, StorageWorkspace,
-    WalRecord, WalRegionPrologue, encode_record_into,
+    WalRecord, WalRegionPrologue, decode_record, encode_record_into,
 };
 use self::std::collections::BTreeSet;
 use self::std::fs;

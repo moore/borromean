@@ -413,7 +413,5 @@ fn read_array<const N: usize>(buffer: &[u8], offset: &mut usize) -> Result<[u8; 
     Ok(bytes)
 }
 
-//= spec/implementation.md#architecture-requirements
-//# `RING-IMPL-ARCH-004` Encoding and decoding code MUST be usable from pure tests without requiring live device I/O.
 #[cfg(test)]
 mod tests;

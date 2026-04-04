@@ -1,5 +1,3 @@
-//= spec/implementation.md#api-requirements
-//# `RING-IMPL-API-005` The implementation MAY provide optional helper adapters for common executors or embedded frameworks, but the core crate MUST remain usable without them.
 #![no_std]
 #![cfg_attr(
     not(test),
@@ -102,10 +100,6 @@ pub trait Collection {
     fn collection_type(&self) -> CollectionType;
 }
 
-//= spec/implementation.md#architecture-requirements
-//# `RING-IMPL-ARCH-001` `Storage` MUST own logical storage state and configuration, but MUST NOT require long-lived ownership of the backing I/O object.
-//= spec/implementation.md#core-requirements
-//# `RING-IMPL-CORE-004` The implementation MUST preserve the durable behavior defined by [spec/ring.md](ring.md); this specification MAY constrain implementation structure but MUST NOT weaken ring-level correctness requirements.
 pub struct Storage<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize> {
     state: StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
     dirty_frontiers: Vec<CollectionId, MAX_COLLECTIONS>,
@@ -139,8 +133,6 @@ impl From<MapStorageError> for StorageOpenError {
 impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
     Storage<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>
 {
-    //= spec/implementation.md#api-requirements
-    //# `RING-IMPL-API-001` Public entry points for format, open, replay, and mutating collection operations MUST make their workspace and I/O dependencies explicit in the function signature.
     pub fn format_future<
         'a,
         const REGION_SIZE: usize,
@@ -739,8 +731,6 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
         V: Debug + Serialize + for<'de> Deserialize<'de>,
     {
-        //= spec/implementation.md#api-requirements
-        //# `RING-IMPL-API-003` Collection implementations MUST define their opaque payload semantics above the shared storage primitives rather than bypassing WAL and region-management invariants.
         let Some(collection) = self
             .state
             .collections()
