@@ -701,20 +701,6 @@ fn scan_wal_region<const REGION_SIZE: usize, IO: FlashIo, F>(
 where
     F: FnMut(&mut IO, usize, WalRecord<'_>) -> Result<(), StartupError>,
 {
-    //= spec/ring.md#durability-and-crash-semantics
-    //# `RING-DURABILITY-003` Replay MUST treat partially written records as torn and ignore them using checksum validation and WAL tail recovery rules.
-    //= spec/ring.md#wal-record-types
-    //# `RING-WAL-ENC-007` Every WAL record start offset within a WAL region
-    //# MUST be aligned to
-    //# `wal_write_granule`, the smallest writable unit of the backing flash.
-    //= spec/ring.md#wal-record-types
-    //# `RING-WAL-ENC-010` The recovered append point for the tail region
-    //# MUST be the first aligned
-    //# slot whose first byte is `erased_byte` after the last valid replayed
-    //# tail record. If no such slot exists, the tail region is currently full
-    //# and the next WAL append must rotate via `link` to a new WAL region.
-    //= spec/ring.md#wal-record-types
-    //# `RING-CHECKSUM-005` An implementation MUST ensure that even intentionally corrupted storage eventually produces a reported error rather than memory unsafety, undefined behavior, control-flow corruption, infinite loops, or unbounded resource consumption amounting to denial of service.
     //= spec/ring.md#wal-record-types
     //# All replay walks, decoders, and collection-format handlers MUST remain bounded by configured storage geometry and record sizes.
     ensure_region_index_in_range(region_index, metadata.region_count)?;
@@ -858,10 +844,6 @@ fn apply_record<IO: FlashIo, const MAX_COLLECTIONS: usize, const MAX_PENDING_REC
     ready_region: &mut Option<u32>,
     pending_reclaims: &mut Vec<u32, MAX_PENDING_RECLAIMS>,
 ) -> Result<(), StartupError> {
-    //= spec/ring.md#core-requirements
-    //# `RING-CORE-006` For a live user collection, the earliest retained type-bearing record seen during replay MUST establish the replay-tracked `collection_type`, and every later valid type-bearing record for that collection MUST carry the same `collection_type`.
-    //= spec/ring.md#wal-record-types
-    //# `RING-WAL-VALID-026` `reclaim_begin(region_index)` and `reclaim_end(region_index)` MUST appear in WAL order and are matched by `region_index`.
     match record {
         WalRecord::NewCollection {
             collection_id,
@@ -1134,10 +1116,6 @@ fn validate_live_collection_types(collections: &[StartupCollection]) -> Result<(
     for collection in collections {
         //= spec/ring.md#startup-replay-algorithm
         //# `RING-STARTUP-026` If replay yields a live collection whose `collection_type` is unsupported by the implementation, startup MUST fail.
-        //= spec/ring.md#startup-replay-algorithm
-        //# `RING-STARTUP-028` A dropped tombstone whose old
-        //# `collection_type` is unsupported MAY remain as inert metadata and does
-        //# not by itself require startup failure.
         if collection.basis == StartupCollectionBasis::Dropped {
             continue;
         }

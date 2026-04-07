@@ -136,6 +136,48 @@ fn open_formatted_store_after_corrupt_slot_with_wal_recovery() -> (usize, Startu
     )
 }
 
+fn open_formatted_store_after_torn_slot_with_wal_recovery() -> (usize, StartupState<8, 4>) {
+    let mut flash = MockFlash::<128, 4, 96>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    let wal_offset = metadata.wal_record_area_offset().unwrap();
+
+    let mut physical = [0u8; 128];
+    let mut logical = [0u8; 128];
+    let encoded_len = encode_record_into(
+        WalRecord::FreeListHead {
+            region_index: Some(3),
+        },
+        metadata,
+        &mut physical,
+        &mut logical,
+    )
+    .unwrap();
+    assert!(encoded_len >= 8);
+    flash.write_region(0, wal_offset, &physical[..4]).unwrap();
+
+    let after_recovery = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        wal_offset + 8,
+        WalRecord::WalRecovery,
+    );
+    let next_offset = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        after_recovery,
+        WalRecord::FreeListHead {
+            region_index: Some(2),
+        },
+    );
+
+    (
+        next_offset,
+        open_formatted_store::<128, 4, _, 8, 4>(&mut flash).unwrap(),
+    )
+}
+
 fn open_formatted_store_after_replayed_alloc_begin() -> (usize, StartupState<8, 4>) {
     let mut flash = MockFlash::<256, 4, 64>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
@@ -341,6 +383,35 @@ fn open_formatted_store_recovers_append_point_after_replayed_alloc_begin() {
     assert_eq!(state.wal_tail(), 0);
 }
 
+//= spec/ring.md#durability-and-crash-semantics
+//# `RING-DURABILITY-003` Replay MUST treat partially written records as
+//# torn and ignore them using checksum validation and WAL tail recovery
+//# rules.
+#[test]
+fn open_formatted_store_ignores_torn_tail_slots_after_wal_recovery() {
+    let (next_offset, state) = open_formatted_store_after_torn_slot_with_wal_recovery();
+
+    assert_eq!(state.wal_append_offset(), next_offset);
+    assert_eq!(state.last_free_list_head(), Some(2));
+    assert!(!state.pending_wal_recovery_boundary());
+}
+
+//= spec/ring.md#wal-record-types
+//# `RING-CHECKSUM-005` An implementation MUST ensure that even
+//# intentionally corrupted storage eventually produces a reported error
+//# rather than memory unsafety, undefined behavior, control-flow
+//# corruption, infinite loops, or unbounded resource consumption
+//# amounting to denial of service.
+#[test]
+fn open_formatted_store_reports_an_error_for_intentionally_corrupted_wal_bytes() {
+    let (_wal_offset, error) = open_formatted_store_after_corrupt_slot_without_wal_recovery();
+
+    assert!(matches!(
+        error,
+        StartupError::UnexpectedRecordAfterCorruption { .. }
+    ));
+}
+
 #[test]
 fn open_formatted_store_tracks_live_collection_snapshot_basis() {
     let mut flash = MockFlash::<128, 4, 96>::new(0xff);
@@ -374,6 +445,52 @@ fn open_formatted_store_tracks_live_collection_snapshot_basis() {
     );
     assert_eq!(state.collections()[0].pending_update_count(), 0);
     assert!(state.pending_reclaims().is_empty());
+}
+
+//= spec/ring.md#core-requirements
+//# `RING-CORE-006` For a live user collection, the earliest retained
+//# type-bearing record seen during replay MUST establish the
+//# replay-tracked `collection_type`, and every later valid type-bearing
+//# record for that collection MUST carry the same `collection_type`.
+#[test]
+fn open_formatted_store_rejects_later_type_bearing_records_with_mismatched_collection_type() {
+    let mut flash = MockFlash::<128, 4, 96>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    init_user_region_header(&mut flash, 2, 4, CollectionId(7), 1);
+
+    let wal_offset = metadata.wal_record_area_offset().unwrap();
+    let after_snapshot = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        wal_offset,
+        WalRecord::Snapshot {
+            collection_id: CollectionId(7),
+            collection_type: CollectionType::MAP_CODE,
+            payload: &[1, 2, 3],
+        },
+    );
+    append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        after_snapshot,
+        WalRecord::Head {
+            collection_id: CollectionId(7),
+            collection_type: CollectionType::CHANNEL_CODE,
+            region_index: 2,
+        },
+    );
+
+    let error = open_formatted_store::<128, 4, _, 8, 4>(&mut flash).unwrap_err();
+    assert_eq!(
+        error,
+        StartupError::CollectionTypeMismatch {
+            collection_id: CollectionId(7),
+            expected: CollectionType::MAP_CODE,
+            actual: CollectionType::CHANNEL_CODE,
+        }
+    );
 }
 
 #[test]
@@ -551,6 +668,10 @@ fn open_formatted_store_rejects_update_after_drop_collection() {
     assert_eq!(error, StartupError::DroppedCollection(CollectionId(7)));
 }
 
+//= spec/ring.md#wal-record-types
+//# `RING-WAL-VALID-026` `reclaim_begin(region_index)` and
+//# `reclaim_end(region_index)` MUST appear in WAL order and are matched
+//# by `region_index`.
 #[test]
 fn open_formatted_store_tracks_pending_reclaims_in_order() {
     let mut flash = MockFlash::<128, 4, 96>::new(0xff);
@@ -604,6 +725,22 @@ fn open_formatted_store_rejects_unsupported_live_collection_type() {
 
     let error = open_formatted_store::<128, 4, _, 8, 4>(&mut flash).unwrap_err();
     assert_eq!(error, StartupError::UnsupportedLiveCollectionType(0x1234));
+}
+
+//= spec/ring.md#startup-replay-algorithm
+//# `RING-STARTUP-028` A dropped tombstone whose old
+//# `collection_type` is unsupported MAY remain as inert metadata and
+//# does not by itself require startup failure.
+#[test]
+fn validate_live_collection_types_ignores_unsupported_dropped_tombstones() {
+    let collections = [StartupCollection {
+        collection_id: CollectionId(7),
+        collection_type: Some(0x1234),
+        basis: StartupCollectionBasis::Dropped,
+        pending_update_count: 0,
+    }];
+
+    assert_eq!(validate_live_collection_types(&collections), Ok(()));
 }
 
 #[test]

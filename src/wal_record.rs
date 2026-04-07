@@ -216,8 +216,6 @@ pub fn encode_record_into(
     output: &mut [u8],
     logical_scratch: &mut [u8],
 ) -> Result<usize, WalRecordError> {
-    //= spec/ring.md#wal-record-types
-    //# `RING-WAL-ENC-007` Every WAL record start offset within a WAL region MUST be aligned to `wal_write_granule`, the smallest writable unit of the backing flash.
     metadata.validate()?;
 
     let logical_len = encode_logical_record(record, logical_scratch)?;

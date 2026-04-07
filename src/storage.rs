@@ -876,10 +876,6 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         workspace: &mut StorageWorkspace<REGION_SIZE>,
         record: WalRecord<'_>,
     ) -> Result<(), StorageRuntimeError> {
-        //= spec/ring.md#wal-record-types
-        //# `RING-WAL-ENC-007` Every WAL record start offset within a WAL region
-        //# MUST be aligned to
-        //# `wal_write_granule`, the smallest writable unit of the backing flash.
         let (physical, logical) = workspace.encode_buffers();
         let encoded_len = encode_record_into(record, self.metadata, physical, logical)?;
         if self

@@ -345,6 +345,27 @@ fn encoded_record_len_is_rounded_to_wal_write_granule() {
     assert_eq!(encoded_len % 16, 0);
 }
 
+//= spec/ring.md#wal-record-types
+//# `RING-WAL-ENC-007` Every WAL record start offset within a WAL region
+//# MUST be aligned to `wal_write_granule`, the smallest writable unit
+//# of the backing flash.
+#[test]
+fn consecutive_wal_record_start_offsets_stay_aligned_to_wal_write_granule() {
+    let metadata = metadata(16);
+    let initial_offset = metadata.wal_record_area_offset().unwrap();
+    let (_first_physical, first_len) = encode_physical(WalRecord::WalRecovery, metadata);
+    let (_second_physical, second_len) = encode_physical(
+        WalRecord::FreeListHead {
+            region_index: Some(3),
+        },
+        metadata,
+    );
+
+    assert_eq!(initial_offset % 16, 0);
+    assert_eq!((initial_offset + first_len) % 16, 0);
+    assert_eq!((initial_offset + first_len + second_len) % 16, 0);
+}
+
 #[test]
 fn update_record_round_trips_with_escaping_and_padding() {
     let metadata = metadata(8);
