@@ -448,13 +448,6 @@ fn open_formatted_store_ignores_torn_tail_slots_after_wal_recovery() {
 //# rather than memory unsafety, undefined behavior, control-flow
 //# corruption, infinite loops, or unbounded resource consumption
 //# amounting to denial of service.
-//= spec/ring.md#wal-record-types
-//# All replay walks, decoders, and collection-format handlers MUST remain
-//# bounded by configured storage geometry and record sizes.
-//= spec/ring.md#wal-record-types
-//= type=test
-//# All replay walks, decoders, and collection-format handlers MUST remain
-//# bounded by configured storage geometry and record sizes.
 #[test]
 fn open_formatted_store_reports_an_error_for_intentionally_corrupted_wal_bytes() {
     let (_wal_offset, error) = open_formatted_store_after_corrupt_slot_without_wal_recovery();

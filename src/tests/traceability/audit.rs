@@ -6,11 +6,6 @@ use super::*;
 //# dedicated automated test function or dedicated compile-time test case
 //# whose primary purpose is to verify that single requirement.
 //= spec/implementation.md#verification-requirements
-//# `RING-IMPL-TEST-001` Every normative requirement in
-//# [spec/ring.md](ring.md) or this specification MUST have at least one
-//# dedicated automated test function or dedicated compile-time test case
-//# whose primary purpose is to verify that single requirement.
-//= spec/implementation.md#verification-requirements
 //= type=test
 //# `RING-IMPL-TEST-001` Every normative requirement in
 //# [spec/ring.md](ring.md) or this specification MUST have at least one

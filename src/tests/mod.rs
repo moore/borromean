@@ -1390,9 +1390,6 @@ fn storage_map_api_restores_snapshot_and_updates() {
 //# `RING-CORE-012` The implementation MUST maintain
 //# `min_free_regions >= max_in_memory_dirty_collections + 1`.
 //= spec/ring.md#core-requirements
-//# `RING-CORE-012` The implementation MUST maintain
-//# `min_free_regions >= max_in_memory_dirty_collections + 1`.
-//= spec/ring.md#core-requirements
 //= type=test
 //# `RING-CORE-012` The implementation MUST maintain
 //# `min_free_regions >= max_in_memory_dirty_collections + 1`.
@@ -2175,11 +2172,6 @@ fn storage_reopen_after_replacement_recovers_singleton_free_list_for_reclaimed_r
     assert_eq!(footer.next_tail, None);
 }
 
-//= spec/ring.md#region-reclaim
-//# `RING-REGION-RECLAIM-004` Establish `r` as a free region without
-//# erasing it. In particular,
-//# `r.free_pointer.next_tail` MUST still be uninitialized when `r` is
-//# about to become the new free-list tail.
 //= spec/ring.md#region-reclaim
 //# `RING-REGION-RECLAIM-004` Establish `r` as a free region without
 //# erasing it. In particular,
