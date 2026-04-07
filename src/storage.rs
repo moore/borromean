@@ -1707,8 +1707,6 @@ struct RotationReserves {
     rotation_reserve: usize,
 }
 
-//= spec/ring.md#format-storage-on-disk-initialization
-//# RING-FORMAT-STORAGE-002 Write `StorageMetadata` (`storage_version`, `region_size`, `region_count`, `min_free_regions`, `wal_write_granule`, `erased_byte`, `wal_record_magic`, `metadata_checksum`) and sync metadata.
 pub fn format<
     const REGION_SIZE: usize,
     const REGION_COUNT: usize,

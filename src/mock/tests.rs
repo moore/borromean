@@ -101,6 +101,44 @@ fn format_empty_store_reserves_region_zero_as_initial_wal_region() {
 }
 
 //= spec/ring.md#format-storage-on-disk-initialization
+//# `RING-FORMAT-STORAGE-003` Initialize region `0` as WAL:
+//# write valid `Header` with `collection_id = 0`,
+//# `collection_format = wal_v1`, and `sequence = 0`,
+//# write a valid `WalRegionPrologue` with `wal_head_region_index = 0`,
+//# then sync region `0`.
+#[test]
+fn format_empty_store_initializes_region_zero_with_wal_header_and_prologue() {
+    let mut flash = MockFlash::<64, 4, 32>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+
+    let header = Header::decode(&flash.region_bytes(0).unwrap()[..Header::ENCODED_LEN]).unwrap();
+    assert_eq!(header.sequence, 0);
+    assert_eq!(header.collection_id, CollectionId(0));
+    assert_eq!(header.collection_format, WAL_V1_FORMAT);
+
+    let prologue_offset = Header::ENCODED_LEN;
+    let prologue_end = prologue_offset + WalRegionPrologue::ENCODED_LEN;
+    let prologue = WalRegionPrologue::decode(
+        &flash.region_bytes(0).unwrap()[prologue_offset..prologue_end],
+        metadata.region_count,
+    )
+    .unwrap();
+    assert_eq!(prologue.wal_head_region_index, 0);
+
+    assert!(flash.operations().contains(&MockOperation::WriteRegion {
+        region_index: 0,
+        offset: 0,
+        len: Header::ENCODED_LEN,
+    }));
+    assert!(flash.operations().contains(&MockOperation::WriteRegion {
+        region_index: 0,
+        offset: Header::ENCODED_LEN,
+        len: WalRegionPrologue::ENCODED_LEN,
+    }));
+    assert_eq!(flash.operations().last(), Some(&MockOperation::Sync));
+}
+
+//= spec/ring.md#format-storage-on-disk-initialization
 //# `RING-FORMAT-STORAGE-POST-003` The free list MUST contain every non-WAL region in ascending region-index
 //# order.
 #[test]

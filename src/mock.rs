@@ -212,10 +212,6 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize>
     //= spec/ring.md#format-storage-on-disk-initialization
     //# RING-FORMAT-STORAGE-PRE-003 Region `0` MUST be reserved as the initial WAL region.
     //= spec/ring.md#format-storage-on-disk-initialization
-    //# RING-FORMAT-STORAGE-003 Initialize region `0` as WAL:
-    //= spec/ring.md#format-storage-on-disk-initialization
-    //# `RING-FORMAT-STORAGE-POST-001` WAL head and WAL tail MUST both be region `0`.
-    //= spec/ring.md#format-storage-on-disk-initialization
     //# RING-FORMAT-STORAGE-POST-002 A user collection durable head MUST NOT exist after formatting.
     //= spec/ring.md#format-storage-on-disk-initialization
     //# `RING-FORMAT-STORAGE-POST-003` The free list MUST contain every non-WAL region in ascending region-index

@@ -167,6 +167,42 @@ fn committed_region_sequence_progress() -> CommittedRegionSequenceProgress {
     }
 }
 
+//= spec/ring.md#format-storage-on-disk-initialization
+//# `RING-FORMAT-STORAGE-002` Write `StorageMetadata`
+//# (`storage_version`, `region_size`, `region_count`,
+//# `min_free_regions`, `wal_write_granule`, `erased_byte`,
+//# `wal_record_magic`, `metadata_checksum`) and sync metadata.
+#[test]
+fn format_writes_metadata_before_reopening_the_fresh_store() {
+    let mut flash = MockFlash::<128, 4, 64>::new(0xff);
+    let state = format::<128, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+    let metadata = flash.metadata().copied().unwrap();
+
+    assert_eq!(
+        flash.operations().first(),
+        Some(&MockOperation::WriteMetadata)
+    );
+    assert_eq!(state.metadata(), metadata);
+    assert_eq!(metadata.region_size, 128);
+    assert_eq!(metadata.region_count, 4);
+    assert_eq!(metadata.min_free_regions, 1);
+    assert_eq!(metadata.wal_write_granule, 8);
+    assert_eq!(metadata.erased_byte, 0xff);
+    assert_eq!(metadata.wal_record_magic, 0xa5);
+}
+
+//= spec/ring.md#format-storage-on-disk-initialization
+//# `RING-FORMAT-STORAGE-POST-001` WAL head and WAL tail MUST both be
+//# region `0`.
+#[test]
+fn format_starts_with_region_zero_as_wal_head_and_tail() {
+    let mut flash = MockFlash::<128, 4, 64>::new(0xff);
+    let state = format::<128, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+
+    assert_eq!(state.wal_head(), 0);
+    assert_eq!(state.wal_tail(), 0);
+}
+
 //= spec/ring.md#core-requirements
 //# `RING-CORE-010` The durable free list MUST be FIFO so allocations
 //# consume the oldest free regions first.
