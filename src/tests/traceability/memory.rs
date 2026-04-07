@@ -6,6 +6,12 @@ use ::core::mem::size_of;
 //# come from caller-owned values, fixed-capacity fields, or stack
 //# frames whose size is statically bounded by type parameters or API
 //# contracts.
+//= spec/implementation.md#core-requirements
+//= type=test
+//# `RING-IMPL-CORE-005` All memory required for normal operation MUST
+//# come from caller-owned values, fixed-capacity fields, or stack
+//# frames whose size is statically bounded by type parameters or API
+//# contracts.
 #[test]
 fn normal_operation_memory_comes_from_caller_owned_or_fixed_capacity_storage() {
     let lib = strip_comment_lines(&read_repo_file("src/lib.rs"));
@@ -36,6 +42,11 @@ fn normal_operation_memory_comes_from_caller_owned_or_fixed_capacity_storage() {
 //# `RING-IMPL-MEM-001` The maximum number of tracked collections,
 //# heads, replay entries, and other bounded in-memory items MUST be an
 //# explicit compile-time or constructor-time capacity.
+//= spec/implementation.md#memory-requirements
+//= type=test
+//# `RING-IMPL-MEM-001` The maximum number of tracked collections,
+//# heads, replay entries, and other bounded in-memory items MUST be an
+//# explicit compile-time or constructor-time capacity.
 #[test]
 fn bounded_runtime_state_uses_explicit_capacity_parameters() {
     let lib = strip_comment_lines(&read_repo_file("src/lib.rs"));
@@ -61,6 +72,11 @@ fn bounded_runtime_state_uses_explicit_capacity_parameters() {
 }
 
 //= spec/implementation.md#memory-requirements
+//# `RING-IMPL-MEM-002` Any operation that needs scratch space for
+//# encoding, decoding, or staging MUST accept caller-provided buffers or
+//# borrow dedicated storage from a caller-provided workspace object.
+//= spec/implementation.md#memory-requirements
+//= type=test
 //# `RING-IMPL-MEM-002` Any operation that needs scratch space for
 //# encoding, decoding, or staging MUST accept caller-provided buffers or
 //# borrow dedicated storage from a caller-provided workspace object.
@@ -104,6 +120,11 @@ fn scratch_space_enters_through_workspace_or_caller_buffers() {
 //# `RING-IMPL-MEM-004` The implementation SHOULD avoid keeping
 //# duplicate copies of large record payloads in memory when a borrowed
 //# buffer or streaming decode is sufficient.
+//= spec/implementation.md#memory-requirements
+//= type=test
+//# `RING-IMPL-MEM-004` The implementation SHOULD avoid keeping
+//# duplicate copies of large record payloads in memory when a borrowed
+//# buffer or streaming decode is sufficient.
 #[test]
 fn map_storage_paths_reuse_borrowed_buffers_for_payload_data() {
     let map = strip_comment_lines(&read_repo_file("src/collections/map/mod.rs"));
@@ -123,6 +144,11 @@ fn map_storage_paths_reuse_borrowed_buffers_for_payload_data() {
 }
 
 //= spec/implementation.md#memory-requirements
+//# `RING-IMPL-MEM-005` Buffer-size requirements that depend on disk
+//# format constants MUST be derivable from public constants, associated
+//# constants, or documented constructor contracts.
+//= spec/implementation.md#memory-requirements
+//= type=test
 //# `RING-IMPL-MEM-005` Buffer-size requirements that depend on disk
 //# format constants MUST be derivable from public constants, associated
 //# constants, or documented constructor contracts.
@@ -156,6 +182,11 @@ fn disk_format_buffer_sizes_are_exposed_by_constants_or_workspace_contracts() {
 //# `RING-IMPL-COLL-002` Collection-specific in-memory state MUST obey
 //# the same explicit-capacity and no-allocation rules as borromean
 //# core.
+//= spec/implementation.md#collection-requirements
+//= type=test
+//# `RING-IMPL-COLL-002` Collection-specific in-memory state MUST obey
+//# the same explicit-capacity and no-allocation rules as borromean
+//# core.
 #[test]
 fn map_in_memory_state_uses_explicit_capacity_and_borrowed_storage() {
     let map = strip_comment_lines(&read_repo_file("src/collections/map/mod.rs"));
@@ -169,6 +200,11 @@ fn map_in_memory_state_uses_explicit_capacity_and_borrowed_storage() {
 }
 
 //= spec/implementation.md#api-requirements
+//# `RING-IMPL-API-004` The implementation SHOULD keep collection
+//# operation APIs close to the prototype's explicit buffer-passing style
+//# where that style avoids hidden allocation.
+//= spec/implementation.md#api-requirements
+//= type=test
 //# `RING-IMPL-API-004` The implementation SHOULD keep collection
 //# operation APIs close to the prototype's explicit buffer-passing style
 //# where that style avoids hidden allocation.

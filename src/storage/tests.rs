@@ -172,6 +172,12 @@ fn committed_region_sequence_progress() -> CommittedRegionSequenceProgress {
 //# (`storage_version`, `region_size`, `region_count`,
 //# `min_free_regions`, `wal_write_granule`, `erased_byte`,
 //# `wal_record_magic`, `metadata_checksum`) and sync metadata.
+//= spec/ring.md#format-storage-on-disk-initialization
+//= type=test
+//# `RING-FORMAT-STORAGE-002` Write `StorageMetadata`
+//# (`storage_version`, `region_size`, `region_count`,
+//# `min_free_regions`, `wal_write_granule`, `erased_byte`,
+//# `wal_record_magic`, `metadata_checksum`) and sync metadata.
 #[test]
 fn format_writes_metadata_before_reopening_the_fresh_store() {
     let mut flash = MockFlash::<128, 4, 64>::new(0xff);
@@ -194,6 +200,10 @@ fn format_writes_metadata_before_reopening_the_fresh_store() {
 //= spec/ring.md#format-storage-on-disk-initialization
 //# `RING-FORMAT-STORAGE-POST-001` WAL head and WAL tail MUST both be
 //# region `0`.
+//= spec/ring.md#format-storage-on-disk-initialization
+//= type=test
+//# `RING-FORMAT-STORAGE-POST-001` WAL head and WAL tail MUST both be
+//# region `0`.
 #[test]
 fn format_starts_with_region_zero_as_wal_head_and_tail() {
     let mut flash = MockFlash::<128, 4, 64>::new(0xff);
@@ -206,6 +216,10 @@ fn format_starts_with_region_zero_as_wal_head_and_tail() {
 //= spec/ring.md#core-requirements
 //# `RING-CORE-010` The durable free list MUST be FIFO so allocations
 //# consume the oldest free regions first.
+//= spec/ring.md#core-requirements
+//= type=test
+//# `RING-CORE-010` The durable free list MUST be FIFO so allocations
+//# consume the oldest free regions first.
 #[test]
 fn reserve_next_region_consumes_the_oldest_free_regions_first() {
     let progress = committed_region_sequence_progress();
@@ -215,6 +229,11 @@ fn reserve_next_region_consumes_the_oldest_free_regions_first() {
 }
 
 //= spec/ring.md#core-requirements
+//# `RING-CORE-011` Any operation that writes a newly allocated region
+//# MUST first durably reserve that region with
+//# `alloc_begin(region_index, free_list_head_after)`.
+//= spec/ring.md#core-requirements
+//= type=test
 //# `RING-CORE-011` Any operation that writes a newly allocated region
 //# MUST first durably reserve that region with
 //# `alloc_begin(region_index, free_list_head_after)`.
@@ -266,6 +285,11 @@ fn committed_region_write_uses_a_region_previously_reserved_by_alloc_begin() {
 }
 
 //= spec/ring.md#durability-and-crash-semantics
+//# `RING-ALLOC-001` Any operation that writes a newly allocated region
+//# MUST first make `alloc_begin(region_index, free_list_head_after)`
+//# durable.
+//= spec/ring.md#durability-and-crash-semantics
+//= type=test
 //# `RING-ALLOC-001` Any operation that writes a newly allocated region
 //# MUST first make `alloc_begin(region_index, free_list_head_after)`
 //# durable.
@@ -326,6 +350,11 @@ fn committed_region_write_waits_for_alloc_begin_sync() {
 //# `RING-REPLAY-ASSUME-004` Any operation that consumes a free-list
 //# head MUST first make the allocator advance durable with
 //# `alloc_begin(region_index, free_list_head_after)`.
+//= spec/ring.md#wal-record-types
+//= type=test
+//# `RING-REPLAY-ASSUME-004` Any operation that consumes a free-list
+//# head MUST first make the allocator advance durable with
+//# `alloc_begin(region_index, free_list_head_after)`.
 #[test]
 fn reopen_after_alloc_begin_recovers_the_advanced_allocator_state() {
     let mut flash = MockFlash::<512, 5, 256>::new(0xff);
@@ -360,6 +389,10 @@ fn format_returns_fresh_runtime_state() {
 //= spec/ring.md#format-storage-on-disk-initialization
 //# `RING-FORMAT-STORAGE-POST-002` A user collection durable head MUST
 //# NOT exist after formatting.
+//= spec/ring.md#format-storage-on-disk-initialization
+//= type=test
+//# `RING-FORMAT-STORAGE-POST-002` A user collection durable head MUST
+//# NOT exist after formatting.
 #[test]
 fn format_starts_with_no_user_collection_durable_head() {
     let mut flash = MockFlash::<128, 4, 64>::new(0xff);
@@ -370,6 +403,11 @@ fn format_starts_with_no_user_collection_durable_head() {
 }
 
 //= spec/ring.md#core-requirements
+//# `RING-CORE-003` Borromean MUST reserve `collection_id = 0` for the
+//# WAL, and all user collection identifiers MUST be nonzero stable 64-bit
+//# nonces that are never recycled.
+//= spec/ring.md#core-requirements
+//= type=test
 //# `RING-CORE-003` Borromean MUST reserve `collection_id = 0` for the
 //# WAL, and all user collection identifiers MUST be nonzero stable 64-bit
 //# nonces that are never recycled.
@@ -415,6 +453,11 @@ fn user_collection_ids_are_nonzero_u64_values_and_are_not_recycled() {
 }
 
 //= spec/ring.md#core-requirements
+//# `RING-CORE-004` Borromean core MUST reserve
+//# `collection_type = wal` for `collection_id = 0`, and user collections
+//# MUST NOT use that collection type.
+//= spec/ring.md#core-requirements
+//= type=test
 //# `RING-CORE-004` Borromean core MUST reserve
 //# `collection_type = wal` for `collection_id = 0`, and user collections
 //# MUST NOT use that collection type.
@@ -655,6 +698,29 @@ fn append_new_collection_and_update_refresh_runtime_state() {
     assert_eq!(state.collections()[0].pending_update_count(), 1);
 }
 
+//= spec/ring.md#core-requirements
+//# `RING-CORE-005` For user collections, append-time validity MUST
+//# require a successful earlier
+//# `new_collection(collection_id, collection_type)` before any later
+//# record for that collection may be appended.
+//= spec/ring.md#core-requirements
+//= type=test
+//# `RING-CORE-005` For user collections, append-time validity MUST
+//# require a successful earlier
+//# `new_collection(collection_id, collection_type)` before any later
+//# record for that collection may be appended.
+#[test]
+fn append_update_requires_a_prior_new_collection_record() {
+    let mut flash = MockFlash::<256, 4, 128>::new(0xff);
+    let mut workspace = StorageWorkspace::<256>::new();
+    let mut state = format::<256, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+
+    assert_eq!(
+        state.append_update::<256, 4, _>(&mut flash, &mut workspace, CollectionId(7), &[1, 2]),
+        Err(StorageRuntimeError::UnknownCollection(CollectionId(7)))
+    );
+}
+
 #[test]
 fn append_snapshot_resets_pending_updates() {
     let mut flash = MockFlash::<256, 4, 512>::new(0xff);
@@ -728,6 +794,70 @@ fn append_head_and_drop_refresh_runtime_state() {
     assert_eq!(state.tracked_user_collection_count(), 0);
 }
 
+//= spec/ring.md#core-requirements
+//# `RING-CORE-007` A `drop_collection(collection_id)` record that is
+//# durable MUST tombstone that collection, MUST forbid later WAL
+//# records for that `collection_id`, and MUST make older durable bytes
+//# reclaimable once they are no longer physically reachable from live
+//# state.
+//= spec/ring.md#core-requirements
+//= type=test
+//# `RING-CORE-007` A `drop_collection(collection_id)` record that is
+//# durable MUST tombstone that collection, MUST forbid later WAL
+//# records for that `collection_id`, and MUST make older durable bytes
+//# reclaimable once they are no longer physically reachable from live
+//# state.
+#[test]
+fn drop_collection_tombstones_the_collection_forbids_later_records_and_starts_reclaim() {
+    let mut flash = MockFlash::<256, 4, 128>::new(0xff);
+    let mut workspace = StorageWorkspace::<256>::new();
+    let mut state = format::<256, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+
+    state
+        .append_new_collection::<256, 4, _>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(7),
+            CollectionType::MAP_CODE,
+        )
+        .unwrap();
+    init_user_region_header(&mut flash, 2, 4, CollectionId(7), 1);
+    state
+        .append_head::<256, 4, _>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(7),
+            CollectionType::MAP_CODE,
+            2,
+        )
+        .unwrap();
+
+    let reclaim = state
+        .drop_collection_and_begin_reclaim::<256, 4, _>(&mut flash, &mut workspace, CollectionId(7))
+        .unwrap();
+
+    assert_eq!(reclaim, Some(2));
+    assert_eq!(
+        state.collections()[0].basis(),
+        StartupCollectionBasis::Dropped
+    );
+    assert_eq!(state.pending_reclaims(), &[2]);
+    assert_eq!(state.tracked_user_collection_count(), 0);
+    assert_eq!(
+        state.append_update::<256, 4, _>(&mut flash, &mut workspace, CollectionId(7), &[9]),
+        Err(StorageRuntimeError::DroppedCollection(CollectionId(7)))
+    );
+}
+
+//= spec/ring.md#core-requirements
+//# `RING-CORE-009` Any reclaim that frees a region MUST be tracked as a
+//# WAL transaction bounded by durable `reclaim_begin(region_index)` and
+//# `reclaim_end(region_index)` records.
+//= spec/ring.md#core-requirements
+//= type=test
+//# `RING-CORE-009` Any reclaim that frees a region MUST be tracked as a
+//# WAL transaction bounded by durable `reclaim_begin(region_index)` and
+//# `reclaim_end(region_index)` records.
 #[test]
 fn append_alloc_and_reclaim_methods_refresh_runtime_state() {
     let mut flash = MockFlash::<256, 4, 128>::new(0xff);
@@ -805,6 +935,12 @@ fn append_rotation_start_and_finish_move_to_new_tail() {
 //# collection or a newly initialized WAL region, MUST use
 //# `sequence = max_seen_sequence + 1`, after which that value becomes the
 //# new in-memory `max_seen_sequence`.
+//= spec/ring.md#storage-requirements
+//= type=test
+//# `RING-STORAGE-003` Each newly allocated region, whether for a user
+//# collection or a newly initialized WAL region, MUST use
+//# `sequence = max_seen_sequence + 1`, after which that value becomes the
+//# new in-memory `max_seen_sequence`.
 #[test]
 fn committed_region_allocations_advance_sequence_from_max_seen_sequence() {
     let progress = committed_region_sequence_progress();
@@ -819,6 +955,12 @@ fn committed_region_allocations_advance_sequence_from_max_seen_sequence() {
 }
 
 //= spec/ring.md#storage-requirements
+//# `RING-STORAGE-003` Each newly allocated region, whether for a user
+//# collection or a newly initialized WAL region, MUST use
+//# `sequence = max_seen_sequence + 1`, after which that value becomes the
+//# new in-memory `max_seen_sequence`.
+//= spec/ring.md#storage-requirements
+//= type=test
 //# `RING-STORAGE-003` Each newly allocated region, whether for a user
 //# collection or a newly initialized WAL region, MUST use
 //# `sequence = max_seen_sequence + 1`, after which that value becomes the
@@ -845,6 +987,11 @@ fn wal_rotation_initializes_the_next_wal_region_at_max_seen_sequence_plus_one() 
 //# `RING-STORAGE-004` Successful later region writes MUST preserve a
 //# strictly monotonic `sequence` ordering even if crashes or abandoned
 //# allocations leave gaps.
+//= spec/ring.md#storage-requirements
+//= type=test
+//# `RING-STORAGE-004` Successful later region writes MUST preserve a
+//# strictly monotonic `sequence` ordering even if crashes or abandoned
+//# allocations leave gaps.
 #[test]
 fn later_region_writes_keep_sequence_numbers_strictly_monotonic() {
     let progress = committed_region_sequence_progress();
@@ -854,6 +1001,11 @@ fn later_region_writes_keep_sequence_numbers_strictly_monotonic() {
 }
 
 //= spec/ring.md#storage-requirements
+//# `RING-STORAGE-006` A free region MUST be defined by membership in the
+//# durable free-list chain rather than by a distinct on-disk header
+//# encoding.
+//= spec/ring.md#storage-requirements
+//= type=test
 //# `RING-STORAGE-006` A free region MUST be defined by membership in the
 //# durable free-list chain rather than by a distinct on-disk header
 //# encoding.
@@ -880,6 +1032,11 @@ fn free_region_membership_is_defined_by_the_free_list_chain() {
 //# `RING-FREE-006` While a region is allocated for live use, the bytes
 //# in its free-pointer footer are uninterpreted stale data and MUST NOT
 //# be used to infer free-list membership.
+//= spec/ring.md#free-pointer-footer
+//= type=test
+//# `RING-FREE-006` While a region is allocated for live use, the bytes
+//# in its free-pointer footer are uninterpreted stale data and MUST NOT
+//# be used to infer free-list membership.
 #[test]
 fn stale_footer_bytes_do_not_make_a_reserved_region_free() {
     let mut flash = MockFlash::<512, 5, 256>::new(0xff);
@@ -902,6 +1059,10 @@ fn stale_footer_bytes_do_not_make_a_reserved_region_free() {
 }
 
 //= spec/ring.md#storage-requirements
+//# `RING-STORAGE-007` The free-pointer footer of a region MUST NOT be
+//# written while that region is allocated for live use.
+//= spec/ring.md#storage-requirements
+//= type=test
 //# `RING-STORAGE-007` The free-pointer footer of a region MUST NOT be
 //# written while that region is allocated for live use.
 #[test]
@@ -956,6 +1117,11 @@ fn committed_region_writes_do_not_write_a_live_free_pointer_footer() {
 //# `RING-STORAGE-008` After a region is durably reachable from the
 //# free-list chain, that region MUST NOT be erased until it is allocated
 //# for reuse.
+//= spec/ring.md#storage-requirements
+//= type=test
+//# `RING-STORAGE-008` After a region is durably reachable from the
+//# free-list chain, that region MUST NOT be erased until it is allocated
+//# for reuse.
 #[test]
 fn free_regions_are_erased_only_when_reused() {
     let mut flash = MockFlash::<512, 5, 256>::new(0xff);
@@ -988,6 +1154,10 @@ fn free_regions_are_erased_only_when_reused() {
 //= spec/ring.md#storage-requirements
 //# `RING-STORAGE-009` A WAL region MUST have `collection_id = 0` and
 //# `collection_format = wal_v1`.
+//= spec/ring.md#storage-requirements
+//= type=test
+//# `RING-STORAGE-009` A WAL region MUST have `collection_id = 0` and
+//# `collection_format = wal_v1`.
 #[test]
 fn initialized_wal_regions_use_reserved_wal_header_fields() {
     let mut flash = MockFlash::<128, 4, 32>::new(0xff);
@@ -1009,6 +1179,10 @@ fn initialized_wal_regions_use_reserved_wal_header_fields() {
 }
 
 //= spec/ring.md#wal-reclaim-eligibility
+//# `RING-WAL-RECLAIM-POST-007` The reclaimed region MUST be erased
+//# before reuse.
+//= spec/ring.md#wal-reclaim-eligibility
+//= type=test
 //# `RING-WAL-RECLAIM-POST-007` The reclaimed region MUST be erased
 //# before reuse.
 #[test]
@@ -1036,6 +1210,25 @@ fn initialized_wal_region_erases_the_reclaimed_region_before_reuse() {
             MockOperation::Sync,
         ]
     );
+}
+
+//= spec/ring.md#wal-record-types
+//# `RING-REPLAY-ASSUME-001` A WAL region MUST be erased before reuse.
+//= spec/ring.md#wal-record-types
+//= type=test
+//# `RING-REPLAY-ASSUME-001` A WAL region MUST be erased before reuse.
+#[test]
+fn initialized_wal_region_erases_the_wal_region_before_reuse() {
+    let mut flash = MockFlash::<128, 4, 32>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+
+    flash.clear_operations();
+    initialize_wal_region::<128, 4, _>(&mut flash, metadata, 1, 7, 0).unwrap();
+
+    assert!(matches!(
+        flash.operations().first(),
+        Some(MockOperation::EraseRegion { region_index: 1 })
+    ));
 }
 
 #[test]

@@ -4,6 +4,11 @@ use super::*;
 //# `RING-IMPL-COLL-001` Collection implementations MUST depend on the
 //# shared storage engine for durability, ordering, and recovery rather
 //# than duplicating those mechanisms ad hoc.
+//= spec/implementation.md#collection-requirements
+//= type=test
+//# `RING-IMPL-COLL-001` Collection implementations MUST depend on the
+//# shared storage engine for durability, ordering, and recovery rather
+//# than duplicating those mechanisms ad hoc.
 #[test]
 fn map_collection_paths_delegate_durability_ordering_and_recovery_to_shared_storage() {
     let lib = strip_comment_lines(&read_repo_file("src/lib.rs"));
@@ -30,6 +35,11 @@ fn map_collection_paths_delegate_durability_ordering_and_recovery_to_shared_stor
 }
 
 //= spec/implementation.md#collection-requirements
+//# `RING-IMPL-COLL-003` A collection operation that needs I/O MUST be
+//# drivable through the same runtime-agnostic future model as core
+//# storage operations.
+//= spec/implementation.md#collection-requirements
+//= type=test
 //# `RING-IMPL-COLL-003` A collection operation that needs I/O MUST be
 //# drivable through the same runtime-agnostic future model as core
 //# storage operations.

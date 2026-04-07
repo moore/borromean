@@ -3,6 +3,10 @@ use super::*;
 //= spec/implementation.md#core-requirements
 //# `RING-IMPL-CORE-001` The core library crate MUST compile with
 //# `#![no_std]`.
+//= spec/implementation.md#core-requirements
+//= type=test
+//# `RING-IMPL-CORE-001` The core library crate MUST compile with
+//# `#![no_std]`.
 #[test]
 fn core_library_crate_declares_no_std() {
     let lib = read_repo_file("src/lib.rs");
@@ -10,6 +14,10 @@ fn core_library_crate_declares_no_std() {
 }
 
 //= spec/implementation.md#core-requirements
+//# `RING-IMPL-CORE-002` The core library crate MUST NOT depend on the
+//# Rust `alloc` crate.
+//= spec/implementation.md#core-requirements
+//= type=test
 //# `RING-IMPL-CORE-002` The core library crate MUST NOT depend on the
 //# Rust `alloc` crate.
 #[test]
@@ -33,6 +41,10 @@ fn core_library_crate_avoids_alloc_dependency_and_usage() {
 }
 
 //= spec/implementation.md#core-requirements
+//# `RING-IMPL-CORE-003` The core library crate MUST NOT depend on an
+//# async runtime, executor, scheduler, or timer facility.
+//= spec/implementation.md#core-requirements
+//= type=test
 //# `RING-IMPL-CORE-003` The core library crate MUST NOT depend on an
 //# async runtime, executor, scheduler, or timer facility.
 #[test]
@@ -76,6 +88,10 @@ fn core_library_crate_has_no_async_runtime_or_timer_dependencies() {
 //= spec/implementation.md#non-goal-requirements
 //# `RING-IMPL-NONGOAL-001` Borromean core MUST NOT require a specific
 //# embedded framework, RTOS, or async executor.
+//= spec/implementation.md#non-goal-requirements
+//= type=test
+//# `RING-IMPL-NONGOAL-001` Borromean core MUST NOT require a specific
+//# embedded framework, RTOS, or async executor.
 #[test]
 fn core_library_crate_requires_no_embedded_framework_or_rtos_dependency() {
     let manifest = strip_comment_lines(&read_repo_file("Cargo.toml"));
@@ -91,6 +107,10 @@ fn core_library_crate_requires_no_embedded_framework_or_rtos_dependency() {
 }
 
 //= spec/implementation.md#non-goal-requirements
+//# `RING-IMPL-NONGOAL-002` Borromean core MUST NOT assume thread
+//# support, background workers, or heap-backed task scheduling.
+//= spec/implementation.md#non-goal-requirements
+//= type=test
 //# `RING-IMPL-NONGOAL-002` Borromean core MUST NOT assume thread
 //# support, background workers, or heap-backed task scheduling.
 #[test]
@@ -120,6 +140,12 @@ fn core_library_crate_assumes_no_threads_or_background_workers() {
 //# behavior defined by [spec/ring.md](ring.md); this specification MAY
 //# constrain implementation structure but MUST NOT weaken ring-level
 //# correctness requirements.
+//= spec/implementation.md#core-requirements
+//= type=test
+//# `RING-IMPL-CORE-004` The implementation MUST preserve the durable
+//# behavior defined by [spec/ring.md](ring.md); this specification MAY
+//# constrain implementation structure but MUST NOT weaken ring-level
+//# correctness requirements.
 #[test]
 fn storage_facade_preserves_ring_behavior_through_delegating_entry_points() {
     let lib = strip_comment_lines(&read_repo_file("src/lib.rs"));
@@ -137,25 +163,6 @@ fn storage_facade_preserves_ring_behavior_through_delegating_entry_points() {
         assert!(
             lib.contains(delegation),
             "missing delegation to ring-behavior module {delegation}"
-        );
-    }
-
-    let storage_src = read_repo_file("src/storage.rs");
-    let startup_src = read_repo_file("src/startup.rs");
-    let map_src = read_repo_file("src/collections/map/mod.rs");
-    for ring_trace in [
-        "RING-CORE-009",
-        "RING-REPLAY-ASSUME-001",
-        "RING-STARTUP-007",
-        "RING-STARTUP-026",
-        "RING-FORMAT-005",
-        "RING-FORMAT-006",
-    ] {
-        assert!(
-            storage_src.contains(ring_trace)
-                || startup_src.contains(ring_trace)
-                || map_src.contains(ring_trace),
-            "expected ring-level requirement trace {ring_trace}"
         );
     }
 

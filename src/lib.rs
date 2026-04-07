@@ -281,8 +281,6 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
                 return Err(StorageOpenError::UnsupportedLiveCollectionType(0xffff));
             };
 
-            //= spec/ring.md#collection-head-state-machine
-            //# `RING-FORMAT-015` An implementation MUST NOT open a database successfully if replay yields a live collection whose `collection_type` is unsupported by that implementation.
             match collection_type {
                 CollectionType::MAP_CODE => {}
                 other => return Err(StorageOpenError::UnsupportedLiveCollectionType(other)),

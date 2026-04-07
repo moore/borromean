@@ -132,8 +132,6 @@ pub struct StorageRuntime<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAI
 impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
     StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>
 {
-    //= spec/ring.md#collection-head-state-machine
-    //# `RING-FORMAT-012` Every non-WAL `collection_type` that may appear durably on disk MUST have a corresponding normative collection specification.
     fn validate_supported_user_collection_type(
         collection_id: CollectionId,
         collection_type: u16,
@@ -334,8 +332,6 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         collection_id: CollectionId,
         payload: &[u8],
     ) -> Result<(), StorageRuntimeError> {
-        //= spec/ring.md#core-requirements
-        //# `RING-CORE-005` For user collections, append-time validity MUST require a successful earlier `new_collection(collection_id, collection_type)` before any later record for that collection may be appended.
         let collection = self
             .find_collection(collection_id)
             .ok_or(StorageRuntimeError::UnknownCollection(collection_id))?;
@@ -450,8 +446,6 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         workspace: &mut StorageWorkspace<REGION_SIZE>,
         collection_id: CollectionId,
     ) -> Result<Option<u32>, StorageRuntimeError> {
-        //= spec/ring.md#core-requirements
-        //# `RING-CORE-007` A `drop_collection(collection_id)` record that is durable MUST tombstone that collection, MUST forbid later WAL records for that `collection_id`, and MUST make older durable bytes reclaimable once they are no longer physically reachable from live state.
         let collection = self
             .find_collection(collection_id)
             .ok_or(StorageRuntimeError::UnknownCollection(collection_id))?;
@@ -565,8 +559,6 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         workspace: &mut StorageWorkspace<REGION_SIZE>,
         region_index: u32,
     ) -> Result<(), StorageRuntimeError> {
-        //= spec/ring.md#core-requirements
-        //# `RING-CORE-009` Any reclaim that frees a region MUST be tracked as a WAL transaction bounded by durable `reclaim_begin(region_index)` and `reclaim_end(region_index)` records.
         if self.pending_reclaims.contains(&region_index) {
             return Err(StorageRuntimeError::DuplicatePendingReclaim(region_index));
         }
@@ -584,8 +576,6 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         workspace: &mut StorageWorkspace<REGION_SIZE>,
         region_index: u32,
     ) -> Result<(), StorageRuntimeError> {
-        //= spec/ring.md#core-requirements
-        //# `RING-CORE-009` Any reclaim that frees a region MUST be tracked as a WAL transaction bounded by durable `reclaim_begin(region_index)` and `reclaim_end(region_index)` records.
         if !self.pending_reclaims.contains(&region_index) {
             return Err(StorageRuntimeError::InvalidReclaimEnd(region_index));
         }
@@ -773,8 +763,6 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         workspace: &mut StorageWorkspace<REGION_SIZE>,
         next_region_index: u32,
     ) -> Result<(), StorageRuntimeError> {
-        //= spec/ring.md#core-requirements
-        //# `RING-CORE-008` Borromean MUST model WAL-head movement as ordinary `head(collection_id = 0, collection_type = wal, region_index = ...)` records rather than a WAL-specific head record type.
         if self.ready_region != Some(next_region_index) {
             return Err(StorageRuntimeError::InvalidRotationState {
                 ready_region: self.ready_region,
@@ -1724,8 +1712,6 @@ pub fn format<
     open::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>(flash, workspace)
 }
 
-//= spec/ring.md#startup-replay-algorithm
-//# RING-STARTUP-007 Maintain replay state: per collection optional live `collection_type`, `last_head`, `basis_pos`, and `pending_updates`, plus global `last_free_list_head`, optional reserved `ready_region`, ordered pending region reclaims, and the replay-local `pending_wal_recovery_boundary`.
 pub fn open<
     const REGION_SIZE: usize,
     const REGION_COUNT: usize,
@@ -1839,8 +1825,6 @@ fn initialize_wal_region<const REGION_SIZE: usize, const REGION_COUNT: usize, IO
     sequence: u64,
     wal_head: u32,
 ) -> Result<(), StorageRuntimeError> {
-    //= spec/ring.md#wal-record-types
-    //# `RING-REPLAY-ASSUME-001` A WAL region MUST be erased before reuse.
     flash.erase_region(region_index)?;
 
     let header = Header {

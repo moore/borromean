@@ -84,6 +84,11 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize> 
 //# `RING-IMPL-EXEC-001` Every fallible storage operation that may
 //# require one or more device interactions MUST be expressible as a
 //# single future.
+//= spec/implementation.md#execution-requirements
+//= type=test
+//# `RING-IMPL-EXEC-001` Every fallible storage operation that may
+//# require one or more device interactions MUST be expressible as a
+//# single future.
 #[test]
 fn fallible_storage_operations_are_expressible_as_single_futures() {
     let lib = strip_comment_lines(&read_repo_file("src/lib.rs"));
@@ -128,6 +133,11 @@ fn fallible_storage_operations_are_expressible_as_single_futures() {
 }
 
 //= spec/implementation.md#execution-requirements
+//# `RING-IMPL-EXEC-002` Borromean futures MUST make progress only when
+//# polled by the caller and when the caller-provided I/O object becomes
+//# ready; they MUST NOT rely on background tasks internal to borromean.
+//= spec/implementation.md#execution-requirements
+//= type=test
 //# `RING-IMPL-EXEC-002` Borromean futures MUST make progress only when
 //# polled by the caller and when the caller-provided I/O object becomes
 //# ready; they MUST NOT rely on background tasks internal to borromean.
@@ -179,6 +189,11 @@ fn operation_futures_advance_only_when_polled_and_without_internal_runtime_hooks
 }
 
 //= spec/implementation.md#execution-requirements
+//# `RING-IMPL-EXEC-003` A simple single-threaded poll-to-completion
+//# executor MUST be sufficient to drive any borromean operation future
+//# to completion.
+//= spec/implementation.md#execution-requirements
+//= type=test
 //# `RING-IMPL-EXEC-003` A simple single-threaded poll-to-completion
 //# executor MUST be sufficient to drive any borromean operation future
 //# to completion.
@@ -243,6 +258,12 @@ fn single_threaded_poll_loop_drives_operation_futures_to_completion() {
 }
 
 //= spec/implementation.md#execution-requirements
+//# `RING-IMPL-EXEC-004` Borromean operations on a given `Storage`
+//# instance MUST require exclusive mutable access to that instance
+//# unless and until a separate concurrency specification defines
+//# stronger sharing rules.
+//= spec/implementation.md#execution-requirements
+//= type=test
 //# `RING-IMPL-EXEC-004` Borromean operations on a given `Storage`
 //# instance MUST require exclusive mutable access to that instance
 //# unless and until a separate concurrency specification defines

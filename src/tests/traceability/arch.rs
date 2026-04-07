@@ -4,6 +4,11 @@ use super::*;
 //# `RING-IMPL-ARCH-003` WAL handling, region-management logic, and
 //# collection-specific logic MUST remain separable modules with explicit
 //# interfaces.
+//= spec/implementation.md#architecture-requirements
+//= type=test
+//# `RING-IMPL-ARCH-003` WAL handling, region-management logic, and
+//# collection-specific logic MUST remain separable modules with explicit
+//# interfaces.
 #[test]
 fn wal_region_management_and_collection_logic_stay_separate_modules() {
     let src_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -52,6 +57,10 @@ fn wal_region_management_and_collection_logic_stay_separate_modules() {
 }
 
 //= spec/implementation.md#architecture-requirements
+//# `RING-IMPL-ARCH-004` Encoding and decoding code MUST be usable from
+//# pure tests without requiring live device I/O.
+//= spec/implementation.md#architecture-requirements
+//= type=test
 //# `RING-IMPL-ARCH-004` Encoding and decoding code MUST be usable from
 //# pure tests without requiring live device I/O.
 #[test]
@@ -106,6 +115,12 @@ fn encoding_and_decoding_round_trip_from_plain_byte_buffers() {
 }
 
 //= spec/implementation.md#architecture-requirements
+//# `RING-IMPL-ARCH-005` The implementation SHOULD model complex
+//# multi-step procedures such as startup replay and reclaim as explicit
+//# phase machines so that each durable transition is inspectable in code
+//# review and testable in isolation.
+//= spec/implementation.md#architecture-requirements
+//= type=test
 //# `RING-IMPL-ARCH-005` The implementation SHOULD model complex
 //# multi-step procedures such as startup replay and reclaim as explicit
 //# phase machines so that each durable transition is inspectable in code

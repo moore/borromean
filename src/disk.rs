@@ -5,7 +5,6 @@ use crc::{Crc, CRC_32_ISCSI};
 
 const CRC32C: Crc<u32> = Crc::<u32>::new(&CRC_32_ISCSI);
 
-//= spec/ring.md#storage-metadata
 pub const STORAGE_VERSION: u32 = 1;
 pub const WAL_V1_FORMAT: u16 = 0;
 

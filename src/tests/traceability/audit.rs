@@ -6,6 +6,11 @@ use super::*;
 //# dedicated automated test function or dedicated compile-time test case
 //# whose primary purpose is to verify that single requirement.
 //= spec/implementation.md#verification-requirements
+//# `RING-IMPL-TEST-001` Every normative requirement in
+//# [spec/ring.md](ring.md) or this specification MUST have at least one
+//# dedicated automated test function or dedicated compile-time test case
+//# whose primary purpose is to verify that single requirement.
+//= spec/implementation.md#verification-requirements
 //= type=test
 //# `RING-IMPL-TEST-001` Every normative requirement in
 //# [spec/ring.md](ring.md) or this specification MUST have at least one
@@ -57,6 +62,12 @@ fn every_normative_requirement_has_a_dedicated_test_or_harness_entry() {
 //# harness entries MUST be defined only in dedicated test modules or
 //# files rather than inside the functional implementation module they
 //# exercise.
+//= spec/implementation.md#verification-requirements
+//= type=test
+//# `RING-IMPL-TEST-005` Automated test functions and compile-time test
+//# harness entries MUST be defined only in dedicated test modules or
+//# files rather than inside the functional implementation module they
+//# exercise.
 #[test]
 fn automated_tests_live_only_in_dedicated_test_modules() {
     let src_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -84,6 +95,10 @@ fn automated_tests_live_only_in_dedicated_test_modules() {
 //= spec/implementation.md#verification-requirements
 //# `RING-IMPL-TEST-002` A top-level automated test function MUST NOT
 //# claim to verify multiple normative requirement identifiers.
+//= spec/implementation.md#verification-requirements
+//= type=test
+//# `RING-IMPL-TEST-002` A top-level automated test function MUST NOT
+//# claim to verify multiple normative requirement identifiers.
 #[test]
 fn top_level_automated_tests_claim_at_most_one_requirement_identifier() {
     let src_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
@@ -103,6 +118,12 @@ fn top_level_automated_tests_claim_at_most_one_requirement_identifier() {
 }
 
 //= spec/implementation.md#verification-requirements
+//# `RING-IMPL-TEST-003` Shared setup, fixtures, helper functions,
+//# macros, and data generators MAY be reused across requirement-specific
+//# tests, but the final traced test entry point MUST remain specific to
+//# one requirement identifier.
+//= spec/implementation.md#verification-requirements
+//= type=test
 //# `RING-IMPL-TEST-003` Shared setup, fixtures, helper functions,
 //# macros, and data generators MAY be reused across requirement-specific
 //# tests, but the final traced test entry point MUST remain specific to
@@ -127,6 +148,11 @@ fn shared_test_helpers_remain_untraced() {
 }
 
 //= spec/implementation.md#verification-requirements
+//# `RING-IMPL-TEST-004` When a requirement is verified by a
+//# compile-fail, compile-pass, or other non-runtime harness, that harness
+//# entry MUST still be dedicated to a single requirement identifier.
+//= spec/implementation.md#verification-requirements
+//= type=test
 //# `RING-IMPL-TEST-004` When a requirement is verified by a
 //# compile-fail, compile-pass, or other non-runtime harness, that harness
 //# entry MUST still be dedicated to a single requirement identifier.

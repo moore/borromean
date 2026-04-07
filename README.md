@@ -9,6 +9,6 @@ The storage spec in [spec/ring.md](spec/ring.md) now keeps normative requirement
 Example Rust annotation:
 
 ```rust
-//= spec/ring.md#startup-replay-algorithm
-//# RING-STARTUP-003 Select WAL tail as the unique candidate WAL region with the largest valid sequence.
+// = spec/ring.md#startup-replay-algorithm
+// # RING-STARTUP-003 Select WAL tail as the unique candidate WAL region with the largest valid sequence.
 ```

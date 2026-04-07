@@ -6,6 +6,11 @@ use ::core::task::Poll;
 //# `RING-IMPL-STARTUP-001` Opening storage MUST be implemented as an
 //# operation that can suspend between device interactions without
 //# losing its replay context.
+//= spec/implementation.md#startup-requirements
+//= type=test
+//# `RING-IMPL-STARTUP-001` Opening storage MUST be implemented as an
+//# operation that can suspend between device interactions without
+//# losing its replay context.
 #[test]
 fn open_future_preserves_replay_context_across_pending_polls() {
     let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
@@ -58,6 +63,10 @@ fn open_future_preserves_replay_context_across_pending_polls() {
 //= spec/implementation.md#startup-requirements
 //# `RING-IMPL-STARTUP-002` Startup replay state MUST itself obey the
 //# same no-allocation rule as steady-state operation.
+//= spec/implementation.md#startup-requirements
+//= type=test
+//# `RING-IMPL-STARTUP-002` Startup replay state MUST itself obey the
+//# same no-allocation rule as steady-state operation.
 #[test]
 fn startup_replay_state_uses_fixed_capacity_storage_without_heap_allocation() {
     let startup = strip_comment_lines(&read_repo_file("src/startup.rs"));
@@ -78,6 +87,11 @@ fn startup_replay_state_uses_fixed_capacity_storage_without_heap_allocation() {
 }
 
 //= spec/implementation.md#startup-requirements
+//# `RING-IMPL-STARTUP-003` If startup needs temporary decode storage,
+//# that storage MUST come from a caller-provided workspace or other
+//# bounded static storage.
+//= spec/implementation.md#startup-requirements
+//= type=test
 //# `RING-IMPL-STARTUP-003` If startup needs temporary decode storage,
 //# that storage MUST come from a caller-provided workspace or other
 //# bounded static storage.
@@ -107,6 +121,11 @@ fn startup_decode_and_scan_paths_take_workspace_backing_from_callers() {
 }
 
 //= spec/implementation.md#startup-requirements
+//# `RING-IMPL-STARTUP-004` Recovery of incomplete WAL rotation,
+//# allocation, or reclaim state MUST be expressible through the same
+//# operation framework used for normal foreground work.
+//= spec/implementation.md#startup-requirements
+//= type=test
 //# `RING-IMPL-STARTUP-004` Recovery of incomplete WAL rotation,
 //# allocation, or reclaim state MUST be expressible through the same
 //# operation framework used for normal foreground work.

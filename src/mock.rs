@@ -205,17 +205,6 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize>
         self.log(MockOperation::Sync)
     }
 
-    //= spec/ring.md#format-storage-on-disk-initialization
-    //# RING-FORMAT-STORAGE-PRE-001 Backing storage MUST be writable and erasable at region granularity.
-    //= spec/ring.md#format-storage-on-disk-initialization
-    //# RING-FORMAT-STORAGE-PRE-006 `region_count >= 2 + min_free_regions`.
-    //= spec/ring.md#format-storage-on-disk-initialization
-    //# RING-FORMAT-STORAGE-PRE-003 Region `0` MUST be reserved as the initial WAL region.
-    //= spec/ring.md#format-storage-on-disk-initialization
-    //# RING-FORMAT-STORAGE-POST-002 A user collection durable head MUST NOT exist after formatting.
-    //= spec/ring.md#format-storage-on-disk-initialization
-    //# `RING-FORMAT-STORAGE-POST-003` The free list MUST contain every non-WAL region in ascending region-index
-    //# order.
     pub fn format_empty_store(
         &mut self,
         min_free_regions: u32,

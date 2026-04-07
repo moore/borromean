@@ -5,6 +5,11 @@ use super::*;
 //# `RING-IMPL-IO-001` The borromean I/O abstraction MUST expose only
 //# the primitive operations needed to satisfy [spec/ring.md](ring.md):
 //# region or metadata reads, writes, erases, and durability barriers.
+//= spec/implementation.md#i-o-requirements
+//= type=test
+//# `RING-IMPL-IO-001` The borromean I/O abstraction MUST expose only
+//# the primitive operations needed to satisfy [spec/ring.md](ring.md):
+//# region or metadata reads, writes, erases, and durability barriers.
 #[test]
 fn flash_io_trait_exposes_only_primitive_storage_operations() {
     let methods = flash_io_method_names();
@@ -23,6 +28,10 @@ fn flash_io_trait_exposes_only_primitive_storage_operations() {
 }
 
 //= spec/implementation.md#i-o-requirements
+//# `RING-IMPL-IO-002` The borromean I/O abstraction MUST be generic
+//# over the caller's concrete transport or flash driver type.
+//= spec/implementation.md#i-o-requirements
+//= type=test
 //# `RING-IMPL-IO-002` The borromean I/O abstraction MUST be generic
 //# over the caller's concrete transport or flash driver type.
 #[test]
@@ -48,6 +57,10 @@ fn flash_io_trait_accepts_caller_defined_driver_types() {
 //= spec/implementation.md#i-o-requirements
 //# `RING-IMPL-IO-003` The borromean I/O abstraction MUST be usable
 //# without dynamic dispatch and without heap allocation.
+//= spec/implementation.md#i-o-requirements
+//= type=test
+//# `RING-IMPL-IO-003` The borromean I/O abstraction MUST be usable
+//# without dynamic dispatch and without heap allocation.
 #[test]
 fn flash_io_trait_avoids_dynamic_dispatch_surfaces() {
     for (path, source) in non_test_sources_without_comments() {
@@ -71,6 +84,11 @@ fn flash_io_trait_avoids_dynamic_dispatch_surfaces() {
 //# `RING-IMPL-IO-004` If the target medium does not require an
 //# explicit durability barrier, the I/O abstraction MAY implement sync as
 //# a zero-cost completed operation.
+//= spec/implementation.md#i-o-requirements
+//= type=test
+//# `RING-IMPL-IO-004` If the target medium does not require an
+//# explicit durability barrier, the I/O abstraction MAY implement sync as
+//# a zero-cost completed operation.
 #[test]
 fn mock_flash_sync_can_complete_immediately() {
     let mut flash = MockFlash::<128, 4, 8>::new(0xff);
@@ -80,6 +98,11 @@ fn mock_flash_sync_can_complete_immediately() {
 }
 
 //= spec/implementation.md#i-o-requirements
+//# `RING-IMPL-IO-005` Borromean MUST treat wakeups, DMA completion, or
+//# interrupt delivery as an external concern of the caller-provided I/O
+//# implementation rather than as an internal runtime service.
+//= spec/implementation.md#i-o-requirements
+//= type=test
 //# `RING-IMPL-IO-005` Borromean MUST treat wakeups, DMA completion, or
 //# interrupt delivery as an external concern of the caller-provided I/O
 //# implementation rather than as an internal runtime service.

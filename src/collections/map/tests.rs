@@ -1,5 +1,6 @@
 use super::*;
 extern crate std;
+use crate::wal_record::encode_record_into;
 use crate::{MockFlash, Storage, StorageWorkspace};
 use proptest::prelude::*;
 use std::{vec, vec::Vec};
@@ -13,6 +14,43 @@ fn vec_and_indexes() -> impl Strategy<Value = (Vec<u8>, usize, usize)> {
             (Just(vec), first, second)
         },
     )
+}
+
+fn append_wal_record<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize>(
+    flash: &mut MockFlash<REGION_SIZE, REGION_COUNT, MAX_LOG>,
+    metadata: crate::StorageMetadata,
+    region_index: u32,
+    offset: usize,
+    record: crate::WalRecord<'_>,
+) -> usize {
+    let mut physical = [0u8; REGION_SIZE];
+    let mut logical = [0u8; REGION_SIZE];
+    let used = encode_record_into(record, metadata, &mut physical, &mut logical).unwrap();
+    flash
+        .write_region(region_index, offset, &physical[..used])
+        .unwrap();
+    offset + used
+}
+
+fn init_user_region_header<
+    const REGION_SIZE: usize,
+    const REGION_COUNT: usize,
+    const MAX_LOG: usize,
+>(
+    flash: &mut MockFlash<REGION_SIZE, REGION_COUNT, MAX_LOG>,
+    region_index: u32,
+    sequence: u64,
+    collection_id: CollectionId,
+    collection_format: u16,
+) {
+    let header = crate::Header {
+        sequence,
+        collection_id,
+        collection_format,
+    };
+    let mut header_bytes = [0u8; crate::Header::ENCODED_LEN];
+    header.encode_into(&mut header_bytes).unwrap();
+    flash.write_region(region_index, 0, &header_bytes).unwrap();
 }
 
 proptest! {
@@ -54,9 +92,12 @@ proptest! {
 
 }
 
-#[test]
 //= spec/implementation.md#panic-requirements
 //# `RING-IMPL-PANIC-004` If a condition is believed to be impossible by construction, the implementation SHOULD encode that proof in types, control flow, or checked validation before the point of use rather than relying on a panic as a backstop.
+//= spec/implementation.md#panic-requirements
+//= type=test
+//# `RING-IMPL-PANIC-004` If a condition is believed to be impossible by construction, the implementation SHOULD encode that proof in types, control flow, or checked validation before the point of use rather than relying on a panic as a backstop.
+#[test]
 fn set_returns_buffer_too_small_when_map_storage_is_exhausted() {
     const MAX_INDEXES: usize = 4;
 
@@ -66,9 +107,12 @@ fn set_returns_buffer_too_small_when_map_storage_is_exhausted() {
     assert!(matches!(map.set(1, 10), Err(MapError::BufferTooSmall)));
 }
 
-#[test]
 //= spec/implementation.md#memory-requirements
 //# `RING-IMPL-MEM-003` If the configured capacities are insufficient to open the store or complete an operation, the implementation MUST fail explicitly with a capacity-related error rather than silently allocate or truncate state.
+//= spec/implementation.md#memory-requirements
+//= type=test
+//# `RING-IMPL-MEM-003` If the configured capacities are insufficient to open the store or complete an operation, the implementation MUST fail explicitly with a capacity-related error rather than silently allocate or truncate state.
+#[test]
 fn encode_snapshot_returns_buffer_too_small_when_output_capacity_is_insufficient() {
     const BUFFER_SIZE: usize = 64;
     const MAX_INDEXES: usize = 4;
@@ -85,9 +129,12 @@ fn encode_snapshot_returns_buffer_too_small_when_output_capacity_is_insufficient
     ));
 }
 
-#[test]
 //= spec/ring.md#collection-head-state-machine
 //# `RING-FORMAT-003` The frontier MUST take precedence over older values in the durable basis.
+//= spec/ring.md#collection-head-state-machine
+//= type=test
+//# `RING-FORMAT-003` The frontier MUST take precedence over older values in the durable basis.
+#[test]
 fn snapshot_round_trip_restores_logical_state() {
     const BUFFER_SIZE: usize = 512;
     const MAX_INDEXES: usize = 4;
@@ -139,7 +186,6 @@ fn update_payload_round_trip_applies_frontier_change() {
     assert_eq!(map.get(&5).unwrap(), None);
 }
 
-#[test]
 //= spec/ring.md#collection-head-state-machine
 //# `RING-FORMAT-013` That collection specification MUST define, at
 //# minimum: the empty logical state established by `new_collection`; the
@@ -149,6 +195,17 @@ fn update_payload_round_trip_applies_frontier_change() {
 //# rules for applying updates and merging a durable basis with the
 //# in-memory frontier; and the collection-specific validation rules used
 //# when loading a basis or replaying WAL payloads.
+//= spec/ring.md#collection-head-state-machine
+//= type=test
+//# `RING-FORMAT-013` That collection specification MUST define, at
+//# minimum: the empty logical state established by `new_collection`; the
+//# exact bytes and interpretation of every supported committed-region
+//# `collection_format`; the exact bytes and interpretation of `snapshot`
+//# payloads; the exact bytes and interpretation of `update` payloads; the
+//# rules for applying updates and merging a durable basis with the
+//# in-memory frontier; and the collection-specific validation rules used
+//# when loading a basis or replaying WAL payloads.
+#[test]
 fn map_collection_format_covers_empty_state_snapshot_update_region_and_validation() {
     const BUFFER_SIZE: usize = 512;
     const MAX_INDEXES: usize = 4;
@@ -222,9 +279,12 @@ fn map_collection_format_covers_empty_state_snapshot_update_region_and_validatio
     ));
 }
 
-#[test]
 //= spec/ring.md#collection-head-state-machine
 //# `RING-FORMAT-014` For non-WAL collections, the pair `(collection_type, collection_format)` MUST identify a unique committed region payload format.
+//= spec/ring.md#collection-head-state-machine
+//= type=test
+//# `RING-FORMAT-014` For non-WAL collections, the pair `(collection_type, collection_format)` MUST identify a unique committed region payload format.
+#[test]
 fn region_round_trip_restores_logical_state() {
     const BUFFER_SIZE: usize = 512;
     const MAX_INDEXES: usize = 4;
@@ -256,6 +316,119 @@ fn region_round_trip_restores_logical_state() {
 
     assert_eq!(restored.get(&3).unwrap(), Some(30));
     assert_eq!(restored.get(&4).unwrap(), Some(40));
+}
+
+//= spec/ring.md#core-requirements
+//# `RING-CORE-002` Each collection MUST be implemented as an
+//# append-only data structure whose new writes are added to the head
+//# region and whose storage can only be freed by truncating the tail.
+//= spec/ring.md#core-requirements
+//= type=test
+//# `RING-CORE-002` Each collection MUST be implemented as an
+//# append-only data structure whose new writes are added to the head
+//# region and whose storage can only be freed by truncating the tail.
+#[test]
+fn map_updates_append_new_head_records_and_replacement_reclaims_the_old_tail_region() {
+    const REGION_SIZE: usize = 512;
+    const REGION_COUNT: usize = 5;
+    const MAX_INDEXES: usize = 4;
+
+    let mut buffer = [0u8; REGION_SIZE];
+    let mut map = LsmMap::<i32, i32, MAX_INDEXES>::new(CollectionId(60), &mut buffer).unwrap();
+    map.set(1, 10).unwrap();
+    let first_end = map.next_record_offset.0;
+    let first_prefix = map.map[..first_end].to_vec();
+
+    map.set(1, 20).unwrap();
+    assert!(map.next_record_offset.0 > first_end);
+    assert_eq!(&map.map[..first_end], first_prefix.as_slice());
+    assert_eq!(map.get(&1).unwrap(), Some(20));
+
+    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 1024>::new(0xff);
+    let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
+    let mut storage = Storage::<8, 4>::format::<REGION_SIZE, REGION_COUNT, _>(
+        &mut flash,
+        &mut workspace,
+        1,
+        8,
+        0xa5,
+    )
+    .unwrap();
+    storage
+        .create_map::<REGION_SIZE, REGION_COUNT, _>(&mut flash, &mut workspace, map.id())
+        .unwrap();
+
+    let first_region = map
+        .flush_to_storage::<REGION_SIZE, REGION_COUNT, _, 8, 4>(
+            storage.runtime_mut(),
+            &mut flash,
+            &mut workspace,
+        )
+        .unwrap();
+
+    map.delete(1).unwrap();
+    let second_region = map
+        .flush_to_storage::<REGION_SIZE, REGION_COUNT, _, 8, 4>(
+            storage.runtime_mut(),
+            &mut flash,
+            &mut workspace,
+        )
+        .unwrap();
+
+    assert_ne!(second_region, first_region);
+    assert_eq!(
+        storage.runtime().collections()[0].basis(),
+        crate::StartupCollectionBasis::Region(second_region)
+    );
+    assert_eq!(storage.runtime().pending_reclaims(), &[first_region]);
+}
+
+//= spec/ring.md#collection-head-state-machine
+//# `RING-FORMAT-008` Every later retained type-bearing record for that
+//# collection MUST carry the same `collection_type`, otherwise replay
+//# must treat the mismatch as corruption.
+//= spec/ring.md#collection-head-state-machine
+//= type=test
+//# `RING-FORMAT-008` Every later retained type-bearing record for that
+//# collection MUST carry the same `collection_type`, otherwise replay
+//# must treat the mismatch as corruption.
+#[test]
+fn open_from_storage_rejects_live_collections_with_a_non_map_collection_type() {
+    let mut flash = MockFlash::<512, 4, 256>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    init_user_region_header(&mut flash, 2, 4, CollectionId(61), MAP_REGION_V1_FORMAT);
+    let wal_offset = metadata.wal_record_area_offset().unwrap();
+    append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        wal_offset,
+        crate::WalRecord::Head {
+            collection_id: CollectionId(61),
+            collection_type: crate::CollectionType::CHANNEL_CODE,
+            region_index: 2,
+        },
+    );
+
+    let mut workspace = StorageWorkspace::<512>::new();
+    let runtime = crate::storage::open::<512, 4, _, 8, 4>(&mut flash, &mut workspace).unwrap();
+    let mut reopen_buffer = [0u8; 512];
+    let result = LsmMap::<i32, i32, 4>::open_from_storage::<512, 4, _, 8, 4>(
+        &runtime,
+        &mut flash,
+        &mut workspace,
+        CollectionId(61),
+        &mut reopen_buffer,
+    );
+
+    assert!(matches!(
+        result,
+        Err(MapStorageError::CollectionTypeMismatch {
+            collection_id: CollectionId(61),
+            expected: crate::CollectionType::MAP_CODE,
+            actual: Some(crate::CollectionType::CHANNEL_CODE),
+        })
+    ));
 }
 
 #[test]
@@ -324,10 +497,14 @@ fn load_snapshot_rejects_overlapping_entry_refs() {
     ));
 }
 
-#[test]
 //= spec/ring.md#core-requirements
 //# `RING-CORE-015` Each collection's mutable in-memory update frontier
 //# MUST have a bounded configured capacity.
+//= spec/ring.md#core-requirements
+//= type=test
+//# `RING-CORE-015` Each collection's mutable in-memory update frontier
+//# MUST have a bounded configured capacity.
+#[test]
 fn mutable_map_frontier_capacity_is_bounded_by_its_configured_buffer() {
     let min_capacity_for_three_updates = (ENTRY_COUNT_SIZE..256)
         .find(|capacity| {
@@ -367,9 +544,12 @@ fn mutable_map_frontier_capacity_is_bounded_by_its_configured_buffer() {
     larger_map.set(1, 40).unwrap();
 }
 
-#[test]
 //= spec/ring.md#collection-head-state-machine
 //# `RING-FORMAT-003` The frontier MUST take precedence over older values in the durable basis.
+//= spec/ring.md#collection-head-state-machine
+//= type=test
+//# `RING-FORMAT-003` The frontier MUST take precedence over older values in the durable basis.
+#[test]
 fn storage_snapshot_replay_restores_map_frontier() {
     const REGION_SIZE: usize = 512;
     const REGION_COUNT: usize = 4;
@@ -437,13 +617,20 @@ fn storage_snapshot_replay_restores_map_frontier() {
     assert_eq!(reopened.get(&2).unwrap(), Some(99));
 }
 
-#[test]
 //= spec/ring.md#collection-head-state-machine
 //# `RING-FORMAT-016` An implementation MUST NOT open a database
 //# successfully if replay yields a live collection whose retained
 //# committed-region basis, retained `snapshot` payload, or retained
 //# post-basis `update` payloads are unsupported or invalid under that
 //# collection's normative specification.
+//= spec/ring.md#collection-head-state-machine
+//= type=test
+//# `RING-FORMAT-016` An implementation MUST NOT open a database
+//# successfully if replay yields a live collection whose retained
+//# committed-region basis, retained `snapshot` payload, or retained
+//# post-basis `update` payloads are unsupported or invalid under that
+//# collection's normative specification.
+#[test]
 fn open_from_storage_rejects_invalid_retained_region_snapshot_and_update_payloads() {
     {
         let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
@@ -621,9 +808,12 @@ fn storage_visit_wal_records_exposes_map_collection_records() {
     );
 }
 
-#[test]
 //= spec/ring.md#collection-head-state-machine
 //# `RING-FORMAT-005` Every user collection MUST remain log-structured: flushing mutable state writes a new immutable committed region segment instead of rewriting an existing live region in place.
+//= spec/ring.md#collection-head-state-machine
+//= type=test
+//# `RING-FORMAT-005` Every user collection MUST remain log-structured: flushing mutable state writes a new immutable committed region segment instead of rewriting an existing live region in place.
+#[test]
 fn storage_region_flush_restores_map_basis() {
     const REGION_SIZE: usize = 512;
     const REGION_COUNT: usize = 4;

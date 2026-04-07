@@ -289,8 +289,6 @@ enum SearchResult {
 }
 
 pub struct LsmMap<'a, K, V, const MAX_INDEXES: usize> {
-    //= spec/ring.md#core-requirements
-    //# `RING-CORE-002` Each collection MUST be implemented as an append-only data structure whose new writes are added to the head region and whose storage can only be freed by truncating the tail.
     id: CollectionId,
     record_count: EntryCount,
     next_record_offset: RecordOffset,
@@ -790,8 +788,6 @@ where
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
     ) -> Result<u32, MapStorageError> {
-        //= spec/ring.md#collection-head-state-machine
-        //# `RING-FORMAT-005` Every user collection MUST remain log-structured: flushing mutable state writes a new immutable committed region segment instead of rewriting an existing live region in place.
         let previous_region = storage
             .collections()
             .iter()
@@ -843,10 +839,6 @@ where
         collection_id: CollectionId,
         buffer: &'a mut [u8],
     ) -> Result<Self, MapStorageError> {
-        //= spec/ring.md#collection-head-state-machine
-        //# `RING-FORMAT-006` A `WALSnapshotHead` MUST be loadable into RAM before that collection accepts further mutations.
-        //= spec/ring.md#collection-head-state-machine
-        //# `RING-FORMAT-008` Every later retained type-bearing record for that collection MUST carry the same `collection_type`, otherwise replay must treat the mismatch as corruption.
         let Some(collection) = storage
             .collections()
             .iter()
@@ -974,8 +966,6 @@ where
     K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
     V: Debug + Serialize + for<'de> Deserialize<'de>,
 {
-    //= spec/ring.md#collection-head-state-machine
-    //# `RING-FORMAT-014` For non-WAL collections, the pair `(collection_type, collection_format)` MUST identify a unique committed region payload format.
     let mut region_bytes = [0u8; REGION_SIZE];
     flash.read_region(region_index, 0, &mut region_bytes)?;
 

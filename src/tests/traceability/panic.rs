@@ -5,6 +5,12 @@ use super::*;
 //# support code MUST be panic free for all input data, including invalid
 //# API inputs, corrupt on-storage state, exhausted capacities, and
 //# device errors.
+//= spec/implementation.md#panic-requirements
+//= type=test
+//# `RING-IMPL-PANIC-001` The borromean core library and its non-test
+//# support code MUST be panic free for all input data, including invalid
+//# API inputs, corrupt on-storage state, exhausted capacities, and
+//# device errors.
 #[test]
 fn corrupt_storage_inputs_return_errors_instead_of_panicking() {
     let metadata = StorageMetadata::new(128, 4, 1, 8, 0xff, 0xa5).unwrap();
@@ -59,6 +65,11 @@ fn corrupt_storage_inputs_return_errors_instead_of_panicking() {
 //# `RING-IMPL-PANIC-002` Recoverable failures and invariant violations
 //# that can be caused by external input or storage state MUST be
 //# reported through explicit error results rather than by panicking.
+//= spec/implementation.md#panic-requirements
+//= type=test
+//# `RING-IMPL-PANIC-002` Recoverable failures and invariant violations
+//# that can be caused by external input or storage state MUST be
+//# reported through explicit error results rather than by panicking.
 #[test]
 fn public_decode_and_open_paths_expose_explicit_error_results() {
     let disk = strip_comment_lines(&read_repo_file("src/disk.rs"));
@@ -79,6 +90,12 @@ fn public_decode_and_open_paths_expose_explicit_error_results() {
 }
 
 //= spec/implementation.md#panic-requirements
+//# `RING-IMPL-PANIC-003` Non-test code MUST NOT use `panic!`,
+//# `unwrap()`, `expect()`, `todo!()`, `unimplemented!()`, or
+//# `unreachable!()` in any path that can be reached from public APIs or
+//# from storage data under validation.
+//= spec/implementation.md#panic-requirements
+//= type=test
 //# `RING-IMPL-PANIC-003` Non-test code MUST NOT use `panic!`,
 //# `unwrap()`, `expect()`, `todo!()`, `unimplemented!()`, or
 //# `unreachable!()` in any path that can be reached from public APIs or

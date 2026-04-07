@@ -701,8 +701,6 @@ fn scan_wal_region<const REGION_SIZE: usize, IO: FlashIo, F>(
 where
     F: FnMut(&mut IO, usize, WalRecord<'_>) -> Result<(), StartupError>,
 {
-    //= spec/ring.md#wal-record-types
-    //# All replay walks, decoders, and collection-format handlers MUST remain bounded by configured storage geometry and record sizes.
     ensure_region_index_in_range(region_index, metadata.region_count)?;
 
     let region_size =
@@ -731,11 +729,6 @@ where
             });
         }
 
-        //= spec/ring.md#wal-record-types
-        //# `RING-WAL-VALID-022` Replay MAY recover only from checksum-invalid or torn aligned WAL
-        //# slots. Replay tracks a pending WAL-recovery boundary from the first
-        //# ignored corrupt/torn aligned slot until a later valid `wal_recovery`
-        //# record is replayed.
         if start_byte != metadata.wal_record_magic {
             pending_boundary_open = true;
             offset = offset
@@ -744,11 +737,6 @@ where
             continue;
         }
 
-        //= spec/ring.md#wal-record-types
-        //# `RING-WAL-VALID-022` Replay MAY recover only from checksum-invalid or torn aligned WAL
-        //# slots. Replay tracks a pending WAL-recovery boundary from the first
-        //# ignored corrupt/torn aligned slot until a later valid `wal_recovery`
-        //# record is replayed.
         let decoded = match decode_record(&region_bytes[offset..], metadata, logical_scratch) {
             Ok(decoded) => decoded,
             Err(_) => {
@@ -1114,8 +1102,6 @@ fn has_valid_wal_target<IO: FlashIo>(
 
 fn validate_live_collection_types(collections: &[StartupCollection]) -> Result<(), StartupError> {
     for collection in collections {
-        //= spec/ring.md#startup-replay-algorithm
-        //# `RING-STARTUP-026` If replay yields a live collection whose `collection_type` is unsupported by the implementation, startup MUST fail.
         if collection.basis == StartupCollectionBasis::Dropped {
             continue;
         }
@@ -1185,10 +1171,6 @@ fn reconstruct_free_list_tail<IO: FlashIo>(
     metadata: StorageMetadata,
     free_list_head: Option<u32>,
 ) -> Result<Option<u32>, StartupError> {
-    //= spec/ring.md#region-reclaim
-    //# `RING-REGION-RECLAIM-POST-005` If a prior tail existed, replay of free pointers MUST follow
-    //# `... -> t_prev -> r`, and `r` is recognized as the tail because its
-    //# free-pointer slot is uninitialized.
     let Some(mut current_region) = free_list_head else {
         return Ok(None);
     };

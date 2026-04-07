@@ -6,6 +6,13 @@ use super::*;
 //# capacities, or sequence advancement MUST use checked arithmetic or
 //# an equivalent construction that makes overflow and underflow
 //# impossible by construction.
+//= spec/implementation.md#arithmetic-requirements
+//= type=test
+//# `RING-IMPL-ARITH-001` Integer arithmetic that can affect storage
+//# layout, region addressing, WAL offsets, lengths, indexes,
+//# capacities, or sequence advancement MUST use checked arithmetic or
+//# an equivalent construction that makes overflow and underflow
+//# impossible by construction.
 #[test]
 fn storage_and_codec_boundaries_use_checked_arithmetic_primitives() {
     let lib = strip_comment_lines(&read_repo_file("src/lib.rs"));
@@ -34,6 +41,12 @@ fn storage_and_codec_boundaries_use_checked_arithmetic_primitives() {
 //# construction and a checked operation fails, the implementation MUST
 //# return an explicit error rather than wrap, saturate, or silently
 //# truncate.
+//= spec/implementation.md#arithmetic-requirements
+//= type=test
+//# `RING-IMPL-ARITH-002` If such arithmetic cannot be proven safe by
+//# construction and a checked operation fails, the implementation MUST
+//# return an explicit error rather than wrap, saturate, or silently
+//# truncate.
 #[test]
 fn checked_arithmetic_failures_map_to_explicit_failure_types() {
     let lib = strip_comment_lines(&read_repo_file("src/lib.rs"));
@@ -57,6 +70,11 @@ fn checked_arithmetic_failures_map_to_explicit_failure_types() {
 //# `RING-IMPL-ARITH-003` The implementation MUST NOT rely on wrapping
 //# integer behavior for correctness unless a future disk-format
 //# requirement explicitly defines modulo arithmetic for that field.
+//= spec/implementation.md#arithmetic-requirements
+//= type=test
+//# `RING-IMPL-ARITH-003` The implementation MUST NOT rely on wrapping
+//# integer behavior for correctness unless a future disk-format
+//# requirement explicitly defines modulo arithmetic for that field.
 #[test]
 fn non_test_sources_avoid_wrapping_saturating_and_overflowing_arithmetic() {
     for (path, source) in non_test_sources_without_comments() {
@@ -71,6 +89,11 @@ fn non_test_sources_avoid_wrapping_saturating_and_overflowing_arithmetic() {
 }
 
 //= spec/implementation.md#arithmetic-requirements
+//# `RING-IMPL-ARITH-004` Conversions between integer widths that may
+//# lose information MUST be checked and MUST fail explicitly if the
+//# value is out of range for the destination type.
+//= spec/implementation.md#arithmetic-requirements
+//= type=test
 //# `RING-IMPL-ARITH-004` Conversions between integer widths that may
 //# lose information MUST be checked and MUST fail explicitly if the
 //# value is out of range for the destination type.

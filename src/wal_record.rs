@@ -200,16 +200,6 @@ pub struct DecodedWalRecord<'a> {
     pub logical_len: usize,
 }
 
-//= spec/ring.md#wal-record-types
-//# RING-WAL-ENC-001 Every physical WAL record MUST begin with a one-byte `record_magic`.
-//= spec/ring.md#wal-record-types
-//# RING-WAL-ENC-003 After the leading `record_magic`, the rest of the physical WAL record is encoded with deterministic byte-stuffing over the logical WAL record bytes:
-//= spec/ring.md#wal-record-types
-//# RING-WAL-ENC-008 The encoded size of every WAL record MUST be rounded up to a multiple of `wal_write_granule`.
-//= spec/ring.md#wal-record-types
-//# RING-WAL-LAYOUT-002 The logical field order before byte-stuffing MUST be exactly the order shown above.
-//= spec/ring.md#wal-record-types
-//# RING-WAL-LAYOUT-004 `record_checksum` MUST be CRC-32C over the logical WAL record bytes from `record_type` through the final byte of the last field preceding `record_checksum`.
 pub fn encode_record_into(
     record: WalRecord<'_>,
     metadata: StorageMetadata,
@@ -252,16 +242,6 @@ pub fn encoded_record_len(
     encode_record_into(record, metadata, physical_scratch, logical_scratch)
 }
 
-//= spec/ring.md#wal-record-types
-//# RING-WAL-ENC-004 During decoding, any `wal_escape_byte` in the encoded body MUST be followed by exactly one of `wal_escape_code_erased`, `wal_escape_code_magic`, or `wal_escape_code_escape`; any other follower byte is corruption.
-//= spec/ring.md#wal-record-types
-//# RING-WAL-ENC-006 After the full logical record through `record_checksum` has been decoded, any remaining bytes up to the aligned physical record end are padding. Those padding bytes MUST all equal `wal_escape_code_escape`.
-//= spec/ring.md#wal-record-types
-//# RING-WAL-LAYOUT-001 `record_type` MUST use these canonical byte codes:
-//= spec/ring.md#wal-record-types
-//# RING-WAL-LAYOUT-003 `payload_len` MUST equal the number of logical payload bytes only.
-//= spec/ring.md#wal-record-types
-//# RING-WAL-LAYOUT-005 Record types whose payload is empty (`new_collection`, `drop_collection`, and `wal_recovery`) MUST still encode `payload_len = 0`.
 pub fn decode_record<'a>(
     input: &[u8],
     metadata: StorageMetadata,

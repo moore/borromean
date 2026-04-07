@@ -1,8 +1,6 @@
 use crate::mock::{MockError, MockFormatError};
 use crate::{MockFlash, StorageMetadata};
 
-//= spec/ring.md#core-requirements
-//# `RING-CORE-001` Region starts and region sizes MUST be aligned to the backing flash erase-block size so every region can be erased independently.
 pub trait FlashIo {
     fn read_metadata(&mut self) -> Result<Option<StorageMetadata>, MockError>;
 
