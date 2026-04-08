@@ -327,17 +327,6 @@ fn read_repo_file(relative: &str) -> String {
     fs::read_to_string(repo_root().join(relative)).unwrap()
 }
 
-fn strip_comment_lines(source: &str) -> String {
-    source
-        .lines()
-        .filter(|line| {
-            let trimmed = line.trim_start();
-            !(trimmed.starts_with("//") || trimmed.starts_with('#'))
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 fn flash_io_method_names() -> Vec<String> {
     let source = read_repo_file("src/flash_io.rs");
     let mut in_trait = false;
