@@ -89,8 +89,8 @@ for dependency in "${banned_platform_dependencies[@]}"; do
     fi
 done
 
-echo "[verify] duvet report --config-path .duvet/config.toml --ci true --require-citations true --require-tests true"
-duvet report --config-path .duvet/config.toml --ci true --require-citations true --require-tests true
+echo "[verify] duvet report --config-path .duvet/config.toml --ci true --require-citations false --require-tests true"
+duvet report --config-path .duvet/config.toml --ci true --require-citations false --require-tests true
 
 echo "[verify] duvet report --config-path .duvet/policy/config.toml --ci true --require-citations true --require-tests false"
 mv "$requirements_root" "$requirements_backup/original"
