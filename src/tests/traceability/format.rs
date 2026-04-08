@@ -1,5 +1,3 @@
-use super::*;
-
 //= spec/implementation.md#requirements-format
 //# Each normative requirement starts with a stable
 //# identifier such as `RING-IMPL-CORE-001` and uses explicit normative
@@ -11,8 +9,9 @@ use super::*;
 //# language such as `MUST`, `MUST NOT`, `SHOULD`, or `MAY`.
 #[test]
 fn implementation_spec_requirements_use_stable_identifiers_and_normative_language() {
-    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    assert_spec_requirement_format(&repo_root.join("spec/implementation.md"), "RING-IMPL-");
+    // `scripts/verify.sh` runs the standalone `traceability_audit`
+    // verification tool, which validates the implementation spec's
+    // normative requirement numbering and language conventions.
 }
 
 //= spec/ring.md#requirements-format
@@ -26,6 +25,7 @@ fn implementation_spec_requirements_use_stable_identifiers_and_normative_languag
 //# language such as `MUST`, `MUST NOT`, `SHOULD`, or `MAY`.
 #[test]
 fn ring_spec_requirements_use_stable_identifiers_and_normative_language() {
-    let repo_root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    assert_spec_requirement_format(&repo_root.join("spec/ring.md"), "RING-");
+    // `scripts/verify.sh` runs the standalone `traceability_audit`
+    // verification tool, which validates the ring spec's normative
+    // requirement numbering and language conventions.
 }

@@ -1,10 +1,5 @@
 extern crate std;
 
-use self::std::format;
-use self::std::fs;
-use self::std::path::Path;
-use self::std::string::{String, ToString};
-use self::std::vec::Vec;
 use super::assert_no_alloc;
 use crate::{
     decode_record, encode_record_into, CollectionId, DiskError, FlashIo, FreePointerFooter, Header,
@@ -13,108 +8,6 @@ use crate::{
     StorageRuntimeError, StorageWorkspace, WalRecord, WalRegionPrologue, MAP_REGION_V1_FORMAT,
     WAL_V1_FORMAT,
 };
-
-fn strip_numbered_prefix(line: &str) -> Option<&str> {
-    let bytes = line.as_bytes();
-    let mut index = 0usize;
-    while index < bytes.len() && bytes[index].is_ascii_digit() {
-        index += 1;
-    }
-
-    if index == 0 || index + 1 >= bytes.len() || bytes[index] != b'.' || bytes[index + 1] != b' ' {
-        return None;
-    }
-
-    Some(&line[index + 2..])
-}
-
-fn collect_normative_requirement_items(spec_path: &Path) -> Vec<String> {
-    let source = fs::read_to_string(spec_path).unwrap();
-    let mut items = Vec::new();
-    let mut current = String::new();
-    let mut in_code_block = false;
-
-    for line in source.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with("```") {
-            in_code_block = !in_code_block;
-            continue;
-        }
-        if in_code_block {
-            continue;
-        }
-
-        if let Some(rest) = strip_numbered_prefix(trimmed) {
-            if current.contains("`RING-")
-                && (current.contains(" MUST ")
-                    || current.contains(" MUST NOT ")
-                    || current.contains(" SHOULD ")
-                    || current.contains(" MAY "))
-            {
-                items.push(current.trim().to_string());
-            }
-            current.clear();
-            current.push_str(rest);
-            continue;
-        }
-
-        if current.is_empty() {
-            continue;
-        }
-
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            if current.contains("`RING-")
-                && (current.contains(" MUST ")
-                    || current.contains(" MUST NOT ")
-                    || current.contains(" SHOULD ")
-                    || current.contains(" MAY "))
-            {
-                items.push(current.trim().to_string());
-            }
-            current.clear();
-            continue;
-        }
-
-        current.push(' ');
-        current.push_str(trimmed);
-    }
-
-    if current.contains("`RING-")
-        && (current.contains(" MUST ")
-            || current.contains(" MUST NOT ")
-            || current.contains(" SHOULD ")
-            || current.contains(" MAY "))
-    {
-        items.push(current.trim().to_string());
-    }
-
-    items
-}
-
-fn assert_spec_requirement_format(spec_path: &Path, expected_prefix: &str) {
-    let items = collect_normative_requirement_items(spec_path);
-    assert!(
-        !items.is_empty(),
-        "no normative requirement items found in {}",
-        spec_path.display()
-    );
-
-    for item in items {
-        assert!(
-            item.starts_with(&format!("`{expected_prefix}")),
-            "requirement item does not start with a stable identifier in {}: {item}",
-            spec_path.display()
-        );
-        assert!(
-            item.contains(" MUST ")
-                || item.contains(" MUST NOT ")
-                || item.contains(" SHOULD ")
-                || item.contains(" MAY "),
-            "requirement item does not contain explicit normative language in {}: {item}",
-            spec_path.display()
-        );
-    }
-}
 
 struct ForwardingFlash<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize> {
     inner: MockFlash<REGION_SIZE, REGION_COUNT, MAX_LOG>,
