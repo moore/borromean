@@ -3,9 +3,6 @@ use ::core::pin::pin;
 use ::core::task::Poll;
 
 //= spec/implementation.md#operation-requirements
-//# `RING-IMPL-OP-001` A borromean future MUST NOT require spawning
-//# another borromean future in order to complete.
-//= spec/implementation.md#operation-requirements
 //= type=test
 //# `RING-IMPL-OP-001` A borromean future MUST NOT require spawning
 //# another borromean future in order to complete.
@@ -98,10 +95,6 @@ fn each_public_operation_future_completes_when_polled_directly() {
     assert_eq!(reclaimed_head, next_region);
 }
 
-//= spec/implementation.md#operation-requirements
-//# `RING-IMPL-OP-004` Pure in-memory state mutations that make a later
-//# durable step mandatory MUST occur in an order that allows the same
-//# operation to be retried or reconstructed after reset.
 //= spec/implementation.md#operation-requirements
 //= type=test
 //# `RING-IMPL-OP-004` Pure in-memory state mutations that make a later
@@ -216,10 +209,6 @@ fn flush_future_keeps_collection_basis_on_previous_state_until_head_commit() {
     );
 }
 
-//= spec/implementation.md#operation-requirements
-//# `RING-IMPL-OP-005` Public operations SHOULD minimize the duration of
-//# mutable borrows of large caller workspaces so embedded callers can
-//# reuse buffers across sequential operations.
 //= spec/implementation.md#operation-requirements
 //= type=test
 //# `RING-IMPL-OP-005` Public operations SHOULD minimize the duration of

@@ -392,13 +392,6 @@ fn wal_and_map_region_formats() -> (Header, Header) {
 }
 
 //= spec/ring.md#canonical-on-disk-encoding
-//# `RING-DISK-004` `collection_format` is a stable per-region `u16`
-//# namespace recorded durably in region headers. The pair
-//# `(collection_type, collection_format)` identifies a concrete
-//# committed region payload encoding. Borromean core reserves
-//# `collection_format = 0x0000` globally for `wal_v1`; every non-WAL
-//# collection format MUST be nonzero.
-//= spec/ring.md#canonical-on-disk-encoding
 //= type=test
 //# `RING-DISK-004` `collection_format` is a stable per-region `u16`
 //# namespace recorded durably in region headers. The pair
@@ -419,10 +412,6 @@ fn wal_and_map_regions_use_distinct_collection_format_namespace_values() {
     assert!(map_header.collection_format > 0);
 }
 
-//= spec/ring.md#storage-requirements
-//# `RING-STORAGE-005` Borromean core MUST reserve the canonical
-//# `collection_format` value `wal_v1` for WAL regions, and user
-//# collections MUST NOT use that identifier.
 //= spec/ring.md#storage-requirements
 //= type=test
 //# `RING-STORAGE-005` Borromean core MUST reserve the canonical
@@ -787,8 +776,6 @@ fn storage_reclaim_wal_head_future_drop_after_reclaim_begin_remains_recoverable(
 }
 
 //= spec/implementation.md#operation-requirements
-//# `RING-IMPL-OP-002` A borromean future MUST either complete with a terminal result or remain safely resumable by further polling after any `Poll::Pending`.
-//= spec/implementation.md#operation-requirements
 //= type=test
 //# `RING-IMPL-OP-002` A borromean future MUST either complete with a terminal result or remain safely resumable by further polling after any `Poll::Pending`.
 #[test]
@@ -851,8 +838,6 @@ fn storage_map_operation_futures_poll_to_completion() {
 }
 
 //= spec/implementation.md#execution-requirements
-//# `RING-IMPL-EXEC-005` Await boundaries inside borromean operations MUST align only with externally visible I/O steps or with pure in-memory decision points that preserve the ring ordering rules.
-//= spec/implementation.md#execution-requirements
 //= type=test
 //# `RING-IMPL-EXEC-005` Await boundaries inside borromean operations MUST align only with externally visible I/O steps or with pure in-memory decision points that preserve the ring ordering rules.
 #[test]
@@ -891,8 +876,6 @@ fn storage_flush_map_future_yields_between_durable_phases() {
     assert_eq!(storage.ready_region(), None);
 }
 
-//= spec/implementation.md#operation-requirements
-//# `RING-IMPL-OP-003` If an operation future is dropped before completion, any already-issued durable writes MUST still satisfy the crash-safety rules from [spec/ring.md](ring.md).
 //= spec/implementation.md#operation-requirements
 //= type=test
 //# `RING-IMPL-OP-003` If an operation future is dropped before completion, any already-issued durable writes MUST still satisfy the crash-safety rules from [spec/ring.md](ring.md).
@@ -934,8 +917,6 @@ fn storage_flush_map_future_drop_after_region_write_remains_recoverable() {
     assert_eq!(reopened.ready_region(), storage.ready_region());
 }
 
-//= spec/implementation.md#architecture-requirements
-//# `RING-IMPL-ARCH-001` `Storage` MUST own logical storage state and configuration, but MUST NOT require long-lived ownership of the backing I/O object.
 //= spec/implementation.md#architecture-requirements
 //= type=test
 //# `RING-IMPL-ARCH-001` `Storage` MUST own logical storage state and configuration, but MUST NOT require long-lived ownership of the backing I/O object.
@@ -997,8 +978,6 @@ fn storage_append_and_reopen_round_trip_through_flash() {
 }
 
 //= spec/ring.md#collection-head-state-machine
-//# `RING-FORMAT-012` Every non-WAL `collection_type` that may appear durably on disk MUST have a corresponding normative collection specification.
-//= spec/ring.md#collection-head-state-machine
 //= type=test
 //# `RING-FORMAT-012` Every non-WAL `collection_type` that may appear durably on disk MUST have a corresponding normative collection specification.
 #[test]
@@ -1020,8 +999,6 @@ fn storage_append_new_collection_rejects_unsupported_channel_collection() {
     ));
 }
 
-//= spec/implementation.md#api-requirements
-//# `RING-IMPL-API-001` Public entry points for format, open, replay, and mutating collection operations MUST make their workspace and I/O dependencies explicit in the function signature.
 //= spec/implementation.md#api-requirements
 //= type=test
 //# `RING-IMPL-API-001` Public entry points for format, open, replay, and mutating collection operations MUST make their workspace and I/O dependencies explicit in the function signature.
@@ -1057,10 +1034,6 @@ fn storage_reclaim_wal_head_updates_runtime_head_to_next_region() {
     assert_eq!(storage.wal_tail(), next_region);
 }
 
-//= spec/ring.md#core-requirements
-//# `RING-CORE-008` Borromean MUST model WAL-head movement as ordinary
-//# `head(collection_id = 0, collection_type = wal, region_index = ...)`
-//# records rather than a WAL-specific head record type.
 //= spec/ring.md#core-requirements
 //= type=test
 //# `RING-CORE-008` Borromean MUST model WAL-head movement as ordinary
@@ -1100,9 +1073,6 @@ fn storage_reclaim_wal_head_appends_an_ordinary_head_record_for_wal_movement() {
 }
 
 //= spec/ring.md#wal-reclaim-eligibility
-//# `RING-WAL-RECLAIM-PRE-001` The candidate region MUST be the head of
-//# the WAL.
-//= spec/ring.md#wal-reclaim-eligibility
 //= type=test
 //# `RING-WAL-RECLAIM-PRE-001` The candidate region MUST be the head of
 //# the WAL.
@@ -1118,12 +1088,6 @@ fn storage_reclaim_wal_head_returns_old_head_region_to_free_list_tail() {
     assert!(storage.pending_reclaims().is_empty());
 }
 
-//= spec/ring.md#wal-reclaim-eligibility
-//# `RING-WAL-RECLAIM-PRE-002` For every live record in the candidate,
-//# an equivalent live state MUST be already represented durably outside
-//# the candidate (typically by newer `snapshot`, `drop_collection`, or
-//# by `head(collection_id, collection_type, region_index)` plus newer
-//# updates).
 //= spec/ring.md#wal-reclaim-eligibility
 //= type=test
 //# `RING-WAL-RECLAIM-PRE-002` For every live record in the candidate,
@@ -1165,9 +1129,6 @@ fn storage_reclaim_wal_head_copies_live_snapshot_basis_to_tail() {
     assert!(storage.wal_tail() >= next_region);
 }
 
-//= spec/ring.md#wal-reclaim-eligibility
-//# `RING-WAL-RECLAIM-POST-001` No collection's `H(c)`, `B(c)`, or live
-//# post-basis updates MUST NOT depend on bytes in the reclaimed region.
 //= spec/ring.md#wal-reclaim-eligibility
 //= type=test
 //# `RING-WAL-RECLAIM-POST-001` No collection's `H(c)`, `B(c)`, or live
@@ -1269,10 +1230,6 @@ fn reclaim_wal_head_and_reopen_empty_head_map() -> (
 }
 
 //= spec/ring.md#wal-reclaim-eligibility
-//# `RING-WAL-RECLAIM-PRE-003` After planned metadata updates, startup
-//# replay MUST still be able to walk a valid WAL chain from head to
-//# tail.
-//= spec/ring.md#wal-reclaim-eligibility
 //= type=test
 //# `RING-WAL-RECLAIM-PRE-003` After planned metadata updates, startup
 //# replay MUST still be able to walk a valid WAL chain from head to
@@ -1294,8 +1251,6 @@ fn storage_reclaim_wal_head_reopen_keeps_the_wal_chain_walkable() {
     assert!(record_count > 0);
 }
 
-//= spec/ring.md#wal-reclaim-eligibility
-//# `RING-WAL-RECLAIM-SAFE-001` Reclaim MUST NOT change replay result: the recovered `last_head` and `pending_updates` for every collection, the recovered `last_free_list_head`, reserved `ready_region`, ordered incomplete reclaim state, and reconstructed `free_list_tail`, after reclaim must match the pre-reclaim logical state.
 //= spec/ring.md#wal-reclaim-eligibility
 //= type=test
 //# `RING-WAL-RECLAIM-SAFE-001` Reclaim MUST NOT change replay result: the recovered `last_head` and `pending_updates` for every collection, the recovered `last_free_list_head`, reserved `ready_region`, ordered incomplete reclaim state, and reconstructed `free_list_tail`, after reclaim must match the pre-reclaim logical state.
@@ -1328,12 +1283,6 @@ fn storage_reclaim_wal_head_reopen_preserves_replay_result() {
 }
 
 //= spec/ring.md#wal-reclaim-eligibility
-//# `RING-WAL-RECLAIM-POST-005` Startup step 4 MUST recover the same effective WAL head after
-//# reclaim as before reclaim, using the current tail region's
-//# `WalRegionPrologue` plus the last valid tail-local
-//# `head(collection_id = 0, collection_type = wal, region_index = ...)`
-//# override, if any.
-//= spec/ring.md#wal-reclaim-eligibility
 //= type=test
 //# `RING-WAL-RECLAIM-POST-005` Startup step 4 MUST recover the same effective WAL head after
 //# reclaim as before reclaim, using the current tail region's
@@ -1348,8 +1297,6 @@ fn storage_reclaim_wal_head_reopen_preserves_effective_wal_head() {
 }
 
 //= spec/ring.md#wal-reclaim-eligibility
-//# `RING-WAL-RECLAIM-POST-002` The recovered free-list head MUST match pre-reclaim allocator state.
-//= spec/ring.md#wal-reclaim-eligibility
 //= type=test
 //# `RING-WAL-RECLAIM-POST-002` The recovered free-list head MUST match pre-reclaim allocator state.
 #[test]
@@ -1361,8 +1308,6 @@ fn storage_reclaim_wal_head_reopen_preserves_free_list_head() {
 }
 
 //= spec/ring.md#wal-reclaim-eligibility
-//# `RING-WAL-RECLAIM-POST-003` The recovered `ready_region`, if any, MUST match pre-reclaim allocator state.
-//= spec/ring.md#wal-reclaim-eligibility
 //= type=test
 //# `RING-WAL-RECLAIM-POST-003` The recovered `ready_region`, if any, MUST match pre-reclaim allocator state.
 #[test]
@@ -1373,9 +1318,6 @@ fn storage_reclaim_wal_head_reopen_preserves_ready_region() {
     assert_eq!(reopened.ready_region(), expected_ready_region);
 }
 
-//= spec/ring.md#wal-reclaim-eligibility
-//# `RING-WAL-RECLAIM-POST-006` WAL chain integrity MUST remain valid
-//# with no broken `link` path.
 //= spec/ring.md#wal-reclaim-eligibility
 //= type=test
 //# `RING-WAL-RECLAIM-POST-006` WAL chain integrity MUST remain valid
@@ -1476,9 +1418,6 @@ fn storage_map_api_restores_snapshot_and_updates() {
 }
 
 //= spec/ring.md#core-requirements
-//# `RING-CORE-012` The implementation MUST maintain
-//# `min_free_regions >= max_in_memory_dirty_collections + 1`.
-//= spec/ring.md#core-requirements
 //= type=test
 //# `RING-CORE-012` The implementation MUST maintain
 //# `min_free_regions >= max_in_memory_dirty_collections + 1`.
@@ -1560,12 +1499,6 @@ fn storage_map_frontiers_do_not_exceed_the_configured_dirty_collection_reserve()
     assert_eq!(second_map.get(&2).unwrap(), Some(20));
 }
 
-//= spec/ring.md#core-requirements
-//# `RING-CORE-016` If applying another update would exceed that
-//# capacity, the implementation MUST flush the collection's current
-//# logical frontier into a newly allocated region, durably commit that
-//# region as the collection head, and clear the in-memory frontier before
-//# accepting further updates for that collection.
 //= spec/ring.md#core-requirements
 //= type=test
 //# `RING-CORE-016` If applying another update would exceed that
@@ -1686,10 +1619,6 @@ fn storage_map_frontier_overflow_flushes_and_commits_a_new_region_head() {
 }
 
 //= spec/ring.md#core-requirements
-//# `RING-CORE-017` After such a frontier-capacity flush, later updates
-//# for that collection MUST accumulate in a fresh in-memory frontier
-//# layered over the newly committed region head.
-//= spec/ring.md#core-requirements
 //= type=test
 //# `RING-CORE-017` After such a frontier-capacity flush, later updates
 //# for that collection MUST accumulate in a fresh in-memory frontier
@@ -1774,8 +1703,6 @@ fn storage_map_frontier_continues_accumulating_updates_after_an_overflow_flush()
     assert_eq!(reopened.get(&2).unwrap(), Some(50));
 }
 
-//= spec/implementation.md#api-requirements
-//# `RING-IMPL-API-003` Collection implementations MUST define their opaque payload semantics above the shared storage primitives rather than bypassing WAL and region-management invariants.
 //= spec/implementation.md#api-requirements
 //= type=test
 //# `RING-IMPL-API-003` Collection implementations MUST define their opaque payload semantics above the shared storage primitives rather than bypassing WAL and region-management invariants.
@@ -1862,9 +1789,6 @@ fn storage_map_api_flushes_committed_region_basis() {
     assert_eq!(reopened.get(&7).unwrap(), Some(70));
 }
 
-//= spec/ring.md#region-reclaim
-//# `RING-REGION-RECLAIM-PRE-001` `reclaim_begin(r)` MUST be durable in
-//# the WAL before any live metadata is updated to stop referencing `r`.
 //= spec/ring.md#region-reclaim
 //= type=test
 //# `RING-REGION-RECLAIM-PRE-001` `reclaim_begin(r)` MUST be durable in
@@ -2030,8 +1954,6 @@ fn replace_map_and_reopen_empty_free_list() -> (
 }
 
 //= spec/ring.md#startup-replay-algorithm
-//# RING-STARTUP-020 Initialize allocator state from `last_free_list_head`.
-//= spec/ring.md#startup-replay-algorithm
 //= type=test
 //# RING-STARTUP-020 Initialize allocator state from `last_free_list_head`.
 #[test]
@@ -2042,8 +1964,6 @@ fn storage_reopen_after_replacement_initializes_allocator_from_recovered_free_li
 }
 
 //= spec/ring.md#startup-replay-algorithm
-//# RING-STARTUP-021 Reconstruct runtime `free_list_tail` by following free-pointer links starting at `last_free_list_head` until reaching a free region whose free-pointer slot is uninitialized.
-//= spec/ring.md#startup-replay-algorithm
 //= type=test
 //# RING-STARTUP-021 Reconstruct runtime `free_list_tail` by following free-pointer links starting at `last_free_list_head` until reaching a free region whose free-pointer slot is uninitialized.
 #[test]
@@ -2053,8 +1973,6 @@ fn storage_reopen_after_replacement_reconstructs_free_list_tail() {
     assert_eq!(reopened.free_list_tail(), Some(first_region));
 }
 
-//= spec/ring.md#startup-replay-algorithm
-//# RING-STARTUP-007 Maintain replay state: per collection optional live `collection_type`, `last_head`, `basis_pos`, and `pending_updates`, plus global `last_free_list_head`, optional reserved `ready_region`, ordered pending region reclaims, and the replay-local `pending_wal_recovery_boundary`.
 //= spec/ring.md#startup-replay-algorithm
 //= type=test
 //# RING-STARTUP-007 Maintain replay state: per collection optional live `collection_type`, `last_head`, `basis_pos`, and `pending_updates`, plus global `last_free_list_head`, optional reserved `ready_region`, ordered pending region reclaims, and the replay-local `pending_wal_recovery_boundary`.
@@ -2084,8 +2002,6 @@ fn storage_reopen_after_replacement_recovers_collection_and_reclaim_state() {
 }
 
 //= spec/ring.md#region-reclaim
-//# `RING-REGION-RECLAIM-PRE-002` After the detach step, the reclaimed region `r` MUST no longer be reachable from any live collection head or live WAL state.
-//= spec/ring.md#region-reclaim
 //= type=test
 //# `RING-REGION-RECLAIM-PRE-002` After the detach step, the reclaimed region `r` MUST no longer be reachable from any live collection head or live WAL state.
 #[test]
@@ -2101,8 +2017,6 @@ fn storage_replacement_flush_detaches_reclaimed_region_from_live_state() {
 }
 
 //= spec/ring.md#region-reclaim
-//# `RING-REGION-RECLAIM-PRE-003` `r` MUST NOT already be reachable from the free-list chain, unless this procedure is being re-entered during crash recovery.
-//= spec/ring.md#region-reclaim
 //= type=test
 //# `RING-REGION-RECLAIM-PRE-003` `r` MUST NOT already be reachable from the free-list chain, unless this procedure is being re-entered during crash recovery.
 #[test]
@@ -2114,8 +2028,6 @@ fn storage_replacement_flush_keeps_detached_region_out_of_free_list_chain() {
     assert!(!chain.contains(&first_region));
 }
 
-//= spec/ring.md#region-reclaim
-//# `RING-REGION-RECLAIM-SEM-003` If `t_prev = none`, reclaim MUST NOT write any predecessor link and MUST durably append `free_list_head(r)` and set `free_list_head = r` and `free_list_tail = r`.
 //= spec/ring.md#region-reclaim
 //= type=test
 //# `RING-REGION-RECLAIM-SEM-003` If `t_prev = none`, reclaim MUST NOT write any predecessor link and MUST durably append `free_list_head(r)` and set `free_list_head = r` and `free_list_tail = r`.
@@ -2138,11 +2050,6 @@ fn storage_reopen_after_replacement_recovers_singleton_free_list_for_reclaimed_r
 }
 
 //= spec/ring.md#region-reclaim
-//# `RING-REGION-RECLAIM-004` Establish `r` as a free region without
-//# erasing it. In particular,
-//# `r.free_pointer.next_tail` MUST still be uninitialized when `r` is
-//# about to become the new free-list tail.
-//= spec/ring.md#region-reclaim
 //= type=test
 //# `RING-REGION-RECLAIM-004` Establish `r` as a free region without
 //# erasing it. In particular,
@@ -2161,8 +2068,6 @@ fn storage_reopen_after_replacement_leaves_new_free_list_tail_uninitialized() {
     assert_eq!(footer.next_tail, None);
 }
 
-//= spec/ring.md#region-reclaim
-//# `RING-REGION-RECLAIM-ORDER-005` The reclaim procedure MUST be idempotent across crashes between any two steps above.
 //= spec/ring.md#region-reclaim
 //= type=test
 //# `RING-REGION-RECLAIM-ORDER-005` The reclaim procedure MUST be idempotent across crashes between any two steps above.
@@ -2189,10 +2094,6 @@ fn storage_reopen_after_replacement_recovers_reclaim_idempotently() {
     assert_eq!(reopened_twice.ready_region(), reopened_once.ready_region());
 }
 
-//= spec/ring.md#core-requirements
-//# `RING-CORE-014` If reclaim cannot restore at least
-//# `min_free_regions` free regions, the database MUST treat ordinary
-//# writes as out of space until space is freed or the store is migrated.
 //= spec/ring.md#core-requirements
 //= type=test
 //# `RING-CORE-014` If reclaim cannot restore at least
@@ -2265,9 +2166,6 @@ fn storage_map_flush_completes_detached_reclaims_before_using_reserve() {
 }
 
 //= spec/ring.md#core-requirements
-//# `RING-CORE-013` Ordinary foreground allocations MUST NOT consume the
-//# last `min_free_regions` free regions.
-//= spec/ring.md#core-requirements
 //= type=test
 //# `RING-CORE-013` Ordinary foreground allocations MUST NOT consume the
 //# last `min_free_regions` free regions.
@@ -2339,10 +2237,6 @@ fn storage_map_flush_reclaims_wal_head_before_consuming_min_free_region_reserve(
 }
 
 //= spec/ring.md#region-reclaim
-//# `RING-REGION-RECLAIM-SEM-002` If `t_prev != none`, reclaim MUST
-//# durably write `t_prev.free_pointer.next_tail = r` when freeing region
-//# `r`.
-//= spec/ring.md#region-reclaim
 //= type=test
 //# `RING-REGION-RECLAIM-SEM-002` If `t_prev != none`, reclaim MUST
 //# durably write `t_prev.free_pointer.next_tail = r` when freeing region
@@ -2353,8 +2247,6 @@ fn storage_complete_pending_reclaim_writes_the_previous_tail_next_pointer() {
     assert_eq!(result.previous_tail_next, Some(result.reclaimed_region));
 }
 
-//= spec/ring.md#region-reclaim
-//# `RING-REGION-RECLAIM-POST-001` The free-list chain MUST remain acyclic and FIFO-ordered.
 //= spec/ring.md#region-reclaim
 //= type=test
 //# `RING-REGION-RECLAIM-POST-001` The free-list chain MUST remain acyclic and FIFO-ordered.
@@ -2375,9 +2267,6 @@ fn storage_complete_pending_reclaim_preserves_fifo_free_list_order() {
     );
 }
 
-//= spec/ring.md#region-reclaim
-//# `RING-REGION-RECLAIM-POST-002` Exactly one new region (`r`) MUST be
-//# appended to the tail.
 //= spec/ring.md#region-reclaim
 //= type=test
 //# `RING-REGION-RECLAIM-POST-002` Exactly one new region (`r`) MUST be
@@ -2402,9 +2291,6 @@ fn storage_complete_pending_reclaim_appends_exactly_one_region_to_the_tail() {
 }
 
 //= spec/ring.md#region-reclaim
-//# `RING-REGION-RECLAIM-POST-003` If a prior tail existed, its
-//# `next_tail` pointer MUST now reference `r`.
-//= spec/ring.md#region-reclaim
 //= type=test
 //# `RING-REGION-RECLAIM-POST-003` If a prior tail existed, its
 //# `next_tail` pointer MUST now reference `r`.
@@ -2415,9 +2301,6 @@ fn storage_complete_pending_reclaim_points_the_previous_tail_at_the_reclaimed_re
 }
 
 //= spec/ring.md#region-reclaim
-//# `RING-REGION-RECLAIM-POST-004` `r.free_pointer.next_tail` MUST
-//# remain uninitialized after reclaim.
-//= spec/ring.md#region-reclaim
 //= type=test
 //# `RING-REGION-RECLAIM-POST-004` `r.free_pointer.next_tail` MUST
 //# remain uninitialized after reclaim.
@@ -2427,10 +2310,6 @@ fn storage_complete_pending_reclaim_keeps_the_reclaimed_tail_footer_uninitialize
     assert_eq!(result.reclaimed_tail_next, None);
 }
 
-//= spec/ring.md#region-reclaim
-//# `RING-REGION-RECLAIM-POST-005` If a prior tail existed, replay of free pointers MUST follow
-//# `... -> t_prev -> r`, and `r` is recognized as the tail because its
-//# free-pointer slot is uninitialized.
 //= spec/ring.md#region-reclaim
 //= type=test
 //# `RING-REGION-RECLAIM-POST-005` If a prior tail existed, replay of free pointers MUST follow
@@ -2447,11 +2326,6 @@ fn storage_complete_pending_reclaim_links_the_previous_tail_to_the_reclaimed_reg
     );
 }
 
-//= spec/ring.md#region-reclaim
-//# `RING-REGION-RECLAIM-ORDER-002` Before any durable write makes `r`
-//# reachable from `t_prev.next_tail`, the implementation MUST ensure
-//# that `r` already has the correct free-list-tail footer state, namely
-//# an uninitialized `r.free_pointer.next_tail`.
 //= spec/ring.md#region-reclaim
 //= type=test
 //# `RING-REGION-RECLAIM-ORDER-002` Before any durable write makes `r`
@@ -2487,10 +2361,6 @@ fn storage_complete_pending_reclaim_prepares_the_reclaimed_footer_before_syncing
     assert!(reclaimed_footer_write < first_sync);
 }
 
-//= spec/ring.md#region-reclaim
-//# `RING-REGION-RECLAIM-ORDER-003` If `t_prev = none`,
-//# `free_list_head(r)` MUST be durable before `reclaim_end(r)` is
-//# acknowledged.
 //= spec/ring.md#region-reclaim
 //= type=test
 //# `RING-REGION-RECLAIM-ORDER-003` If `t_prev = none`,
@@ -2532,10 +2402,6 @@ fn storage_complete_pending_reclaim_records_free_list_head_before_reclaim_end_wh
     assert!(saw_reclaim_end);
 }
 
-//= spec/ring.md#region-reclaim
-//# `RING-REGION-RECLAIM-ORDER-004` If `t_prev` exists, the
-//# `t_prev.next_tail = r` write MUST be synced before `reclaim_end(r)`
-//# is acknowledged.
 //= spec/ring.md#region-reclaim
 //= type=test
 //# `RING-REGION-RECLAIM-ORDER-004` If `t_prev` exists, the
@@ -2719,9 +2585,6 @@ fn storage_reopen_discards_reclaim_begin_before_drop_detaches_live_region() {
     assert_eq!(reopened_map.get(&8).unwrap(), Some(80));
 }
 
-//= spec/ring.md#region-reclaim
-//# `RING-REGION-RECLAIM-ORDER-001` `reclaim_begin(r)` MUST be durable
-//# before any live metadata stops referencing `r`.
 //= spec/ring.md#region-reclaim
 //= type=test
 //# `RING-REGION-RECLAIM-ORDER-001` `reclaim_begin(r)` MUST be durable

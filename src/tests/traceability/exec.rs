@@ -81,10 +81,6 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize> 
 }
 
 //= spec/implementation.md#execution-requirements
-//# `RING-IMPL-EXEC-001` Every fallible storage operation that may
-//# require one or more device interactions MUST be expressible as a
-//# single future.
-//= spec/implementation.md#execution-requirements
 //= type=test
 //# `RING-IMPL-EXEC-001` Every fallible storage operation that may
 //# require one or more device interactions MUST be expressible as a
@@ -170,10 +166,6 @@ fn each_fallible_storage_operation_is_drivable_as_one_future() {
 }
 
 //= spec/implementation.md#execution-requirements
-//# `RING-IMPL-EXEC-002` Borromean futures MUST make progress only when
-//# polled by the caller and when the caller-provided I/O object becomes
-//# ready; they MUST NOT rely on background tasks internal to borromean.
-//= spec/implementation.md#execution-requirements
 //= type=test
 //# `RING-IMPL-EXEC-002` Borromean futures MUST make progress only when
 //# polled by the caller and when the caller-provided I/O object becomes
@@ -208,10 +200,6 @@ fn operation_futures_advance_only_when_the_caller_polls_them() {
     assert_eq!(reopened.wal_head(), 0);
 }
 
-//= spec/implementation.md#execution-requirements
-//# `RING-IMPL-EXEC-003` A simple single-threaded poll-to-completion
-//# executor MUST be sufficient to drive any borromean operation future
-//# to completion.
 //= spec/implementation.md#execution-requirements
 //= type=test
 //# `RING-IMPL-EXEC-003` A simple single-threaded poll-to-completion
@@ -277,11 +265,6 @@ fn single_threaded_poll_loop_drives_operation_futures_to_completion() {
     assert_eq!(reopened_map.get(&7).unwrap(), Some(70));
 }
 
-//= spec/implementation.md#execution-requirements
-//# `RING-IMPL-EXEC-004` Borromean operations on a given `Storage`
-//# instance MUST require exclusive mutable access to that instance
-//# unless and until a separate concurrency specification defines
-//# stronger sharing rules.
 //= spec/implementation.md#execution-requirements
 //= type=test
 //# `RING-IMPL-EXEC-004` Borromean operations on a given `Storage`

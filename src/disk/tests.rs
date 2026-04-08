@@ -1,10 +1,6 @@
 use super::*;
 
 //= spec/ring.md#canonical-on-disk-encoding
-//# `RING-DISK-001` All fixed-width integer fields in `StorageMetadata`,
-//# `Header`, `WalRegionPrologue`, free-pointer footers, and logical WAL
-//# records MUST be encoded little-endian.
-//= spec/ring.md#canonical-on-disk-encoding
 //= type=test
 //# `RING-DISK-001` All fixed-width integer fields in `StorageMetadata`,
 //# `Header`, `WalRegionPrologue`, free-pointer footers, and logical WAL
@@ -79,12 +75,6 @@ fn disk_structures_encode_fixed_width_fields_little_endian() {
 }
 
 //= spec/ring.md#canonical-on-disk-encoding
-//# `RING-DISK-006` `metadata_checksum`, `header_checksum`,
-//# `prologue_checksum`, `footer_checksum`, and `record_checksum` MUST all use the standard
-//# CRC-32C (Castagnoli) parameters (`poly = 0x1edc6f41`,
-//# `init = 0xffffffff`, `refin = true`, `refout = true`,
-//# `xorout = 0xffffffff`) and MUST be stored little-endian.
-//= spec/ring.md#canonical-on-disk-encoding
 //= type=test
 //# `RING-DISK-006` `metadata_checksum`, `header_checksum`,
 //# `prologue_checksum`, `footer_checksum`, and `record_checksum` MUST all use the standard
@@ -149,9 +139,6 @@ fn disk_structure_checksums_use_crc32c_and_store_little_endian_bytes() {
 }
 
 //= spec/ring.md#storage-metadata
-//# `RING-META-001` The canonical on-disk `storage_version` defined by
-//# this specification MUST be `1`.
-//= spec/ring.md#storage-metadata
 //= type=test
 //# `RING-META-001` The canonical on-disk `storage_version` defined by
 //# this specification MUST be `1`.
@@ -161,10 +148,6 @@ fn storage_metadata_uses_storage_version_1() {
     assert_eq!(metadata.storage_version, STORAGE_VERSION);
 }
 
-//= spec/ring.md#storage-metadata
-//# `RING-META-002` `StorageMetadata` MUST be encoded as the exact byte
-//# sequence of the fields shown above, in that order, with no implicit
-//# padding.
 //= spec/ring.md#storage-metadata
 //= type=test
 //# `RING-META-002` `StorageMetadata` MUST be encoded as the exact byte
@@ -191,9 +174,6 @@ fn storage_metadata_encodes_fields_in_canonical_order() {
 }
 
 //= spec/ring.md#storage-metadata
-//# `RING-META-003` `metadata_checksum` MUST be CRC-32C over every
-//# earlier `StorageMetadata` field in on-disk order.
-//= spec/ring.md#storage-metadata
 //= type=test
 //# `RING-META-003` `metadata_checksum` MUST be CRC-32C over every
 //# earlier `StorageMetadata` field in on-disk order.
@@ -211,9 +191,6 @@ fn storage_metadata_checksum_covers_prior_fields() {
 }
 
 //= spec/ring.md#storage-metadata
-//# `RING-META-004` Startup MUST reject the store if
-//# `metadata_checksum` is invalid or if `storage_version` is unsupported.
-//= spec/ring.md#storage-metadata
 //= type=test
 //# `RING-META-004` Startup MUST reject the store if
 //# `metadata_checksum` is invalid or if `storage_version` is unsupported.
@@ -229,8 +206,6 @@ fn storage_metadata_decode_rejects_bad_checksum() {
 }
 
 //= spec/ring.md#storage-metadata
-//# `RING-META-005` Any bytes in the metadata region after the encoded `StorageMetadata` are reserved, MUST be left erased by formatting, and MUST be ignored on read.
-//= spec/ring.md#storage-metadata
 //= type=test
 //# `RING-META-005` Any bytes in the metadata region after the encoded `StorageMetadata` are reserved, MUST be left erased by formatting, and MUST be ignored on read.
 #[test]
@@ -243,10 +218,6 @@ fn storage_metadata_decode_ignores_reserved_trailing_bytes() {
     assert_eq!(StorageMetadata::decode(&buffer).unwrap(), metadata);
 }
 
-//= spec/ring.md#header
-//# `RING-HEADER-001` `Header` MUST be encoded as the exact byte
-//# sequence of the fields shown above, in that order, with no implicit
-//# padding.
 //= spec/ring.md#header
 //= type=test
 //# `RING-HEADER-001` `Header` MUST be encoded as the exact byte
@@ -272,9 +243,6 @@ fn header_encodes_fields_in_canonical_order() {
 }
 
 //= spec/ring.md#header
-//# `RING-HEADER-002` `header_checksum` MUST be CRC-32C over `sequence`,
-//# `collection_id`, and `collection_format` in on-disk order.
-//= spec/ring.md#header
 //= type=test
 //# `RING-HEADER-002` `header_checksum` MUST be CRC-32C over `sequence`,
 //# `collection_id`, and `collection_format` in on-disk order.
@@ -296,10 +264,6 @@ fn header_checksum_covers_prefix_fields() {
 }
 
 //= spec/ring.md#storage-requirements
-//# `RING-STORAGE-002` Every region header MUST record the region
-//# `sequence`, `collection_id`, `collection_format`, and a checksum over
-//# the header itself.
-//= spec/ring.md#storage-requirements
 //= type=test
 //# `RING-STORAGE-002` Every region header MUST record the region
 //# `sequence`, `collection_id`, `collection_format`, and a checksum over
@@ -319,10 +283,6 @@ fn header_round_trips_sequence_collection_id_collection_format_and_checksum() {
 }
 
 //= spec/ring.md#wal-region-prologue
-//# `RING-PROLOGUE-001` `WalRegionPrologue` MUST be encoded as the exact
-//# byte sequence of the fields shown above, in that order, with no
-//# implicit padding.
-//= spec/ring.md#wal-region-prologue
 //= type=test
 //# `RING-PROLOGUE-001` `WalRegionPrologue` MUST be encoded as the exact
 //# byte sequence of the fields shown above, in that order, with no
@@ -338,9 +298,6 @@ fn wal_prologue_encodes_fields_in_canonical_order() {
     assert_eq!(&buffer[..size_of::<u32>()], 3u32.to_le_bytes().as_slice());
 }
 
-//= spec/ring.md#wal-region-prologue
-//# `RING-PROLOGUE-002` `prologue_checksum` MUST be CRC-32C over
-//# `wal_head_region_index`.
 //= spec/ring.md#wal-region-prologue
 //= type=test
 //# `RING-PROLOGUE-002` `prologue_checksum` MUST be CRC-32C over
@@ -360,9 +317,6 @@ fn wal_prologue_checksum_covers_head_region_index() {
     assert_eq!(u32::from_le_bytes(checksum_bytes), expected);
 }
 
-//= spec/ring.md#wal-region-prologue
-//# `RING-PROLOGUE-003` `wal_head_region_index` MUST be strictly less
-//# than `region_count`.
 //= spec/ring.md#wal-region-prologue
 //= type=test
 //# `RING-PROLOGUE-003` `wal_head_region_index` MUST be strictly less
@@ -385,10 +339,6 @@ fn wal_prologue_rejects_out_of_range_head() {
 }
 
 //= spec/ring.md#free-pointer-footer
-//# `RING-FREE-003` Otherwise the footer MUST decode as
-//# `next_tail:u32, footer_checksum:u32`, both little-endian, with
-//# `footer_checksum` equal to CRC-32C over `next_tail`.
-//= spec/ring.md#free-pointer-footer
 //= type=test
 //# `RING-FREE-003` Otherwise the footer MUST decode as
 //# `next_tail:u32, footer_checksum:u32`, both little-endian, with
@@ -409,8 +359,6 @@ fn free_pointer_footer_uses_crc32c_for_non_erased_value() {
 }
 
 //= spec/ring.md#free-pointer-footer
-//# RING-FREE-002 If all eight footer bytes equal `erased_byte`, the footer is uninitialized and represents `next_tail = none`.
-//= spec/ring.md#free-pointer-footer
 //= type=test
 //# RING-FREE-002 If all eight footer bytes equal `erased_byte`, the footer is uninitialized and represents `next_tail = none`.
 #[test]
@@ -424,10 +372,6 @@ fn free_pointer_footer_none_uses_erased_bytes() {
     assert_eq!(decoded, footer);
 }
 
-//= spec/ring.md#free-pointer-footer
-//# `RING-FREE-004` A checksum-valid non-erased footer MUST decode to a
-//# `u32 region_index` strictly less than `region_count`; any other value is
-//# malformed.
 //= spec/ring.md#free-pointer-footer
 //= type=test
 //# `RING-FREE-004` A checksum-valid non-erased footer MUST decode to a

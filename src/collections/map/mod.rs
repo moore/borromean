@@ -826,8 +826,6 @@ where
         Ok(region_index)
     }
 
-    //= spec/ring.md#startup-replay-algorithm
-    //# `RING-STARTUP-027` If replay yields a live collection with unsupported or invalid retained collection data under that collection's normative specification, startup MUST fail before open succeeds.
     pub fn open_from_storage<
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,

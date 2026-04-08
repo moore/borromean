@@ -2,11 +2,6 @@ use super::*;
 use crate::{StorageOpenError, StorageRuntime};
 
 //= spec/implementation.md#panic-requirements
-//# `RING-IMPL-PANIC-001` The borromean core library and its non-test
-//# support code MUST be panic free for all input data, including invalid
-//# API inputs, corrupt on-storage state, exhausted capacities, and
-//# device errors.
-//= spec/implementation.md#panic-requirements
 //= type=test
 //# `RING-IMPL-PANIC-001` The borromean core library and its non-test
 //# support code MUST be panic free for all input data, including invalid
@@ -62,10 +57,6 @@ fn corrupt_storage_inputs_return_errors_instead_of_panicking() {
     ));
 }
 
-//= spec/implementation.md#panic-requirements
-//# `RING-IMPL-PANIC-002` Recoverable failures and invariant violations
-//# that can be caused by external input or storage state MUST be
-//# reported through explicit error results rather than by panicking.
 //= spec/implementation.md#panic-requirements
 //= type=test
 //# `RING-IMPL-PANIC-002` Recoverable failures and invariant violations
@@ -147,11 +138,6 @@ fn public_decode_and_open_paths_expose_explicit_error_results() {
     );
 }
 
-//= spec/implementation.md#panic-requirements
-//# `RING-IMPL-PANIC-003` Non-test code MUST NOT use `panic!`,
-//# `unwrap()`, `expect()`, `todo!()`, `unimplemented!()`, or
-//# `unreachable!()` in any path that can be reached from public APIs or
-//# from storage data under validation.
 //= spec/implementation.md#panic-requirements
 //= type=test
 //# `RING-IMPL-PANIC-003` Non-test code MUST NOT use `panic!`,

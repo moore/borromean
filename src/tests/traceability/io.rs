@@ -1,10 +1,6 @@
 use super::*;
 
 //= spec/implementation.md#i-o-requirements
-//# `RING-IMPL-IO-001` The borromean I/O abstraction MUST expose only
-//# the primitive operations needed to satisfy [spec/ring.md](ring.md):
-//# region or metadata reads, writes, erases, and durability barriers.
-//= spec/implementation.md#i-o-requirements
 //= type=test
 //# `RING-IMPL-IO-001` The borromean I/O abstraction MUST expose only
 //# the primitive operations needed to satisfy [spec/ring.md](ring.md):
@@ -81,9 +77,6 @@ fn flash_io_trait_exposes_only_primitive_storage_operations() {
 }
 
 //= spec/implementation.md#i-o-requirements
-//# `RING-IMPL-IO-002` The borromean I/O abstraction MUST be generic
-//# over the caller's concrete transport or flash driver type.
-//= spec/implementation.md#i-o-requirements
 //= type=test
 //# `RING-IMPL-IO-002` The borromean I/O abstraction MUST be generic
 //# over the caller's concrete transport or flash driver type.
@@ -107,9 +100,6 @@ fn flash_io_trait_accepts_caller_defined_driver_types() {
     assert_eq!(storage.collections()[0].collection_id(), CollectionId(62));
 }
 
-//= spec/implementation.md#i-o-requirements
-//# `RING-IMPL-IO-003` The borromean I/O abstraction MUST be usable
-//# without dynamic dispatch and without heap allocation.
 //= spec/implementation.md#i-o-requirements
 //= type=test
 //# `RING-IMPL-IO-003` The borromean I/O abstraction MUST be usable
@@ -142,10 +132,6 @@ fn flash_io_trait_supports_non_allocating_concrete_driver_usage() {
 }
 
 //= spec/implementation.md#i-o-requirements
-//# `RING-IMPL-IO-004` If the target medium does not require an
-//# explicit durability barrier, the I/O abstraction MAY implement sync as
-//# a zero-cost completed operation.
-//= spec/implementation.md#i-o-requirements
 //= type=test
 //# `RING-IMPL-IO-004` If the target medium does not require an
 //# explicit durability barrier, the I/O abstraction MAY implement sync as
@@ -158,10 +144,6 @@ fn mock_flash_sync_can_complete_immediately() {
     assert_eq!(flash.operations(), &[MockOperation::Sync]);
 }
 
-//= spec/implementation.md#i-o-requirements
-//# `RING-IMPL-IO-005` Borromean MUST treat wakeups, DMA completion, or
-//# interrupt delivery as an external concern of the caller-provided I/O
-//# implementation rather than as an internal runtime service.
 //= spec/implementation.md#i-o-requirements
 //= type=test
 //# `RING-IMPL-IO-005` Borromean MUST treat wakeups, DMA completion, or

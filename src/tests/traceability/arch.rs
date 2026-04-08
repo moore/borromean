@@ -3,10 +3,6 @@ use ::core::pin::pin;
 use ::core::task::Poll;
 
 //= spec/implementation.md#architecture-requirements
-//# `RING-IMPL-ARCH-003` WAL handling, region-management logic, and
-//# collection-specific logic MUST remain separable modules with explicit
-//# interfaces.
-//= spec/implementation.md#architecture-requirements
 //= type=test
 //# `RING-IMPL-ARCH-003` WAL handling, region-management logic, and
 //# collection-specific logic MUST remain separable modules with explicit
@@ -59,9 +55,6 @@ fn wal_storage_and_map_logic_are_exercised_through_separate_interfaces() {
     assert_eq!(reopened_map.get(&5).unwrap(), Some(50));
 }
 
-//= spec/implementation.md#architecture-requirements
-//# `RING-IMPL-ARCH-004` Encoding and decoding code MUST be usable from
-//# pure tests without requiring live device I/O.
 //= spec/implementation.md#architecture-requirements
 //= type=test
 //# `RING-IMPL-ARCH-004` Encoding and decoding code MUST be usable from
@@ -117,11 +110,6 @@ fn encoding_and_decoding_round_trip_from_plain_byte_buffers() {
     assert_eq!(decoded.record, record);
 }
 
-//= spec/implementation.md#architecture-requirements
-//# `RING-IMPL-ARCH-005` The implementation SHOULD model complex
-//# multi-step procedures such as startup replay and reclaim as explicit
-//# phase machines so that each durable transition is inspectable in code
-//# review and testable in isolation.
 //= spec/implementation.md#architecture-requirements
 //= type=test
 //# `RING-IMPL-ARCH-005` The implementation SHOULD model complex

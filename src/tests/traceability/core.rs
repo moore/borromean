@@ -1,9 +1,6 @@
 use super::*;
 
 //= spec/implementation.md#core-requirements
-//# `RING-IMPL-CORE-001` The core library crate MUST compile with
-//# `#![no_std]`.
-//= spec/implementation.md#core-requirements
 //= type=test
 //# `RING-IMPL-CORE-001` The core library crate MUST compile with
 //# `#![no_std]`.
@@ -13,9 +10,6 @@ fn core_library_no_std_target_build_is_enforced_by_verification() {
     // library for a no-std target triple.
 }
 
-//= spec/implementation.md#core-requirements
-//# `RING-IMPL-CORE-002` The core library crate MUST NOT depend on the
-//# Rust `alloc` crate.
 //= spec/implementation.md#core-requirements
 //= type=test
 //# `RING-IMPL-CORE-002` The core library crate MUST NOT depend on the
@@ -28,9 +22,6 @@ fn core_library_alloc_policy_is_enforced_by_clippy_verification() {
 }
 
 //= spec/implementation.md#core-requirements
-//# `RING-IMPL-CORE-003` The core library crate MUST NOT depend on an
-//# async runtime, executor, scheduler, or timer facility.
-//= spec/implementation.md#core-requirements
 //= type=test
 //# `RING-IMPL-CORE-003` The core library crate MUST NOT depend on an
 //# async runtime, executor, scheduler, or timer facility.
@@ -42,9 +33,6 @@ fn core_library_runtime_policy_is_enforced_by_verification() {
 }
 
 //= spec/implementation.md#non-goal-requirements
-//# `RING-IMPL-NONGOAL-001` Borromean core MUST NOT require a specific
-//# embedded framework, RTOS, or async executor.
-//= spec/implementation.md#non-goal-requirements
 //= type=test
 //# `RING-IMPL-NONGOAL-001` Borromean core MUST NOT require a specific
 //# embedded framework, RTOS, or async executor.
@@ -54,9 +42,6 @@ fn core_library_framework_and_rtos_policy_is_enforced_by_verification() {
     // dependency declarations through the dependency-tree policy check.
 }
 
-//= spec/implementation.md#non-goal-requirements
-//# `RING-IMPL-NONGOAL-002` Borromean core MUST NOT assume thread
-//# support, background workers, or heap-backed task scheduling.
 //= spec/implementation.md#non-goal-requirements
 //= type=test
 //# `RING-IMPL-NONGOAL-002` Borromean core MUST NOT assume thread
@@ -68,11 +53,6 @@ fn core_library_thread_and_worker_policy_is_enforced_by_clippy_verification() {
     // and the lib-only clippy policy pass in `scripts/verify.sh`.
 }
 
-//= spec/implementation.md#core-requirements
-//# `RING-IMPL-CORE-004` The implementation MUST preserve the durable
-//# behavior defined by [spec/ring.md](ring.md); this specification MAY
-//# constrain implementation structure but MUST NOT weaken ring-level
-//# correctness requirements.
 //= spec/implementation.md#core-requirements
 //= type=test
 //# `RING-IMPL-CORE-004` The implementation MUST preserve the durable

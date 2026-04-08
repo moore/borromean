@@ -22,12 +22,6 @@ fn storage_with_max_seen_sequence() -> (MockFlash<128, 4, 256>, StorageWorkspace
 }
 
 //= spec/implementation.md#arithmetic-requirements
-//# `RING-IMPL-ARITH-001` Integer arithmetic that can affect storage
-//# layout, region addressing, WAL offsets, lengths, indexes,
-//# capacities, or sequence advancement MUST use checked arithmetic or
-//# an equivalent construction that makes overflow and underflow
-//# impossible by construction.
-//= spec/implementation.md#arithmetic-requirements
 //= type=test
 //# `RING-IMPL-ARITH-001` Integer arithmetic that can affect storage
 //# layout, region addressing, WAL offsets, lengths, indexes,
@@ -56,11 +50,6 @@ fn boundary_sensitive_storage_and_map_lengths_stay_in_range() {
     assert_eq!(map.region_len().unwrap(), snapshot_len + size_of::<u32>());
 }
 
-//= spec/implementation.md#arithmetic-requirements
-//# `RING-IMPL-ARITH-002` If such arithmetic cannot be proven safe by
-//# construction and a checked operation fails, the implementation MUST
-//# return an explicit error rather than wrap, saturate, or silently
-//# truncate.
 //= spec/implementation.md#arithmetic-requirements
 //= type=test
 //# `RING-IMPL-ARITH-002` If such arithmetic cannot be proven safe by
@@ -100,10 +89,6 @@ fn arithmetic_boundary_failures_surface_explicit_error_variants() {
 }
 
 //= spec/implementation.md#arithmetic-requirements
-//# `RING-IMPL-ARITH-003` The implementation MUST NOT rely on wrapping
-//# integer behavior for correctness unless a future disk-format
-//# requirement explicitly defines modulo arithmetic for that field.
-//= spec/implementation.md#arithmetic-requirements
 //= type=test
 //# `RING-IMPL-ARITH-003` The implementation MUST NOT rely on wrapping
 //# integer behavior for correctness unless a future disk-format
@@ -130,10 +115,6 @@ fn sequence_advancement_stops_at_the_maximum_value_instead_of_wrapping() {
     assert_eq!(reopened.wal_head(), 0);
 }
 
-//= spec/implementation.md#arithmetic-requirements
-//# `RING-IMPL-ARITH-004` Conversions between integer widths that may
-//# lose information MUST be checked and MUST fail explicitly if the
-//# value is out of range for the destination type.
 //= spec/implementation.md#arithmetic-requirements
 //= type=test
 //# `RING-IMPL-ARITH-004` Conversions between integer widths that may

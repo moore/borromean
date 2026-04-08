@@ -2,10 +2,6 @@ use super::*;
 use crate::disk::StorageMetadata;
 
 //= spec/ring.md#core-requirements
-//# `RING-CORE-001` Region starts and region sizes MUST be aligned to
-//# the backing flash erase-block size so every region can be erased
-//# independently.
-//= spec/ring.md#core-requirements
 //= type=test
 //# `RING-CORE-001` Region starts and region sizes MUST be aligned to
 //# the backing flash erase-block size so every region can be erased
@@ -30,8 +26,6 @@ fn mock_flash_regions_occupy_fixed_independent_storage_spans() {
     assert_eq!(region_one_prefix, [0x33, 0x44]);
 }
 
-//= spec/ring.md#format-storage-on-disk-initialization
-//# `RING-FORMAT-STORAGE-PRE-001` Backing storage MUST be writable and erasable at region granularity.
 //= spec/ring.md#format-storage-on-disk-initialization
 //= type=test
 //# `RING-FORMAT-STORAGE-PRE-001` Backing storage MUST be writable and erasable at region granularity.
@@ -106,8 +100,6 @@ fn erase_restores_erased_bytes() {
 }
 
 //= spec/ring.md#format-storage-on-disk-initialization
-//# RING-FORMAT-STORAGE-PRE-006 `region_count >= 2 + min_free_regions`.
-//= spec/ring.md#format-storage-on-disk-initialization
 //= type=test
 //# RING-FORMAT-STORAGE-PRE-006 `region_count >= 2 + min_free_regions`.
 #[test]
@@ -124,8 +116,6 @@ fn format_empty_store_rejects_too_few_regions() {
 }
 
 //= spec/ring.md#format-storage-on-disk-initialization
-//# `RING-FORMAT-STORAGE-PRE-003` Region `0` MUST be reserved as the initial WAL region.
-//= spec/ring.md#format-storage-on-disk-initialization
 //= type=test
 //# `RING-FORMAT-STORAGE-PRE-003` Region `0` MUST be reserved as the initial WAL region.
 #[test]
@@ -138,12 +128,6 @@ fn format_empty_store_reserves_region_zero_as_initial_wal_region() {
     assert_eq!(header.collection_format, WAL_V1_FORMAT);
 }
 
-//= spec/ring.md#format-storage-on-disk-initialization
-//# `RING-FORMAT-STORAGE-003` Initialize region `0` as WAL:
-//# write valid `Header` with `collection_id = 0`,
-//# `collection_format = wal_v1`, and `sequence = 0`,
-//# write a valid `WalRegionPrologue` with `wal_head_region_index = 0`,
-//# then sync region `0`.
 //= spec/ring.md#format-storage-on-disk-initialization
 //= type=test
 //# `RING-FORMAT-STORAGE-003` Initialize region `0` as WAL:
@@ -184,9 +168,6 @@ fn format_empty_store_initializes_region_zero_with_wal_header_and_prologue() {
 }
 
 //= spec/ring.md#format-storage-on-disk-initialization
-//# `RING-FORMAT-STORAGE-POST-003` The free list MUST contain every non-WAL region in ascending region-index
-//# order.
-//= spec/ring.md#format-storage-on-disk-initialization
 //= type=test
 //# `RING-FORMAT-STORAGE-POST-003` The free list MUST contain every non-WAL region in ascending region-index
 //# order.
@@ -220,9 +201,6 @@ fn format_empty_store_populates_free_list_in_ascending_order() {
 }
 
 //= spec/ring.md#free-pointer-footer
-//# `RING-FREE-001` The free-pointer footer MUST occupy the final eight
-//# bytes of the region.
-//= spec/ring.md#free-pointer-footer
 //= type=test
 //# `RING-FREE-001` The free-pointer footer MUST occupy the final eight
 //# bytes of the region.
@@ -243,8 +221,6 @@ fn format_empty_store_writes_free_pointer_footer_in_final_eight_bytes() {
 }
 
 //= spec/ring.md#storage-metadata
-//# `RING-META-005` Any bytes in the metadata region after the encoded `StorageMetadata` are reserved, MUST be left erased by formatting, and MUST be ignored on read.
-//= spec/ring.md#storage-metadata
 //= type=test
 //# `RING-META-005` Any bytes in the metadata region after the encoded `StorageMetadata` are reserved, MUST be left erased by formatting, and MUST be ignored on read.
 #[test]
@@ -259,8 +235,6 @@ fn format_empty_store_leaves_reserved_metadata_bytes_erased() {
         .all(|byte| *byte == 0xff));
 }
 
-//= spec/ring.md#storage-requirements
-//# `RING-STORAGE-010` The metadata region MUST occupy exactly one `region_size` span at storage offset `0`, MUST NOT be counted in `region_count`, and data region `0` MUST begin immediately after that metadata region.
 //= spec/ring.md#storage-requirements
 //= type=test
 //# `RING-STORAGE-010` The metadata region MUST occupy exactly one `region_size` span at storage offset `0`, MUST NOT be counted in `region_count`, and data region `0` MUST begin immediately after that metadata region.
@@ -287,8 +261,6 @@ fn format_empty_store_places_region_zero_immediately_after_metadata_region() {
     assert_eq!(header.collection_format, WAL_V1_FORMAT);
 }
 
-//= spec/ring.md#storage-requirements
-//# `RING-STORAGE-001` Storage MUST begin with a static metadata region that records version and configuration parameters that do not change after initialization.
 //= spec/ring.md#storage-requirements
 //= type=test
 //# `RING-STORAGE-001` Storage MUST begin with a static metadata region that records version and configuration parameters that do not change after initialization.

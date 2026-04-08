@@ -168,11 +168,6 @@ fn committed_region_sequence_progress() -> CommittedRegionSequenceProgress {
 }
 
 //= spec/ring.md#format-storage-on-disk-initialization
-//# `RING-FORMAT-STORAGE-002` Write `StorageMetadata`
-//# (`storage_version`, `region_size`, `region_count`,
-//# `min_free_regions`, `wal_write_granule`, `erased_byte`,
-//# `wal_record_magic`, `metadata_checksum`) and sync metadata.
-//= spec/ring.md#format-storage-on-disk-initialization
 //= type=test
 //# `RING-FORMAT-STORAGE-002` Write `StorageMetadata`
 //# (`storage_version`, `region_size`, `region_count`,
@@ -198,9 +193,6 @@ fn format_writes_metadata_before_reopening_the_fresh_store() {
 }
 
 //= spec/ring.md#format-storage-on-disk-initialization
-//# `RING-FORMAT-STORAGE-POST-001` WAL head and WAL tail MUST both be
-//# region `0`.
-//= spec/ring.md#format-storage-on-disk-initialization
 //= type=test
 //# `RING-FORMAT-STORAGE-POST-001` WAL head and WAL tail MUST both be
 //# region `0`.
@@ -214,9 +206,6 @@ fn format_starts_with_region_zero_as_wal_head_and_tail() {
 }
 
 //= spec/ring.md#core-requirements
-//# `RING-CORE-010` The durable free list MUST be FIFO so allocations
-//# consume the oldest free regions first.
-//= spec/ring.md#core-requirements
 //= type=test
 //# `RING-CORE-010` The durable free list MUST be FIFO so allocations
 //# consume the oldest free regions first.
@@ -228,10 +217,6 @@ fn reserve_next_region_consumes_the_oldest_free_regions_first() {
     assert_eq!(progress.second_region, 2);
 }
 
-//= spec/ring.md#core-requirements
-//# `RING-CORE-011` Any operation that writes a newly allocated region
-//# MUST first durably reserve that region with
-//# `alloc_begin(region_index, free_list_head_after)`.
 //= spec/ring.md#core-requirements
 //= type=test
 //# `RING-CORE-011` Any operation that writes a newly allocated region
@@ -284,10 +269,6 @@ fn committed_region_write_uses_a_region_previously_reserved_by_alloc_begin() {
         .unwrap();
 }
 
-//= spec/ring.md#durability-and-crash-semantics
-//# `RING-ALLOC-001` Any operation that writes a newly allocated region
-//# MUST first make `alloc_begin(region_index, free_list_head_after)`
-//# durable.
 //= spec/ring.md#durability-and-crash-semantics
 //= type=test
 //# `RING-ALLOC-001` Any operation that writes a newly allocated region
@@ -347,10 +328,6 @@ fn committed_region_write_waits_for_alloc_begin_sync() {
 }
 
 //= spec/ring.md#wal-record-types
-//# `RING-REPLAY-ASSUME-004` Any operation that consumes a free-list
-//# head MUST first make the allocator advance durable with
-//# `alloc_begin(region_index, free_list_head_after)`.
-//= spec/ring.md#wal-record-types
 //= type=test
 //# `RING-REPLAY-ASSUME-004` Any operation that consumes a free-list
 //# head MUST first make the allocator advance durable with
@@ -387,9 +364,6 @@ fn format_returns_fresh_runtime_state() {
 }
 
 //= spec/ring.md#format-storage-on-disk-initialization
-//# `RING-FORMAT-STORAGE-POST-002` A user collection durable head MUST
-//# NOT exist after formatting.
-//= spec/ring.md#format-storage-on-disk-initialization
 //= type=test
 //# `RING-FORMAT-STORAGE-POST-002` A user collection durable head MUST
 //# NOT exist after formatting.
@@ -402,10 +376,6 @@ fn format_starts_with_no_user_collection_durable_head() {
     assert_eq!(state.tracked_user_collection_count(), 0);
 }
 
-//= spec/ring.md#core-requirements
-//# `RING-CORE-003` Borromean MUST reserve `collection_id = 0` for the
-//# WAL, and all user collection identifiers MUST be nonzero stable 64-bit
-//# nonces that are never recycled.
 //= spec/ring.md#core-requirements
 //= type=test
 //# `RING-CORE-003` Borromean MUST reserve `collection_id = 0` for the
@@ -452,10 +422,6 @@ fn user_collection_ids_are_nonzero_u64_values_and_are_not_recycled() {
     );
 }
 
-//= spec/ring.md#core-requirements
-//# `RING-CORE-004` Borromean core MUST reserve
-//# `collection_type = wal` for `collection_id = 0`, and user collections
-//# MUST NOT use that collection type.
 //= spec/ring.md#core-requirements
 //= type=test
 //# `RING-CORE-004` Borromean core MUST reserve
@@ -699,11 +665,6 @@ fn append_new_collection_and_update_refresh_runtime_state() {
 }
 
 //= spec/ring.md#core-requirements
-//# `RING-CORE-005` For user collections, append-time validity MUST
-//# require a successful earlier
-//# `new_collection(collection_id, collection_type)` before any later
-//# record for that collection may be appended.
-//= spec/ring.md#core-requirements
 //= type=test
 //# `RING-CORE-005` For user collections, append-time validity MUST
 //# require a successful earlier
@@ -795,12 +756,6 @@ fn append_head_and_drop_refresh_runtime_state() {
 }
 
 //= spec/ring.md#core-requirements
-//# `RING-CORE-007` A `drop_collection(collection_id)` record that is
-//# durable MUST tombstone that collection, MUST forbid later WAL
-//# records for that `collection_id`, and MUST make older durable bytes
-//# reclaimable once they are no longer physically reachable from live
-//# state.
-//= spec/ring.md#core-requirements
 //= type=test
 //# `RING-CORE-007` A `drop_collection(collection_id)` record that is
 //# durable MUST tombstone that collection, MUST forbid later WAL
@@ -849,10 +804,6 @@ fn drop_collection_tombstones_the_collection_forbids_later_records_and_starts_re
     );
 }
 
-//= spec/ring.md#core-requirements
-//# `RING-CORE-009` Any reclaim that frees a region MUST be tracked as a
-//# WAL transaction bounded by durable `reclaim_begin(region_index)` and
-//# `reclaim_end(region_index)` records.
 //= spec/ring.md#core-requirements
 //= type=test
 //# `RING-CORE-009` Any reclaim that frees a region MUST be tracked as a
@@ -931,11 +882,6 @@ fn append_rotation_start_and_finish_move_to_new_tail() {
 }
 
 //= spec/ring.md#storage-requirements
-//# `RING-STORAGE-003` Each newly allocated region, whether for a user
-//# collection or a newly initialized WAL region, MUST use
-//# `sequence = max_seen_sequence + 1`, after which that value becomes the
-//# new in-memory `max_seen_sequence`.
-//= spec/ring.md#storage-requirements
 //= type=test
 //# `RING-STORAGE-003` Each newly allocated region, whether for a user
 //# collection or a newly initialized WAL region, MUST use
@@ -954,11 +900,6 @@ fn committed_region_allocations_advance_sequence_from_max_seen_sequence() {
     assert_eq!(progress.max_seen_after_second, progress.second_sequence);
 }
 
-//= spec/ring.md#storage-requirements
-//# `RING-STORAGE-003` Each newly allocated region, whether for a user
-//# collection or a newly initialized WAL region, MUST use
-//# `sequence = max_seen_sequence + 1`, after which that value becomes the
-//# new in-memory `max_seen_sequence`.
 //= spec/ring.md#storage-requirements
 //= type=test
 //# `RING-STORAGE-003` Each newly allocated region, whether for a user
@@ -984,10 +925,6 @@ fn wal_rotation_initializes_the_next_wal_region_at_max_seen_sequence_plus_one() 
 }
 
 //= spec/ring.md#storage-requirements
-//# `RING-STORAGE-004` Successful later region writes MUST preserve a
-//# strictly monotonic `sequence` ordering even if crashes or abandoned
-//# allocations leave gaps.
-//= spec/ring.md#storage-requirements
 //= type=test
 //# `RING-STORAGE-004` Successful later region writes MUST preserve a
 //# strictly monotonic `sequence` ordering even if crashes or abandoned
@@ -1000,10 +937,6 @@ fn later_region_writes_keep_sequence_numbers_strictly_monotonic() {
     assert!(progress.max_seen_after_first < progress.max_seen_after_second);
 }
 
-//= spec/ring.md#storage-requirements
-//# `RING-STORAGE-006` A free region MUST be defined by membership in the
-//# durable free-list chain rather than by a distinct on-disk header
-//# encoding.
 //= spec/ring.md#storage-requirements
 //= type=test
 //# `RING-STORAGE-006` A free region MUST be defined by membership in the
@@ -1028,10 +961,6 @@ fn free_region_membership_is_defined_by_the_free_list_chain() {
         .unwrap());
 }
 
-//= spec/ring.md#free-pointer-footer
-//# `RING-FREE-006` While a region is allocated for live use, the bytes
-//# in its free-pointer footer are uninterpreted stale data and MUST NOT
-//# be used to infer free-list membership.
 //= spec/ring.md#free-pointer-footer
 //= type=test
 //# `RING-FREE-006` While a region is allocated for live use, the bytes
@@ -1058,9 +987,6 @@ fn stale_footer_bytes_do_not_make_a_reserved_region_free() {
     assert_eq!(state.ready_region(), Some(reserved_region));
 }
 
-//= spec/ring.md#storage-requirements
-//# `RING-STORAGE-007` The free-pointer footer of a region MUST NOT be
-//# written while that region is allocated for live use.
 //= spec/ring.md#storage-requirements
 //= type=test
 //# `RING-STORAGE-007` The free-pointer footer of a region MUST NOT be
@@ -1114,10 +1040,6 @@ fn committed_region_writes_do_not_write_a_live_free_pointer_footer() {
 }
 
 //= spec/ring.md#storage-requirements
-//# `RING-STORAGE-008` After a region is durably reachable from the
-//# free-list chain, that region MUST NOT be erased until it is allocated
-//# for reuse.
-//= spec/ring.md#storage-requirements
 //= type=test
 //# `RING-STORAGE-008` After a region is durably reachable from the
 //# free-list chain, that region MUST NOT be erased until it is allocated
@@ -1152,9 +1074,6 @@ fn free_regions_are_erased_only_when_reused() {
 }
 
 //= spec/ring.md#storage-requirements
-//# `RING-STORAGE-009` A WAL region MUST have `collection_id = 0` and
-//# `collection_format = wal_v1`.
-//= spec/ring.md#storage-requirements
 //= type=test
 //# `RING-STORAGE-009` A WAL region MUST have `collection_id = 0` and
 //# `collection_format = wal_v1`.
@@ -1178,9 +1097,6 @@ fn initialized_wal_regions_use_reserved_wal_header_fields() {
     assert_eq!(prologue.wal_head_region_index, 0);
 }
 
-//= spec/ring.md#wal-reclaim-eligibility
-//# `RING-WAL-RECLAIM-POST-007` The reclaimed region MUST be erased
-//# before reuse.
 //= spec/ring.md#wal-reclaim-eligibility
 //= type=test
 //# `RING-WAL-RECLAIM-POST-007` The reclaimed region MUST be erased
@@ -1212,8 +1128,6 @@ fn initialized_wal_region_erases_the_reclaimed_region_before_reuse() {
     );
 }
 
-//= spec/ring.md#wal-record-types
-//# `RING-REPLAY-ASSUME-001` A WAL region MUST be erased before reuse.
 //= spec/ring.md#wal-record-types
 //= type=test
 //# `RING-REPLAY-ASSUME-001` A WAL region MUST be erased before reuse.

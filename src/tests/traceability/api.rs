@@ -1,10 +1,6 @@
 use super::*;
 
 //= spec/implementation.md#architecture-requirements
-//# `RING-IMPL-ARCH-002` The backing I/O object MUST instead be passed
-//# into operation entry points or operation builders so the same
-//# `Storage` value can participate in externally driven async execution.
-//= spec/implementation.md#architecture-requirements
 //= type=test
 //# `RING-IMPL-ARCH-002` The backing I/O object MUST instead be passed
 //# into operation entry points or operation builders so the same
@@ -59,10 +55,6 @@ fn caller_owned_storage_can_mix_future_and_blocking_entry_points() {
     assert_eq!(map.get(&7).unwrap(), Some(70));
 }
 
-//= spec/implementation.md#api-requirements
-//# `RING-IMPL-API-002` The public API MUST allow a caller to drive the
-//# same storage engine from either blocking test shims or asynchronous
-//# device adapters without changing borromean correctness logic.
 //= spec/implementation.md#api-requirements
 //= type=test
 //# `RING-IMPL-API-002` The public API MUST allow a caller to drive the
@@ -191,10 +183,6 @@ fn blocking_and_future_entry_points_produce_equivalent_storage_state() {
     assert_eq!(future_map.get(&7).unwrap(), Some(70));
 }
 
-//= spec/implementation.md#api-requirements
-//# `RING-IMPL-API-005` The implementation MAY provide optional helper
-//# adapters for common executors or embedded frameworks, but the core
-//# crate MUST remain usable without them.
 //= spec/implementation.md#api-requirements
 //= type=test
 //# `RING-IMPL-API-005` The implementation MAY provide optional helper

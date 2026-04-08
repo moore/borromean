@@ -1,10 +1,6 @@
 use super::*;
 
 //= spec/implementation.md#collection-requirements
-//# `RING-IMPL-COLL-001` Collection implementations MUST depend on the
-//# shared storage engine for durability, ordering, and recovery rather
-//# than duplicating those mechanisms ad hoc.
-//= spec/implementation.md#collection-requirements
 //= type=test
 //# `RING-IMPL-COLL-001` Collection implementations MUST depend on the
 //# shared storage engine for durability, ordering, and recovery rather
@@ -87,10 +83,6 @@ fn map_durability_and_recovery_only_change_when_the_shared_storage_engine_is_use
     assert_eq!(reopened_map.get(&2).unwrap(), Some(20));
 }
 
-//= spec/implementation.md#collection-requirements
-//# `RING-IMPL-COLL-003` A collection operation that needs I/O MUST be
-//# drivable through the same runtime-agnostic future model as core
-//# storage operations.
 //= spec/implementation.md#collection-requirements
 //= type=test
 //# `RING-IMPL-COLL-003` A collection operation that needs I/O MUST be

@@ -3,10 +3,6 @@ use ::core::pin::pin;
 use ::core::task::Poll;
 
 //= spec/implementation.md#startup-requirements
-//# `RING-IMPL-STARTUP-001` Opening storage MUST be implemented as an
-//# operation that can suspend between device interactions without
-//# losing its replay context.
-//= spec/implementation.md#startup-requirements
 //= type=test
 //# `RING-IMPL-STARTUP-001` Opening storage MUST be implemented as an
 //# operation that can suspend between device interactions without
@@ -61,9 +57,6 @@ fn open_future_preserves_replay_context_across_pending_polls() {
 }
 
 //= spec/implementation.md#startup-requirements
-//# `RING-IMPL-STARTUP-002` Startup replay state MUST itself obey the
-//# same no-allocation rule as steady-state operation.
-//= spec/implementation.md#startup-requirements
 //= type=test
 //# `RING-IMPL-STARTUP-002` Startup replay state MUST itself obey the
 //# same no-allocation rule as steady-state operation.
@@ -97,10 +90,6 @@ fn startup_open_paths_complete_without_heap_allocation() {
     });
 }
 
-//= spec/implementation.md#startup-requirements
-//# `RING-IMPL-STARTUP-003` If startup needs temporary decode storage,
-//# that storage MUST come from a caller-provided workspace or other
-//# bounded static storage.
 //= spec/implementation.md#startup-requirements
 //= type=test
 //# `RING-IMPL-STARTUP-003` If startup needs temporary decode storage,
@@ -144,10 +133,6 @@ fn startup_can_reuse_the_same_caller_workspace_across_repeated_opens() {
     );
 }
 
-//= spec/implementation.md#startup-requirements
-//# `RING-IMPL-STARTUP-004` Recovery of incomplete WAL rotation,
-//# allocation, or reclaim state MUST be expressible through the same
-//# operation framework used for normal foreground work.
 //= spec/implementation.md#startup-requirements
 //= type=test
 //# `RING-IMPL-STARTUP-004` Recovery of incomplete WAL rotation,

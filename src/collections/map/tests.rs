@@ -93,8 +93,6 @@ proptest! {
 }
 
 //= spec/implementation.md#panic-requirements
-//# `RING-IMPL-PANIC-004` If a condition is believed to be impossible by construction, the implementation SHOULD encode that proof in types, control flow, or checked validation before the point of use rather than relying on a panic as a backstop.
-//= spec/implementation.md#panic-requirements
 //= type=test
 //# `RING-IMPL-PANIC-004` If a condition is believed to be impossible by construction, the implementation SHOULD encode that proof in types, control flow, or checked validation before the point of use rather than relying on a panic as a backstop.
 #[test]
@@ -107,8 +105,6 @@ fn set_returns_buffer_too_small_when_map_storage_is_exhausted() {
     assert!(matches!(map.set(1, 10), Err(MapError::BufferTooSmall)));
 }
 
-//= spec/implementation.md#memory-requirements
-//# `RING-IMPL-MEM-003` If the configured capacities are insufficient to open the store or complete an operation, the implementation MUST fail explicitly with a capacity-related error rather than silently allocate or truncate state.
 //= spec/implementation.md#memory-requirements
 //= type=test
 //# `RING-IMPL-MEM-003` If the configured capacities are insufficient to open the store or complete an operation, the implementation MUST fail explicitly with a capacity-related error rather than silently allocate or truncate state.
@@ -129,8 +125,6 @@ fn encode_snapshot_returns_buffer_too_small_when_output_capacity_is_insufficient
     ));
 }
 
-//= spec/ring.md#collection-head-state-machine
-//# `RING-FORMAT-003` The frontier MUST take precedence over older values in the durable basis.
 //= spec/ring.md#collection-head-state-machine
 //= type=test
 //# `RING-FORMAT-003` The frontier MUST take precedence over older values in the durable basis.
@@ -186,15 +180,6 @@ fn update_payload_round_trip_applies_frontier_change() {
     assert_eq!(map.get(&5).unwrap(), None);
 }
 
-//= spec/ring.md#collection-head-state-machine
-//# `RING-FORMAT-013` That collection specification MUST define, at
-//# minimum: the empty logical state established by `new_collection`; the
-//# exact bytes and interpretation of every supported committed-region
-//# `collection_format`; the exact bytes and interpretation of `snapshot`
-//# payloads; the exact bytes and interpretation of `update` payloads; the
-//# rules for applying updates and merging a durable basis with the
-//# in-memory frontier; and the collection-specific validation rules used
-//# when loading a basis or replaying WAL payloads.
 //= spec/ring.md#collection-head-state-machine
 //= type=test
 //# `RING-FORMAT-013` That collection specification MUST define, at
@@ -280,8 +265,6 @@ fn map_collection_format_covers_empty_state_snapshot_update_region_and_validatio
 }
 
 //= spec/ring.md#collection-head-state-machine
-//# `RING-FORMAT-014` For non-WAL collections, the pair `(collection_type, collection_format)` MUST identify a unique committed region payload format.
-//= spec/ring.md#collection-head-state-machine
 //= type=test
 //# `RING-FORMAT-014` For non-WAL collections, the pair `(collection_type, collection_format)` MUST identify a unique committed region payload format.
 #[test]
@@ -318,10 +301,6 @@ fn region_round_trip_restores_logical_state() {
     assert_eq!(restored.get(&4).unwrap(), Some(40));
 }
 
-//= spec/ring.md#core-requirements
-//# `RING-CORE-002` Each collection MUST be implemented as an
-//# append-only data structure whose new writes are added to the head
-//# region and whose storage can only be freed by truncating the tail.
 //= spec/ring.md#core-requirements
 //= type=test
 //# `RING-CORE-002` Each collection MUST be implemented as an
@@ -383,10 +362,6 @@ fn map_updates_append_new_head_records_and_replacement_reclaims_the_old_tail_reg
     assert_eq!(storage.runtime().pending_reclaims(), &[first_region]);
 }
 
-//= spec/ring.md#collection-head-state-machine
-//# `RING-FORMAT-008` Every later retained type-bearing record for that
-//# collection MUST carry the same `collection_type`, otherwise replay
-//# must treat the mismatch as corruption.
 //= spec/ring.md#collection-head-state-machine
 //= type=test
 //# `RING-FORMAT-008` Every later retained type-bearing record for that
@@ -498,9 +473,6 @@ fn load_snapshot_rejects_overlapping_entry_refs() {
 }
 
 //= spec/ring.md#core-requirements
-//# `RING-CORE-015` Each collection's mutable in-memory update frontier
-//# MUST have a bounded configured capacity.
-//= spec/ring.md#core-requirements
 //= type=test
 //# `RING-CORE-015` Each collection's mutable in-memory update frontier
 //# MUST have a bounded configured capacity.
@@ -544,8 +516,6 @@ fn mutable_map_frontier_capacity_is_bounded_by_its_configured_buffer() {
     larger_map.set(1, 40).unwrap();
 }
 
-//= spec/ring.md#collection-head-state-machine
-//# `RING-FORMAT-003` The frontier MUST take precedence over older values in the durable basis.
 //= spec/ring.md#collection-head-state-machine
 //= type=test
 //# `RING-FORMAT-003` The frontier MUST take precedence over older values in the durable basis.
@@ -617,12 +587,6 @@ fn storage_snapshot_replay_restores_map_frontier() {
     assert_eq!(reopened.get(&2).unwrap(), Some(99));
 }
 
-//= spec/ring.md#collection-head-state-machine
-//# `RING-FORMAT-016` An implementation MUST NOT open a database
-//# successfully if replay yields a live collection whose retained
-//# committed-region basis, retained `snapshot` payload, or retained
-//# post-basis `update` payloads are unsupported or invalid under that
-//# collection's normative specification.
 //= spec/ring.md#collection-head-state-machine
 //= type=test
 //# `RING-FORMAT-016` An implementation MUST NOT open a database
@@ -808,8 +772,6 @@ fn storage_visit_wal_records_exposes_map_collection_records() {
     );
 }
 
-//= spec/ring.md#collection-head-state-machine
-//# `RING-FORMAT-005` Every user collection MUST remain log-structured: flushing mutable state writes a new immutable committed region segment instead of rewriting an existing live region in place.
 //= spec/ring.md#collection-head-state-machine
 //= type=test
 //# `RING-FORMAT-005` Every user collection MUST remain log-structured: flushing mutable state writes a new immutable committed region segment instead of rewriting an existing live region in place.

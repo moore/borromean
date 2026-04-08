@@ -3,11 +3,6 @@ use ::core::mem::size_of;
 use heapless::Vec as HeaplessVec;
 
 //= spec/implementation.md#core-requirements
-//# `RING-IMPL-CORE-005` All memory required for normal operation MUST
-//# come from caller-owned values, fixed-capacity fields, or stack
-//# frames whose size is statically bounded by type parameters or API
-//# contracts.
-//= spec/implementation.md#core-requirements
 //= type=test
 //# `RING-IMPL-CORE-005` All memory required for normal operation MUST
 //# come from caller-owned values, fixed-capacity fields, or stack
@@ -50,10 +45,6 @@ fn normal_operation_uses_caller_owned_buffers_without_heap_allocation() {
 }
 
 //= spec/implementation.md#memory-requirements
-//# `RING-IMPL-MEM-001` The maximum number of tracked collections,
-//# heads, replay entries, and other bounded in-memory items MUST be an
-//# explicit compile-time or constructor-time capacity.
-//= spec/implementation.md#memory-requirements
 //= type=test
 //# `RING-IMPL-MEM-001` The maximum number of tracked collections,
 //# heads, replay entries, and other bounded in-memory items MUST be an
@@ -82,10 +73,6 @@ fn explicit_collection_and_reclaim_capacities_fail_when_exhausted() {
     assert!(matches!(tiny_map.set(2, 20), Err(MapError::BufferTooSmall)));
 }
 
-//= spec/implementation.md#memory-requirements
-//# `RING-IMPL-MEM-002` Any operation that needs scratch space for
-//# encoding, decoding, or staging MUST accept caller-provided buffers or
-//# borrow dedicated storage from a caller-provided workspace object.
 //= spec/implementation.md#memory-requirements
 //= type=test
 //# `RING-IMPL-MEM-002` Any operation that needs scratch space for
@@ -137,10 +124,6 @@ fn scratch_space_boundaries_are_enforced_on_caller_buffers() {
 }
 
 //= spec/implementation.md#memory-requirements
-//# `RING-IMPL-MEM-004` The implementation SHOULD avoid keeping
-//# duplicate copies of large record payloads in memory when a borrowed
-//# buffer or streaming decode is sufficient.
-//= spec/implementation.md#memory-requirements
 //= type=test
 //# `RING-IMPL-MEM-004` The implementation SHOULD avoid keeping
 //# duplicate copies of large record payloads in memory when a borrowed
@@ -180,10 +163,6 @@ fn map_round_trips_large_snapshots_using_only_borrowed_buffers() {
 }
 
 //= spec/implementation.md#memory-requirements
-//# `RING-IMPL-MEM-005` Buffer-size requirements that depend on disk
-//# format constants MUST be derivable from public constants, associated
-//# constants, or documented constructor contracts.
-//= spec/implementation.md#memory-requirements
 //= type=test
 //# `RING-IMPL-MEM-005` Buffer-size requirements that depend on disk
 //# format constants MUST be derivable from public constants, associated
@@ -215,10 +194,6 @@ fn disk_format_buffer_sizes_are_exposed_by_constants_or_workspace_contracts() {
 }
 
 //= spec/implementation.md#collection-requirements
-//# `RING-IMPL-COLL-002` Collection-specific in-memory state MUST obey
-//# the same explicit-capacity and no-allocation rules as borromean
-//# core.
-//= spec/implementation.md#collection-requirements
 //= type=test
 //# `RING-IMPL-COLL-002` Collection-specific in-memory state MUST obey
 //# the same explicit-capacity and no-allocation rules as borromean
@@ -241,10 +216,6 @@ fn map_in_memory_state_runs_inside_a_borrowed_buffer_without_allocating() {
     assert!(matches!(tiny_map.set(2, 20), Err(MapError::BufferTooSmall)));
 }
 
-//= spec/implementation.md#api-requirements
-//# `RING-IMPL-API-004` The implementation SHOULD keep collection
-//# operation APIs close to the prototype's explicit buffer-passing style
-//# where that style avoids hidden allocation.
 //= spec/implementation.md#api-requirements
 //= type=test
 //# `RING-IMPL-API-004` The implementation SHOULD keep collection
