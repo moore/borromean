@@ -4,6 +4,8 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
+no_std_target="${BORROMEAN_NO_STD_TARGET:-riscv32imac-unknown-none-elf}"
+
 banned_runtime_dependencies=(
     tokio
     async-std
@@ -30,6 +32,9 @@ trap 'rm -f "$tree_output"' EXIT
 
 echo "[verify] cargo test"
 cargo test
+
+echo "[verify] cargo build --lib --target ${no_std_target}"
+cargo build --lib --target "$no_std_target"
 
 echo "[verify] cargo clippy --all-targets --all-features -- -D warnings -A clippy::disallowed_methods -A clippy::disallowed_types -A clippy::disallowed_macros"
 cargo clippy --all-targets --all-features -- \

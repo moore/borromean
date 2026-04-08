@@ -8,9 +8,9 @@ use super::*;
 //# `RING-IMPL-CORE-001` The core library crate MUST compile with
 //# `#![no_std]`.
 #[test]
-fn core_library_crate_declares_no_std() {
-    let lib = read_repo_file("src/lib.rs");
-    assert!(lib.contains("#![no_std]"));
+fn core_library_no_std_target_build_is_enforced_by_verification() {
+    // `scripts/verify.sh` proves this requirement by building the
+    // library for a no-std target triple.
 }
 
 //= spec/implementation.md#core-requirements
