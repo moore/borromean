@@ -7,7 +7,10 @@
         clippy::panic,
         clippy::todo,
         clippy::unimplemented,
-        clippy::unreachable
+        clippy::unreachable,
+        clippy::disallowed_methods,
+        clippy::disallowed_types,
+        clippy::disallowed_macros
     )
 )]
 

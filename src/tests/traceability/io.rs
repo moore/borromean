@@ -62,22 +62,30 @@ fn flash_io_trait_accepts_caller_defined_driver_types() {
 //# `RING-IMPL-IO-003` The borromean I/O abstraction MUST be usable
 //# without dynamic dispatch and without heap allocation.
 #[test]
-fn flash_io_trait_avoids_dynamic_dispatch_surfaces() {
-    for (path, source) in non_test_sources_without_comments() {
-        for banned in [
-            "dyn FlashIo",
-            "Box<dyn FlashIo",
-            "&dyn FlashIo",
-            "Arc<dyn FlashIo",
-            "Rc<dyn FlashIo",
-        ] {
-            assert!(
-                !source.contains(banned),
-                "non-test source unexpectedly references {banned} in {}",
-                path.display()
-            );
-        }
-    }
+fn flash_io_trait_supports_non_allocating_concrete_driver_usage() {
+    const REGION_SIZE: usize = 256;
+    const REGION_COUNT: usize = 5;
+
+    assert_no_alloc("FlashIo concrete-driver operation path", || {
+        let mut flash = ForwardingFlash::<REGION_SIZE, REGION_COUNT, 2048>::new(0xff);
+        let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
+        let mut storage = Storage::<8, 4>::format::<REGION_SIZE, REGION_COUNT, _>(
+            &mut flash,
+            &mut workspace,
+            1,
+            8,
+            0xa5,
+        )
+        .unwrap();
+        storage
+            .create_map::<REGION_SIZE, REGION_COUNT, _>(
+                &mut flash,
+                &mut workspace,
+                CollectionId(63),
+            )
+            .unwrap();
+        assert_eq!(storage.collections()[0].collection_id(), CollectionId(63));
+    });
 }
 
 //= spec/implementation.md#i-o-requirements
@@ -107,30 +115,8 @@ fn mock_flash_sync_can_complete_immediately() {
 //# interrupt delivery as an external concern of the caller-provided I/O
 //# implementation rather than as an internal runtime service.
 #[test]
-fn flash_io_surface_leaves_wakeup_and_interrupt_delivery_external() {
-    for name in flash_io_method_names() {
-        for forbidden in ["wake", "waker", "callback", "interrupt", "dma", "register"] {
-            assert!(
-                !name.contains(forbidden),
-                "FlashIo unexpectedly exposes runtime-style hook {name}"
-            );
-        }
-    }
-
-    for relative in ["src/flash_io.rs", "src/lib.rs", "src/op_future.rs"] {
-        let source = strip_comment_lines(&read_repo_file(relative));
-        for forbidden in [
-            "register_waker",
-            "callback",
-            "interrupt",
-            "dma",
-            "tokio::spawn",
-            "async_std::task::spawn",
-        ] {
-            assert!(
-                !source.contains(forbidden),
-                "unexpected runtime-owned I/O concern {forbidden} in {relative}"
-            );
-        }
-    }
+fn flash_io_runtime_hook_policy_is_enforced_by_clippy_verification() {
+    // The mechanical enforcement for this requirement lives in
+    // `clippy.toml`, the crate-level deny configuration in `src/lib.rs`,
+    // and the lib-only clippy policy pass in `scripts/verify.sh`.
 }

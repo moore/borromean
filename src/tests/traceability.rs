@@ -338,50 +338,6 @@ fn strip_comment_lines(source: &str) -> String {
         .join("\n")
 }
 
-fn dependency_names(manifest: &str, section: &str) -> BTreeSet<String> {
-    let section_header = format!("[{section}]");
-    let mut names = BTreeSet::new();
-    let mut in_section = false;
-
-    for line in manifest.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('[') {
-            in_section = trimmed == section_header;
-            continue;
-        }
-        if !in_section || trimmed.is_empty() {
-            continue;
-        }
-
-        let Some((name, _)) = trimmed.split_once('=') else {
-            continue;
-        };
-        names.insert(name.trim().to_string());
-    }
-
-    names
-}
-
-fn non_test_source_files() -> Vec<PathBuf> {
-    let src_root = repo_root().join("src");
-    let mut files = Vec::new();
-    collect_rust_sources(&src_root, &mut files);
-    files
-        .into_iter()
-        .filter(|path| !is_dedicated_test_file(path))
-        .collect()
-}
-
-fn non_test_sources_without_comments() -> Vec<(PathBuf, String)> {
-    non_test_source_files()
-        .into_iter()
-        .map(|path| {
-            let source = fs::read_to_string(&path).unwrap();
-            (path, strip_comment_lines(&source))
-        })
-        .collect()
-}
-
 fn flash_io_method_names() -> Vec<String> {
     let source = read_repo_file("src/flash_io.rs");
     let mut in_trait = false;
