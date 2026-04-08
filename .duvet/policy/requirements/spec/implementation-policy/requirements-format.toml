@@ -1,0 +1,29 @@
+target = "spec/implementation-policy.md#requirements-format"
+
+# Requirements Format
+#
+# This policy specification keeps normative requirements adjacent to the
+# text that motivates them. Each normative requirement in
+# [spec/implementation.md](implementation.md) or this specification MUST
+# start with a stable identifier such as `RING-IMPL-CORE-001` and MUST
+# use explicit normative language such as `MUST`, `MUST NOT`, `SHOULD`,
+# or `MAY`.
+#
+# These identifiers are intended to be Duvet traceability targets for
+# implementation-architecture decisions and repository policy
+# constraints that are not themselves on-disk format requirements.
+
+[[spec]]
+level = "MUST"
+quote = '''
+Each normative requirement in
+[spec/implementation.md](implementation.md) or this specification MUST
+start with a stable identifier such as `RING-IMPL-CORE-001`
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+and MUST
+use explicit normative language
+'''

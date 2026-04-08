@@ -9,16 +9,8 @@ semantics, crash ordering, and on-disk format. This document defines
 how those rules are to be realized in a `no_std`, `no_alloc`,
 runtime-agnostic Rust implementation.
 
-## Requirements Format
-
-This specification keeps normative requirements adjacent to the text
-that motivates them. Each normative requirement starts with a stable
-identifier such as `RING-IMPL-CORE-001` and uses explicit normative
-language such as `MUST`, `MUST NOT`, `SHOULD`, or `MAY`.
-
-These identifiers are intended to be Duvet traceability targets for
-implementation-architecture decisions that are not themselves on-disk
-format requirements.
+Repository traceability policy and specification-format rules live in
+[spec/implementation-policy.md](implementation-policy.md).
 
 ## Design Goals
 
@@ -350,43 +342,6 @@ the same explicit-capacity and no-allocation rules as borromean core.
 3. `RING-IMPL-COLL-003` A collection operation that needs I/O MUST be
 drivable through the same runtime-agnostic future model as core
 storage operations.
-
-## Verification Strategy
-
-Requirement traceability should stay mechanically simple. If a single
-test body tries to verify many independent requirements at once, the
-trace becomes noisy and failure diagnosis gets worse. A tighter rule is
-better: one requirement, one dedicated test function, with any shared
-setup moved into helpers.
-
-This does not forbid helper code, fixtures, macros, or shared property
-generators. It only constrains how normative requirements are claimed
-by top-level tests.
-
-Verification structure should also preserve a clean separation between
-functional code and test code. Requirement-specific tests are part of
-the verification surface, not part of the production implementation
-module they exercise.
-
-### Verification Requirements
-
-1. `RING-IMPL-TEST-001` Every normative requirement in
-[spec/ring.md](ring.md) or this specification MUST have at least one
-dedicated automated test function or dedicated compile-time test case
-whose primary purpose is to verify that single requirement.
-2. `RING-IMPL-TEST-002` A top-level automated test function MUST NOT
-claim to verify multiple normative requirement identifiers.
-3. `RING-IMPL-TEST-003` Shared setup, fixtures, helper functions,
-macros, and data generators MAY be reused across requirement-specific
-tests, but the final traced test entry point MUST remain specific to
-one requirement identifier.
-4. `RING-IMPL-TEST-004` When a requirement is verified by a
-compile-fail, compile-pass, or other non-runtime harness, that harness
-entry MUST still be dedicated to a single requirement identifier.
-5. `RING-IMPL-TEST-005` Automated test functions and compile-time test
-harness entries MUST be defined only in dedicated test modules or
-files rather than inside the functional implementation module they
-exercise.
 
 ## Non-Goals
 

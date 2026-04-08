@@ -1,8 +1,7 @@
 use super::*;
 use crate::disk::{FreePointerFooter, Header};
 use crate::wal_record::{encode_record_into, encoded_record_len, WalRecord};
-use crate::MockFlash;
-use crate::StorageWorkspace;
+use crate::{MapError, MapStorageError, MockFlash, Storage, StorageWorkspace, MAP_REGION_V1_FORMAT};
 
 fn open_formatted_store<
     const REGION_SIZE: usize,
@@ -1025,4 +1024,120 @@ fn open_formatted_store_initializes_allocator_state_for_a_fresh_store() {
 fn open_formatted_store_keeps_max_seen_sequence_for_the_next_region_header() {
     let (_metadata, state) = open_formatted_store_from_fresh_format();
     assert_eq!(state.max_seen_sequence(), 0);
+}
+
+//= spec/ring.md#startup-replay-algorithm
+//# `RING-STARTUP-027` If replay yields a live collection with unsupported or invalid retained collection data under that collection's normative specification, startup MUST fail before open succeeds.
+//= spec/ring.md#startup-replay-algorithm
+//= type=test
+//# `RING-STARTUP-027` If replay yields a live collection with unsupported or invalid retained collection data under that collection's normative specification, startup MUST fail before open succeeds.
+#[test]
+fn storage_open_path_rejects_invalid_retained_map_region_snapshot_and_update_payloads() {
+    {
+        let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
+        let mut workspace = StorageWorkspace::<512>::new();
+        let mut storage =
+            Storage::<8, 4>::format::<512, 5, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+
+        storage
+            .create_map::<512, 5, _>(&mut flash, &mut workspace, CollectionId(43))
+            .unwrap();
+
+        let region_index = storage
+            .runtime_mut()
+            .reserve_next_region::<512, 5, _>(&mut flash, &mut workspace)
+            .unwrap();
+        storage
+            .runtime()
+            .write_committed_region::<512, 5, _>(
+                &mut flash,
+                region_index,
+                CollectionId(43),
+                MAP_REGION_V1_FORMAT,
+                &[1, 2, 3],
+            )
+            .unwrap();
+        storage
+            .append_head::<512, 5, _>(
+                &mut flash,
+                &mut workspace,
+                CollectionId(43),
+                CollectionType::MAP_CODE,
+                region_index,
+            )
+            .unwrap();
+
+        let reopened = Storage::<8, 4>::open::<512, 5, _>(&mut flash, &mut workspace).unwrap();
+        let mut reopen_buffer = [0u8; 512];
+        let result = reopened.open_map::<512, 5, _, i32, i32, 4>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(43),
+            &mut reopen_buffer,
+        );
+        assert!(matches!(
+            result,
+            Err(MapStorageError::Map(MapError::SerializationError))
+        ));
+    }
+
+    {
+        let mut flash = MockFlash::<512, 4, 1024>::new(0xff);
+        let mut workspace = StorageWorkspace::<512>::new();
+        let mut storage =
+            Storage::<8, 4>::format::<512, 4, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+
+        storage
+            .create_map::<512, 4, _>(&mut flash, &mut workspace, CollectionId(44))
+            .unwrap();
+        storage
+            .append_snapshot::<512, 4, _>(
+                &mut flash,
+                &mut workspace,
+                CollectionId(44),
+                CollectionType::MAP_CODE,
+                &[1],
+            )
+            .unwrap();
+
+        let reopened = Storage::<8, 4>::open::<512, 4, _>(&mut flash, &mut workspace).unwrap();
+        let mut reopen_buffer = [0u8; 512];
+        let result = reopened.open_map::<512, 4, _, i32, i32, 4>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(44),
+            &mut reopen_buffer,
+        );
+        assert!(matches!(
+            result,
+            Err(MapStorageError::Map(MapError::SerializationError))
+        ));
+    }
+
+    {
+        let mut flash = MockFlash::<512, 4, 1024>::new(0xff);
+        let mut workspace = StorageWorkspace::<512>::new();
+        let mut storage =
+            Storage::<8, 4>::format::<512, 4, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+
+        storage
+            .create_map::<512, 4, _>(&mut flash, &mut workspace, CollectionId(45))
+            .unwrap();
+        storage
+            .append_update::<512, 4, _>(&mut flash, &mut workspace, CollectionId(45), &[0xff])
+            .unwrap();
+
+        let reopened = Storage::<8, 4>::open::<512, 4, _>(&mut flash, &mut workspace).unwrap();
+        let mut reopen_buffer = [0u8; 512];
+        let result = reopened.open_map::<512, 4, _, i32, i32, 4>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(45),
+            &mut reopen_buffer,
+        );
+        assert!(matches!(
+            result,
+            Err(MapStorageError::Map(MapError::SerializationError))
+        ));
+    }
 }

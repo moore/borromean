@@ -73,11 +73,9 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize> 
 mod api;
 mod arch;
 mod arithmetic;
-mod audit;
 mod collection;
 mod core;
 mod exec;
-mod format;
 mod io;
 mod memory;
 mod operation;

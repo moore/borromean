@@ -25,9 +25,9 @@ option.
 ## Requirements Format
 
 This specification keeps normative requirements adjacent to the text
-that motivates them. Each normative requirement starts with a stable
-identifier such as `RING-WAL-ENC-001` and uses explicit normative
-language such as `MUST`, `MUST NOT`, `SHOULD`, or `MAY`.
+that motivates them. Stable identifier and RFC-2119 language
+conventions for borromean specifications are defined by
+[spec/implementation-policy.md](implementation-policy.md).
 
 These identifiers are intended to be the primary Duvet traceability
 targets. The surrounding narrative is informative unless it also
@@ -1306,11 +1306,7 @@ region is reclaimed or erased for reuse.
 26. `RING-STARTUP-026` If replay yields a live collection whose
 `collection_type` is unsupported by the implementation, startup MUST
 fail.
-27. `RING-STARTUP-027` If replay yields a live collection whose
-retained committed-region basis, retained `snapshot` payload, or
-retained post-basis `update` payloads are unsupported or invalid under
-that collection's normative specification, startup MUST fail before
-open succeeds.
+27. `RING-STARTUP-027` If replay yields a live collection with unsupported or invalid retained collection data under that collection's normative specification, startup MUST fail before open succeeds.
 28. `RING-STARTUP-028` A dropped tombstone whose old
 `collection_type` is unsupported MAY remain as inert metadata and does
 not by itself require startup failure.

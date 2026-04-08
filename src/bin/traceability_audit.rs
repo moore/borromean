@@ -27,7 +27,15 @@ fn run() -> Result<(), String> {
         spec_requirement_format_offenders(repo_root, "spec/implementation.md", "RING-IMPL-")?
     {
         failures.push(format!(
-            "spec/implementation.md#requirements-format: {message}"
+            "spec/implementation-policy.md#requirements-format: {message}"
+        ));
+    }
+
+    if let Some(message) =
+        spec_requirement_format_offenders(repo_root, "spec/implementation-policy.md", "RING-IMPL-")?
+    {
+        failures.push(format!(
+            "spec/implementation-policy.md#requirements-format: {message}"
         ));
     }
 

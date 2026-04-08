@@ -1,0 +1,15 @@
+'$schema' = "https://awslabs.github.io/duvet/config/v0.4.json"
+
+[[source]]
+pattern = "tools/**/*.rs"
+
+[[specification]]
+source = "spec/implementation-policy.md"
+
+[report.html]
+enabled = true
+path = ".duvet/reports/policy-report.html"
+
+[report.json]
+enabled = true
+path = ".duvet/reports/policy-report.json"

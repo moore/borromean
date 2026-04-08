@@ -1,11 +1,12 @@
-target = "spec/implementation.md#verification-requirements"
+target = "spec/implementation-policy.md#verification-requirements"
 
 # Verification Requirements
 #
 # 1. `RING-IMPL-TEST-001` Every normative requirement in
-# [spec/ring.md](ring.md) or this specification MUST have at least one
-# dedicated automated test function or dedicated compile-time test case
-# whose primary purpose is to verify that single requirement.
+# [spec/ring.md](ring.md) or [spec/implementation.md](implementation.md)
+# MUST have at least one dedicated automated test function or dedicated
+# compile-time test case whose primary purpose is to verify that single
+# requirement.
 # 2. `RING-IMPL-TEST-002` A top-level automated test function MUST NOT
 # claim to verify multiple normative requirement identifiers.
 # 3. `RING-IMPL-TEST-003` Shared setup, fixtures, helper functions,
@@ -24,9 +25,10 @@ target = "spec/implementation.md#verification-requirements"
 level = "MUST"
 quote = '''
 `RING-IMPL-TEST-001` Every normative requirement in
-[spec/ring.md](ring.md) or this specification MUST have at least one
-dedicated automated test function or dedicated compile-time test case
-whose primary purpose is to verify that single requirement.
+[spec/ring.md](ring.md) or [spec/implementation.md](implementation.md)
+MUST have at least one dedicated automated test function or dedicated
+compile-time test case whose primary purpose is to verify that single
+requirement.
 '''
 
 [[spec]]

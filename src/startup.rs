@@ -1166,6 +1166,10 @@ fn find_collection_mut<const MAX_COLLECTIONS: usize>(
     collections.get_mut(index)
 }
 
+//= spec/ring.md#region-reclaim
+//# `RING-REGION-RECLAIM-POST-005` If a prior tail existed, replay of free pointers MUST follow
+//# `... -> t_prev -> r`, and `r` is recognized as the tail because its
+//# free-pointer slot is uninitialized.
 fn reconstruct_free_list_tail<IO: FlashIo>(
     flash: &mut IO,
     metadata: StorageMetadata,
