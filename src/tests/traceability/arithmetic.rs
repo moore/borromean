@@ -2,11 +2,8 @@ use super::*;
 use ::core::mem::size_of;
 use heapless::Vec as HeaplessVec;
 
-fn storage_with_max_seen_sequence() -> (
-    MockFlash<128, 4, 256>,
-    StorageWorkspace<128>,
-    Storage<8, 4>,
-) {
+fn storage_with_max_seen_sequence() -> (MockFlash<128, 4, 256>, StorageWorkspace<128>, Storage<8, 4>)
+{
     let mut flash = MockFlash::<128, 4, 256>::new(0xff);
     let mut workspace = StorageWorkspace::<128>::new();
     Storage::<8, 4>::format::<128, 4, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
@@ -74,8 +71,8 @@ fn boundary_sensitive_storage_and_map_lengths_stay_in_range() {
 fn arithmetic_boundary_failures_surface_explicit_error_variants() {
     let mut flash = MockFlash::<64, 4, 256>::new(0xff);
     let mut workspace = StorageWorkspace::<64>::new();
-    let storage = Storage::<8, 4>::format::<64, 4, _>(&mut flash, &mut workspace, 1, 8, 0xa5)
-        .unwrap();
+    let storage =
+        Storage::<8, 4>::format::<64, 4, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
 
     let oversized_payload = [0u8; 64];
     assert!(matches!(

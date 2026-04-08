@@ -79,6 +79,30 @@ fn public_decode_and_open_paths_expose_explicit_error_results() {
     type Map<'a> = LsmMap<'a, u16, u16, 8>;
     type Update = MapUpdate<u16, u16>;
     type Runtime = StorageRuntime<8, 4>;
+    type CreateMapFn =
+        fn(&mut Store, &mut Flash, &mut Workspace, CollectionId) -> Result<(), StorageRuntimeError>;
+    type AppendMapUpdateFn = fn(
+        &mut Store,
+        &mut Flash,
+        &mut Workspace,
+        CollectionId,
+        &Update,
+        &mut [u8],
+    ) -> Result<(), MapStorageError>;
+    type OpenMapFn<'a> = fn(
+        &Store,
+        &mut Flash,
+        &mut Workspace,
+        CollectionId,
+        &'a mut [u8],
+    ) -> Result<Map<'a>, MapStorageError>;
+    type OpenFromStorageFn<'a> = fn(
+        &Runtime,
+        &mut Flash,
+        &mut Workspace,
+        CollectionId,
+        &'a mut [u8],
+    ) -> Result<Map<'a>, MapStorageError>;
 
     // This is an API-shape test. It does not exercise runtime behavior;
     // instead it asks the compiler to prove that these fallible entry
@@ -96,10 +120,8 @@ fn public_decode_and_open_paths_expose_explicit_error_results() {
 
     let _: fn(&mut Flash, &mut Workspace) -> Result<Store, StorageOpenError> =
         Store::open::<256, 5, Flash>;
-    let _: fn(&mut Store, &mut Flash, &mut Workspace, CollectionId) -> Result<(), StorageRuntimeError> =
-        Store::create_map::<256, 5, Flash>;
-    let _: fn(&mut Store, &mut Flash, &mut Workspace, CollectionId, &Update, &mut [u8]) -> Result<(), MapStorageError> =
-        Store::append_map_update::<256, 5, Flash, u16, u16, 8>;
+    let _: CreateMapFn = Store::create_map::<256, 5, Flash>;
+    let _: AppendMapUpdateFn = Store::append_map_update::<256, 5, Flash, u16, u16, 8>;
     let _: fn(&mut Store, &mut Flash, &mut Workspace, &Map<'_>) -> Result<u32, MapStorageError> =
         Store::flush_map::<256, 5, Flash, u16, u16, 8>;
 
@@ -107,23 +129,14 @@ fn public_decode_and_open_paths_expose_explicit_error_results() {
     // also verify the lifetime relationship between the caller's buffer
     // and the returned map value while still checking that the return
     // type is `Result<..., ...>`.
-    fn assert_open_map_signature<'a>(
-        _: fn(&Store, &mut Flash, &mut Workspace, CollectionId, &'a mut [u8]) -> Result<Map<'a>, MapStorageError>,
-    ) {
-    }
+    fn assert_open_map_signature<'a>(_: OpenMapFn<'a>) {}
     fn assert_map_new_signature<'a>(
         _: fn(CollectionId, &'a mut [u8]) -> Result<Map<'a>, MapError>,
     ) {
     }
     fn assert_map_set_signature<'a>(_: fn(&mut Map<'a>, u16, u16) -> Result<(), MapError>) {}
-    fn assert_map_load_snapshot_signature<'a>(
-        _: fn(&mut Map<'a>, &[u8]) -> Result<(), MapError>,
-    ) {
-    }
-    fn assert_open_from_storage_signature<'a>(
-        _: fn(&Runtime, &mut Flash, &mut Workspace, CollectionId, &'a mut [u8]) -> Result<Map<'a>, MapStorageError>,
-    ) {
-    }
+    fn assert_map_load_snapshot_signature<'a>(_: fn(&mut Map<'a>, &[u8]) -> Result<(), MapError>) {}
+    fn assert_open_from_storage_signature<'a>(_: OpenFromStorageFn<'a>) {}
 
     assert_open_map_signature(Store::open_map::<256, 5, Flash, u16, u16, 8>);
     assert_map_new_signature(LsmMap::<u16, u16, 8>::new);

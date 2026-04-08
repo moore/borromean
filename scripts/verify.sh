@@ -56,6 +56,9 @@ cargo clippy --lib --all-features -- \
     -D clippy::disallowed_types \
     -D clippy::disallowed_macros
 
+echo "[verify] cargo run --quiet --bin traceability_audit"
+cargo run --quiet --bin traceability_audit
+
 echo "[verify] cargo tree -e normal --prefix none"
 cargo tree -e normal --prefix none > "$tree_output"
 

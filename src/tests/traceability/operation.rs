@@ -33,28 +33,25 @@ fn each_public_operation_future_completes_when_polled_directly() {
     let mut source_buffer = [0u8; REGION_SIZE];
     let mut source = LsmMap::<u16, u16, 8>::new(CollectionId(82), &mut source_buffer).unwrap();
     source.set(1, 10).unwrap();
-    super::super::poll_ready(storage.snapshot_map_future::<REGION_SIZE, REGION_COUNT, _, _, _, 8>(
-        &mut flash,
-        &mut workspace,
-        &source,
-    ))
+    super::super::poll_ready(
+        storage.snapshot_map_future::<REGION_SIZE, REGION_COUNT, _, _, _, 8>(
+            &mut flash,
+            &mut workspace,
+            &source,
+        ),
+    )
     .unwrap();
 
     let mut payload_buffer = [0u8; 64];
-    super::super::poll_ready(storage.append_map_update_future::<
-        REGION_SIZE,
-        REGION_COUNT,
-        _,
-        u16,
-        u16,
-        8,
-    >(
-        &mut flash,
-        &mut workspace,
-        CollectionId(82),
-        &MapUpdate::Set { key: 2, value: 20 },
-        &mut payload_buffer,
-    ))
+    super::super::poll_ready(
+        storage.append_map_update_future::<REGION_SIZE, REGION_COUNT, _, u16, u16, 8>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(82),
+            &MapUpdate::Set { key: 2, value: 20 },
+            &mut payload_buffer,
+        ),
+    )
     .unwrap();
 
     source.set(3, 30).unwrap();
@@ -72,16 +69,13 @@ fn each_public_operation_future_completes_when_polled_directly() {
         StartupCollectionBasis::Region(committed_region)
     );
 
-    let reclaim_region = super::super::poll_ready(storage.drop_map_future::<
-        REGION_SIZE,
-        REGION_COUNT,
-        _,
-    >(
-        &mut flash,
-        &mut workspace,
-        CollectionId(82),
-    ))
-    .unwrap();
+    let reclaim_region =
+        super::super::poll_ready(storage.drop_map_future::<REGION_SIZE, REGION_COUNT, _>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(82),
+        ))
+        .unwrap();
     assert_eq!(reclaim_region, Some(committed_region));
 
     let reopened = super::super::poll_until_ready(

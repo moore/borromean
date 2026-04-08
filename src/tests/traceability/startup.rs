@@ -175,12 +175,18 @@ fn blocking_and_future_open_recover_the_same_pending_reclaim_state() {
     assert_eq!(reopened_blocking.last_free_list_head(), Some(first_region));
     assert!(reopened_blocking.pending_reclaims().is_empty());
 
-    assert_eq!(reopened_future.collections(), reopened_blocking.collections());
+    assert_eq!(
+        reopened_future.collections(),
+        reopened_blocking.collections()
+    );
     assert_eq!(
         reopened_future.last_free_list_head(),
         reopened_blocking.last_free_list_head()
     );
-    assert_eq!(reopened_future.free_list_tail(), reopened_blocking.free_list_tail());
+    assert_eq!(
+        reopened_future.free_list_tail(),
+        reopened_blocking.free_list_tail()
+    );
     assert_eq!(
         reopened_future.pending_reclaims(),
         reopened_blocking.pending_reclaims()

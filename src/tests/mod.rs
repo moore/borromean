@@ -89,11 +89,9 @@ fn assert_no_alloc<T>(label: &str, operation: impl FnOnce() -> T) -> T {
 
     let allocations = TRACKED_ALLOCATIONS.with(Cell::get);
     assert_eq!(
-        allocations,
-        0,
+        allocations, 0,
         "{} unexpectedly performed {} heap allocation(s)",
-        label,
-        allocations
+        label, allocations
     );
     result
 }

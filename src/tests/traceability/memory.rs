@@ -71,7 +71,9 @@ fn explicit_collection_and_reclaim_capacities_fail_when_exhausted() {
     assert!(matches!(
         storage.create_map::<512, 5, _>(&mut flash, &mut workspace, CollectionId(2)),
         Err(StorageRuntimeError::TooManyTrackedCollections)
-            | Err(StorageRuntimeError::Startup(StartupError::TooManyTrackedCollections))
+            | Err(StorageRuntimeError::Startup(
+                StartupError::TooManyTrackedCollections
+            ))
     ));
 
     let mut tiny_buffer = [0u8; 16];

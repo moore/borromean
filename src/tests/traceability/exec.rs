@@ -113,28 +113,25 @@ fn each_fallible_storage_operation_is_drivable_as_one_future() {
     let mut source_buffer = [0u8; REGION_SIZE];
     let mut source = LsmMap::<u16, u16, 8>::new(CollectionId(81), &mut source_buffer).unwrap();
     source.set(1, 10).unwrap();
-    super::super::poll_ready(storage.snapshot_map_future::<REGION_SIZE, REGION_COUNT, _, _, _, 8>(
-        &mut flash,
-        &mut workspace,
-        &source,
-    ))
+    super::super::poll_ready(
+        storage.snapshot_map_future::<REGION_SIZE, REGION_COUNT, _, _, _, 8>(
+            &mut flash,
+            &mut workspace,
+            &source,
+        ),
+    )
     .unwrap();
 
     let mut payload_buffer = [0u8; 64];
-    super::super::poll_ready(storage.append_map_update_future::<
-        REGION_SIZE,
-        REGION_COUNT,
-        _,
-        u16,
-        u16,
-        8,
-    >(
-        &mut flash,
-        &mut workspace,
-        CollectionId(81),
-        &MapUpdate::Set { key: 2, value: 20 },
-        &mut payload_buffer,
-    ))
+    super::super::poll_ready(
+        storage.append_map_update_future::<REGION_SIZE, REGION_COUNT, _, u16, u16, 8>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(81),
+            &MapUpdate::Set { key: 2, value: 20 },
+            &mut payload_buffer,
+        ),
+    )
     .unwrap();
 
     source.set(3, 30).unwrap();
@@ -152,16 +149,13 @@ fn each_fallible_storage_operation_is_drivable_as_one_future() {
         StartupCollectionBasis::Region(committed_region)
     );
 
-    let reclaim_region = super::super::poll_ready(storage.drop_map_future::<
-        REGION_SIZE,
-        REGION_COUNT,
-        _,
-    >(
-        &mut flash,
-        &mut workspace,
-        CollectionId(81),
-    ))
-    .unwrap();
+    let reclaim_region =
+        super::super::poll_ready(storage.drop_map_future::<REGION_SIZE, REGION_COUNT, _>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(81),
+        ))
+        .unwrap();
     assert_eq!(reclaim_region, Some(committed_region));
 
     let reopened = super::super::poll_until_ready(
@@ -196,10 +190,8 @@ fn operation_futures_advance_only_when_the_caller_polls_them() {
         .unwrap();
     call_count.set(0);
 
-    let future = Storage::<8, 4>::open_future::<REGION_SIZE, REGION_COUNT, _>(
-        &mut flash,
-        &mut workspace,
-    );
+    let future =
+        Storage::<8, 4>::open_future::<REGION_SIZE, REGION_COUNT, _>(&mut flash, &mut workspace);
     let mut future = pin!(future);
 
     assert_eq!(call_count.get(), 0);
@@ -311,11 +303,8 @@ fn storage_can_be_reused_only_after_an_operation_future_is_finished_or_dropped()
     map.set(1, 10).unwrap();
 
     {
-        let future = storage.flush_map_future::<512, 5, _, _, _, 8>(
-            &mut flash,
-            &mut workspace,
-            &map,
-        );
+        let future =
+            storage.flush_map_future::<512, 5, _, _, _, 8>(&mut flash, &mut workspace, &map);
         let mut future = pin!(future);
         assert!(matches!(
             super::super::poll_once(future.as_mut()),
