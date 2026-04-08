@@ -319,39 +319,6 @@ fn assert_spec_requirement_format(spec_path: &Path, expected_prefix: &str) {
     }
 }
 
-fn repo_root() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-}
-
-fn read_repo_file(relative: &str) -> String {
-    fs::read_to_string(repo_root().join(relative)).unwrap()
-}
-
-fn flash_io_method_names() -> Vec<String> {
-    let source = read_repo_file("src/flash_io.rs");
-    let mut in_trait = false;
-    let mut names = Vec::new();
-
-    for line in source.lines() {
-        let trimmed = line.trim();
-        if trimmed == "pub trait FlashIo {" {
-            in_trait = true;
-            continue;
-        }
-        if !in_trait {
-            continue;
-        }
-        if trimmed == "}" {
-            break;
-        }
-        if let Some(name) = extract_fn_name(trimmed) {
-            names.push(name);
-        }
-    }
-
-    names
-}
-
 struct ForwardingFlash<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize> {
     inner: MockFlash<REGION_SIZE, REGION_COUNT, MAX_LOG>,
 }

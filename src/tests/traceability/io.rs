@@ -1,4 +1,3 @@
-use super::std::vec;
 use super::*;
 
 //= spec/implementation.md#i-o-requirements
@@ -12,19 +11,73 @@ use super::*;
 //# region or metadata reads, writes, erases, and durability barriers.
 #[test]
 fn flash_io_trait_exposes_only_primitive_storage_operations() {
-    let methods = flash_io_method_names();
-    assert_eq!(
-        methods,
-        vec![
-            "read_metadata".to_string(),
-            "write_metadata".to_string(),
-            "read_region".to_string(),
-            "write_region".to_string(),
-            "erase_region".to_string(),
-            "sync".to_string(),
-            "format_empty_store".to_string(),
-        ]
-    );
+    struct SurfaceCheckedFlash;
+
+    impl FlashIo for SurfaceCheckedFlash {
+        fn read_metadata(&mut self) -> Result<Option<StorageMetadata>, MockError> {
+            Ok(None)
+        }
+
+        fn write_metadata(&mut self, _metadata: StorageMetadata) -> Result<(), MockError> {
+            Ok(())
+        }
+
+        fn read_region(
+            &mut self,
+            _region_index: u32,
+            _offset: usize,
+            _buffer: &mut [u8],
+        ) -> Result<(), MockError> {
+            Ok(())
+        }
+
+        fn write_region(
+            &mut self,
+            _region_index: u32,
+            _offset: usize,
+            _data: &[u8],
+        ) -> Result<(), MockError> {
+            Ok(())
+        }
+
+        fn erase_region(&mut self, _region_index: u32) -> Result<(), MockError> {
+            Ok(())
+        }
+
+        fn sync(&mut self) -> Result<(), MockError> {
+            Ok(())
+        }
+
+        fn format_empty_store(
+            &mut self,
+            _min_free_regions: u32,
+            _wal_write_granule: u32,
+            _wal_record_magic: u8,
+        ) -> Result<StorageMetadata, MockFormatError> {
+            Err(MockFormatError::RegionCountTooLarge)
+        }
+    }
+
+    // This is a compile-time surface test. The impl above names exactly
+    // the primitive operations allowed by the requirement. If `FlashIo`
+    // gained another required method, or if any of these signatures
+    // stopped exposing the expected `Result`-based contract, this test
+    // would stop compiling. Runtime-style hook surfaces are separately
+    // prohibited by `RING-IMPL-IO-005`.
+    let _: fn(&mut SurfaceCheckedFlash) -> Result<Option<StorageMetadata>, MockError> =
+        <SurfaceCheckedFlash as FlashIo>::read_metadata;
+    let _: fn(&mut SurfaceCheckedFlash, StorageMetadata) -> Result<(), MockError> =
+        <SurfaceCheckedFlash as FlashIo>::write_metadata;
+    let _: fn(&mut SurfaceCheckedFlash, u32, usize, &mut [u8]) -> Result<(), MockError> =
+        <SurfaceCheckedFlash as FlashIo>::read_region;
+    let _: fn(&mut SurfaceCheckedFlash, u32, usize, &[u8]) -> Result<(), MockError> =
+        <SurfaceCheckedFlash as FlashIo>::write_region;
+    let _: fn(&mut SurfaceCheckedFlash, u32) -> Result<(), MockError> =
+        <SurfaceCheckedFlash as FlashIo>::erase_region;
+    let _: fn(&mut SurfaceCheckedFlash) -> Result<(), MockError> =
+        <SurfaceCheckedFlash as FlashIo>::sync;
+    let _: fn(&mut SurfaceCheckedFlash, u32, u32, u8) -> Result<StorageMetadata, MockFormatError> =
+        <SurfaceCheckedFlash as FlashIo>::format_empty_store;
 }
 
 //= spec/implementation.md#i-o-requirements
