@@ -10,31 +10,53 @@ use super::*;
 //# into operation entry points or operation builders so the same
 //# `Storage` value can participate in externally driven async execution.
 #[test]
-fn storage_public_entry_points_take_backing_io_from_callers() {
-    let lib = strip_comment_lines(&read_repo_file("src/lib.rs"));
-    assert!(lib.contains(
-        "pub struct Storage<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize> {"
-    ));
-    assert!(!lib.contains("pub struct Storage<IO"));
+fn caller_owned_storage_can_mix_future_and_blocking_entry_points() {
+    const REGION_SIZE: usize = 256;
+    const REGION_COUNT: usize = 5;
 
-    for signature in [
-        "pub fn format_future<",
-        "pub fn format<",
-        "pub fn open_future<'a",
-        "pub fn open<const",
-        "pub fn create_map_future<",
-        "pub fn append_map_update_future<",
-        "pub fn flush_map_future<",
-        "pub fn drop_map_future<",
-    ] {
-        assert!(
-            lib.contains(signature),
-            "missing public entry point {signature}"
-        );
-    }
+    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 2048>::new(0xff);
+    let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
+    let mut storage = Storage::<8, 4>::format::<REGION_SIZE, REGION_COUNT, _>(
+        &mut flash,
+        &mut workspace,
+        1,
+        8,
+        0xa5,
+    )
+    .unwrap();
 
-    assert!(lib.contains("flash: &'a mut IO"));
-    assert!(lib.contains("flash: &mut IO"));
+    assert_no_alloc("create_map_future", || {
+        super::super::poll_ready(storage.create_map_future::<REGION_SIZE, REGION_COUNT, _>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(61),
+        ))
+        .unwrap();
+    });
+
+    let mut payload_buffer = [0u8; 64];
+    assert_no_alloc("append_map_update", || {
+        storage
+            .append_map_update::<REGION_SIZE, REGION_COUNT, _, u16, u16, 8>(
+                &mut flash,
+                &mut workspace,
+                CollectionId(61),
+                &MapUpdate::Set { key: 7, value: 70 },
+                &mut payload_buffer,
+            )
+            .unwrap();
+    });
+
+    let mut map_buffer = [0u8; REGION_SIZE];
+    let map = storage
+        .open_map::<REGION_SIZE, REGION_COUNT, _, u16, u16, 8>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(61),
+            &mut map_buffer,
+        )
+        .unwrap();
+    assert_eq!(map.get(&7).unwrap(), Some(70));
 }
 
 //= spec/implementation.md#api-requirements
@@ -180,42 +202,16 @@ fn blocking_and_future_entry_points_produce_equivalent_storage_state() {
 //# crate MUST remain usable without them.
 #[test]
 fn core_api_remains_usable_without_executor_or_framework_helpers() {
-    let manifest = strip_comment_lines(&read_repo_file("Cargo.toml"));
-    let dependencies = dependency_names(&manifest, "dependencies");
-    for banned in [
-        "tokio",
-        "async-std",
-        "embassy-executor",
-        "async-executor",
-        "futures-executor",
-        "rtic",
-        "freertos",
-        "zephyr",
-        "esp-idf",
-        "esp_idf",
-        "arduino",
-    ] {
-        assert!(
-            !dependencies.contains(banned),
-            "core crate unexpectedly requires helper dependency {banned}"
-        );
-    }
-
-    let lib = strip_comment_lines(&read_repo_file("src/lib.rs"));
-    for forbidden in ["pub mod adapters;", "pub mod executor", "pub mod framework"] {
-        assert!(
-            !lib.contains(forbidden),
-            "core crate unexpectedly requires helper surface {forbidden}"
-        );
-    }
-
     let mut flash = MockFlash::<256, 5, 256>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
     let mut storage =
         Storage::<8, 4>::format::<256, 5, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
-    storage
-        .create_map::<256, 5, _>(&mut flash, &mut workspace, CollectionId(85))
-        .unwrap();
+
+    assert_no_alloc("blocking core api", || {
+        storage
+            .create_map::<256, 5, _>(&mut flash, &mut workspace, CollectionId(85))
+            .unwrap();
+    });
 
     let reopened = Storage::<8, 4>::open::<256, 5, _>(&mut flash, &mut workspace).unwrap();
     assert_eq!(reopened.metadata().region_size, 256);

@@ -1,4 +1,6 @@
 use super::*;
+use ::core::pin::pin;
+use ::core::task::Poll;
 
 //= spec/implementation.md#architecture-requirements
 //# `RING-IMPL-ARCH-003` WAL handling, region-management logic, and
@@ -10,50 +12,51 @@ use super::*;
 //# collection-specific logic MUST remain separable modules with explicit
 //# interfaces.
 #[test]
-fn wal_region_management_and_collection_logic_stay_separate_modules() {
-    let src_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    for relative in [
-        "wal_record.rs",
-        "storage.rs",
-        "startup.rs",
-        "collections.rs",
-        "collections/map/mod.rs",
-    ] {
-        assert!(
-            src_root.join(relative).is_file(),
-            "expected separate module file {relative}"
-        );
-    }
+fn wal_storage_and_map_logic_are_exercised_through_separate_interfaces() {
+    let metadata = StorageMetadata::new(256, 4, 1, 8, 0xff, 0xa5).unwrap();
 
-    let lib = fs::read_to_string(src_root.join("lib.rs")).unwrap();
-    assert!(lib.contains("pub mod wal_record;"));
-    assert!(lib.contains("pub mod storage;"));
-    assert!(lib.contains("mod collections;"));
+    let record = WalRecord::Update {
+        collection_id: CollectionId(7),
+        payload: &[0x11, 0xff, 0xa5, 0x00, 0x33],
+    };
+    let mut physical = [0u8; 256];
+    let mut logical = [0u8; 256];
+    let encoded_len = encode_record_into(record, metadata, &mut physical, &mut logical).unwrap();
+    let mut decode_scratch = [0u8; 256];
+    let decoded = decode_record(&physical[..encoded_len], metadata, &mut decode_scratch).unwrap();
+    assert_eq!(decoded.record, record);
 
-    let collections = fs::read_to_string(src_root.join("collections.rs")).unwrap();
-    assert!(collections.contains("pub mod map;"));
+    let mut flash = MockFlash::<256, 4, 512>::new(0xff);
+    let mut workspace = StorageWorkspace::<256>::new();
+    let mut storage =
+        Storage::<8, 4>::format::<256, 4, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+    storage
+        .create_map::<256, 4, _>(&mut flash, &mut workspace, CollectionId(7))
+        .unwrap();
 
-    let metadata = StorageMetadata::new(128, 4, 1, 8, 0xff, 0xa5).unwrap();
-    let mut physical = [0u8; 128];
-    let mut logical = [0u8; 128];
-    let encoded_len = encode_record_into(
-        WalRecord::WalRecovery,
-        metadata,
-        &mut physical,
-        &mut logical,
-    )
-    .unwrap();
-    assert!(encoded_len > 0);
+    let mut source_buffer = [0u8; 256];
+    let mut source = LsmMap::<u16, u16, 8>::new(CollectionId(7), &mut source_buffer).unwrap();
+    source.set(5, 50).unwrap();
+    let region_index = storage
+        .flush_map::<256, 4, _, _, _, 8>(&mut flash, &mut workspace, &source)
+        .unwrap();
 
-    let mut flash = MockFlash::<128, 4, 256>::new(0xff);
-    let mut workspace = StorageWorkspace::<128>::new();
-    let storage =
-        Storage::<8, 4>::format::<128, 4, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
-    assert_eq!(storage.wal_head(), 0);
+    let reopened = Storage::<8, 4>::open::<256, 4, _>(&mut flash, &mut workspace).unwrap();
+    assert_eq!(
+        reopened.collections()[0].basis(),
+        StartupCollectionBasis::Region(region_index)
+    );
 
-    let mut map_buffer = [0u8; 128];
-    let map = LsmMap::<i32, i32, 4>::new(CollectionId(7), &mut map_buffer).unwrap();
-    assert_eq!(map.id(), CollectionId(7));
+    let mut reopened_buffer = [0u8; 256];
+    let reopened_map = reopened
+        .open_map::<256, 4, _, u16, u16, 8>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(7),
+            &mut reopened_buffer,
+        )
+        .unwrap();
+    assert_eq!(reopened_map.get(&5).unwrap(), Some(50));
 }
 
 //= spec/implementation.md#architecture-requirements
@@ -126,39 +129,66 @@ fn encoding_and_decoding_round_trip_from_plain_byte_buffers() {
 //# phase machines so that each durable transition is inspectable in code
 //# review and testable in isolation.
 #[test]
-fn startup_and_reclaim_use_explicit_phase_machine_enums() {
-    let op_future = strip_comment_lines(&read_repo_file("src/op_future.rs"));
+fn startup_and_reclaim_expose_stepwise_intermediate_states_between_polls() {
+    let mut flash = MockFlash::<256, 4, 512>::new(0xff);
+    let mut workspace = StorageWorkspace::<256>::new();
+    let mut storage =
+        Storage::<8, 4>::format::<256, 4, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+    storage
+        .create_map::<256, 4, _>(&mut flash, &mut workspace, CollectionId(83))
+        .unwrap();
+    storage
+        .append_update::<256, 4, _>(&mut flash, &mut workspace, CollectionId(83), &[7, 70])
+        .unwrap();
+    drop(storage);
 
-    assert!(op_future.contains("enum ReclaimWalHeadPhase<const MAX_COLLECTIONS: usize>"));
-    for variant in [
-        "Plan,",
-        "BeginReclaim {",
-        "PreserveFreeListHead {",
-        "CopyLiveState {",
-        "CommitHead {",
-        "CompleteReclaim {",
-        "Done,",
-    ] {
-        assert!(
-            op_future.contains(variant),
-            "missing reclaim phase variant {variant}"
-        );
+    {
+        let future = Storage::<8, 4>::open_future::<256, 4, _>(&mut flash, &mut workspace);
+        let mut future = pin!(future);
+
+        assert!(matches!(
+            super::super::poll_once(future.as_mut()),
+            Poll::Pending
+        ));
+        assert!(matches!(
+            super::super::poll_once(future.as_mut()),
+            Poll::Pending
+        ));
+        let reopened = super::super::poll_until_ready(future.as_mut(), 8).unwrap();
+        assert_eq!(reopened.wal_head(), 0);
+        assert_eq!(reopened.collections()[0].collection_id(), CollectionId(83));
     }
 
-    assert!(op_future.contains("enum OpenStoragePhase<"));
-    for variant in [
-        "Begin,",
-        "RecoverRotation {",
-        "DiscoverWalChain {",
-        "ReplayWalChain {",
-        "FinishStartup {",
-        "RecoverPendingReclaims {",
-        "ValidateCollections {",
-        "Done,",
-    ] {
-        assert!(
-            op_future.contains(variant),
-            "missing startup phase variant {variant}"
-        );
+    let (mut flash, mut workspace, mut storage, _next_region) =
+        super::super::setup_storage_with_stale_wal_head();
+    {
+        let future = storage.reclaim_wal_head_future::<512, 6, _>(&mut flash, &mut workspace);
+        let mut future = pin!(future);
+
+        assert!(matches!(
+            super::super::poll_once(future.as_mut()),
+            Poll::Pending
+        ));
+        assert!(matches!(
+            super::super::poll_once(future.as_mut()),
+            Poll::Pending
+        ));
     }
+
+    let reopened = Storage::<8, 4>::open::<512, 6, _>(&mut flash, &mut workspace).unwrap();
+    assert!(reopened.pending_reclaims().is_empty());
+    assert_eq!(
+        reopened.collections()[0].basis(),
+        StartupCollectionBasis::WalSnapshot
+    );
+
+    let (mut flash, mut workspace, mut storage, next_region) =
+        super::super::setup_storage_with_stale_wal_head();
+    let reclaimed_head = super::super::poll_until_ready(
+        storage.reclaim_wal_head_future::<512, 6, _>(&mut flash, &mut workspace),
+        6,
+    )
+    .unwrap();
+    assert_eq!(reclaimed_head, next_region);
+    assert_eq!(storage.wal_head(), next_region);
 }

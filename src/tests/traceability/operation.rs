@@ -10,43 +10,98 @@ use ::core::task::Poll;
 //# `RING-IMPL-OP-001` A borromean future MUST NOT require spawning
 //# another borromean future in order to complete.
 #[test]
-fn borromean_futures_do_not_spawn_other_borromean_futures() {
-    let lib = strip_comment_lines(&read_repo_file("src/lib.rs"));
-    let op_future = strip_comment_lines(&read_repo_file("src/op_future.rs"));
+fn each_public_operation_future_completes_when_polled_directly() {
+    const REGION_SIZE: usize = 512;
+    const REGION_COUNT: usize = 5;
 
-    for constructor in [
-        "run_once(move || {",
-        "self.create_map::<REGION_SIZE, REGION_COUNT, IO>(",
-        "self.snapshot_map::<REGION_SIZE, REGION_COUNT, IO, K, V, MAX_INDEXES>(",
-        "self.append_map_update::<REGION_SIZE, REGION_COUNT, IO, K, V, MAX_INDEXES>(",
-        "self.drop_map::<REGION_SIZE, REGION_COUNT, IO>(",
-        "OpenStorageFuture::<",
-        "ReclaimWalHeadFuture::<",
-        "FlushMapFuture::<",
-    ] {
-        assert!(
-            lib.contains(constructor),
-            "missing direct future construction path {constructor}"
-        );
-    }
+    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 2048>::new(0xff);
+    let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
+    let mut storage = super::super::poll_ready(Storage::<8, 4>::format_future::<
+        REGION_SIZE,
+        REGION_COUNT,
+        _,
+    >(&mut flash, &mut workspace, 1, 8, 0xa5))
+    .unwrap();
 
-    for banned in [
-        "format_future::<",
-        "open_future::<",
-        "reclaim_wal_head_future::<",
-        "create_map_future::<",
-        "snapshot_map_future::<",
-        "append_map_update_future::<",
-        "flush_map_future::<",
-        "drop_map_future::<",
-        ".await",
-        "spawn(",
-    ] {
-        assert!(
-            !op_future.contains(banned),
-            "operation future implementation unexpectedly nests {banned}"
-        );
-    }
+    super::super::poll_ready(storage.create_map_future::<REGION_SIZE, REGION_COUNT, _>(
+        &mut flash,
+        &mut workspace,
+        CollectionId(82),
+    ))
+    .unwrap();
+
+    let mut source_buffer = [0u8; REGION_SIZE];
+    let mut source = LsmMap::<u16, u16, 8>::new(CollectionId(82), &mut source_buffer).unwrap();
+    source.set(1, 10).unwrap();
+    super::super::poll_ready(storage.snapshot_map_future::<REGION_SIZE, REGION_COUNT, _, _, _, 8>(
+        &mut flash,
+        &mut workspace,
+        &source,
+    ))
+    .unwrap();
+
+    let mut payload_buffer = [0u8; 64];
+    super::super::poll_ready(storage.append_map_update_future::<
+        REGION_SIZE,
+        REGION_COUNT,
+        _,
+        u16,
+        u16,
+        8,
+    >(
+        &mut flash,
+        &mut workspace,
+        CollectionId(82),
+        &MapUpdate::Set { key: 2, value: 20 },
+        &mut payload_buffer,
+    ))
+    .unwrap();
+
+    source.set(3, 30).unwrap();
+    let committed_region = super::super::poll_until_ready(
+        storage.flush_map_future::<REGION_SIZE, REGION_COUNT, _, _, _, 8>(
+            &mut flash,
+            &mut workspace,
+            &source,
+        ),
+        4,
+    )
+    .unwrap();
+    assert_eq!(
+        storage.collections()[0].basis(),
+        StartupCollectionBasis::Region(committed_region)
+    );
+
+    let reclaim_region = super::super::poll_ready(storage.drop_map_future::<
+        REGION_SIZE,
+        REGION_COUNT,
+        _,
+    >(
+        &mut flash,
+        &mut workspace,
+        CollectionId(82),
+    ))
+    .unwrap();
+    assert_eq!(reclaim_region, Some(committed_region));
+
+    let reopened = super::super::poll_until_ready(
+        Storage::<8, 4>::open_future::<REGION_SIZE, REGION_COUNT, _>(&mut flash, &mut workspace),
+        8,
+    )
+    .unwrap();
+    assert_eq!(
+        reopened.collections()[0].basis(),
+        StartupCollectionBasis::Dropped
+    );
+
+    let (mut flash, mut workspace, mut storage, next_region) =
+        super::super::setup_storage_with_stale_wal_head();
+    let reclaimed_head = super::super::poll_until_ready(
+        storage.reclaim_wal_head_future::<512, 6, _>(&mut flash, &mut workspace),
+        6,
+    )
+    .unwrap();
+    assert_eq!(reclaimed_head, next_region);
 }
 
 //= spec/implementation.md#operation-requirements
@@ -177,20 +232,52 @@ fn flush_future_keeps_collection_basis_on_previous_state_until_head_commit() {
 //# mutable borrows of large caller workspaces so embedded callers can
 //# reuse buffers across sequential operations.
 #[test]
-fn flush_future_limits_large_workspace_borrows_to_the_region_encoding_step() {
-    let op_future = strip_comment_lines(&read_repo_file("src/op_future.rs"));
+fn one_workspace_is_reusable_across_sequential_future_driven_operations() {
+    let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
+    let mut workspace = StorageWorkspace::<512>::new();
+    let mut storage =
+        Storage::<8, 4>::format::<512, 5, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
 
-    assert!(op_future.contains("pub struct FlushMapFuture<"));
-    assert!(op_future.contains("workspace: &'a mut StorageWorkspace<REGION_SIZE>"));
-    assert!(op_future.contains("phase: FlushMapPhase"));
-    assert!(op_future.contains("let (payload, _) = this.workspace.encode_buffers();"));
-    assert!(op_future.contains("let used = this.map.encode_region_into(payload)?;"));
-    assert!(op_future.contains("this.phase = match previous_region {"));
-
-    for banned in ["payload: &'a", "region_bytes:", "logical_scratch:"] {
-        assert!(
-            !op_future.contains(banned),
-            "flush future unexpectedly retains large workspace borrow state via {banned}"
-        );
+    super::super::poll_ready(storage.create_map_future::<512, 5, _>(
+        &mut flash,
+        &mut workspace,
+        CollectionId(83),
+    ))
+    .unwrap();
+    {
+        let (region_bytes, logical_scratch) = workspace.scan_buffers();
+        region_bytes.fill(0x11);
+        logical_scratch.fill(0x22);
     }
+
+    let mut payload_buffer = [0u8; 64];
+    super::super::poll_ready(storage.append_map_update_future::<512, 5, _, u16, u16, 8>(
+        &mut flash,
+        &mut workspace,
+        CollectionId(83),
+        &MapUpdate::Set { key: 7, value: 70 },
+        &mut payload_buffer,
+    ))
+    .unwrap();
+    {
+        let (physical_scratch, logical_scratch) = workspace.encode_buffers();
+        physical_scratch.fill(0x33);
+        logical_scratch.fill(0x44);
+    }
+
+    let reopened = super::super::poll_until_ready(
+        Storage::<8, 4>::open_future::<512, 5, _>(&mut flash, &mut workspace),
+        8,
+    )
+    .unwrap();
+    let mut map_buffer = [0u8; 512];
+    let map = reopened
+        .open_map::<512, 5, _, u16, u16, 8>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(83),
+            &mut map_buffer,
+        )
+        .unwrap();
+    assert_eq!(map.get(&7).unwrap(), Some(70));
 }

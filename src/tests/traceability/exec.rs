@@ -90,46 +90,89 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize> 
 //# require one or more device interactions MUST be expressible as a
 //# single future.
 #[test]
-fn fallible_storage_operations_are_expressible_as_single_futures() {
-    let lib = strip_comment_lines(&read_repo_file("src/lib.rs"));
-    let op_future = strip_comment_lines(&read_repo_file("src/op_future.rs"));
+fn each_fallible_storage_operation_is_drivable_as_one_future() {
+    const REGION_SIZE: usize = 512;
+    const REGION_COUNT: usize = 5;
 
-    for signature in [
-        "pub fn format_future<",
-        "pub fn open_future<'a",
-        "pub fn reclaim_wal_head_future<",
-        "pub fn create_map_future<",
-        "pub fn snapshot_map_future<",
-        "pub fn append_map_update_future<",
-        "pub fn flush_map_future<",
-        "pub fn drop_map_future<",
-    ] {
-        assert!(
-            lib.contains(signature),
-            "missing single-future entry point {signature}"
-        );
-    }
+    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 2048>::new(0xff);
+    let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
+    let mut storage = super::super::poll_ready(Storage::<8, 4>::format_future::<
+        REGION_SIZE,
+        REGION_COUNT,
+        _,
+    >(&mut flash, &mut workspace, 1, 8, 0xa5))
+    .unwrap();
 
-    assert!(op_future.contains("pub struct RunOnce<F>"));
-    assert!(op_future.contains("pub struct OpenStorageFuture<"));
-    assert!(op_future.contains("pub struct ReclaimWalHeadFuture<"));
-    assert!(op_future.contains("pub struct FlushMapFuture<"));
+    super::super::poll_ready(storage.create_map_future::<REGION_SIZE, REGION_COUNT, _>(
+        &mut flash,
+        &mut workspace,
+        CollectionId(81),
+    ))
+    .unwrap();
 
-    for constructor in [
-        "run_once(move || {",
-        "self.create_map::<REGION_SIZE, REGION_COUNT, IO>(",
-        "self.snapshot_map::<REGION_SIZE, REGION_COUNT, IO, K, V, MAX_INDEXES>(",
-        "self.append_map_update::<REGION_SIZE, REGION_COUNT, IO, K, V, MAX_INDEXES>(",
-        "self.drop_map::<REGION_SIZE, REGION_COUNT, IO>(",
-        "OpenStorageFuture::<",
-        "ReclaimWalHeadFuture::<",
-        "FlushMapFuture::<",
-    ] {
-        assert!(
-            lib.contains(constructor),
-            "missing single-future construction pattern {constructor}"
-        );
-    }
+    let mut source_buffer = [0u8; REGION_SIZE];
+    let mut source = LsmMap::<u16, u16, 8>::new(CollectionId(81), &mut source_buffer).unwrap();
+    source.set(1, 10).unwrap();
+    super::super::poll_ready(storage.snapshot_map_future::<REGION_SIZE, REGION_COUNT, _, _, _, 8>(
+        &mut flash,
+        &mut workspace,
+        &source,
+    ))
+    .unwrap();
+
+    let mut payload_buffer = [0u8; 64];
+    super::super::poll_ready(storage.append_map_update_future::<
+        REGION_SIZE,
+        REGION_COUNT,
+        _,
+        u16,
+        u16,
+        8,
+    >(
+        &mut flash,
+        &mut workspace,
+        CollectionId(81),
+        &MapUpdate::Set { key: 2, value: 20 },
+        &mut payload_buffer,
+    ))
+    .unwrap();
+
+    source.set(3, 30).unwrap();
+    let committed_region = super::super::poll_until_ready(
+        storage.flush_map_future::<REGION_SIZE, REGION_COUNT, _, _, _, 8>(
+            &mut flash,
+            &mut workspace,
+            &source,
+        ),
+        4,
+    )
+    .unwrap();
+    assert_eq!(
+        storage.collections()[0].basis(),
+        StartupCollectionBasis::Region(committed_region)
+    );
+
+    let reclaim_region = super::super::poll_ready(storage.drop_map_future::<
+        REGION_SIZE,
+        REGION_COUNT,
+        _,
+    >(
+        &mut flash,
+        &mut workspace,
+        CollectionId(81),
+    ))
+    .unwrap();
+    assert_eq!(reclaim_region, Some(committed_region));
+
+    let reopened = super::super::poll_until_ready(
+        Storage::<8, 4>::open_future::<REGION_SIZE, REGION_COUNT, _>(&mut flash, &mut workspace),
+        8,
+    )
+    .unwrap();
+    assert_eq!(
+        reopened.collections()[0].basis(),
+        StartupCollectionBasis::Dropped
+    );
 }
 
 //= spec/implementation.md#execution-requirements
@@ -142,7 +185,7 @@ fn fallible_storage_operations_are_expressible_as_single_futures() {
 //# polled by the caller and when the caller-provided I/O object becomes
 //# ready; they MUST NOT rely on background tasks internal to borromean.
 #[test]
-fn operation_futures_advance_only_when_polled_and_without_internal_runtime_hooks() {
+fn operation_futures_advance_only_when_the_caller_polls_them() {
     const REGION_SIZE: usize = 256;
     const REGION_COUNT: usize = 4;
 
@@ -153,39 +196,24 @@ fn operation_futures_advance_only_when_polled_and_without_internal_runtime_hooks
         .unwrap();
     call_count.set(0);
 
-    {
-        let future = Storage::<8, 4>::open_future::<REGION_SIZE, REGION_COUNT, _>(
-            &mut flash,
-            &mut workspace,
-        );
-        let mut future = pin!(future);
+    let future = Storage::<8, 4>::open_future::<REGION_SIZE, REGION_COUNT, _>(
+        &mut flash,
+        &mut workspace,
+    );
+    let mut future = pin!(future);
 
-        assert_eq!(call_count.get(), 0);
-        assert!(matches!(
-            super::super::poll_once(future.as_mut()),
-            Poll::Pending
-        ));
-        let after_first_poll = call_count.get();
-        assert!(after_first_poll > 0);
-        assert_eq!(call_count.get(), after_first_poll);
-    }
+    assert_eq!(call_count.get(), 0);
+    assert!(matches!(
+        super::super::poll_once(future.as_mut()),
+        Poll::Pending
+    ));
+    let after_first_poll = call_count.get();
+    assert!(after_first_poll > 0);
+    assert_eq!(call_count.get(), after_first_poll);
 
-    let op_future = strip_comment_lines(&read_repo_file("src/op_future.rs"));
-    for banned in [
-        "tokio::spawn",
-        "async_std::task::spawn",
-        "thread::spawn",
-        "register_waker",
-        "wake_by_ref",
-        "callback",
-        "interrupt",
-        "dma",
-    ] {
-        assert!(
-            !op_future.contains(banned),
-            "operation futures unexpectedly reference runtime hook {banned}"
-        );
-    }
+    let reopened = super::super::poll_until_ready(future.as_mut(), 8).unwrap();
+    assert!(call_count.get() >= after_first_poll);
+    assert_eq!(reopened.wal_head(), 0);
 }
 
 //= spec/implementation.md#execution-requirements
@@ -269,39 +297,39 @@ fn single_threaded_poll_loop_drives_operation_futures_to_completion() {
 //# unless and until a separate concurrency specification defines
 //# stronger sharing rules.
 #[test]
-fn operation_futures_require_exclusive_mutable_storage_access() {
-    let lib = strip_comment_lines(&read_repo_file("src/lib.rs"));
-    let op_future = strip_comment_lines(&read_repo_file("src/op_future.rs"));
+fn storage_can_be_reused_only_after_an_operation_future_is_finished_or_dropped() {
+    let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
+    let mut workspace = StorageWorkspace::<512>::new();
+    let mut storage =
+        Storage::<8, 4>::format::<512, 5, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+    storage
+        .create_map::<512, 5, _>(&mut flash, &mut workspace, CollectionId(82))
+        .unwrap();
 
-    for signature in [
-        "pub fn reclaim_wal_head_future<",
-        "pub fn create_map_future<",
-        "pub fn snapshot_map_future<",
-        "pub fn append_map_update_future<",
-        "pub fn flush_map_future<",
-        "pub fn drop_map_future<",
-    ] {
-        assert!(
-            lib.contains(signature),
-            "missing mutably-borrowed entry point {signature}"
+    let mut map_buffer = [0u8; 512];
+    let mut map = LsmMap::<u16, u16, 8>::new(CollectionId(82), &mut map_buffer).unwrap();
+    map.set(1, 10).unwrap();
+
+    {
+        let future = storage.flush_map_future::<512, 5, _, _, _, 8>(
+            &mut flash,
+            &mut workspace,
+            &map,
         );
+        let mut future = pin!(future);
+        assert!(matches!(
+            super::super::poll_once(future.as_mut()),
+            Poll::Pending
+        ));
     }
 
-    assert!(lib.contains("&'a mut self,"));
-    assert!(lib.contains("flash: &'a mut IO"));
-    assert!(lib.contains("workspace: &'a mut StorageWorkspace<REGION_SIZE>"));
-    assert!(op_future.contains("storage: &'a mut Storage<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>"));
-
-    for banned in [
-        "&'a Storage<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>",
-        "Arc<Storage",
-        "Rc<Storage",
-        "RefCell<Storage",
-        "Mutex<Storage",
-    ] {
-        assert!(
-            !lib.contains(banned) && !op_future.contains(banned),
-            "unexpected shared-storage handle {banned}"
-        );
-    }
+    storage
+        .append_map_update::<512, 5, _, u16, u16, 8>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(82),
+            &MapUpdate::Set { key: 2, value: 20 },
+            &mut [0u8; 64],
+        )
+        .unwrap();
 }

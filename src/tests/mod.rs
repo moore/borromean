@@ -3,9 +3,100 @@ use core::future::Future;
 use core::pin::{pin, Pin};
 use core::task::{Context, Poll, RawWaker, RawWakerVTable, Waker};
 extern crate std;
+use std::alloc::{GlobalAlloc, Layout, System};
+use std::cell::Cell;
+use std::thread_local;
 use std::vec;
 
 mod traceability;
+
+thread_local! {
+    static TRACKED_ALLOCATIONS: Cell<usize> = const { Cell::new(0) };
+    static TRACKING_DEPTH: Cell<usize> = const { Cell::new(0) };
+}
+
+struct CountingAllocator;
+
+#[global_allocator]
+static TEST_ALLOCATOR: CountingAllocator = CountingAllocator;
+
+fn note_allocation() {
+    TRACKING_DEPTH.with(|depth| {
+        if depth.get() == 0 {
+            return;
+        }
+
+        TRACKED_ALLOCATIONS.with(|count| {
+            count.set(count.get().checked_add(1).unwrap());
+        });
+    });
+}
+
+unsafe impl GlobalAlloc for CountingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let ptr = unsafe { System.alloc(layout) };
+        if !ptr.is_null() {
+            note_allocation();
+        }
+        ptr
+    }
+
+    unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(ptr, layout) };
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        let ptr = unsafe { System.alloc_zeroed(layout) };
+        if !ptr.is_null() {
+            note_allocation();
+        }
+        ptr
+    }
+
+    unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        let new_ptr = unsafe { System.realloc(ptr, layout, new_size) };
+        if !new_ptr.is_null() && new_ptr != ptr {
+            note_allocation();
+        }
+        new_ptr
+    }
+}
+
+struct AllocationTrackingGuard;
+
+impl AllocationTrackingGuard {
+    fn new() -> Self {
+        TRACKED_ALLOCATIONS.with(|count| count.set(0));
+        TRACKING_DEPTH.with(|depth| {
+            depth.set(depth.get().checked_add(1).unwrap());
+        });
+        Self
+    }
+}
+
+impl Drop for AllocationTrackingGuard {
+    fn drop(&mut self) {
+        TRACKING_DEPTH.with(|depth| {
+            depth.set(depth.get().checked_sub(1).unwrap());
+        });
+    }
+}
+
+fn assert_no_alloc<T>(label: &str, operation: impl FnOnce() -> T) -> T {
+    let guard = AllocationTrackingGuard::new();
+    let result = operation();
+    drop(guard);
+
+    let allocations = TRACKED_ALLOCATIONS.with(Cell::get);
+    assert_eq!(
+        allocations,
+        0,
+        "{} unexpectedly performed {} heap allocation(s)",
+        label,
+        allocations
+    );
+    result
+}
 
 fn noop_raw_waker() -> RawWaker {
     unsafe fn clone(_data: *const ()) -> RawWaker {

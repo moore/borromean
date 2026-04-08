@@ -68,22 +68,33 @@ fn open_future_preserves_replay_context_across_pending_polls() {
 //# `RING-IMPL-STARTUP-002` Startup replay state MUST itself obey the
 //# same no-allocation rule as steady-state operation.
 #[test]
-fn startup_replay_state_uses_fixed_capacity_storage_without_heap_allocation() {
-    let startup = strip_comment_lines(&read_repo_file("src/startup.rs"));
+fn startup_open_paths_complete_without_heap_allocation() {
+    let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
+    let mut workspace = StorageWorkspace::<512>::new();
+    let mut storage =
+        Storage::<8, 4>::format::<512, 5, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
 
-    assert!(startup.contains(
-        "pub struct StartupState<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>"
-    ));
-    assert!(startup.contains("collections: Vec<StartupCollection, MAX_COLLECTIONS>"));
-    assert!(startup.contains("pending_reclaims: Vec<u32, MAX_PENDING_RECLAIMS>"));
-    assert!(startup.contains("wal_chain: Vec<u32, REGION_COUNT>"));
+    storage
+        .create_map::<512, 5, _>(&mut flash, &mut workspace, CollectionId(84))
+        .unwrap();
+    storage
+        .append_update::<512, 5, _>(&mut flash, &mut workspace, CollectionId(84), &[1, 2, 3])
+        .unwrap();
+    drop(storage);
 
-    for banned in ["alloc::", "std::vec::Vec", "Box<", "Rc<", "Arc<"] {
-        assert!(
-            !startup.contains(banned),
-            "startup replay state unexpectedly uses heap allocation via {banned}"
-        );
-    }
+    assert_no_alloc("blocking open", || {
+        let reopened = Storage::<8, 4>::open::<512, 5, _>(&mut flash, &mut workspace).unwrap();
+        assert_eq!(reopened.collections()[0].collection_id(), CollectionId(84));
+    });
+
+    assert_no_alloc("future open", || {
+        let reopened = super::super::poll_until_ready(
+            Storage::<8, 4>::open_future::<512, 5, _>(&mut flash, &mut workspace),
+            8,
+        )
+        .unwrap();
+        assert_eq!(reopened.collections()[0].collection_id(), CollectionId(84));
+    });
 }
 
 //= spec/implementation.md#startup-requirements
@@ -96,28 +107,41 @@ fn startup_replay_state_uses_fixed_capacity_storage_without_heap_allocation() {
 //# that storage MUST come from a caller-provided workspace or other
 //# bounded static storage.
 #[test]
-fn startup_decode_and_scan_paths_take_workspace_backing_from_callers() {
-    let startup = strip_comment_lines(&read_repo_file("src/startup.rs"));
+fn startup_can_reuse_the_same_caller_workspace_across_repeated_opens() {
+    let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
+    let mut workspace = StorageWorkspace::<512>::new();
+    let mut storage =
+        Storage::<8, 4>::format::<512, 5, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
 
-    for signature in [
-        "workspace: &mut StorageWorkspace<REGION_SIZE>",
-        "pub(crate) fn begin_open_formatted_store<",
-        "pub(crate) fn recover_open_rotation<",
-        "pub(crate) fn discover_open_wal_chain<",
-        "pub(crate) fn replay_open_wal_chain<",
-    ] {
-        assert!(
-            startup.contains(signature),
-            "missing startup workspace contract {signature}"
-        );
+    storage
+        .create_map::<512, 5, _>(&mut flash, &mut workspace, CollectionId(85))
+        .unwrap();
+    storage
+        .append_update::<512, 5, _>(&mut flash, &mut workspace, CollectionId(85), &[9, 9, 9])
+        .unwrap();
+    drop(storage);
+
+    {
+        let (region_bytes, logical_scratch) = workspace.scan_buffers();
+        region_bytes.fill(0x11);
+        logical_scratch.fill(0x22);
     }
+    let reopened_once = Storage::<8, 4>::open::<512, 5, _>(&mut flash, &mut workspace).unwrap();
 
-    assert!(
-        startup.contains("let (physical_scratch, logical_scratch) = workspace.encode_buffers();")
+    {
+        let (physical_scratch, logical_scratch) = workspace.encode_buffers();
+        physical_scratch.fill(0x33);
+        logical_scratch.fill(0x44);
+    }
+    let reopened_twice = Storage::<8, 4>::open::<512, 5, _>(&mut flash, &mut workspace).unwrap();
+
+    assert_eq!(reopened_twice.collections(), reopened_once.collections());
+    assert_eq!(reopened_twice.wal_head(), reopened_once.wal_head());
+    assert_eq!(reopened_twice.wal_tail(), reopened_once.wal_tail());
+    assert_eq!(
+        reopened_twice.pending_reclaims(),
+        reopened_once.pending_reclaims()
     );
-    assert!(startup.contains("let (region_bytes, logical_scratch) = workspace.scan_buffers();"));
-    assert!(startup.contains("metadata: StorageMetadata"));
-    assert!(startup.contains("wal_chain: Vec<u32, REGION_COUNT>"));
 }
 
 //= spec/implementation.md#startup-requirements
@@ -130,23 +154,35 @@ fn startup_decode_and_scan_paths_take_workspace_backing_from_callers() {
 //# allocation, or reclaim state MUST be expressible through the same
 //# operation framework used for normal foreground work.
 #[test]
-fn startup_recovery_runs_inside_the_same_operation_phase_framework() {
-    let lib = strip_comment_lines(&read_repo_file("src/lib.rs"));
-    let op_future = strip_comment_lines(&read_repo_file("src/op_future.rs"));
+fn blocking_and_future_open_recover_the_same_pending_reclaim_state() {
+    let (mut blocking_flash, mut blocking_workspace, _, first_region, second_region) =
+        super::super::replace_map_into_pending_reclaim_with_empty_free_list();
+    let reopened_blocking =
+        Storage::<8, 4>::open::<512, 3, _>(&mut blocking_flash, &mut blocking_workspace).unwrap();
 
-    assert!(lib.contains(
-        "pub fn open_future<'a, const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>("
-    ));
-    assert!(lib.contains("OpenStorageFuture::<"));
-    assert!(op_future.contains("enum OpenStoragePhase<"));
-    assert!(op_future.contains("RecoverRotation {"));
-    assert!(op_future.contains("RecoverPendingReclaims {"));
-    assert!(op_future.contains("crate::startup::recover_open_rotation::<"));
-    assert!(
-        op_future.contains("runtime.recover_pending_reclaims::<REGION_SIZE, REGION_COUNT, IO>(")
+    let (mut future_flash, mut future_workspace, _, _, _) =
+        super::super::replace_map_into_pending_reclaim_with_empty_free_list();
+    let reopened_future = super::super::poll_until_ready(
+        Storage::<8, 4>::open_future::<512, 3, _>(&mut future_flash, &mut future_workspace),
+        8,
+    )
+    .unwrap();
+
+    assert_eq!(
+        reopened_blocking.collections()[0].basis(),
+        StartupCollectionBasis::Region(second_region)
     );
-    assert!(op_future.contains("this.phase = OpenStoragePhase::RecoverRotation { plan };"));
-    assert!(
-        op_future.contains("this.phase = OpenStoragePhase::RecoverPendingReclaims { runtime };")
+    assert_eq!(reopened_blocking.last_free_list_head(), Some(first_region));
+    assert!(reopened_blocking.pending_reclaims().is_empty());
+
+    assert_eq!(reopened_future.collections(), reopened_blocking.collections());
+    assert_eq!(
+        reopened_future.last_free_list_head(),
+        reopened_blocking.last_free_list_head()
+    );
+    assert_eq!(reopened_future.free_list_tail(), reopened_blocking.free_list_tail());
+    assert_eq!(
+        reopened_future.pending_reclaims(),
+        reopened_blocking.pending_reclaims()
     );
 }

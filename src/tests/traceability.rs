@@ -1,5 +1,6 @@
 extern crate std;
 
+use super::assert_no_alloc;
 use self::std::collections::BTreeSet;
 use self::std::format;
 use self::std::fs;
@@ -8,8 +9,10 @@ use self::std::string::{String, ToString};
 use self::std::vec::Vec;
 use crate::{
     decode_record, encode_record_into, CollectionId, DiskError, FlashIo, FreePointerFooter, Header,
-    LsmMap, MapUpdate, MockError, MockFlash, MockFormatError, MockOperation, Storage,
-    StorageMetadata, StorageWorkspace, WalRecord, WalRegionPrologue,
+    LsmMap, MapError, MapStorageError, MapUpdate, MockError, MockFlash, MockFormatError,
+    MockOperation, StartupCollectionBasis, StartupError, Storage, StorageMetadata,
+    StorageRuntimeError, StorageWorkspace, WalRecord, WalRegionPrologue, MAP_REGION_V1_FORMAT,
+    WAL_V1_FORMAT,
 };
 
 fn collect_rust_sources(dir: &Path, files: &mut Vec<PathBuf>) {
