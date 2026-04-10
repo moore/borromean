@@ -1,7 +1,9 @@
 use super::*;
 use crate::disk::{FreePointerFooter, Header};
 use crate::wal_record::{encode_record_into, encoded_record_len, WalRecord};
-use crate::{MapError, MapStorageError, MockFlash, Storage, StorageWorkspace, MAP_REGION_V1_FORMAT};
+use crate::{
+    MapError, MapStorageError, MockFlash, Storage, StorageWorkspace, MAP_REGION_V1_FORMAT,
+};
 
 fn open_formatted_store<
     const REGION_SIZE: usize,

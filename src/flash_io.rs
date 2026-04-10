@@ -1,11 +1,15 @@
 use crate::mock::{MockError, MockFormatError};
 use crate::{MockFlash, StorageMetadata};
 
+/// Caller-owned flash or transport interface used by Borromean core.
 pub trait FlashIo {
+    /// Reads the storage metadata region, returning `None` for unformatted media.
     fn read_metadata(&mut self) -> Result<Option<StorageMetadata>, MockError>;
 
+    /// Writes the storage metadata region durably.
     fn write_metadata(&mut self, metadata: StorageMetadata) -> Result<(), MockError>;
 
+    /// Reads bytes from a region into `buffer`.
     fn read_region(
         &mut self,
         region_index: u32,
@@ -13,6 +17,7 @@ pub trait FlashIo {
         buffer: &mut [u8],
     ) -> Result<(), MockError>;
 
+    /// Writes bytes into a region at the supplied offset.
     fn write_region(
         &mut self,
         region_index: u32,
@@ -20,10 +25,13 @@ pub trait FlashIo {
         data: &[u8],
     ) -> Result<(), MockError>;
 
+    /// Erases an entire region.
     fn erase_region(&mut self, region_index: u32) -> Result<(), MockError>;
 
+    /// Applies any durability barrier required by the target medium.
     fn sync(&mut self) -> Result<(), MockError>;
 
+    /// Formats empty metadata and region state for a fresh store.
     fn format_empty_store(
         &mut self,
         min_free_regions: u32,

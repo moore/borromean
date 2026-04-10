@@ -5,22 +5,34 @@ use crate::disk::{
 };
 use crate::CollectionId;
 
+/// Errors returned by [`MockFlash`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MockError {
+    /// The requested region index was outside the configured range.
     InvalidRegionIndex(u32),
+    /// A byte-range operation exceeded the backing storage bounds.
     OutOfBounds,
+    /// The operation log reached its configured maximum length.
     LogFull,
 }
 
+/// Errors returned while formatting [`MockFlash`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MockFormatError {
+    /// Formatting failed while encoding a disk structure.
     Disk(DiskError),
+    /// Formatting failed while mutating the mock backend.
     Mock(MockError),
+    /// The configured store is too small for the requested free-region policy.
     InsufficientRegions {
+        /// Total number of configured regions.
         region_count: u32,
+        /// Requested minimum number of free regions.
         min_free_regions: u32,
     },
+    /// `REGION_COUNT` does not fit in a `u32`.
     RegionCountTooLarge,
+    /// `REGION_SIZE` does not fit in a `u32`.
     RegionSizeTooLarge,
 }
 
@@ -36,26 +48,41 @@ impl From<MockError> for MockFormatError {
     }
 }
 
+/// Recorded operations performed against [`MockFlash`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MockOperation {
+    /// Metadata was read.
     ReadMetadata,
+    /// Metadata was written.
     WriteMetadata,
+    /// Region bytes were read.
     ReadRegion {
+        /// Region index read.
         region_index: u32,
+        /// Offset within the region.
         offset: usize,
+        /// Number of bytes read.
         len: usize,
     },
+    /// Region bytes were written.
     WriteRegion {
+        /// Region index written.
         region_index: u32,
+        /// Offset within the region.
         offset: usize,
+        /// Number of bytes written.
         len: usize,
     },
+    /// A region was erased.
     EraseRegion {
+        /// Region index erased.
         region_index: u32,
     },
+    /// A durability barrier was requested.
     Sync,
 }
 
+/// In-memory flash model used by tests, examples, and traceability checks.
 pub struct MockFlash<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize> {
     metadata: Option<StorageMetadata>,
     metadata_region: [u8; REGION_SIZE],
@@ -67,6 +94,7 @@ pub struct MockFlash<const REGION_SIZE: usize, const REGION_COUNT: usize, const 
 impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize>
     MockFlash<REGION_SIZE, REGION_COUNT, MAX_LOG>
 {
+    /// Creates a new erased mock device.
     pub fn new(erased_byte: u8) -> Self {
         Self {
             metadata: None,
@@ -77,10 +105,12 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize>
         }
     }
 
+    /// Returns the current formatted metadata, if present.
     pub fn metadata(&self) -> Option<&StorageMetadata> {
         self.metadata.as_ref()
     }
 
+    /// Reads from the metadata region plus data regions as one contiguous space.
     pub fn read_storage(&self, offset: usize, buffer: &mut [u8]) -> Result<(), MockError> {
         let total_len = REGION_SIZE
             .checked_mul(REGION_COUNT + 1)
@@ -124,23 +154,28 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize>
         Ok(())
     }
 
+    /// Returns the recorded operation log.
     pub fn operations(&self) -> &[MockOperation] {
         self.log.as_slice()
     }
 
+    /// Returns immutable bytes for a single region.
     pub fn region_bytes(&self, region_index: u32) -> Result<&[u8; REGION_SIZE], MockError> {
         self.region(region_index)
     }
 
+    /// Clears the recorded operation log.
     pub fn clear_operations(&mut self) {
         self.log.clear();
     }
 
+    /// Reads formatted storage metadata.
     pub fn read_metadata(&mut self) -> Result<Option<StorageMetadata>, MockError> {
         self.log(MockOperation::ReadMetadata)?;
         Ok(self.metadata)
     }
 
+    /// Writes formatted storage metadata and updates the metadata region bytes.
     pub fn write_metadata(&mut self, metadata: StorageMetadata) -> Result<(), MockError> {
         self.log(MockOperation::WriteMetadata)?;
         if REGION_SIZE < StorageMetadata::ENCODED_LEN {
@@ -154,6 +189,7 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize>
         Ok(())
     }
 
+    /// Reads bytes from a single region.
     pub fn read_region(
         &mut self,
         region_index: u32,
@@ -173,6 +209,7 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize>
         Ok(())
     }
 
+    /// Writes bytes to a single region.
     pub fn write_region(
         &mut self,
         region_index: u32,
@@ -193,6 +230,7 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize>
         Ok(())
     }
 
+    /// Erases a single region to the configured erased byte.
     pub fn erase_region(&mut self, region_index: u32) -> Result<(), MockError> {
         self.log(MockOperation::EraseRegion { region_index })?;
         let erased_byte = self.erased_byte;
@@ -201,10 +239,12 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize>
         Ok(())
     }
 
+    /// Records a durability barrier in the operation log.
     pub fn sync(&mut self) -> Result<(), MockError> {
         self.log(MockOperation::Sync)
     }
 
+    /// Formats the mock device as an empty Borromean store.
     pub fn format_empty_store(
         &mut self,
         min_free_regions: u32,

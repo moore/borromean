@@ -1,0 +1,52 @@
+target = "spec/map.md#merge-and-frontier-rules"
+
+# Merge And Frontier Rules
+#
+# The map collection uses a durable basis plus a mutable frontier.
+# 
+# 1. `MAP-MERGE-001` When opening a live map collection, the retained
+# durable basis MUST be selected from the replay-tracked empty basis,
+# retained snapshot basis, or retained committed-region basis, and any
+# later retained update payloads for that collection MUST then be applied
+# in replay order.
+# 2. `MAP-MERGE-002` Later retained updates MUST take precedence over
+# older values from the retained basis for the same key.
+# 3. `MAP-MERGE-003` Flushing a mutable map frontier MUST write a new
+# immutable committed region rather than rewriting the previous live
+# region in place.
+
+[[spec]]
+level = "MUST"
+quote = '''
+`MAP-MERGE-001` When opening a live map collection, the retained
+durable basis MUST be selected from the replay-tracked empty basis,
+retained snapshot basis, or retained committed-region basis, and any
+later retained update payloads for that collection MUST then be applied
+in replay order.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`MAP-MERGE-001` When opening a live map collection, the retained
+durable basis MUST be selected from the replay-tracked empty basis,
+retained snapshot basis, or retained committed-region basis, and any
+later retained update payloads for that collection MUST then be applied
+in replay order.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`MAP-MERGE-002` Later retained updates MUST take precedence over
+older values from the retained basis for the same key.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`MAP-MERGE-003` Flushing a mutable map frontier MUST write a new
+immutable committed region rather than rewriting the previous live
+region in place.
+'''
+

@@ -5,43 +5,69 @@ use crc::{Crc, CRC_32_ISCSI};
 
 const CRC32C: Crc<u32> = Crc::<u32>::new(&CRC_32_ISCSI);
 
+/// Stable storage metadata version for the current on-disk format.
 pub const STORAGE_VERSION: u32 = 1;
+/// Stable `collection_format` reserved for WAL regions.
 pub const WAL_V1_FORMAT: u16 = 0;
 
+/// Errors returned while encoding or decoding fixed on-disk structures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DiskError {
+    /// The provided buffer was not large enough for the requested structure.
     BufferTooSmall {
+        /// Required buffer length in bytes.
         needed: usize,
+        /// Available buffer length in bytes.
         available: usize,
     },
+    /// A CRC-protected structure failed checksum validation.
     InvalidChecksum,
+    /// Metadata used an invalid WAL record magic byte.
     InvalidWalRecordMagic,
+    /// Metadata used an invalid WAL write granule.
     InvalidWalWriteGranule,
+    /// A referenced region index was outside the formatted region range.
     InvalidRegionIndex {
+        /// The offending region index.
         region_index: u32,
+        /// The total formatted region count.
         region_count: u32,
     },
+    /// A WAL prologue pointed at a region outside the formatted region range.
     InvalidWalHeadRegionIndex {
+        /// The offending WAL head region index.
         region_index: u32,
+        /// The total formatted region count.
         region_count: u32,
     },
+    /// Metadata declared a storage version not understood by this build.
     UnsupportedStorageVersion(u32),
 }
 
+/// Top-level storage metadata persisted outside the ring regions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StorageMetadata {
+    /// Stable storage format version.
     pub storage_version: u32,
+    /// Region size in bytes.
     pub region_size: u32,
+    /// Number of regions in the store.
     pub region_count: u32,
+    /// Minimum number of free regions the engine tries to preserve.
     pub min_free_regions: u32,
+    /// WAL write alignment in bytes.
     pub wal_write_granule: u32,
+    /// Erased flash byte value.
     pub erased_byte: u8,
+    /// Magic byte that prefixes encoded WAL records.
     pub wal_record_magic: u8,
 }
 
 impl StorageMetadata {
+    /// Encoded byte length of [`StorageMetadata`].
     pub const ENCODED_LEN: usize = size_of::<u32>() * 6 + size_of::<u8>() * 2;
 
+    /// Constructs validated storage metadata for a formatted store.
     pub fn new(
         region_size: u32,
         region_count: u32,
@@ -63,6 +89,7 @@ impl StorageMetadata {
         Ok(metadata)
     }
 
+    /// Validates metadata fields that must hold for any supported store.
     pub fn validate(&self) -> Result<(), DiskError> {
         if self.storage_version != STORAGE_VERSION {
             return Err(DiskError::UnsupportedStorageVersion(self.storage_version));
@@ -79,6 +106,7 @@ impl StorageMetadata {
         Ok(())
     }
 
+    /// Encodes metadata into `buffer` and returns the encoded length.
     pub fn encode_into(&self, buffer: &mut [u8]) -> Result<usize, DiskError> {
         if buffer.len() < Self::ENCODED_LEN {
             return Err(DiskError::BufferTooSmall {
@@ -103,6 +131,7 @@ impl StorageMetadata {
         Ok(offset)
     }
 
+    /// Decodes metadata from a CRC-protected byte slice.
     pub fn decode(buffer: &[u8]) -> Result<Self, DiskError> {
         ensure_len(buffer, Self::ENCODED_LEN)?;
 
@@ -134,6 +163,7 @@ impl StorageMetadata {
         Ok(metadata)
     }
 
+    /// Returns the first byte offset usable for WAL records in a WAL region.
     pub fn wal_record_area_offset(&self) -> Result<usize, DiskError> {
         let granule = usize::try_from(self.wal_write_granule)
             .map_err(|_| DiskError::InvalidWalWriteGranule)?;
@@ -147,17 +177,23 @@ impl StorageMetadata {
     }
 }
 
+/// Per-region header shared by WAL and committed collection regions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Header {
+    /// Monotonic region sequence number.
     pub sequence: u64,
+    /// Collection id owning the region.
     pub collection_id: CollectionId,
+    /// Collection-defined committed-region format identifier.
     pub collection_format: u16,
 }
 
 impl Header {
+    /// Encoded byte length of [`Header`].
     pub const ENCODED_LEN: usize =
         size_of::<u64>() + size_of::<u64>() + size_of::<u16>() + size_of::<u32>();
 
+    /// Encodes the header into `buffer` and returns the encoded length.
     pub fn encode_into(&self, buffer: &mut [u8]) -> Result<usize, DiskError> {
         ensure_len(buffer, Self::ENCODED_LEN)?;
 
@@ -171,6 +207,7 @@ impl Header {
         Ok(offset)
     }
 
+    /// Decodes a header from a CRC-protected byte slice.
     pub fn decode(buffer: &[u8]) -> Result<Self, DiskError> {
         ensure_len(buffer, Self::ENCODED_LEN)?;
 
@@ -193,14 +230,18 @@ impl Header {
     }
 }
 
+/// WAL-specific prologue written after the region header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WalRegionPrologue {
+    /// Region index that replay should treat as the logical WAL head.
     pub wal_head_region_index: u32,
 }
 
 impl WalRegionPrologue {
+    /// Encoded byte length of [`WalRegionPrologue`].
     pub const ENCODED_LEN: usize = size_of::<u32>() * 2;
 
+    /// Encodes the WAL prologue and validates its region reference.
     pub fn encode_into(&self, buffer: &mut [u8], region_count: u32) -> Result<usize, DiskError> {
         if self.wal_head_region_index >= region_count {
             return Err(DiskError::InvalidWalHeadRegionIndex {
@@ -218,6 +259,7 @@ impl WalRegionPrologue {
         Ok(offset)
     }
 
+    /// Decodes a WAL prologue and validates its region reference.
     pub fn decode(buffer: &[u8], region_count: u32) -> Result<Self, DiskError> {
         ensure_len(buffer, Self::ENCODED_LEN)?;
 
@@ -243,14 +285,18 @@ impl WalRegionPrologue {
     }
 }
 
+/// Footer stored in free-list regions to chain unused regions together.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FreePointerFooter {
+    /// Successor free-list region, or `None` for the current tail.
     pub next_tail: Option<u32>,
 }
 
 impl FreePointerFooter {
+    /// Encoded byte length of [`FreePointerFooter`].
     pub const ENCODED_LEN: usize = size_of::<u32>() * 2;
 
+    /// Encodes the free-list footer into `buffer`.
     pub fn encode_into(&self, buffer: &mut [u8], erased_byte: u8) -> Result<usize, DiskError> {
         ensure_len(buffer, Self::ENCODED_LEN)?;
 
@@ -269,6 +315,7 @@ impl FreePointerFooter {
         }
     }
 
+    /// Decodes a free-list footer from the supplied bytes.
     pub fn decode(buffer: &[u8], erased_byte: u8) -> Result<Self, DiskError> {
         ensure_len(buffer, Self::ENCODED_LEN)?;
         if buffer[..Self::ENCODED_LEN]
@@ -291,6 +338,7 @@ impl FreePointerFooter {
         })
     }
 
+    /// Decodes a free-list footer and validates the referenced region index.
     pub fn decode_with_region_count(
         buffer: &[u8],
         erased_byte: u8,

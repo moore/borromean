@@ -1,0 +1,49 @@
+target = "spec/map.md#validation-and-open-rules"
+
+# Validation And Open Rules
+#
+# Map-specific validation is authoritative for live map collections.
+# 
+# 1. `MAP-VALIDATE-001` Map snapshot loading MUST reject payloads whose
+# lengths, entry ranges, ordering, or entry decoding are invalid.
+# 2. `MAP-VALIDATE-002` Opening or loading a live map collection MUST
+# reject retained collection state whose `collection_type` is not
+# `MAP_CODE`.
+# 3. `MAP-VALIDATE-003` Opening or loading a live map collection MUST
+# reject retained committed-region bases whose `collection_format` is not
+# `MAP_REGION_V1_FORMAT`.
+# 4. `MAP-VALIDATE-004` Opening a live map collection MUST reject
+# retained committed-region payloads, snapshot payloads, or update
+# payloads that fail map-specific validation.
+
+[[spec]]
+level = "MUST"
+quote = '''
+`MAP-VALIDATE-001` Map snapshot loading MUST reject payloads whose
+lengths, entry ranges, ordering, or entry decoding are invalid.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`MAP-VALIDATE-002` Opening or loading a live map collection MUST
+reject retained collection state whose `collection_type` is not
+`MAP_CODE`.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`MAP-VALIDATE-003` Opening or loading a live map collection MUST
+reject retained committed-region bases whose `collection_format` is not
+`MAP_REGION_V1_FORMAT`.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`MAP-VALIDATE-004` Opening a live map collection MUST reject
+retained committed-region payloads, snapshot payloads, or update
+payloads that fail map-specific validation.
+'''
+

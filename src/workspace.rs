@@ -1,3 +1,4 @@
+/// Caller-owned scratch buffers borrowed by replay and mutation paths.
 pub struct StorageWorkspace<const REGION_SIZE: usize> {
     region_bytes: [u8; REGION_SIZE],
     physical_scratch: [u8; REGION_SIZE],
@@ -5,6 +6,7 @@ pub struct StorageWorkspace<const REGION_SIZE: usize> {
 }
 
 impl<const REGION_SIZE: usize> StorageWorkspace<REGION_SIZE> {
+    /// Allocates a zero-initialized workspace for the chosen region size.
     pub fn new() -> Self {
         Self {
             region_bytes: [0u8; REGION_SIZE],

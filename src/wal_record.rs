@@ -7,27 +7,45 @@ use crate::CollectionId;
 
 const CRC32C: Crc<u32> = Crc::<u32>::new(&CRC_32_ISCSI);
 
+/// Errors returned while encoding or decoding WAL records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WalRecordError {
+    /// Disk metadata validation failed.
     Disk(DiskError),
+    /// A scratch or output buffer was too small.
     BufferTooSmall {
+        /// Required buffer length in bytes.
         needed: usize,
+        /// Available buffer length in bytes.
         available: usize,
     },
+    /// The record magic byte did not match storage metadata.
     InvalidRecordMagic {
+        /// Byte found in the encoded record.
         found: u8,
+        /// Byte expected from metadata.
         expected: u8,
     },
+    /// An escaped byte sequence was malformed.
     InvalidEscapeSequence(u8),
+    /// Padding bytes after a record were not valid escape padding.
     InvalidPadding(u8),
+    /// The record type byte was unknown.
     InvalidRecordType(u8),
+    /// Decoding reached the payload header before a record type was known.
     MissingRecordType,
+    /// An optional region tag had an invalid discriminant.
     InvalidOptRegionTag(u8),
+    /// Record checksum validation failed.
     InvalidChecksum,
+    /// A record payload length did not match the record type.
     PayloadLengthMismatch {
+        /// Record type being decoded.
         record_type: WalRecordType,
+        /// Payload length stored in the record.
         payload_len: u32,
     },
+    /// A checked length conversion or addition overflowed.
     LengthOverflow,
 }
 
@@ -37,15 +55,21 @@ impl From<DiskError> for WalRecordError {
     }
 }
 
+/// Escape bytes derived from storage metadata for WAL encoding.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WalEscapeCodes {
+    /// Escape prefix byte.
     pub wal_escape_byte: u8,
+    /// Escape code representing the erased byte value.
     pub wal_escape_code_erased: u8,
+    /// Escape code representing the WAL magic byte.
     pub wal_escape_code_magic: u8,
+    /// Escape code representing the escape byte itself.
     pub wal_escape_code_escape: u8,
 }
 
 impl WalEscapeCodes {
+    /// Derives a stable set of escape bytes from metadata values.
     pub fn derive(erased_byte: u8, wal_record_magic: u8) -> Self {
         let mut values = [0u8; 4];
         let mut count = 0usize;
@@ -71,22 +95,35 @@ impl WalEscapeCodes {
     }
 }
 
+/// Stable logical WAL record kinds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WalRecordType {
+    /// Creates a new collection.
     NewCollection,
+    /// Appends a collection-specific update payload.
     Update,
+    /// Appends a collection-specific snapshot payload.
     Snapshot,
+    /// Reserves a free region for future use.
     AllocBegin,
+    /// Commits a new collection or WAL head.
     Head,
+    /// Drops a collection.
     DropCollection,
+    /// Links one WAL region to the next.
     Link,
+    /// Updates the tracked free-list head.
     FreeListHead,
+    /// Marks a region as pending reclaim.
     ReclaimBegin,
+    /// Marks reclaim complete for a region.
     ReclaimEnd,
+    /// Marks a WAL recovery boundary.
     WalRecovery,
 }
 
 impl WalRecordType {
+    /// Returns the stable type byte used in WAL encoding.
     pub fn code(self) -> u8 {
         match self {
             Self::NewCollection => 0x01,
@@ -103,6 +140,7 @@ impl WalRecordType {
         }
     }
 
+    /// Decodes a stable type byte into a [`WalRecordType`].
     pub fn decode(code: u8) -> Result<Self, WalRecordError> {
         match code {
             0x01 => Ok(Self::NewCollection),
@@ -132,50 +170,81 @@ impl WalRecordType {
     }
 }
 
+/// Borrowed logical WAL record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WalRecord<'a> {
+    /// `new_collection(collection_id, collection_type)`.
     NewCollection {
+        /// Collection being created.
         collection_id: CollectionId,
+        /// Stable collection type code.
         collection_type: u16,
     },
+    /// `update(collection_id, payload)`.
     Update {
+        /// Collection being updated.
         collection_id: CollectionId,
+        /// Collection-specific update payload bytes.
         payload: &'a [u8],
     },
+    /// `snapshot(collection_id, collection_type, payload)`.
     Snapshot {
+        /// Collection whose basis is being snapshotted.
         collection_id: CollectionId,
+        /// Stable collection type code.
         collection_type: u16,
+        /// Collection-specific snapshot payload bytes.
         payload: &'a [u8],
     },
+    /// `alloc_begin(region_index, free_list_head_after)`.
     AllocBegin {
+        /// Free-list region being reserved.
         region_index: u32,
+        /// Successor free-list head after reserving the region.
         free_list_head_after: Option<u32>,
     },
+    /// `head(collection_id, collection_type, region_index)`.
     Head {
+        /// Collection whose head is being updated.
         collection_id: CollectionId,
+        /// Stable collection type code.
         collection_type: u16,
+        /// New committed region or WAL head region.
         region_index: u32,
     },
+    /// `drop_collection(collection_id)`.
     DropCollection {
+        /// Collection being dropped.
         collection_id: CollectionId,
     },
+    /// `link(next_region_index, expected_sequence)`.
     Link {
+        /// Next WAL region in the chain.
         next_region_index: u32,
+        /// Sequence expected in the linked region header.
         expected_sequence: u64,
     },
+    /// `free_list_head(region_index)`.
     FreeListHead {
+        /// New free-list head, or `None` for an empty free list.
         region_index: Option<u32>,
     },
+    /// `reclaim_begin(region_index)`.
     ReclaimBegin {
+        /// Region entering reclaim.
         region_index: u32,
     },
+    /// `reclaim_end(region_index)`.
     ReclaimEnd {
+        /// Region whose reclaim completed.
         region_index: u32,
     },
+    /// `wal_recovery()`.
     WalRecovery,
 }
 
 impl<'a> WalRecord<'a> {
+    /// Returns the logical type of this record.
     pub fn record_type(self) -> WalRecordType {
         match self {
             Self::NewCollection { .. } => WalRecordType::NewCollection,
@@ -193,13 +262,18 @@ impl<'a> WalRecord<'a> {
     }
 }
 
+/// Decoded WAL record plus physical and logical lengths.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DecodedWalRecord<'a> {
+    /// Decoded logical record.
     pub record: WalRecord<'a>,
+    /// Number of encoded bytes consumed from the physical WAL.
     pub encoded_len: usize,
+    /// Number of decoded logical bytes before escaping and padding.
     pub logical_len: usize,
 }
 
+/// Encodes a logical record into a WAL byte buffer.
 pub fn encode_record_into(
     record: WalRecord<'_>,
     metadata: StorageMetadata,
@@ -233,6 +307,7 @@ pub fn encode_record_into(
     Ok(aligned_end)
 }
 
+/// Returns the encoded byte length of a logical WAL record.
 pub fn encoded_record_len(
     record: WalRecord<'_>,
     metadata: StorageMetadata,
@@ -242,6 +317,7 @@ pub fn encoded_record_len(
     encode_record_into(record, metadata, physical_scratch, logical_scratch)
 }
 
+/// Decodes a WAL record from the supplied physical bytes.
 pub fn decode_record<'a>(
     input: &[u8],
     metadata: StorageMetadata,

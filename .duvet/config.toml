@@ -9,6 +9,9 @@ source = "spec/ring.md"
 [[specification]]
 source = "spec/implementation.md"
 
+[[specification]]
+source = "spec/map.md"
+
 [report.html]
 enabled = true
 path = ".duvet/reports/report.html"

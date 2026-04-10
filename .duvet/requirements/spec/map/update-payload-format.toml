@@ -1,0 +1,35 @@
+target = "spec/map.md#update-payload-format"
+
+# Update Payload Format
+#
+# Map updates represent logical mutations layered over the retained basis.
+# 
+# 1. `MAP-UPDATE-001` A map update payload MUST be the exact `postcard`
+# serialization of `MapUpdate<K, V>`.
+# 2. `MAP-UPDATE-002` Applying a `Set` update payload MUST make the key
+# visible with the supplied value, and applying a `Delete` update payload
+# MUST make the key absent from the frontier.
+
+[[spec]]
+level = "MUST"
+quote = '''
+`MAP-UPDATE-001` A map update payload MUST be the exact `postcard`
+serialization of `MapUpdate<K, V>`.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`MAP-UPDATE-002` Applying a `Set` update payload MUST make the key
+visible with the supplied value, and applying a `Delete` update payload
+MUST make the key absent from the frontier.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`MAP-UPDATE-002` Applying a `Set` update payload MUST make the key
+visible with the supplied value, and applying a `Delete` update payload
+MUST make the key absent from the frontier.
+'''
+

@@ -11,64 +11,115 @@ use crate::workspace::StorageWorkspace;
 use crate::StorageMetadata;
 use crate::{CollectionId, CollectionType, StartupCollectionBasis};
 
+/// Errors returned by low-level shared storage operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StorageRuntimeError {
+    /// Formatting the backing store failed.
     Format(MockFormatError),
+    /// The backing I/O adapter failed.
     Mock(MockError),
+    /// Startup replay or recovery failed.
     Startup(StartupError),
+    /// WAL record encoding or decoding failed.
     WalRecord(WalRecordError),
+    /// The configured collection capacity was exceeded.
     TooManyTrackedCollections,
+    /// The configured pending-reclaim capacity was exceeded.
     TooManyPendingReclaims,
+    /// A user collection attempted to use the reserved WAL collection id.
     ReservedCollectionId(CollectionId),
+    /// A collection type is not supported by this build.
     UnsupportedCollectionType(u16),
+    /// A collection was created more than once.
     DuplicateCollection(CollectionId),
+    /// A referenced collection was not tracked.
     UnknownCollection(CollectionId),
+    /// A referenced collection was already dropped.
     DroppedCollection(CollectionId),
+    /// A retained record changed collection type unexpectedly.
     CollectionTypeMismatch {
+        /// Collection being validated.
         collection_id: CollectionId,
+        /// Previously retained collection type.
         expected: u16,
+        /// Conflicting collection type.
         actual: u16,
     },
+    /// A committed region did not belong to the named collection.
     InvalidHeadTarget {
+        /// Collection being updated.
         collection_id: CollectionId,
+        /// Region named by the head record.
         region_index: u32,
     },
+    /// An `alloc_begin` record did not match the free-list head.
     InvalidAllocBegin {
+        /// Region named by `alloc_begin`.
         region_index: u32,
+        /// Free-list head expected at that point.
         free_list_head: Option<u32>,
     },
+    /// More than one ready region was observed.
     DoubleReadyRegion(u32),
+    /// A reclaim end was requested for a non-pending region.
     InvalidReclaimEnd(u32),
+    /// A region was marked pending reclaim more than once.
     DuplicatePendingReclaim(u32),
+    /// The current WAL tail does not have enough space for the requested record.
     WalRotationRequired,
+    /// WAL rotation needed a free region but none were available.
     NoFreeRegionForRotation,
+    /// `wal_recovery` was requested without a pending recovery boundary.
     WalRecoveryNotNeeded,
+    /// WAL rotation state did not match the requested operation.
     InvalidRotationState {
+        /// Ready region currently tracked in memory.
         ready_region: Option<u32>,
+        /// Region requested by the caller, if any.
         requested_region: Option<u32>,
     },
+    /// Remaining WAL space violated the expected rotation reserve window.
     InvalidRotationWindow {
+        /// Bytes that would remain after the record append.
         remaining_after: usize,
+        /// Bytes required for the `link` record.
         link_reserve: usize,
+        /// Bytes required for the full rotation sequence.
         rotation_reserve: usize,
     },
+    /// WAL-head reclaim requires at least two WAL regions.
     WalHeadReclaimRequiresMultipleWalRegions,
+    /// WAL-head reclaim is blocked by an open recovery boundary.
     WalHeadReclaimBlockedByRecoveryBoundary,
+    /// WAL-head reclaim is blocked by a reserved ready region.
     WalHeadReclaimBlockedByReadyRegion(u32),
+    /// WAL-head reclaim is blocked by pending collection-region reclaims.
     WalHeadReclaimBlockedByPendingReclaims,
+    /// WAL-head reclaim is blocked by a retained record kind.
     WalHeadReclaimBlockedByRecord(WalRecordType),
+    /// WAL-head reclaim exceeded the active-collection capacity.
     WalHeadReclaimTooManyActiveCollections,
+    /// WAL-head reclaim encountered an unsupported collection type.
     WalHeadReclaimUnsupportedCollectionType(u16),
+    /// Too few free regions remain to satisfy the configured reserve.
     InsufficientFreeRegions {
+        /// Free regions currently available.
         free_regions: u32,
+        /// Minimum free-region reserve required by metadata.
         min_free_regions: u32,
     },
+    /// Too many dirty frontiers would violate the free-region reserve.
     TooManyDirtyFrontiers {
+        /// Number of dirty frontiers that would be active.
         dirty_frontiers: usize,
+        /// Minimum free-region reserve required by metadata.
         min_free_regions: u32,
     },
+    /// A committed region payload did not fit within the usable region capacity.
     CommittedRegionTooLarge {
+        /// Requested payload length in bytes.
         payload_len: usize,
+        /// Maximum payload capacity in bytes.
         capacity: usize,
     },
 }
@@ -114,6 +165,7 @@ pub(crate) struct WalHeadReclaimPlan<const MAX_COLLECTIONS: usize> {
     original_collections: Vec<StartupCollection, MAX_COLLECTIONS>,
 }
 
+/// Advanced runtime state for the shared Borromean storage engine.
 #[derive(Debug)]
 pub struct StorageRuntime<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize> {
     metadata: StorageMetadata,
@@ -165,50 +217,62 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         Self::validate_supported_user_collection_type(collection_id, collection_type)
     }
 
+    /// Returns storage metadata recovered from disk.
     pub fn metadata(&self) -> StorageMetadata {
         self.metadata
     }
 
+    /// Returns the current WAL head region index.
     pub fn wal_head(&self) -> u32 {
         self.wal_head
     }
 
+    /// Returns the current WAL tail region index.
     pub fn wal_tail(&self) -> u32 {
         self.wal_tail
     }
 
+    /// Returns the next append offset within the WAL tail region.
     pub fn wal_append_offset(&self) -> usize {
         self.wal_append_offset
     }
 
+    /// Returns the current free-list head, if any.
     pub fn last_free_list_head(&self) -> Option<u32> {
         self.last_free_list_head
     }
 
+    /// Returns the current free-list tail, if any.
     pub fn free_list_tail(&self) -> Option<u32> {
         self.free_list_tail
     }
 
+    /// Returns a reserved ready region, if one exists.
     pub fn ready_region(&self) -> Option<u32> {
         self.ready_region
     }
 
+    /// Returns the largest region sequence observed so far.
     pub fn max_seen_sequence(&self) -> u64 {
         self.max_seen_sequence
     }
 
+    /// Returns the replay-tracked collections.
     pub fn collections(&self) -> &[StartupCollection] {
         self.collections.as_slice()
     }
 
+    /// Returns regions still pending reclaim completion.
     pub fn pending_reclaims(&self) -> &[u32] {
         self.pending_reclaims.as_slice()
     }
 
+    /// Returns whether replay left an open WAL recovery boundary.
     pub fn pending_wal_recovery_boundary(&self) -> bool {
         self.pending_wal_recovery_boundary
     }
 
+    /// Returns the number of non-dropped user collections.
     pub fn tracked_user_collection_count(&self) -> usize {
         self.collections
             .iter()
@@ -216,6 +280,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
             .count()
     }
 
+    /// Reserves a free region for a future committed-region write or WAL rotation.
     pub fn reserve_next_region<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
         &mut self,
         flash: &mut IO,
@@ -251,6 +316,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
             })
     }
 
+    /// Writes a committed collection region and syncs it durably.
     pub fn write_committed_region<
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
@@ -299,6 +365,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         Ok(())
     }
 
+    /// Appends a `new_collection` record for a supported user collection.
     pub fn append_new_collection<
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
@@ -325,6 +392,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         )
     }
 
+    /// Appends a raw `update` payload for an existing live collection.
     pub fn append_update<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
         &mut self,
         flash: &mut IO,
@@ -377,6 +445,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         )
     }
 
+    /// Appends a raw `snapshot` payload for an existing live collection.
     pub fn append_snapshot<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
         &mut self,
         flash: &mut IO,
@@ -412,6 +481,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         )
     }
 
+    /// Appends a `drop_collection` record for an existing live collection.
     pub fn append_drop_collection<
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
@@ -436,6 +506,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         )
     }
 
+    /// Drops a collection and begins reclaim for its previous region basis, if any.
     pub fn drop_collection_and_begin_reclaim<
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
@@ -474,6 +545,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         Ok(previous_region)
     }
 
+    /// Appends a `head` record pointing at a committed region.
     pub fn append_head<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
         &mut self,
         flash: &mut IO,
@@ -522,6 +594,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         )
     }
 
+    /// Appends an `alloc_begin` record for a free-list region.
     pub fn append_alloc_begin<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
         &mut self,
         flash: &mut IO,
@@ -549,6 +622,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         )
     }
 
+    /// Appends a `reclaim_begin` record for a detached region.
     pub fn append_reclaim_begin<
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
@@ -570,6 +644,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         )
     }
 
+    /// Appends a `reclaim_end` record for a pending region reclaim.
     pub fn append_reclaim_end<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
         &mut self,
         flash: &mut IO,
@@ -587,6 +662,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         )
     }
 
+    /// Reclaims the current WAL head and returns the new head region.
     pub fn reclaim_wal_head<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
         &mut self,
         flash: &mut IO,
@@ -617,6 +693,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         Ok(plan.new_head)
     }
 
+    /// Completes physical reclaim for a region already marked pending.
     pub fn complete_pending_reclaim<
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
@@ -658,6 +735,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         self.append_reclaim_end::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace, region_index)
     }
 
+    /// Appends a `free_list_head` record.
     pub fn append_free_list_head<
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
@@ -675,6 +753,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         )
     }
 
+    /// Appends a `wal_recovery` record for an open recovery boundary.
     pub fn append_wal_recovery<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
         &mut self,
         flash: &mut IO,
@@ -690,6 +769,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         )
     }
 
+    /// Begins a WAL tail rotation and returns the reserved next tail region.
     pub fn append_wal_rotation_start<
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
@@ -753,6 +833,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         Ok(next_region_index)
     }
 
+    /// Finishes a WAL tail rotation previously started by `append_wal_rotation_start`.
     pub fn append_wal_rotation_finish<
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
@@ -1599,9 +1680,12 @@ fn activate_collection<const MAX_COLLECTIONS: usize>(
         .map_err(|_| StorageRuntimeError::WalHeadReclaimTooManyActiveCollections)
 }
 
+/// Error returned while visiting decoded WAL records.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StorageVisitError<E> {
+    /// Shared storage traversal failed.
     Storage(StorageRuntimeError),
+    /// The caller-supplied visitor returned an error.
     Visitor(E),
 }
 
@@ -1614,6 +1698,7 @@ impl<E> From<StorageRuntimeError> for StorageVisitError<E> {
 impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
     StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>
 {
+    /// Visits retained WAL records from head through tail in replay order.
     pub fn visit_wal_records<const REGION_SIZE: usize, IO: FlashIo, E, F>(
         &self,
         flash: &mut IO,
@@ -1695,6 +1780,7 @@ struct RotationReserves {
     rotation_reserve: usize,
 }
 
+/// Formats an empty store and reopens it as runtime state.
 pub fn format<
     const REGION_SIZE: usize,
     const REGION_COUNT: usize,
@@ -1712,6 +1798,7 @@ pub fn format<
     open::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>(flash, workspace)
 }
 
+/// Opens a formatted store into runtime state and completes pending reclaims.
 pub fn open<
     const REGION_SIZE: usize,
     const REGION_COUNT: usize,

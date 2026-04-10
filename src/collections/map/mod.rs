@@ -1,3 +1,5 @@
+//! Durable map collection implementation and storage helpers.
+
 use crate::disk::{DiskError, FreePointerFooter, Header};
 use crate::flash_io::FlashIo;
 use crate::mock::MockError;
@@ -40,12 +42,18 @@ mod tests;
 //
 // In this approach the head of the map is alway the log.
 
+/// Errors returned by in-memory map encoding, decode, and mutation paths.
 #[derive(Debug)]
 pub enum MapError {
+    /// The entry count header was invalid.
     InvalidEntryCount,
+    /// Serialization or decode failed.
     SerializationError,
+    /// An entry-ref index was outside the available range.
     IndexOutOfBounds,
+    /// A decoded snapshot could not fit into the destination buffer.
     SnapshotTooLarge,
+    /// The caller-provided buffer was too small.
     BufferTooSmall,
 }
 
@@ -58,6 +66,7 @@ impl From<postcard::Error> for MapError {
     }
 }
 
+/// Logical map entry stored in compacted snapshots and frontiers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(bound(
     serialize = "K: Serialize, V: Serialize",
@@ -86,7 +95,9 @@ const SNAPSHOT_ENTRY_COUNT_SIZE: usize = size_of::<u32>();
 const SNAPSHOT_ENTRY_BYTES_LEN_SIZE: usize = size_of::<u32>();
 const REGION_SNAPSHOT_LEN_SIZE: usize = size_of::<u32>();
 
+/// Stable committed-region format identifier for map regions.
 pub const MAP_REGION_V1_FORMAT: u16 = 1;
+/// Snapshot bytes representing an empty map basis.
 pub const EMPTY_MAP_SNAPSHOT: [u8; SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE] =
     [0u8; SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE];
 
@@ -97,22 +108,37 @@ pub(crate) struct MapCheckpoint {
     next_record_index: usize,
 }
 
+/// Errors returned while combining map operations with storage state.
 #[derive(Debug)]
 pub enum MapStorageError {
+    /// Map-local encoding or validation failed.
     Map(MapError),
+    /// Shared storage logic rejected the operation.
     Storage(StorageRuntimeError),
+    /// The backing I/O adapter failed.
     Mock(MockError),
+    /// A disk structure was invalid.
     Disk(DiskError),
+    /// The named collection was not tracked.
     UnknownCollection(CollectionId),
+    /// The named collection was already dropped.
     DroppedCollection(CollectionId),
+    /// The tracked collection type was not a map.
     CollectionTypeMismatch {
+        /// Collection being validated.
         collection_id: CollectionId,
+        /// Expected map collection type code.
         expected: u16,
+        /// Actual retained collection type.
         actual: Option<u16>,
     },
+    /// The retained committed-region format was not supported.
     UnsupportedRegionFormat {
+        /// Collection being opened.
         collection_id: CollectionId,
+        /// Region whose header used the unsupported format.
         region_index: u32,
+        /// Unsupported committed-region format code.
         actual: u16,
     },
 }
@@ -141,6 +167,7 @@ impl From<DiskError> for MapStorageError {
     }
 }
 
+/// Logical map mutation encoded into WAL update payloads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(bound(
     serialize = "K: Serialize, V: Serialize",
@@ -151,8 +178,18 @@ where
     K: Debug + Ord + PartialOrd + Eq + PartialEq,
     V: Debug,
 {
-    Set { key: K, value: V },
-    Delete { key: K },
+    /// Sets `key` to `value`.
+    Set {
+        /// Key being updated.
+        key: K,
+        /// Value that should become visible for `key`.
+        value: V,
+    },
+    /// Removes `key` from the logical map.
+    Delete {
+        /// Key that should become absent.
+        key: K,
+    },
 }
 
 impl EntryRef {
@@ -288,6 +325,7 @@ enum SearchResult {
     NotFound(RecordIndex),
 }
 
+/// Caller-owned bounded map frontier used by the durable map collection.
 pub struct LsmMap<'a, K, V, const MAX_INDEXES: usize> {
     id: CollectionId,
     record_count: EntryCount,
@@ -303,6 +341,7 @@ where
     K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
     V: Debug + Serialize + for<'de> Deserialize<'de>,
 {
+    /// Creates a new empty map frontier over `buffer`.
     pub fn new(id: CollectionId, buffer: &'a mut [u8]) -> Result<Self, MapError> {
         let record_count = EntryCount(0);
         let next_record_offset = RecordOffset(ENTRY_COUNT_SIZE);
@@ -323,14 +362,17 @@ where
         })
     }
 
+    /// Returns the collection id represented by this frontier.
     pub fn id(&self) -> CollectionId {
         self.id
     }
 
+    /// Returns the number of retained lower layers after open or compaction.
     pub fn layer_count(&self) -> usize {
         self.next_layer_count
     }
 
+    /// Inserts or replaces a key with the supplied value.
     pub fn set(&mut self, key: K, value: V) -> Result<(), MapError>
     where
         K: Ord + PartialOrd + Eq + PartialEq + Serialize + for<'d> Deserialize<'d>,
@@ -339,6 +381,7 @@ where
         self.set_worker(key, Some(value))
     }
 
+    /// Deletes a key from the logical map.
     pub fn delete(&mut self, key: K) -> Result<(), MapError>
     where
         K: Ord + PartialOrd + Eq + PartialEq + Serialize + for<'d> Deserialize<'d>,
@@ -391,6 +434,7 @@ where
         Ok(())
     }
 
+    /// Returns the current visible value for `key`.
     pub fn get(&self, key: &K) -> Result<Option<V>, MapError> {
         let search_result = self.find_index(key)?;
         match search_result {
@@ -419,6 +463,7 @@ where
         Ok((start, end))
     }
 
+    /// Returns the encoded byte length of a snapshot payload for this map.
     pub fn snapshot_len(&self) -> Result<usize, MapError> {
         let entry_count =
             usize::try_from(self.record_count.0).map_err(|_| MapError::SerializationError)?;
@@ -439,12 +484,14 @@ where
             .ok_or(MapError::SerializationError)
     }
 
+    /// Returns the encoded byte length of a committed-region payload for this map.
     pub fn region_len(&self) -> Result<usize, MapError> {
         self.snapshot_len()?
             .checked_add(REGION_SNAPSHOT_LEN_SIZE)
             .ok_or(MapError::SerializationError)
     }
 
+    /// Encodes a compact snapshot payload into `snapshot`.
     pub fn encode_snapshot_into(&self, snapshot: &mut [u8]) -> Result<usize, MapError> {
         let snapshot_len = self.snapshot_len()?;
         if snapshot.len() < snapshot_len {
@@ -516,6 +563,7 @@ where
         Ok(snapshot_len)
     }
 
+    /// Encodes a committed-region payload into `region_payload`.
     pub fn encode_region_into(&self, region_payload: &mut [u8]) -> Result<usize, MapError> {
         let snapshot_len = self.snapshot_len()?;
         let region_len = self.region_len()?;
@@ -532,6 +580,7 @@ where
         Ok(region_len)
     }
 
+    /// Loads a compact snapshot payload into this frontier.
     pub fn load_snapshot(&mut self, snapshot: &[u8]) -> Result<(), MapError> {
         if snapshot.len() < SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE {
             return Err(MapError::SerializationError);
@@ -611,6 +660,7 @@ where
         Ok(())
     }
 
+    /// Loads a committed-region payload into this frontier.
     pub fn load_region(&mut self, region_payload: &[u8]) -> Result<(), MapError> {
         if region_payload.len() < REGION_SNAPSHOT_LEN_SIZE {
             return Err(MapError::SerializationError);
@@ -664,6 +714,7 @@ where
         self.load_snapshot(&snapshot[..snapshot_len])
     }
 
+    /// Encodes a map update payload into `payload`.
     pub fn encode_update_into(
         update: &MapUpdate<K, V>,
         payload: &mut [u8],
@@ -671,6 +722,7 @@ where
         Ok(to_slice(update, payload)?.len())
     }
 
+    /// Applies an encoded update payload to this frontier.
     pub fn apply_update_payload(&mut self, payload: &[u8]) -> Result<(), MapError> {
         let update: MapUpdate<K, V> = from_bytes(payload)?;
         match update {
@@ -752,6 +804,7 @@ where
         Ok(SearchResult::NotFound(RecordIndex(low_index)))
     }
 
+    /// Writes this frontier as a WAL snapshot for its backing collection.
     pub fn write_snapshot_to_storage<
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
@@ -776,6 +829,7 @@ where
         Ok(())
     }
 
+    /// Flushes this frontier into a new committed region and updates head state.
     pub fn flush_to_storage<
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
@@ -826,6 +880,7 @@ where
         Ok(region_index)
     }
 
+    /// Opens a live map collection from replay-tracked storage state.
     pub fn open_from_storage<
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,

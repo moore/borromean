@@ -1,0 +1,41 @@
+target = "spec/map.md#committed-region-format"
+
+# Committed Region Format
+#
+# The current implementation supports one committed-region map format,
+# `MAP_REGION_V1_FORMAT`.
+# 
+# 1. `MAP-REGION-001` A committed map region with
+# `collection_format = MAP_REGION_V1_FORMAT` MUST encode its payload as
+# `[snapshot_len:u32 little-endian][snapshot_payload]`.
+# 2. `MAP-REGION-002` The `snapshot_len` prefix MUST equal the exact byte
+# length of the embedded snapshot payload used as the region's durable
+# basis.
+# 3. `MAP-REGION-003` Loading a valid committed region payload MUST
+# reconstruct the same logical state as loading its embedded snapshot
+# payload.
+
+[[spec]]
+level = "MUST"
+quote = '''
+`MAP-REGION-001` A committed map region with
+`collection_format = MAP_REGION_V1_FORMAT` MUST encode its payload as
+`[snapshot_len:u32 little-endian][snapshot_payload]`.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`MAP-REGION-002` The `snapshot_len` prefix MUST equal the exact byte
+length of the embedded snapshot payload used as the region's durable
+basis.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`MAP-REGION-003` Loading a valid committed region payload MUST
+reconstruct the same logical state as loading its embedded snapshot
+payload.
+'''
+

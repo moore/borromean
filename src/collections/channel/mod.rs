@@ -1,3 +1,5 @@
+//! Experimental in-memory channel collection APIs.
+
 use core::marker::PhantomData;
 
 use heapless::Vec;
@@ -7,39 +9,52 @@ use crate::CollectionId;
 #[cfg(test)]
 mod tests;
 
+/// Address type used to name channel regions or command locations.
 pub trait ChannelAddress: Copy + Eq + PartialEq + Default {}
 
 impl<T> ChannelAddress for T where T: Copy + Eq + PartialEq + Default {}
 
+/// Errors returned by the experimental channel API.
 #[derive(Debug)]
 pub enum ChannelError {
+    /// The member registry is full.
     UserLimitReached,
+    /// A referenced member was not known to the channel.
     MemberNotFound(MemberId),
+    /// The pending-command buffer is full.
     PendingLimitReached,
+    /// The update tracker is full and a checkpoint is required.
     NeedsCheckpoint,
 }
 
 ///////////// basic types /////////////
+/// Monotonic sequence number used by channel commands.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ChannelSequence(u64);
 
+/// Stable member identifier used by the channel API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MemberId {
     id: u128,
 }
 
+/// Stable message identifier used by the channel API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MessageId {
     id: u128,
 }
 
+/// Address of a command within a channel log.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandAddress<A: ChannelAddress> {
+    /// Region identifier containing the command.
     pub region: A,
+    /// Byte offset of the command within the region.
     pub offset: usize,
 }
 
 impl<A: ChannelAddress> CommandAddress<A> {
+    /// Returns the zero address used by an empty or uninitialized channel.
     pub fn zero() -> Self {
         Self {
             region: A::default(),
@@ -48,6 +63,7 @@ impl<A: ChannelAddress> CommandAddress<A> {
     }
 }
 
+/// Per-member sequence tracking stored by checkpoints.
 #[derive(Debug, Clone, PartialEq, Eq, Copy)]
 pub struct MemberSequence {
     member: MemberId,
@@ -56,9 +72,13 @@ pub struct MemberSequence {
 
 ///////////// Protocol /////////////
 
+/// Top-level experimental channel commands.
 pub enum ChannelCommand<A: ChannelAddress, const PAYLOAD_MAX: usize, const CHECKPOINT_MAX: usize> {
+    /// Application payload command.
     AddCommand(AddCommand<A, PAYLOAD_MAX>),
+    /// Membership update command.
     AddMemberCommand(AddMemberCommand<A>),
+    /// Checkpoint command.
     CheckPointCommand(CheckPointCommand<A, CHECKPOINT_MAX>),
 }
 
@@ -102,6 +122,7 @@ pub struct AddCommand<A: ChannelAddress, const PAYLOAD_MAX: usize> {
 }
 
 impl<A: ChannelAddress, const PAYLOAD_MAX: usize> AddCommand<A, PAYLOAD_MAX> {
+    /// Wraps an add-command payload in the top-level channel command enum.
     pub fn into_command<const MEMBER_LIMIT: usize>(
         prior: CommandAddress<A>,
         sender_last: ChannelSequence,
@@ -120,38 +141,46 @@ impl<A: ChannelAddress, const PAYLOAD_MAX: usize> AddCommand<A, PAYLOAD_MAX> {
         })
     }
 
+    /// Returns the prior command reference.
     pub fn prior(&self) -> &CommandAddress<A> {
         &self.prior
     }
 
+    /// Returns the sender's previous known sequence.
     pub fn sender_last(&self) -> ChannelSequence {
         self.sender_last
     }
 
+    /// Returns this command's sequence number.
     pub fn sequence(&self) -> ChannelSequence {
         self.sequence
     }
 
+    /// Returns the authoring member.
     pub fn author(&self) -> MemberId {
         self.author
     }
 
+    /// Returns the stable message id.
     pub fn message_id(&self) -> MessageId {
         self.message_id
     }
 
+    /// Returns the command payload bytes.
     pub fn payload(&self) -> &[u8] {
         self.payload.as_slice()
     }
 }
 
 ///////////// Add Member Command /////////////
+/// Membership update command for the experimental channel API.
 pub struct AddMemberCommand<A: ChannelAddress> {
     member: MemberId,
     phantom: PhantomData<A>,
 }
 
 impl<A: ChannelAddress> AddMemberCommand<A> {
+    /// Wraps an add-member command in the top-level channel command enum.
     pub fn into_command<const PAYLOAD_MAX: usize, const MEMBER_LIMIT: usize>(
         member: MemberId,
     ) -> ChannelCommand<A, PAYLOAD_MAX, MEMBER_LIMIT> {
@@ -161,6 +190,7 @@ impl<A: ChannelAddress> AddMemberCommand<A> {
         })
     }
 
+    /// Returns the member being added.
     pub fn member(&self) -> MemberId {
         self.member
     }
@@ -171,6 +201,8 @@ impl<A: ChannelAddress> AddMemberCommand<A> {
 /// A check point is used when a one needs to talk about which devices
 /// have sent which commands in a way that allow only describing recent
 /// changes.
+///
+/// This API is experimental and not yet wired into the durable storage engine.
 pub struct CheckPointCommand<A: ChannelAddress, const USER_LIMIT: usize> {
     /// The checkpoint that this builds on
     previous_checkpoint: CommandAddress<A>,
@@ -185,6 +217,7 @@ pub struct CheckPointCommand<A: ChannelAddress, const USER_LIMIT: usize> {
 }
 
 impl<A: ChannelAddress, const MEMBER_LIMIT: usize> CheckPointCommand<A, MEMBER_LIMIT> {
+    /// Wraps a checkpoint command in the top-level channel command enum.
     pub fn into_command<const PAYLOAD_MAX: usize>(
         previous_checkpoint: CommandAddress<A>,
         command_count: u64,
@@ -197,14 +230,17 @@ impl<A: ChannelAddress, const MEMBER_LIMIT: usize> CheckPointCommand<A, MEMBER_L
         })
     }
 
+    /// Returns the checkpoint this command builds on.
     pub fn previous_checkpoint(&self) -> &CommandAddress<A> {
         &self.previous_checkpoint
     }
 
+    /// Returns the total command count described by this checkpoint.
     pub fn command_count(&self) -> u64 {
         self.command_count
     }
 
+    /// Returns the per-member sequence summary carried by this checkpoint.
     pub fn sequences(&self) -> &[MemberSequence] {
         self.sequences.as_slice()
     }
@@ -222,6 +258,8 @@ impl<A: ChannelAddress, const MEMBER_LIMIT: usize> CheckPointCommand<A, MEMBER_L
 ///
 /// We wright commands in to the next segment instead of the WAL so that they have a
 /// stable address.
+///
+/// This type is experimental and currently models only the in-memory command protocol.
 pub struct Channel<
     'a,
     'b,
@@ -257,6 +295,7 @@ impl<
         const CHECKPOINT_MAX: usize,
     > Channel<'a, 'b, 'c, A, M, U, P, PAYLOAD_MAX, CHECKPOINT_MAX>
 {
+    /// Creates a new channel with a single initial member.
     pub fn new(
         id: CollectionId,
         initial_member: MemberId,
@@ -282,6 +321,7 @@ impl<
         })
     }
 
+    /// Adds a member and returns the corresponding command.
     pub fn add_member(
         &mut self,
         member: MemberId,
@@ -292,6 +332,7 @@ impl<
         Ok(command)
     }
 
+    /// Adds an application command and returns the resulting protocol item.
     pub fn add_command(
         &mut self,
         prior: CommandAddress<A>,
@@ -383,14 +424,17 @@ impl<
         sequence
     }
 
+    /// Returns the collection id associated with this channel.
     pub fn id(&self) -> CollectionId {
         self.id
     }
 
+    /// Returns the current checkpoint pointer.
     pub fn checkpoint(&self) -> &CommandAddress<A> {
         &self.checkpoint
     }
 
+    /// Returns the number of members with pending updates.
     pub fn update_count(&self) -> usize {
         self.updates.len()
     }

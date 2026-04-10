@@ -12,10 +12,12 @@ use crate::{
     StorageRuntimeError, StorageWorkspace,
 };
 
+/// Minimal future wrapper that executes a closure exactly once when first polled.
 pub struct RunOnce<F> {
     operation: Option<F>,
 }
 
+/// Wraps a synchronous closure as a trivially ready future.
 pub fn run_once<F>(operation: F) -> RunOnce<F> {
     RunOnce {
         operation: Some(operation),
@@ -104,6 +106,7 @@ enum OpenStoragePhase<
     Done,
 }
 
+/// Explicit phase-machine future for flushing a map frontier into a region.
 pub struct FlushMapFuture<
     'a,
     const MAX_COLLECTIONS: usize,
@@ -153,6 +156,7 @@ where
     K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
     V: Debug + Serialize + for<'de> Deserialize<'de>,
 {
+    /// Creates a new map-flush future.
     pub fn new(
         storage: &'a mut Storage<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
         flash: &'a mut IO,
@@ -169,6 +173,7 @@ where
     }
 }
 
+/// Explicit phase-machine future for reclaiming the current WAL head.
 pub struct ReclaimWalHeadFuture<
     'a,
     const MAX_COLLECTIONS: usize,
@@ -185,6 +190,7 @@ pub struct ReclaimWalHeadFuture<
     phase: ReclaimWalHeadPhase<MAX_COLLECTIONS>,
 }
 
+/// Explicit phase-machine future for opening storage through replay.
 pub struct OpenStorageFuture<
     'a,
     const MAX_COLLECTIONS: usize,
@@ -211,6 +217,7 @@ impl<
 where
     IO: FlashIo,
 {
+    /// Creates a new WAL-head reclaim future.
     pub fn new(
         storage: &'a mut Storage<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
         flash: &'a mut IO,
@@ -236,6 +243,7 @@ impl<
 where
     IO: FlashIo,
 {
+    /// Creates a new open-storage future.
     pub fn new(flash: &'a mut IO, workspace: &'a mut StorageWorkspace<REGION_SIZE>) -> Self {
         Self {
             flash,

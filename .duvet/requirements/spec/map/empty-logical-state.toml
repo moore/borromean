@@ -1,0 +1,28 @@
+target = "spec/map.md#empty-logical-state"
+
+# Empty Logical State
+#
+# The map collection represents a partial function from keys `K` to values
+# `V`. The empty logical state contains no visible keys.
+# 
+# 1. `MAP-STATE-001` After a durable
+# `new_collection(collection_id, MAP_CODE)` basis, opening the collection
+# MUST yield an empty logical map.
+# 2. `MAP-STATE-002` `LsmMap::new` MUST construct the same empty logical
+# state used by an empty durable map basis.
+
+[[spec]]
+level = "MUST"
+quote = '''
+`MAP-STATE-001` After a durable
+`new_collection(collection_id, MAP_CODE)` basis, opening the collection
+MUST yield an empty logical map.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`MAP-STATE-002` `LsmMap::new` MUST construct the same empty logical
+state used by an empty durable map basis.
+'''
+

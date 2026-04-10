@@ -1,0 +1,45 @@
+target = "spec/map.md#snapshot-payload-format"
+
+# Snapshot Payload Format
+#
+# A snapshot payload is a compact complete basis for the logical map.
+# 
+# 1. `MAP-SNAPSHOT-001` A map snapshot payload MUST be encoded as
+# `[entry_count:u32 little-endian][entry_bytes_len:u32 little-endian][entry_bytes][entry_refs]`.
+# 2. `MAP-SNAPSHOT-002` Snapshot encoding MUST write `entry_count` as the
+# number of visible entries in the logical map and `entry_bytes_len` as
+# the exact byte length of the compact serialized entry data that follows.
+# 3. `MAP-SNAPSHOT-003` Loading a valid snapshot payload MUST reconstruct
+# the same logical key/value visibility encoded by that payload.
+# 4. `MAP-SNAPSHOT-004` Snapshot loaders MUST treat `entry_refs` as an
+# ordered, non-overlapping description of the compact entry bytes.
+
+[[spec]]
+level = "MUST"
+quote = '''
+`MAP-SNAPSHOT-001` A map snapshot payload MUST be encoded as
+`[entry_count:u32 little-endian][entry_bytes_len:u32 little-endian][entry_bytes][entry_refs]`.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`MAP-SNAPSHOT-002` Snapshot encoding MUST write `entry_count` as the
+number of visible entries in the logical map and `entry_bytes_len` as
+the exact byte length of the compact serialized entry data that follows.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`MAP-SNAPSHOT-003` Loading a valid snapshot payload MUST reconstruct
+the same logical key/value visibility encoded by that payload.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+`MAP-SNAPSHOT-004` Snapshot loaders MUST treat `entry_refs` as an
+ordered, non-overlapping description of the compact entry bytes.
+'''
+

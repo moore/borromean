@@ -11,61 +11,107 @@ use crate::wal_record::{
 use crate::workspace::StorageWorkspace;
 use crate::{CollectionId, CollectionType};
 
+/// Errors returned while replaying or recovering storage state at open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartupError {
+    /// Disk structure decoding failed.
     Disk(DiskError),
+    /// The backing I/O adapter failed.
     Mock(MockError),
+    /// WAL record decoding failed.
     WalRecord(WalRecordError),
+    /// Metadata was missing from the device.
     MissingMetadata,
+    /// Replay could not identify a WAL tail.
     NoWalTailCandidate,
+    /// Two candidate WAL tails used the same sequence number.
     DuplicateWalTailSequence(u64),
+    /// A region failed WAL validation.
     InvalidWalRegion(u32),
+    /// A WAL link pointed at an unexpected successor.
     InvalidWalLinkTarget {
+        /// Region containing the bad link.
         region_index: u32,
+        /// Sequence number the link should have targeted.
         expected_sequence: u64,
     },
+    /// A replayed WAL head control record used the wrong collection type.
     InvalidWalHeadControlType(u16),
+    /// The free-list chain was malformed.
     InvalidFreeListChain {
+        /// Region at which the malformed chain was detected.
         region_index: u32,
     },
+    /// Replay referenced a region outside the formatted range.
     InvalidRegionReference(u32),
+    /// A WAL chain was missing its expected link record.
     BrokenWalChain {
+        /// Region where the chain broke.
         region_index: u32,
     },
+    /// Replay found a valid record after an earlier corruption point.
     UnexpectedRecordAfterCorruption {
+        /// Region containing the unexpected record.
         region_index: u32,
+        /// Offset of the unexpected record.
         offset: usize,
     },
+    /// Replay found a `wal_recovery` marker where it was not allowed.
     UnexpectedWalRecovery {
+        /// Region containing the unexpected marker.
         region_index: u32,
+        /// Offset of the unexpected marker.
         offset: usize,
     },
+    /// An `alloc_begin` record did not match the tracked free-list head.
     InvalidAllocBegin {
+        /// Region named by the bad record.
         region_index: u32,
+        /// Free-list head replay expected at that point.
         last_free_list_head: Option<u32>,
     },
+    /// Replay saw two distinct ready regions.
     DoubleReadyRegion {
+        /// Previously tracked ready region.
         existing: u32,
+        /// Newly discovered conflicting ready region.
         next: u32,
     },
+    /// Replay saw a duplicate pending reclaim marker.
     DuplicatePendingReclaim(u32),
+    /// Replay saw a reclaim end without a matching begin.
     InvalidReclaimEnd(u32),
+    /// Replay saw the same collection created twice.
     DuplicateCollection(CollectionId),
+    /// Replay referenced a collection that was never created.
     UnknownCollection(CollectionId),
+    /// Replay referenced a collection that was already dropped.
     DroppedCollection(CollectionId),
+    /// Replay attempted to use the reserved WAL collection id as a user collection.
     ReservedCollectionId(CollectionId),
+    /// A retained collection record changed collection type unexpectedly.
     CollectionTypeMismatch {
+        /// Collection being validated.
         collection_id: CollectionId,
+        /// Previously retained collection type.
         expected: u16,
+        /// Conflicting collection type.
         actual: u16,
     },
+    /// A committed region head did not point at a region for that collection.
     InvalidCommittedRegionHead {
+        /// Collection being validated.
         collection_id: CollectionId,
+        /// Region named by the retained head.
         region_index: u32,
     },
+    /// Replay exceeded `MAX_COLLECTIONS`.
     TooManyTrackedCollections,
+    /// Replay exceeded `MAX_PENDING_RECLAIMS`.
     TooManyPendingReclaims,
+    /// Replay found a live collection type not supported by this build.
     UnsupportedLiveCollectionType(u16),
+    /// A checked length conversion or addition overflowed.
     LengthOverflow,
 }
 
@@ -87,14 +133,20 @@ impl From<WalRecordError> for StartupError {
     }
 }
 
+/// Replay-tracked durable basis for a collection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartupCollectionBasis {
+    /// The collection exists with only an empty basis.
     Empty,
+    /// The collection basis is a retained WAL snapshot.
     WalSnapshot,
+    /// The collection basis is a committed region.
     Region(u32),
+    /// The collection has been durably dropped.
     Dropped,
 }
 
+/// Replay summary for one tracked collection.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StartupCollection {
     collection_id: CollectionId,
@@ -104,23 +156,28 @@ pub struct StartupCollection {
 }
 
 impl StartupCollection {
+    /// Returns the stable collection identifier.
     pub fn collection_id(&self) -> CollectionId {
         self.collection_id
     }
 
+    /// Returns the retained collection type, if one is known.
     pub fn collection_type(&self) -> Option<u16> {
         self.collection_type
     }
 
+    /// Returns the retained durable basis after replay.
     pub fn basis(&self) -> StartupCollectionBasis {
         self.basis
     }
 
+    /// Returns the number of retained updates layered over the basis.
     pub fn pending_update_count(&self) -> usize {
         self.pending_update_count
     }
 }
 
+/// Bounded replay state returned by startup before it is wrapped in [`crate::StorageRuntime`].
 #[derive(Debug)]
 pub struct StartupState<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize> {
     metadata: StorageMetadata,
@@ -139,50 +196,62 @@ pub struct StartupState<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS
 impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
     StartupState<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>
 {
+    /// Returns storage metadata recovered during replay.
     pub fn metadata(&self) -> StorageMetadata {
         self.metadata
     }
 
+    /// Returns the replay-selected WAL head region.
     pub fn wal_head(&self) -> u32 {
         self.wal_head
     }
 
+    /// Returns the replay-selected WAL tail region.
     pub fn wal_tail(&self) -> u32 {
         self.wal_tail
     }
 
+    /// Returns the next append offset within the WAL tail region.
     pub fn wal_append_offset(&self) -> usize {
         self.wal_append_offset
     }
 
+    /// Returns the current free-list head, if any.
     pub fn last_free_list_head(&self) -> Option<u32> {
         self.last_free_list_head
     }
 
+    /// Returns the current free-list tail, if any.
     pub fn free_list_tail(&self) -> Option<u32> {
         self.free_list_tail
     }
 
+    /// Returns a reserved ready region, if replay found one.
     pub fn ready_region(&self) -> Option<u32> {
         self.ready_region
     }
 
+    /// Returns the largest region sequence seen during replay.
     pub fn max_seen_sequence(&self) -> u64 {
         self.max_seen_sequence
     }
 
+    /// Returns the replay-tracked collections.
     pub fn collections(&self) -> &[StartupCollection] {
         self.collections.as_slice()
     }
 
+    /// Returns regions still pending reclaim completion.
     pub fn pending_reclaims(&self) -> &[u32] {
         self.pending_reclaims.as_slice()
     }
 
+    /// Returns whether replay left an open WAL recovery boundary.
     pub fn pending_wal_recovery_boundary(&self) -> bool {
         self.pending_wal_recovery_boundary
     }
 
+    /// Returns the number of non-dropped user collections.
     pub fn tracked_user_collection_count(&self) -> usize {
         self.collections
             .iter()
@@ -236,6 +305,7 @@ pub(crate) struct StartupOpenPlan<
     pending_wal_recovery_boundary: bool,
 }
 
+/// Replays a formatted store into bounded in-memory startup state.
 pub fn open_formatted_store<
     const REGION_SIZE: usize,
     const REGION_COUNT: usize,

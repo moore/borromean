@@ -2,6 +2,7 @@ use super::*;
 extern crate std;
 use crate::wal_record::encode_record_into;
 use crate::{MockFlash, Storage, StorageWorkspace};
+use postcard::to_slice;
 use proptest::prelude::*;
 use std::{vec, vec::Vec};
 
@@ -128,6 +129,10 @@ fn encode_snapshot_returns_buffer_too_small_when_output_capacity_is_insufficient
 //= spec/ring.md#collection-head-state-machine
 //= type=test
 //# `RING-FORMAT-003` The frontier MUST take precedence over older values in the durable basis.
+//= spec/map.md#snapshot-payload-format
+//= type=test
+//# `MAP-SNAPSHOT-003` Loading a valid snapshot payload MUST reconstruct
+//# the same logical key/value visibility encoded by that payload.
 #[test]
 fn snapshot_round_trip_restores_logical_state() {
     const BUFFER_SIZE: usize = 512;
@@ -151,6 +156,34 @@ fn snapshot_round_trip_restores_logical_state() {
     assert_eq!(restored.get(&2).unwrap(), Some(20));
 }
 
+//= spec/map.md#update-payload-format
+//= type=test
+//# `MAP-UPDATE-001` A map update payload MUST be the exact `postcard`
+//# serialization of `MapUpdate<K, V>`.
+#[test]
+fn encoded_update_payload_matches_postcard_serialization() {
+    let update = MapUpdate::Set {
+        key: 5i32,
+        value: 42i32,
+    };
+    let mut encoded = [0u8; 64];
+    let used = LsmMap::<i32, i32, 4>::encode_update_into(&update, &mut encoded).unwrap();
+
+    let mut expected = [0u8; 64];
+    let expected_used = to_slice(&update, &mut expected).unwrap().len();
+    assert_eq!(&encoded[..used], &expected[..expected_used]);
+
+    let update = MapUpdate::Delete { key: 5i32 };
+    let used = LsmMap::<i32, i32, 4>::encode_update_into(&update, &mut encoded).unwrap();
+    let expected_used = to_slice(&update, &mut expected).unwrap().len();
+    assert_eq!(&encoded[..used], &expected[..expected_used]);
+}
+
+//= spec/map.md#update-payload-format
+//= type=test
+//# `MAP-UPDATE-002` Applying a `Set` update payload MUST make the key
+//# visible with the supplied value, and applying a `Delete` update payload
+//# MUST make the key absent from the frontier.
 #[test]
 fn update_payload_round_trip_applies_frontier_change() {
     const BUFFER_SIZE: usize = 512;
@@ -178,6 +211,136 @@ fn update_payload_round_trip_applies_frontier_change() {
     map.apply_update_payload(&delete_payload[..delete_len])
         .unwrap();
     assert_eq!(map.get(&5).unwrap(), None);
+}
+
+//= spec/map.md#empty-logical-state
+//= type=test
+//# `MAP-STATE-001` After a durable
+//# `new_collection(collection_id, MAP_CODE)` basis, opening the collection
+//# MUST yield an empty logical map.
+//= spec/map.md#empty-logical-state
+//= type=test
+//# `MAP-STATE-002` `LsmMap::new` MUST construct the same empty logical
+//# state used by an empty durable map basis.
+#[test]
+fn empty_map_open_matches_new_map_state() {
+    const REGION_SIZE: usize = 512;
+    const REGION_COUNT: usize = 4;
+    const MAX_INDEXES: usize = 4;
+    let id = CollectionId(70);
+
+    let mut empty_buffer = [0u8; REGION_SIZE];
+    let empty = LsmMap::<i32, i32, MAX_INDEXES>::new(id, &mut empty_buffer).unwrap();
+    assert_eq!(empty.get(&1).unwrap(), None);
+
+    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 1024>::new(0xff);
+    let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
+    let mut storage = Storage::<8, 4>::format::<REGION_SIZE, REGION_COUNT, _>(
+        &mut flash,
+        &mut workspace,
+        1,
+        8,
+        0xa5,
+    )
+    .unwrap();
+    storage
+        .create_map::<REGION_SIZE, REGION_COUNT, _>(&mut flash, &mut workspace, id)
+        .unwrap();
+
+    let reopened =
+        Storage::<8, 4>::open::<REGION_SIZE, REGION_COUNT, _>(&mut flash, &mut workspace).unwrap();
+    let mut reopen_buffer = [0u8; REGION_SIZE];
+    let reopened_map = reopened
+        .open_map::<REGION_SIZE, REGION_COUNT, _, i32, i32, MAX_INDEXES>(
+            &mut flash,
+            &mut workspace,
+            id,
+            &mut reopen_buffer,
+        )
+        .unwrap();
+
+    assert_eq!(reopened_map.get(&1).unwrap(), None);
+}
+
+//= spec/map.md#snapshot-payload-format
+//= type=test
+//# `MAP-SNAPSHOT-001` A map snapshot payload MUST be encoded as
+//# `[entry_count:u32 little-endian][entry_bytes_len:u32 little-endian][entry_bytes][entry_refs]`.
+//= spec/map.md#snapshot-payload-format
+//= type=test
+//# `MAP-SNAPSHOT-002` Snapshot encoding MUST write `entry_count` as the
+//# number of visible entries in the logical map and `entry_bytes_len` as
+//# the exact byte length of the compact serialized entry data that follows.
+#[test]
+fn snapshot_encoding_stores_header_compact_entries_and_refs() {
+    const BUFFER_SIZE: usize = 512;
+    const MAX_INDEXES: usize = 4;
+    let id = CollectionId(71);
+
+    let mut source_buffer = [0u8; BUFFER_SIZE];
+    let mut source = LsmMap::<i32, i32, MAX_INDEXES>::new(id, &mut source_buffer).unwrap();
+    source.set(5, 50).unwrap();
+    source.set(2, 20).unwrap();
+
+    let mut snapshot = [0u8; BUFFER_SIZE];
+    let snapshot_len = source.encode_snapshot_into(&mut snapshot).unwrap();
+
+    let entry_count = u32::from_le_bytes(snapshot[..SNAPSHOT_ENTRY_COUNT_SIZE].try_into().unwrap());
+    assert_eq!(entry_count, 2);
+
+    let entry_bytes_len = usize::try_from(u32::from_le_bytes(
+        snapshot
+            [SNAPSHOT_ENTRY_COUNT_SIZE..SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE]
+            .try_into()
+            .unwrap(),
+    ))
+    .unwrap();
+    assert_eq!(
+        snapshot_len,
+        SNAPSHOT_ENTRY_COUNT_SIZE
+            + SNAPSHOT_ENTRY_BYTES_LEN_SIZE
+            + entry_bytes_len
+            + usize::try_from(entry_count).unwrap() * ENTRY_REF_SIZE
+    );
+
+    let refs_start = snapshot_len - usize::try_from(entry_count).unwrap() * ENTRY_REF_SIZE;
+    let mut first_start = [0u8; ENTRY_REF_POINTER_SIZE];
+    let mut first_end = [0u8; ENTRY_REF_POINTER_SIZE];
+    let mut second_start = [0u8; ENTRY_REF_POINTER_SIZE];
+    let mut second_end = [0u8; ENTRY_REF_POINTER_SIZE];
+    first_start.copy_from_slice(&snapshot[refs_start..refs_start + ENTRY_REF_POINTER_SIZE]);
+    first_end.copy_from_slice(
+        &snapshot[refs_start + ENTRY_REF_POINTER_SIZE..refs_start + ENTRY_REF_SIZE],
+    );
+    second_start.copy_from_slice(
+        &snapshot
+            [refs_start + ENTRY_REF_SIZE..refs_start + ENTRY_REF_SIZE + ENTRY_REF_POINTER_SIZE],
+    );
+    second_end.copy_from_slice(
+        &snapshot
+            [refs_start + ENTRY_REF_SIZE + ENTRY_REF_POINTER_SIZE..refs_start + ENTRY_REF_SIZE * 2],
+    );
+
+    let first_start = usize::from(RefType::from_le_bytes(first_start));
+    let first_end = usize::from(RefType::from_le_bytes(first_end));
+    let second_start = usize::from(RefType::from_le_bytes(second_start));
+    let second_end = usize::from(RefType::from_le_bytes(second_end));
+    assert_eq!(first_start, ENTRY_COUNT_SIZE);
+    assert_eq!(first_end, second_start);
+    assert_eq!(second_end, ENTRY_COUNT_SIZE + entry_bytes_len);
+
+    let entry_bytes_offset = SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE;
+    let first_entry: Entry<i32, i32> = postcard::from_bytes(
+        &snapshot[entry_bytes_offset + first_start - ENTRY_COUNT_SIZE
+            ..entry_bytes_offset + first_end - ENTRY_COUNT_SIZE],
+    )
+    .unwrap();
+    let second_entry: Entry<i32, i32> = postcard::from_bytes(
+        &snapshot[entry_bytes_offset + second_start - ENTRY_COUNT_SIZE
+            ..entry_bytes_offset + second_end - ENTRY_COUNT_SIZE],
+    )
+    .unwrap();
+    assert!(first_entry.key < second_entry.key);
 }
 
 //= spec/ring.md#collection-head-state-machine
@@ -267,6 +430,21 @@ fn map_collection_format_covers_empty_state_snapshot_update_region_and_validatio
 //= spec/ring.md#collection-head-state-machine
 //= type=test
 //# `RING-FORMAT-014` For non-WAL collections, the pair `(collection_type, collection_format)` MUST identify a unique committed region payload format.
+//= spec/map.md#committed-region-format
+//= type=test
+//# `MAP-REGION-001` A committed map region with
+//# `collection_format = MAP_REGION_V1_FORMAT` MUST encode its payload as
+//# `[snapshot_len:u32 little-endian][snapshot_payload]`.
+//= spec/map.md#committed-region-format
+//= type=test
+//# `MAP-REGION-002` The `snapshot_len` prefix MUST equal the exact byte
+//# length of the embedded snapshot payload used as the region's durable
+//# basis.
+//= spec/map.md#committed-region-format
+//= type=test
+//# `MAP-REGION-003` Loading a valid committed region payload MUST
+//# reconstruct the same logical state as loading its embedded snapshot
+//# payload.
 #[test]
 fn region_round_trip_restores_logical_state() {
     const BUFFER_SIZE: usize = 512;
@@ -367,6 +545,11 @@ fn map_updates_append_new_head_records_and_replacement_reclaims_the_old_tail_reg
 //# `RING-FORMAT-008` Every later retained type-bearing record for that
 //# collection MUST carry the same `collection_type`, otherwise replay
 //# must treat the mismatch as corruption.
+//= spec/map.md#validation-and-open-rules
+//= type=test
+//# `MAP-VALIDATE-002` Opening or loading a live map collection MUST
+//# reject retained collection state whose `collection_type` is not
+//# `MAP_CODE`.
 #[test]
 fn open_from_storage_rejects_live_collections_with_a_non_map_collection_type() {
     let mut flash = MockFlash::<512, 4, 256>::new(0xff);
@@ -406,6 +589,14 @@ fn open_from_storage_rejects_live_collections_with_a_non_map_collection_type() {
     ));
 }
 
+//= spec/map.md#validation-and-open-rules
+//= type=test
+//# `MAP-VALIDATE-001` Map snapshot loading MUST reject payloads whose
+//# lengths, entry ranges, ordering, or entry decoding are invalid.
+//= spec/map.md#snapshot-payload-format
+//= type=test
+//# `MAP-SNAPSHOT-004` Snapshot loaders MUST treat `entry_refs` as an
+//# ordered, non-overlapping description of the compact entry bytes.
 #[test]
 fn load_snapshot_rejects_unsorted_entry_refs() {
     const BUFFER_SIZE: usize = 512;
@@ -438,6 +629,14 @@ fn load_snapshot_rejects_unsorted_entry_refs() {
     ));
 }
 
+//= spec/map.md#validation-and-open-rules
+//= type=test
+//# `MAP-VALIDATE-001` Map snapshot loading MUST reject payloads whose
+//# lengths, entry ranges, ordering, or entry decoding are invalid.
+//= spec/map.md#snapshot-payload-format
+//= type=test
+//# `MAP-SNAPSHOT-004` Snapshot loaders MUST treat `entry_refs` as an
+//# ordered, non-overlapping description of the compact entry bytes.
 #[test]
 fn load_snapshot_rejects_overlapping_entry_refs() {
     const BUFFER_SIZE: usize = 512;
@@ -516,6 +715,17 @@ fn mutable_map_frontier_capacity_is_bounded_by_its_configured_buffer() {
     larger_map.set(1, 40).unwrap();
 }
 
+//= spec/map.md#merge-and-frontier-rules
+//= type=test
+//# `MAP-MERGE-001` When opening a live map collection, the retained
+//# durable basis MUST be selected from the replay-tracked empty basis,
+//# retained snapshot basis, or retained committed-region basis, and any
+//# later retained update payloads for that collection MUST then be applied
+//# in replay order.
+//= spec/map.md#merge-and-frontier-rules
+//= type=test
+//# `MAP-MERGE-002` Later retained updates MUST take precedence over
+//# older values from the retained basis for the same key.
 //= spec/ring.md#collection-head-state-machine
 //= type=test
 //# `RING-FORMAT-003` The frontier MUST take precedence over older values in the durable basis.
@@ -587,6 +797,50 @@ fn storage_snapshot_replay_restores_map_frontier() {
     assert_eq!(reopened.get(&2).unwrap(), Some(99));
 }
 
+//= spec/map.md#validation-and-open-rules
+//= type=test
+//# `MAP-VALIDATE-003` Opening or loading a live map collection MUST
+//# reject retained committed-region bases whose `collection_format` is not
+//# `MAP_REGION_V1_FORMAT`.
+#[test]
+fn open_from_storage_rejects_unsupported_committed_region_format() {
+    let mut flash = MockFlash::<512, 4, 256>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    init_user_region_header(&mut flash, 2, 4, CollectionId(72), MAP_REGION_V1_FORMAT + 1);
+    let wal_offset = metadata.wal_record_area_offset().unwrap();
+    append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        wal_offset,
+        crate::WalRecord::Head {
+            collection_id: CollectionId(72),
+            collection_type: crate::CollectionType::MAP_CODE,
+            region_index: 2,
+        },
+    );
+
+    let mut workspace = StorageWorkspace::<512>::new();
+    let runtime = crate::storage::open::<512, 4, _, 8, 4>(&mut flash, &mut workspace).unwrap();
+    let mut reopen_buffer = [0u8; 512];
+    let result = LsmMap::<i32, i32, 4>::open_from_storage::<512, 4, _, 8, 4>(
+        &runtime,
+        &mut flash,
+        &mut workspace,
+        CollectionId(72),
+        &mut reopen_buffer,
+    );
+
+    assert!(matches!(
+        result,
+        Err(MapStorageError::UnsupportedRegionFormat {
+            collection_id: CollectionId(72),
+            region_index: 2,
+            actual,
+        }) if actual == MAP_REGION_V1_FORMAT + 1
+    ));
+}
+
 //= spec/ring.md#collection-head-state-machine
 //= type=test
 //# `RING-FORMAT-016` An implementation MUST NOT open a database
@@ -594,6 +848,11 @@ fn storage_snapshot_replay_restores_map_frontier() {
 //# committed-region basis, retained `snapshot` payload, or retained
 //# post-basis `update` payloads are unsupported or invalid under that
 //# collection's normative specification.
+//= spec/map.md#validation-and-open-rules
+//= type=test
+//# `MAP-VALIDATE-004` Opening a live map collection MUST reject
+//# retained committed-region payloads, snapshot payloads, or update
+//# payloads that fail map-specific validation.
 #[test]
 fn open_from_storage_rejects_invalid_retained_region_snapshot_and_update_payloads() {
     {
@@ -772,6 +1031,11 @@ fn storage_visit_wal_records_exposes_map_collection_records() {
     );
 }
 
+//= spec/map.md#merge-and-frontier-rules
+//= type=test
+//# `MAP-MERGE-003` Flushing a mutable map frontier MUST write a new
+//# immutable committed region rather than rewriting the previous live
+//# region in place.
 //= spec/ring.md#collection-head-state-machine
 //= type=test
 //# `RING-FORMAT-005` Every user collection MUST remain log-structured: flushing mutable state writes a new immutable committed region segment instead of rewriting an existing live region in place.
