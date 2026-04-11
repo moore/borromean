@@ -66,6 +66,10 @@ The normative byte-level rules for those payloads live in [../spec/map.md](../sp
 - `src/mock.rs`: in-memory flash model used by tests and examples
 - `src/disk.rs` and `src/wal_record.rs`: advanced reference surfaces for exact bytes on disk and in WAL records
 
+## Contributor Guide
+
+If you are adding a new durably integrated collection type, start with [implementing-a-collection.md](./implementing-a-collection.md). That tutorial walks through the current integration points in `lib`, `storage`, `startup`, and the collection module itself.
+
 ## Experimental Surface
 
 The exported `channel` module is still experimental. It has API documentation so readers can inspect the design, but it is not yet backed by the durable storage engine and is out of scope for the current collection specifications.

@@ -28,6 +28,7 @@ In both styles the ownership model stays the same:
 - Implementation architecture and API constraints: [spec/implementation.md](spec/implementation.md)
 - Durable map collection format and validation rules: [spec/map.md](spec/map.md)
 - Narrative architecture and API guide: [docs/architecture-and-api.md](docs/architecture-and-api.md)
+- Contributor tutorial for adding a durable collection: [docs/implementing-a-collection.md](docs/implementing-a-collection.md)
 - Documentation work tracker: [docs/implementation-docs-plan.md](docs/implementation-docs-plan.md)
 
 ## Requirement Traceability
