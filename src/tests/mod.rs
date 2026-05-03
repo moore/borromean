@@ -1503,9 +1503,9 @@ fn storage_map_frontiers_do_not_exceed_the_configured_dirty_collection_reserve()
 //= type=test
 //# `RING-CORE-016` If applying another update would exceed that
 //# capacity, the implementation MUST flush the collection's current
-//# logical frontier into a newly allocated region, durably commit that
-//# region as the collection head, and clear the in-memory frontier before
-//# accepting further updates for that collection.
+//# logical frontier into collection-defined committed state, durably commit
+//# a new collection head, and clear the in-memory frontier before accepting
+//# further updates for that collection.
 #[test]
 fn storage_map_frontier_overflow_flushes_and_commits_a_new_region_head() {
     const REGION_SIZE: usize = 512;
@@ -1622,7 +1622,7 @@ fn storage_map_frontier_overflow_flushes_and_commits_a_new_region_head() {
 //= type=test
 //# `RING-CORE-017` After such a frontier-capacity flush, later updates
 //# for that collection MUST accumulate in a fresh in-memory frontier
-//# layered over the newly committed region head.
+//# layered over the newly committed collection head.
 #[test]
 fn storage_map_frontier_continues_accumulating_updates_after_an_overflow_flush() {
     const REGION_SIZE: usize = 512;

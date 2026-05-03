@@ -43,7 +43,7 @@ Both styles keep I/O and workspace dependencies explicit in the function signatu
 
 ## Durable Map Model
 
-The durable map collection uses three payload shapes:
+The implemented durable map collection currently uses three payload shapes:
 
 - update payloads in WAL records
 - snapshot payloads in WAL records
@@ -56,6 +56,14 @@ The durable map collection uses three payload shapes:
 - later updates override older basis values for the same key
 
 The normative byte-level rules for those payloads live in [../spec/map.md](../spec/map.md).
+
+That same map specification now also records the intended target design
+for the map: a manifest-backed whole-run LSM where frontier flushes
+create immutable sorted runs, overlapping runs are read newest first,
+and asynchronous compaction replaces complete runs. The current runtime
+still retains one committed region basis per collection, so that target
+requires shared replay, reachability, and reclaim extensions before it
+can be implemented.
 
 ## Module Guide
 

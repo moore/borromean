@@ -65,18 +65,20 @@ that collection id is valid, and its older durable bytes may be
 reclaimed once they are no longer physically reachable from live
 storage state.
 
-A collection head may refer either to
-a committed region or to a WAL-resident snapshot. The data payload in
-each region is defined by the corresponding collection specification.
-For user collections, append-time validity requires a successful
-`new_collection(collection_id, collection_type)` before any later
-record for that collection may be appended. WAL reclaim may later
-remove that `new_collection` record once a newer durable basis for the
-collection survives elsewhere in the WAL or in committed regions.
-Replay therefore distinguishes historical validity from retained
-basis: after reclaim, the earliest retained basis record for a user
-collection may be `snapshot`, `head`, or `drop_collection` even though
-`new_collection` was required historically.
+A collection head may refer either to a committed region or to a
+WAL-resident snapshot. The data payload in each committed region is
+defined by the corresponding collection specification. Some collection
+formats may use that committed region as a manifest whose payload names
+additional committed regions that remain live collection state. For
+user collections, append-time validity requires a successful
+`new_collection(collection_id, collection_type)` before any later record
+for that collection may be appended. WAL reclaim may later remove that
+`new_collection` record once a newer durable basis for the collection
+survives elsewhere in the WAL or in committed regions. Replay therefore
+distinguishes historical validity from retained basis: after reclaim,
+the earliest retained basis record for a user collection may be
+`snapshot`, `head`, or `drop_collection` even though `new_collection`
+was required historically.
 
 Borromean tracks the current collection type for each live collection
 in WAL replay state. Any durable record that carries
@@ -104,12 +106,14 @@ Further snapshotting to the WAL allows bounded RAM usage with an
 unbounded number of collections. However, each collection's mutable
 in-memory update frontier is bounded. If applying another update would
 overflow that frontier, the implementation flushes the current logical
-frontier into a newly allocated collection region, commits that region
-as the new durable head, clears the in-memory frontier, and continues
-accepting later updates into RAM over the new region head. Collections
-therefore remain log-structured: a flush creates a new immutable
-append-only region segment, analogous to an LSM SSTable, instead of
-rewriting an existing live region in place.
+frontier into collection-defined committed state, commits a new durable
+head, clears the in-memory frontier, and continues accepting later
+updates into RAM over the new committed head. For simple collections the
+head may be the newly written data region itself. For manifest-based
+collections the head may be a manifest region that makes one or more
+data-region segments live. Collections therefore remain log-structured:
+a flush creates new immutable committed region state, analogous to an
+LSM SSTable, instead of rewriting existing live region state in place.
 
 In a completed WAL rotation, the last record of the old WAL tail is
 `link(next_region_index, expected_sequence)`, which points to the next
@@ -241,12 +245,12 @@ writes as out of space until space is freed or the store is migrated.
 MUST have a bounded configured capacity.
 16. `RING-CORE-016` If applying another update would exceed that
 capacity, the implementation MUST flush the collection's current
-logical frontier into a newly allocated region, durably commit that
-region as the collection head, and clear the in-memory frontier before
-accepting further updates for that collection.
+logical frontier into collection-defined committed state, durably commit
+a new collection head, and clear the in-memory frontier before accepting
+further updates for that collection.
 17. `RING-CORE-017` After such a frontier-capacity flush, later updates
 for that collection MUST accumulate in a fresh in-memory frontier
-layered over the newly committed region head.
+layered over the newly committed collection head.
 
 ### Storage Structure
 
@@ -989,12 +993,13 @@ with the in-memory frontier.
 3. `RING-FORMAT-003` The frontier MUST take precedence over older values in the durable
 basis.
 4. `RING-FORMAT-004` Flush to `RegionHead` materializes the logical state produced by
-that merge.
+that merge, either directly in the head region or through
+collection-defined manifest state referenced by the head region.
 5. `RING-FORMAT-005` Every user collection MUST remain log-structured:
-flushing mutable state writes a new immutable committed region segment
-instead of rewriting an existing live region in place. An LSM-style
-layout with SSTable-like immutable regions is one valid way to satisfy
-this requirement.
+flushing mutable state writes new immutable committed region state
+instead of rewriting existing live region state in place. An LSM-style
+layout with manifest-described immutable runs is one valid way to
+satisfy this requirement.
 6. `RING-FORMAT-006` A `WALSnapshotHead` MUST be loadable into RAM before that
 collection accepts further mutations.
 7. `RING-FORMAT-007` For live user collections, the replay-tracked collection type is

@@ -2,7 +2,8 @@ target = "spec/map.md#merge-and-frontier-rules"
 
 # Merge And Frontier Rules
 #
-# The map collection uses a durable basis plus a mutable frontier.
+# The current implemented map collection uses a durable basis plus a
+# mutable frontier.
 # 
 # 1. `MAP-MERGE-001` When opening a live map collection, the retained
 # durable basis MUST be selected from the replay-tracked empty basis,

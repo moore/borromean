@@ -48,12 +48,12 @@ target = "spec/ring.md#core-requirements"
 # MUST have a bounded configured capacity.
 # 16. `RING-CORE-016` If applying another update would exceed that
 # capacity, the implementation MUST flush the collection's current
-# logical frontier into a newly allocated region, durably commit that
-# region as the collection head, and clear the in-memory frontier before
-# accepting further updates for that collection.
+# logical frontier into collection-defined committed state, durably commit
+# a new collection head, and clear the in-memory frontier before accepting
+# further updates for that collection.
 # 17. `RING-CORE-017` After such a frontier-capacity flush, later updates
 # for that collection MUST accumulate in a fresh in-memory frontier
-# layered over the newly committed region head.
+# layered over the newly committed collection head.
 
 [[spec]]
 level = "MUST"
@@ -222,9 +222,9 @@ level = "MUST"
 quote = '''
 `RING-CORE-016` If applying another update would exceed that
 capacity, the implementation MUST flush the collection's current
-logical frontier into a newly allocated region, durably commit that
-region as the collection head, and clear the in-memory frontier before
-accepting further updates for that collection.
+logical frontier into collection-defined committed state, durably commit
+a new collection head, and clear the in-memory frontier before accepting
+further updates for that collection.
 '''
 
 [[spec]]
@@ -232,6 +232,6 @@ level = "MUST"
 quote = '''
 `RING-CORE-017` After such a frontier-capacity flush, later updates
 for that collection MUST accumulate in a fresh in-memory frontier
-layered over the newly committed region head.
+layered over the newly committed collection head.
 '''
 

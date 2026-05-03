@@ -2,7 +2,8 @@ target = "spec/map.md#snapshot-payload-format"
 
 # Snapshot Payload Format
 #
-# A snapshot payload is a compact complete basis for the logical map.
+# The current implemented snapshot payload is a compact complete basis
+# for the logical map.
 # 
 # 1. `MAP-SNAPSHOT-001` A map snapshot payload MUST be encoded as
 # `[entry_count:u32 little-endian][entry_bytes_len:u32 little-endian][entry_bytes][entry_refs]`.

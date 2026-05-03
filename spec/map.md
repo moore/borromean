@@ -9,9 +9,18 @@ layout, and committed-region mechanics remain defined by
 constraints remain defined by
 [spec/implementation.md](implementation.md).
 
-This document is the normative specification required by
-`RING-FORMAT-012` and `RING-FORMAT-013` for the only non-WAL collection
-type that the current implementation supports durably.
+This document has two layers:
+
+- the current Duvet-backed requirements for the implemented durable map
+  format
+- the intended whole-run LSM map design that the durable map is expected to grow
+  toward
+
+The current implementation still supports a single committed-region map
+basis. The target design is a manifest-backed LSM: frontier updates
+flush into immutable sorted runs, runs can overlap by key range, reads
+resolve newest-to-oldest, and asynchronous compaction replaces complete
+runs with merged replacement runs.
 
 ## Empty Logical State
 
@@ -26,7 +35,8 @@ state used by an empty durable map basis.
 
 ## Snapshot Payload Format
 
-A snapshot payload is a compact complete basis for the logical map.
+The current implemented snapshot payload is a compact complete basis
+for the logical map.
 
 1. `MAP-SNAPSHOT-001` A map snapshot payload MUST be encoded as
 `[entry_count:u32 little-endian][entry_bytes_len:u32 little-endian][entry_bytes][entry_refs]`.
@@ -65,7 +75,8 @@ payload.
 
 ## Merge And Frontier Rules
 
-The map collection uses a durable basis plus a mutable frontier.
+The current implemented map collection uses a durable basis plus a
+mutable frontier.
 
 1. `MAP-MERGE-001` When opening a live map collection, the retained
 durable basis MUST be selected from the replay-tracked empty basis,
@@ -93,3 +104,106 @@ reject retained committed-region bases whose `collection_format` is not
 4. `MAP-VALIDATE-004` Opening a live map collection MUST reject
 retained committed-region payloads, snapshot payloads, or update
 payloads that fail map-specific validation.
+
+## Target Whole-Run LSM Model
+
+The intended durable map model is an LSM made from immutable sorted
+runs. The mutable frontier remains the newest state. When the frontier
+is flushed, Borromean writes a new immutable run rather than rewriting
+an older run. A run is a sorted table of key states, where each key
+state is either a visible value or a tombstone. Tombstones are retained
+until compaction proves that no older live run can expose a value for
+the same key.
+
+Runs are ordered by generation. Higher generations are newer. Runs can
+have overlapping key ranges, especially newly flushed runs. Lookup
+therefore checks the mutable frontier first, then WAL-retained updates,
+then immutable runs from newest generation to oldest generation. The
+first visible `Set` determines the returned value. The first visible
+`Delete` determines absence and masks older values.
+
+Iteration over the map is a merge of the mutable frontier, retained WAL
+updates, and live immutable runs. It yields each logical key at most
+once, with the same newest-wins and tombstone-masking semantics as
+point lookup.
+
+## Target Manifest And Run Formats
+
+The intended committed map head is a manifest region using
+`MAP_MANIFEST_V1_FORMAT`. The manifest describes the live run set for a
+map collection. It records enough metadata to recover read order,
+identify all physically live run regions, and choose future compaction
+work without scanning every segment payload first.
+
+Each live run descriptor records:
+
+- generation, where larger values are newer
+- first physical region in the run
+- number of physical regions in the run
+- approximate count of entries plus tombstones in the run
+- encoded lower and upper key bounds for the run
+
+The intended immutable run segment format is `MAP_RUN_V1_FORMAT`. A run
+can occupy one region or a chain of regions. Each segment stores sorted
+key states and enough chain metadata for recovery to validate that the
+manifest's declared region count and first region describe the complete
+run. The manifest, not hidden region ownership, is authoritative for
+which runs are live.
+
+The exact byte layouts for `MAP_MANIFEST_V1_FORMAT` and
+`MAP_RUN_V1_FORMAT` are intentionally left to the implementation pass
+that introduces those formats. Once those format values are accepted by
+the runtime, this specification needs to be extended with Duvet-backed
+requirements for the exact bytes and validation rules.
+
+## Target Flush And Manifest Commit Rules
+
+A frontier flush writes a new immutable sorted run and then commits a
+new manifest head. The new manifest includes the new run plus every
+prior live run that has not been removed by compaction. Older overlapping
+runs remain live after a normal flush.
+
+A manifest commit is the logical point at which the live run set
+changes. Regions referenced by the previous manifest remain live until a
+new manifest that omits them is durable. After the replacement manifest
+is durable, omitted run regions become eligible for ordinary Borromean
+reclaim.
+
+## Target Whole-Run Async Compaction
+
+Compaction operates on complete runs, not on key-range slices and not on
+individual physical regions within a run. A compaction job reads the
+selected runs in generation order, performs one sorted merge, drops
+obsolete older key states hidden by newer states, writes one replacement
+run chain, and commits a replacement manifest.
+
+The target selection policy is "Target Then Greedy":
+
+1. Select newest runs until replacing them would move the collection
+   toward its configured live map-run region target.
+2. Continue including older runs while each older run's approximate
+   entry-plus-tombstone count is smaller than the accumulated selected
+   count.
+3. Stop when the next older run is not smaller than the accumulated
+   selected count or when no older run remains.
+
+The sum of selected run entry-plus-tombstone counts is the conservative
+proxy for output size. The exact output size is discovered during the
+single merge pass after duplicate keys and masked tombstones are
+discarded.
+
+This gives the map the deferred whole-run merge behavior wanted from a
+fractal-index-inspired design, but schedules the work asynchronously
+like an LSM database instead of pushing buffered messages through an
+internal tree on node overflow.
+
+## Target Runtime Prerequisites
+
+The current replay model retains only one committed region basis per
+collection. The target LSM map needs shared runtime support for a
+manifest basis whose payload makes additional run regions live. Startup,
+reachability, and reclaim need to validate manifest-referenced regions
+and keep them live until a newer manifest removes them.
+
+Until that shared runtime support exists, `MAP_REGION_V1_FORMAT` remains
+the only implemented committed map region format.

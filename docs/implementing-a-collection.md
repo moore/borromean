@@ -2,7 +2,7 @@
 
 This guide is for contributors adding a new durably integrated collection type to Borromean.
 
-Today the map collection in [`src/collections/map/mod.rs`](../src/collections/map/mod.rs) is the only complete example. The experimental channel module in [`src/collections/channel/mod.rs`](../src/collections/channel/mod.rs) is useful as a public-API example, but it is not wired into startup, WAL replay, reclaim, or committed-region handling.
+Today the map collection in [`src/collections/map/mod.rs`](../src/collections/map/mod.rs) is the only complete implemented example. The map specification also describes the intended whole-run LSM target design, but the current runtime still opens the map from one retained committed-region basis plus later WAL records. The experimental channel module in [`src/collections/channel/mod.rs`](../src/collections/channel/mod.rs) is useful as a public-API example, but it is not wired into startup, WAL replay, reclaim, or committed-region handling.
 
 The goal is to add a collection that:
 
@@ -244,7 +244,7 @@ For large logs, the most practical API is usually sequential reading from a curs
 
 ### Why A Log Collection Pushes The Current Runtime
 
-The current engine stores one retained committed-region basis per collection through `StartupCollectionBasis::Region(u32)`. That is enough for the map, because the whole compacted basis fits in one region.
+The current engine stores one retained committed-region basis per collection through `StartupCollectionBasis::Region(u32)`. That is enough for the implemented map path, because the whole compacted basis currently fits in one region. It is not enough for the target map design in [`spec/map.md`](../spec/map.md), where the map head is intended to become a manifest that keeps multiple immutable run regions live.
 
 An unbounded log is different. A single committed region cannot hold any number of records, so a true durable log needs a multi-region basis. That means the tutorial for a log collection should call out a required shared-runtime extension before the collection itself is wired in:
 

@@ -114,12 +114,13 @@ target = "spec/ring.md#collection-head-state-machine"
 # 3. `RING-FORMAT-003` The frontier MUST take precedence over older values in the durable
 # basis.
 # 4. `RING-FORMAT-004` Flush to `RegionHead` materializes the logical state produced by
-# that merge.
+# that merge, either directly in the head region or through
+# collection-defined manifest state referenced by the head region.
 # 5. `RING-FORMAT-005` Every user collection MUST remain log-structured:
-# flushing mutable state writes a new immutable committed region segment
-# instead of rewriting an existing live region in place. An LSM-style
-# layout with SSTable-like immutable regions is one valid way to satisfy
-# this requirement.
+# flushing mutable state writes new immutable committed region state
+# instead of rewriting existing live region state in place. An LSM-style
+# layout with manifest-described immutable runs is one valid way to
+# satisfy this requirement.
 # 6. `RING-FORMAT-006` A `WALSnapshotHead` MUST be loadable into RAM before that
 # collection accepts further mutations.
 # 7. `RING-FORMAT-007` For live user collections, the replay-tracked collection type is
@@ -200,8 +201,8 @@ basis.
 level = "MUST"
 quote = '''
 `RING-FORMAT-005` Every user collection MUST remain log-structured:
-flushing mutable state writes a new immutable committed region segment
-instead of rewriting an existing live region in place.
+flushing mutable state writes new immutable committed region state
+instead of rewriting existing live region state in place.
 '''
 
 [[spec]]

@@ -1038,7 +1038,11 @@ fn storage_visit_wal_records_exposes_map_collection_records() {
 //# region in place.
 //= spec/ring.md#collection-head-state-machine
 //= type=test
-//# `RING-FORMAT-005` Every user collection MUST remain log-structured: flushing mutable state writes a new immutable committed region segment instead of rewriting an existing live region in place.
+//# `RING-FORMAT-005` Every user collection MUST remain log-structured:
+//# flushing mutable state writes new immutable committed region state
+//# instead of rewriting existing live region state in place. An LSM-style
+//# layout with manifest-described immutable runs is one valid way to
+//# satisfy this requirement.
 #[test]
 fn storage_region_flush_restores_map_basis() {
     const REGION_SIZE: usize = 512;
