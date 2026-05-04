@@ -1110,22 +1110,41 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
             return Ok(None);
         };
 
-        let mut replacement =
-            LsmMap::<K, V, MAX_INDEXES, MAX_RUNS>::new(collection_id, scratch_buffer)?;
-        opened.materialize_run_prefix_into::<REGION_SIZE, IO>(
-            flash,
-            workspace,
-            selected_runs,
-            &mut replacement,
-        )?;
-        opened.move_unselected_runs_into(selected_runs, &mut replacement)?;
-        let manifest_region = replacement.flush_to_storage::<
+        let planned_allocations = opened
+            .selected_compaction_state_count(selected_runs)?
+            .checked_add(1)
+            .ok_or(MapStorageError::Map(
+                crate::collections::map::MapError::SerializationError,
+            ))?;
+        let additional_allocations = if self.state.ready_region().is_some() {
+            planned_allocations.saturating_sub(1)
+        } else {
+            planned_allocations
+        };
+        self.state
+            .ensure_foreground_allocation_headroom_for::<REGION_SIZE, REGION_COUNT, IO>(
+                flash,
+                workspace,
+                additional_allocations,
+            )?;
+
+        let replacement_run = opened.write_compacted_run_to_storage::<
             REGION_SIZE,
             REGION_COUNT,
             IO,
             MAX_COLLECTIONS,
             MAX_PENDING_RECLAIMS,
-        >(&mut self.state, flash, workspace)?;
+        >(&mut self.state, flash, workspace, selected_runs)?;
+        let mut replacement =
+            LsmMap::<K, V, MAX_INDEXES, MAX_RUNS>::new(collection_id, scratch_buffer)?;
+        opened.move_unselected_runs_into(selected_runs, &mut replacement)?;
+        let manifest_region = replacement.commit_manifest_to_storage::<
+            REGION_SIZE,
+            REGION_COUNT,
+            IO,
+            MAX_COLLECTIONS,
+            MAX_PENDING_RECLAIMS,
+        >(&mut self.state, flash, workspace, replacement_run)?;
         opened.reclaim_run_regions::<
             REGION_SIZE,
             REGION_COUNT,

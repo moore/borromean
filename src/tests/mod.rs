@@ -2056,6 +2056,125 @@ fn storage_compact_map_preserves_tombstone_masking() {
     );
 }
 
+#[test]
+fn storage_compact_map_streams_replacement_larger_than_frontier_capacity() {
+    const REGION_SIZE: usize = 1024;
+    const REGION_COUNT: usize = 40;
+    const MAX_INDEXES: usize = 4;
+    const MAX_RUNS: usize = 8;
+
+    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 16384>::new(0xff);
+    let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
+    let mut storage = Storage::<8, 16>::format::<REGION_SIZE, REGION_COUNT, _>(
+        &mut flash,
+        &mut workspace,
+        1,
+        8,
+        0xa5,
+    )
+    .unwrap();
+
+    storage
+        .create_map::<REGION_SIZE, REGION_COUNT, _>(&mut flash, &mut workspace, CollectionId(72))
+        .unwrap();
+
+    let mut map_buffer = [0u8; REGION_SIZE];
+    let mut map = LsmMap::<i32, i32, MAX_INDEXES, MAX_RUNS>::new(
+        CollectionId(72),
+        &mut map_buffer,
+    )
+    .unwrap();
+    for run in 0..3 {
+        for offset in 0..MAX_INDEXES {
+            let key = run * 10 + offset as i32;
+            map.set(key, key * 10).unwrap();
+        }
+        storage
+            .flush_map::<REGION_SIZE, REGION_COUNT, _, _, _, MAX_INDEXES, MAX_RUNS>(
+                &mut flash,
+                &mut workspace,
+                &mut map,
+            )
+            .unwrap();
+    }
+
+    let mut before_buffer = [0u8; REGION_SIZE];
+    let before = storage
+        .open_map::<REGION_SIZE, REGION_COUNT, _, i32, i32, MAX_INDEXES, MAX_RUNS>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(72),
+            &mut before_buffer,
+        )
+        .unwrap();
+    assert_eq!(before.run_count(), 3);
+
+    let mut scratch_buffer = [0u8; REGION_SIZE];
+    let compacted_manifest = storage
+        .compact_map::<REGION_SIZE, REGION_COUNT, _, i32, i32, MAX_INDEXES, MAX_RUNS, 1>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(72),
+            &mut scratch_buffer,
+        )
+        .unwrap();
+    assert!(compacted_manifest.is_some());
+
+    let mut after_buffer = [0u8; REGION_SIZE];
+    let after = storage
+        .open_map::<REGION_SIZE, REGION_COUNT, _, i32, i32, MAX_INDEXES, MAX_RUNS>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(72),
+            &mut after_buffer,
+        )
+        .unwrap();
+    assert_eq!(after.run_count(), 1);
+    for run in 0..3 {
+        for offset in 0..MAX_INDEXES {
+            let key = run * 10 + offset as i32;
+            assert_eq!(
+                after
+                    .get::<REGION_SIZE, _>(&mut flash, &mut workspace, &key)
+                    .unwrap(),
+                Some(key * 10)
+            );
+        }
+    }
+
+    let second_manifest = storage
+        .compact_map::<REGION_SIZE, REGION_COUNT, _, i32, i32, MAX_INDEXES, MAX_RUNS, 1>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(72),
+            &mut scratch_buffer,
+        )
+        .unwrap();
+    assert!(second_manifest.is_some());
+
+    let mut second_buffer = [0u8; REGION_SIZE];
+    let second = storage
+        .open_map::<REGION_SIZE, REGION_COUNT, _, i32, i32, MAX_INDEXES, MAX_RUNS>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(72),
+            &mut second_buffer,
+        )
+        .unwrap();
+    assert_eq!(second.run_count(), 1);
+    for run in 0..3 {
+        for offset in 0..MAX_INDEXES {
+            let key = run * 10 + offset as i32;
+            assert_eq!(
+                second
+                    .get::<REGION_SIZE, _>(&mut flash, &mut workspace, &key)
+                    .unwrap(),
+                Some(key * 10)
+            );
+        }
+    }
+}
+
 //= spec/ring.md#region-reclaim
 //= type=test
 //# `RING-REGION-RECLAIM-PRE-001` `reclaim_begin(r)` MUST be durable in

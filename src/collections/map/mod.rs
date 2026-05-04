@@ -240,7 +240,7 @@ enum MapRunSource {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-struct MapRunDescriptor<K> {
+pub(crate) struct MapRunDescriptor<K> {
     source: MapRunSource,
     generation: u64,
     first_region: u32,
@@ -469,7 +469,11 @@ where
     Ok(LookupResult::NotFound)
 }
 
-fn snapshot_range_len(snapshot: &[u8], start_index: usize, entry_count: usize) -> Result<usize, MapError> {
+fn snapshot_range_len(
+    snapshot: &[u8],
+    start_index: usize,
+    entry_count: usize,
+) -> Result<usize, MapError> {
     let (available, _, _, _) = snapshot_parts(snapshot)?;
     let end_index = start_index
         .checked_add(entry_count)
@@ -557,6 +561,81 @@ fn encode_snapshot_range_from_snapshot_into(
     Ok(snapshot_len)
 }
 
+fn encode_snapshot_from_entries_into<K, V>(
+    entries: &[Entry<K, V>],
+    snapshot: &mut [u8],
+) -> Result<usize, MapError>
+where
+    K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize,
+    V: Debug + Serialize,
+{
+    let entry_count = entries.len();
+    let refs_len = entry_count
+        .checked_mul(ENTRY_REF_SIZE)
+        .ok_or(MapError::SerializationError)?;
+    let entries_offset = SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE;
+    let temp_refs_start = snapshot
+        .len()
+        .checked_sub(refs_len)
+        .ok_or(MapError::BufferTooSmall)?;
+    if temp_refs_start < entries_offset {
+        return Err(MapError::BufferTooSmall);
+    }
+
+    let mut write_offset = entries_offset;
+    let mut compact_offset = ENTRY_COUNT_SIZE;
+    for (index, entry) in entries.iter().enumerate() {
+        let used = to_slice(entry, &mut snapshot[write_offset..temp_refs_start])?.len();
+        let next_write_offset = write_offset
+            .checked_add(used)
+            .ok_or(MapError::SerializationError)?;
+        let compact_end = compact_offset
+            .checked_add(used)
+            .ok_or(MapError::SerializationError)?;
+        let compact_start_ref: RefType = compact_offset
+            .try_into()
+            .map_err(|_| MapError::SerializationError)?;
+        let compact_end_ref: RefType = compact_end
+            .try_into()
+            .map_err(|_| MapError::SerializationError)?;
+
+        let ref_offset = temp_refs_start
+            .checked_add(
+                index
+                    .checked_mul(ENTRY_REF_SIZE)
+                    .ok_or(MapError::SerializationError)?,
+            )
+            .ok_or(MapError::SerializationError)?;
+        snapshot[ref_offset..ref_offset + ENTRY_REF_POINTER_SIZE]
+            .copy_from_slice(&compact_start_ref.to_le_bytes());
+        snapshot[ref_offset + ENTRY_REF_POINTER_SIZE..ref_offset + ENTRY_REF_SIZE]
+            .copy_from_slice(&compact_end_ref.to_le_bytes());
+
+        compact_offset = compact_end;
+        write_offset = next_write_offset;
+    }
+
+    let entry_bytes_len = write_offset
+        .checked_sub(entries_offset)
+        .ok_or(MapError::SerializationError)?;
+    let refs_start = write_offset;
+    let snapshot_len = refs_start
+        .checked_add(refs_len)
+        .ok_or(MapError::SerializationError)?;
+    if refs_start != temp_refs_start {
+        snapshot.copy_within(temp_refs_start..temp_refs_start + refs_len, refs_start);
+    }
+
+    let entry_count_u32 = u32::try_from(entry_count).map_err(|_| MapError::SerializationError)?;
+    snapshot[..SNAPSHOT_ENTRY_COUNT_SIZE].copy_from_slice(&entry_count_u32.to_le_bytes());
+    let entry_bytes_len_u32 =
+        u32::try_from(entry_bytes_len).map_err(|_| MapError::SerializationError)?;
+    snapshot[SNAPSHOT_ENTRY_COUNT_SIZE..SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE]
+        .copy_from_slice(&entry_bytes_len_u32.to_le_bytes());
+
+    Ok(snapshot_len)
+}
+
 struct RunSegmentView<'a> {
     generation: u64,
     next_region: Option<u32>,
@@ -575,12 +654,12 @@ fn parse_run_segment_payload(payload: &[u8]) -> Result<RunSegmentView<'_>, MapEr
         Some(next_region_raw)
     };
     let state_count = read_u32(payload, &mut offset)?;
-    let lower_key_len =
-        usize::try_from(read_u32(payload, &mut offset)?).map_err(|_| MapError::SerializationError)?;
-    let upper_key_len =
-        usize::try_from(read_u32(payload, &mut offset)?).map_err(|_| MapError::SerializationError)?;
-    let snapshot_len =
-        usize::try_from(read_u32(payload, &mut offset)?).map_err(|_| MapError::SerializationError)?;
+    let lower_key_len = usize::try_from(read_u32(payload, &mut offset)?)
+        .map_err(|_| MapError::SerializationError)?;
+    let upper_key_len = usize::try_from(read_u32(payload, &mut offset)?)
+        .map_err(|_| MapError::SerializationError)?;
+    let snapshot_len = usize::try_from(read_u32(payload, &mut offset)?)
+        .map_err(|_| MapError::SerializationError)?;
 
     let lower_key_end = offset
         .checked_add(lower_key_len)
@@ -636,8 +715,8 @@ fn legacy_snapshot_from_payload(region_payload: &[u8]) -> Result<&[u8], MapError
     }
 
     let mut offset = 0usize;
-    let snapshot_len =
-        usize::try_from(read_u32(region_payload, &mut offset)?).map_err(|_| MapError::SerializationError)?;
+    let snapshot_len = usize::try_from(read_u32(region_payload, &mut offset)?)
+        .map_err(|_| MapError::SerializationError)?;
     let snapshot_end = offset
         .checked_add(snapshot_len)
         .ok_or(MapError::SerializationError)?;
@@ -754,6 +833,29 @@ where
         u32::try_from(snapshot_len).map_err(|_| MapError::SerializationError)?,
     )?;
     Ok(used)
+}
+
+fn encode_run_segment_from_entries_into<K, V>(
+    run_payload: &mut [u8],
+    generation: u64,
+    next_region: Option<u32>,
+    entries: &[Entry<K, V>],
+) -> Result<usize, MapError>
+where
+    K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize,
+    V: Debug + Serialize,
+{
+    let lower = entries.first().ok_or(MapError::SerializationError)?;
+    let upper = entries.last().ok_or(MapError::SerializationError)?;
+    encode_run_segment_with_snapshot_writer(
+        run_payload,
+        generation,
+        next_region,
+        entries.len(),
+        &lower.key,
+        &upper.key,
+        |snapshot| encode_snapshot_from_entries_into(entries, snapshot),
+    )
 }
 
 impl EntryRef {
@@ -898,6 +1000,539 @@ pub struct LsmMap<'a, K, V, const MAX_INDEXES: usize, const MAX_RUNS: usize = MA
     map: &'a mut [u8],
     runs: Vec<MapRunDescriptor<K>, MAX_RUNS>,
     _phantom: PhantomData<(K, V)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RunChainOrder {
+    Ascending,
+    Descending,
+}
+
+struct RunEntryCursor<K, V>
+where
+    K: Debug + Ord + PartialOrd + Eq + PartialEq,
+    V: Debug,
+{
+    generation: u64,
+    first_region: u32,
+    region_count: u32,
+    order: Option<RunChainOrder>,
+    next_segment_position: Option<u32>,
+    active_region: Option<u32>,
+    active_position: Option<u32>,
+    entry_index: usize,
+    current: Option<Entry<K, V>>,
+}
+
+impl<K, V> RunEntryCursor<K, V>
+where
+    K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
+    V: Debug + Serialize + for<'de> Deserialize<'de>,
+{
+    fn new(run: &MapRunDescriptor<K>) -> Result<Self, MapStorageError> {
+        if run.source != MapRunSource::RunChain || run.region_count == 0 {
+            return Err(MapStorageError::Map(MapError::SerializationError));
+        }
+
+        Ok(Self {
+            generation: run.generation,
+            first_region: run.first_region,
+            region_count: run.region_count,
+            order: None,
+            next_segment_position: None,
+            active_region: None,
+            active_position: None,
+            entry_index: 0,
+            current: None,
+        })
+    }
+
+    fn advance<const REGION_SIZE: usize, IO: FlashIo>(
+        &mut self,
+        collection_id: CollectionId,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+    ) -> Result<(), MapStorageError> {
+        self.current = None;
+        self.ensure_order::<REGION_SIZE, IO>(collection_id, flash, workspace)?;
+
+        loop {
+            let region_index = match self.active_region {
+                Some(region_index) => region_index,
+                None => {
+                    let Some(position) = self.next_segment_position else {
+                        return Ok(());
+                    };
+                    let region_index = self.region_at_position::<REGION_SIZE, IO>(
+                        collection_id,
+                        flash,
+                        workspace,
+                        position,
+                    )?;
+                    self.active_region = Some(region_index);
+                    self.active_position = Some(position);
+                    self.entry_index = 0;
+                    region_index
+                }
+            };
+
+            let (region_bytes, _) = workspace.scan_buffers();
+            flash.read_region(region_index, 0, region_bytes)?;
+            let header = Header::decode(&region_bytes[..Header::ENCODED_LEN])?;
+            if header.collection_id != collection_id
+                || header.collection_format != MAP_RUN_V1_FORMAT
+            {
+                return Err(MapStorageError::InvalidRun {
+                    collection_id,
+                    region_index,
+                });
+            }
+            let payload_end = REGION_SIZE
+                .checked_sub(FreePointerFooter::ENCODED_LEN)
+                .ok_or(MapStorageError::Map(MapError::SerializationError))?;
+            let view = parse_run_segment_payload(&region_bytes[Header::ENCODED_LEN..payload_end])
+                .map_err(|_| MapStorageError::InvalidRun {
+                    collection_id,
+                    region_index,
+                })?;
+            if view.generation != self.generation {
+                return Err(MapStorageError::InvalidRun {
+                    collection_id,
+                    region_index,
+                });
+            }
+
+            let (entry_count, _, _, _) = snapshot_parts(view.snapshot)?;
+            if entry_count == 0 {
+                return Err(MapStorageError::InvalidRun {
+                    collection_id,
+                    region_index,
+                });
+            }
+            if self.entry_index < entry_count {
+                self.current = Some(snapshot_entry(view.snapshot, self.entry_index)?);
+                self.entry_index = self
+                    .entry_index
+                    .checked_add(1)
+                    .ok_or(MapError::SerializationError)?;
+                return Ok(());
+            }
+
+            self.advance_segment_position()?;
+            self.active_region = None;
+            self.active_position = None;
+            self.entry_index = 0;
+        }
+    }
+
+    fn ensure_order<const REGION_SIZE: usize, IO: FlashIo>(
+        &mut self,
+        collection_id: CollectionId,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+    ) -> Result<(), MapStorageError> {
+        if self.order.is_some() {
+            return Ok(());
+        }
+
+        if self.region_count == 1 {
+            self.order = Some(RunChainOrder::Ascending);
+            self.next_segment_position = Some(0);
+            return Ok(());
+        }
+
+        let first_region =
+            self.region_at_position::<REGION_SIZE, IO>(collection_id, flash, workspace, 0)?;
+        let second_region =
+            self.region_at_position::<REGION_SIZE, IO>(collection_id, flash, workspace, 1)?;
+        let (first_lower, first_upper) = read_run_segment_bounds::<K, REGION_SIZE, IO>(
+            collection_id,
+            self.generation,
+            flash,
+            workspace,
+            first_region,
+        )?;
+        let (second_lower, second_upper) = read_run_segment_bounds::<K, REGION_SIZE, IO>(
+            collection_id,
+            self.generation,
+            flash,
+            workspace,
+            second_region,
+        )?;
+
+        if first_upper <= second_lower {
+            self.order = Some(RunChainOrder::Ascending);
+            self.next_segment_position = Some(0);
+        } else if second_upper <= first_lower {
+            self.order = Some(RunChainOrder::Descending);
+            self.next_segment_position = Some(
+                self.region_count
+                    .checked_sub(1)
+                    .ok_or(MapError::SerializationError)?,
+            );
+        } else {
+            return Err(MapStorageError::InvalidRun {
+                collection_id,
+                region_index: self.first_region,
+            });
+        }
+
+        Ok(())
+    }
+
+    fn advance_segment_position(&mut self) -> Result<(), MapStorageError> {
+        let active_position = self.active_position.ok_or(MapError::SerializationError)?;
+        self.next_segment_position = match self.order.ok_or(MapError::SerializationError)? {
+            RunChainOrder::Ascending => {
+                let next = active_position
+                    .checked_add(1)
+                    .ok_or(MapError::SerializationError)?;
+                if next < self.region_count {
+                    Some(next)
+                } else {
+                    None
+                }
+            }
+            RunChainOrder::Descending => active_position.checked_sub(1),
+        };
+        Ok(())
+    }
+
+    fn region_at_position<const REGION_SIZE: usize, IO: FlashIo>(
+        &self,
+        collection_id: CollectionId,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        position: u32,
+    ) -> Result<u32, MapStorageError> {
+        if position >= self.region_count {
+            return Err(MapStorageError::InvalidRun {
+                collection_id,
+                region_index: self.first_region,
+            });
+        }
+
+        let mut region_index = self.first_region;
+        for _ in 0..position {
+            region_index = read_run_segment_next_region::<REGION_SIZE, IO>(
+                collection_id,
+                self.generation,
+                flash,
+                workspace,
+                region_index,
+            )?
+            .ok_or(MapStorageError::InvalidRun {
+                collection_id,
+                region_index,
+            })?;
+        }
+
+        Ok(region_index)
+    }
+}
+
+struct CompactionRunWriter<K, V, const MAX_INDEXES: usize>
+where
+    K: Debug + Ord + PartialOrd + Eq + PartialEq,
+    V: Debug,
+{
+    generation: u64,
+    next_region: Option<u32>,
+    first_region: Option<u32>,
+    lowest_region: Option<u32>,
+    region_count: u32,
+    state_count: u32,
+    segment_entries: Vec<Entry<K, V>, MAX_INDEXES>,
+}
+
+impl<K, V, const MAX_INDEXES: usize> CompactionRunWriter<K, V, MAX_INDEXES>
+where
+    K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
+    V: Debug + Serialize + for<'de> Deserialize<'de>,
+{
+    fn new(generation: u64) -> Self {
+        Self {
+            generation,
+            next_region: None,
+            first_region: None,
+            lowest_region: None,
+            region_count: 0,
+            state_count: 0,
+            segment_entries: Vec::new(),
+        }
+    }
+
+    fn push<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+        const MAX_COLLECTIONS: usize,
+        const MAX_PENDING_RECLAIMS: usize,
+    >(
+        &mut self,
+        collection_id: CollectionId,
+        storage: &mut StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        entry: Entry<K, V>,
+    ) -> Result<(), MapStorageError> {
+        match self.segment_entries.push(entry) {
+            Ok(()) => {
+                if self.segment_entries_fit(workspace)? {
+                    self.increment_state_count()?;
+                    return Ok(());
+                }
+
+                let entry = self
+                    .segment_entries
+                    .pop()
+                    .ok_or(MapError::SerializationError)?;
+                self.flush_segment::<
+                    REGION_SIZE,
+                    REGION_COUNT,
+                    IO,
+                    MAX_COLLECTIONS,
+                    MAX_PENDING_RECLAIMS,
+                >(collection_id, storage, flash, workspace)?;
+                self.segment_entries
+                    .push(entry)
+                    .map_err(|_| MapError::BufferTooSmall)?;
+                if !self.segment_entries_fit(workspace)? {
+                    return Err(MapStorageError::Map(MapError::BufferTooSmall));
+                }
+                self.increment_state_count()
+            }
+            Err(entry) => {
+                self.flush_segment::<
+                    REGION_SIZE,
+                    REGION_COUNT,
+                    IO,
+                    MAX_COLLECTIONS,
+                    MAX_PENDING_RECLAIMS,
+                >(collection_id, storage, flash, workspace)?;
+                self.segment_entries
+                    .push(entry)
+                    .map_err(|_| MapError::BufferTooSmall)?;
+                if !self.segment_entries_fit(workspace)? {
+                    return Err(MapStorageError::Map(MapError::BufferTooSmall));
+                }
+                self.increment_state_count()
+            }
+        }
+    }
+
+    fn finish<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+        const MAX_COLLECTIONS: usize,
+        const MAX_PENDING_RECLAIMS: usize,
+    >(
+        mut self,
+        collection_id: CollectionId,
+        storage: &mut StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+    ) -> Result<Option<MapRunDescriptor<K>>, MapStorageError> {
+        self.flush_segment::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>(
+            collection_id,
+            storage,
+            flash,
+            workspace,
+        )?;
+
+        let Some(first_region) = self.first_region else {
+            return Ok(None);
+        };
+        let lowest_region = self.lowest_region.ok_or(MapError::SerializationError)?;
+        let (lower_key, _) = read_run_segment_bounds::<K, REGION_SIZE, IO>(
+            collection_id,
+            self.generation,
+            flash,
+            workspace,
+            lowest_region,
+        )?;
+        let (_, upper_key) = read_run_segment_bounds::<K, REGION_SIZE, IO>(
+            collection_id,
+            self.generation,
+            flash,
+            workspace,
+            first_region,
+        )?;
+
+        Ok(Some(MapRunDescriptor {
+            source: MapRunSource::RunChain,
+            generation: self.generation,
+            first_region,
+            region_count: self.region_count,
+            approx_state_count: self.state_count,
+            lower_key: Some(lower_key),
+            upper_key: Some(upper_key),
+        }))
+    }
+
+    fn segment_entries_fit<const REGION_SIZE: usize>(
+        &self,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+    ) -> Result<bool, MapError> {
+        let (payload, _) = workspace.encode_buffers();
+        match encode_run_segment_from_entries_into(
+            payload,
+            self.generation,
+            self.next_region,
+            self.segment_entries.as_slice(),
+        ) {
+            Ok(_) => Ok(true),
+            Err(MapError::BufferTooSmall) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn flush_segment<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+        const MAX_COLLECTIONS: usize,
+        const MAX_PENDING_RECLAIMS: usize,
+    >(
+        &mut self,
+        collection_id: CollectionId,
+        storage: &mut StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+    ) -> Result<(), MapStorageError> {
+        if self.segment_entries.is_empty() {
+            return Ok(());
+        }
+
+        if let Some(region_index) = storage.last_free_list_head() {
+            storage
+                .ensure_stage_region_append_room_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
+                    flash,
+                    workspace,
+                    region_index,
+                )?;
+        }
+        let region_index =
+            storage.reserve_next_region::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace)?;
+        {
+            let (payload, _) = workspace.encode_buffers();
+            let used = encode_run_segment_from_entries_into(
+                payload,
+                self.generation,
+                self.next_region,
+                self.segment_entries.as_slice(),
+            )?;
+            storage.write_committed_region::<REGION_SIZE, REGION_COUNT, IO>(
+                flash,
+                region_index,
+                collection_id,
+                MAP_RUN_V1_FORMAT,
+                &payload[..used],
+            )?;
+        }
+        storage.stage_ready_region_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
+            flash,
+            workspace,
+            region_index,
+        )?;
+
+        if self.lowest_region.is_none() {
+            self.lowest_region = Some(region_index);
+        }
+        self.next_region = Some(region_index);
+        self.first_region = Some(region_index);
+        self.region_count = self
+            .region_count
+            .checked_add(1)
+            .ok_or(MapError::SerializationError)?;
+        self.segment_entries.clear();
+        Ok(())
+    }
+
+    fn increment_state_count(&mut self) -> Result<(), MapStorageError> {
+        self.state_count = self
+            .state_count
+            .checked_add(1)
+            .ok_or(MapError::SerializationError)?;
+        Ok(())
+    }
+}
+
+fn read_run_segment_bounds<K, const REGION_SIZE: usize, IO: FlashIo>(
+    collection_id: CollectionId,
+    generation: u64,
+    flash: &mut IO,
+    workspace: &mut StorageWorkspace<REGION_SIZE>,
+    region_index: u32,
+) -> Result<(K, K), MapStorageError>
+where
+    K: Debug + Ord + PartialOrd + Eq + PartialEq + for<'de> Deserialize<'de>,
+{
+    let (region_bytes, _) = workspace.scan_buffers();
+    flash.read_region(region_index, 0, region_bytes)?;
+    let header = Header::decode(&region_bytes[..Header::ENCODED_LEN])?;
+    if header.collection_id != collection_id || header.collection_format != MAP_RUN_V1_FORMAT {
+        return Err(MapStorageError::InvalidRun {
+            collection_id,
+            region_index,
+        });
+    }
+    let payload_end = REGION_SIZE
+        .checked_sub(FreePointerFooter::ENCODED_LEN)
+        .ok_or(MapStorageError::Map(MapError::SerializationError))?;
+    let view = parse_run_segment_payload(&region_bytes[Header::ENCODED_LEN..payload_end]).map_err(
+        |_| MapStorageError::InvalidRun {
+            collection_id,
+            region_index,
+        },
+    )?;
+    if view.generation != generation {
+        return Err(MapStorageError::InvalidRun {
+            collection_id,
+            region_index,
+        });
+    }
+
+    Ok((
+        from_bytes(view.lower_key).map_err(MapError::from)?,
+        from_bytes(view.upper_key).map_err(MapError::from)?,
+    ))
+}
+
+fn read_run_segment_next_region<const REGION_SIZE: usize, IO: FlashIo>(
+    collection_id: CollectionId,
+    generation: u64,
+    flash: &mut IO,
+    workspace: &mut StorageWorkspace<REGION_SIZE>,
+    region_index: u32,
+) -> Result<Option<u32>, MapStorageError> {
+    let (region_bytes, _) = workspace.scan_buffers();
+    flash.read_region(region_index, 0, region_bytes)?;
+    let header = Header::decode(&region_bytes[..Header::ENCODED_LEN])?;
+    if header.collection_id != collection_id || header.collection_format != MAP_RUN_V1_FORMAT {
+        return Err(MapStorageError::InvalidRun {
+            collection_id,
+            region_index,
+        });
+    }
+    let payload_end = REGION_SIZE
+        .checked_sub(FreePointerFooter::ENCODED_LEN)
+        .ok_or(MapStorageError::Map(MapError::SerializationError))?;
+    let view = parse_run_segment_payload(&region_bytes[Header::ENCODED_LEN..payload_end]).map_err(
+        |_| MapStorageError::InvalidRun {
+            collection_id,
+            region_index,
+        },
+    )?;
+    if view.generation != generation {
+        return Err(MapStorageError::InvalidRun {
+            collection_id,
+            region_index,
+        });
+    }
+
+    Ok(view.next_region)
 }
 
 impl<'a, K, V, const MAX_INDEXES: usize, const MAX_RUNS: usize>
@@ -1076,14 +1711,12 @@ where
         key: &K,
     ) -> Result<LookupResult<V>, MapStorageError> {
         match run.source {
-            MapRunSource::LegacyRegion => {
-                self.lookup_legacy_region::<REGION_SIZE, IO>(
-                    flash,
-                    workspace,
-                    run.first_region,
-                    key,
-                )
-            }
+            MapRunSource::LegacyRegion => self.lookup_legacy_region::<REGION_SIZE, IO>(
+                flash,
+                workspace,
+                run.first_region,
+                key,
+            ),
             MapRunSource::RunChain => {
                 self.lookup_run_chain::<REGION_SIZE, IO>(flash, workspace, run, key)
             }
@@ -1141,9 +1774,9 @@ where
                 .ok_or(MapStorageError::Map(MapError::SerializationError))?;
             let view = parse_run_segment_payload(&region_bytes[Header::ENCODED_LEN..payload_end])
                 .map_err(|_| MapStorageError::InvalidRun {
-                    collection_id: self.id,
-                    region_index,
-                })?;
+                collection_id: self.id,
+                region_index,
+            })?;
             if view.generation != run.generation {
                 return Err(MapStorageError::InvalidRun {
                     collection_id: self.id,
@@ -1178,75 +1811,6 @@ where
             }
         }
         Ok(count)
-    }
-
-    fn apply_snapshot_to_frontier(&mut self, snapshot: &[u8]) -> Result<(), MapError> {
-        let (entry_count, _, _, _) = snapshot_parts(snapshot)?;
-        for index in 0..entry_count {
-            let entry: Entry<K, V> = snapshot_entry(snapshot, index)?;
-            self.set_worker(entry.key, entry.value)?;
-        }
-        Ok(())
-    }
-
-    fn materialize_legacy_run_into<const REGION_SIZE: usize, IO: FlashIo>(
-        &self,
-        flash: &mut IO,
-        workspace: &mut StorageWorkspace<REGION_SIZE>,
-        region_index: u32,
-        target: &mut Self,
-    ) -> Result<(), MapStorageError> {
-        let (region_bytes, _) = workspace.scan_buffers();
-        flash.read_region(region_index, 0, region_bytes)?;
-        let header = Header::decode(&region_bytes[..Header::ENCODED_LEN])?;
-        if header.collection_id != self.id || header.collection_format != MAP_REGION_V1_FORMAT {
-            return Err(MapStorageError::InvalidRun {
-                collection_id: self.id,
-                region_index,
-            });
-        }
-        let payload_end = REGION_SIZE
-            .checked_sub(FreePointerFooter::ENCODED_LEN)
-            .ok_or(MapStorageError::Map(MapError::SerializationError))?;
-        let snapshot = legacy_snapshot_from_payload(&region_bytes[Header::ENCODED_LEN..payload_end])?;
-        target.apply_snapshot_to_frontier(snapshot)?;
-        Ok(())
-    }
-
-    fn materialize_run_chain_into<const REGION_SIZE: usize, IO: FlashIo>(
-        &self,
-        flash: &mut IO,
-        workspace: &mut StorageWorkspace<REGION_SIZE>,
-        run: &MapRunDescriptor<K>,
-        target: &mut Self,
-    ) -> Result<(), MapStorageError> {
-        let mut current_region = Some(run.first_region);
-        for _ in 0..run.region_count {
-            let region_index = current_region.ok_or(MapStorageError::InvalidRun {
-                collection_id: self.id,
-                region_index: run.first_region,
-            })?;
-            let (region_bytes, _) = workspace.scan_buffers();
-            flash.read_region(region_index, 0, region_bytes)?;
-            let header = Header::decode(&region_bytes[..Header::ENCODED_LEN])?;
-            if header.collection_id != self.id || header.collection_format != MAP_RUN_V1_FORMAT {
-                return Err(MapStorageError::InvalidRun {
-                    collection_id: self.id,
-                    region_index,
-                });
-            }
-            let payload_end = REGION_SIZE
-                .checked_sub(FreePointerFooter::ENCODED_LEN)
-                .ok_or(MapStorageError::Map(MapError::SerializationError))?;
-            let view = parse_run_segment_payload(&region_bytes[Header::ENCODED_LEN..payload_end])
-                .map_err(|_| MapStorageError::InvalidRun {
-                    collection_id: self.id,
-                    region_index,
-                })?;
-            target.apply_snapshot_to_frontier(view.snapshot)?;
-            current_region = view.next_region;
-        }
-        Ok(())
     }
 
     pub(crate) fn selected_compaction_run_count(
@@ -1309,31 +1873,129 @@ where
         Ok(Some(selected_runs))
     }
 
-    pub(crate) fn materialize_run_prefix_into<const REGION_SIZE: usize, IO: FlashIo>(
+    pub(crate) fn selected_compaction_state_count(
         &self,
+        selected_runs: usize,
+    ) -> Result<u32, MapError> {
+        if selected_runs > self.runs.len() {
+            return Err(MapError::IndexOutOfBounds);
+        }
+
+        let mut state_count = 0u32;
+        for run in self.runs.iter().take(selected_runs) {
+            if run.source != MapRunSource::RunChain {
+                return Err(MapError::SerializationError);
+            }
+            state_count = state_count
+                .checked_add(run.approx_state_count)
+                .ok_or(MapError::SerializationError)?;
+        }
+        Ok(state_count)
+    }
+
+    pub(crate) fn write_compacted_run_to_storage<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+        const MAX_COLLECTIONS: usize,
+        const MAX_PENDING_RECLAIMS: usize,
+    >(
+        &self,
+        storage: &mut StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
         selected_runs: usize,
-        target: &mut Self,
-    ) -> Result<(), MapStorageError> {
-        for run in self.runs.iter().take(selected_runs).rev() {
-            match run.source {
-                MapRunSource::LegacyRegion => {
-                    self.materialize_legacy_run_into::<REGION_SIZE, IO>(
-                        flash,
-                        workspace,
-                        run.first_region,
-                        target,
-                    )?;
-                }
-                MapRunSource::RunChain => {
-                    self.materialize_run_chain_into::<REGION_SIZE, IO>(
-                        flash, workspace, run, target,
-                    )?;
+    ) -> Result<Option<MapRunDescriptor<K>>, MapStorageError> {
+        if selected_runs == 0 {
+            return Ok(None);
+        }
+        if selected_runs > self.runs.len() {
+            return Err(MapStorageError::Map(MapError::IndexOutOfBounds));
+        }
+
+        let mut cursors = Vec::<RunEntryCursor<K, V>, MAX_RUNS>::new();
+        for run in self.runs.iter().take(selected_runs) {
+            let mut cursor = RunEntryCursor::new(run)?;
+            cursor.advance::<REGION_SIZE, IO>(self.id, flash, workspace)?;
+            cursors
+                .push(cursor)
+                .map_err(|_| MapStorageError::TooManyRuns {
+                    collection_id: self.id,
+                    max_runs: MAX_RUNS,
+                })?;
+        }
+
+        let mut writer =
+            CompactionRunWriter::<K, V, MAX_INDEXES>::new(self.next_run_generation());
+        loop {
+            let mut min_index: Option<usize> = None;
+            for index in 0..cursors.len() {
+                let Some(entry) = cursors[index].current.as_ref() else {
+                    continue;
+                };
+                let should_replace = match min_index {
+                    Some(current_min) => {
+                        let min_entry = cursors[current_min]
+                            .current
+                            .as_ref()
+                            .ok_or(MapError::SerializationError)?;
+                        entry.key.cmp(&min_entry.key) == core::cmp::Ordering::Less
+                    }
+                    None => true,
+                };
+                if should_replace {
+                    min_index = Some(index);
                 }
             }
+
+            let Some(min_index) = min_index else {
+                break;
+            };
+            let mut duplicate_indices = Vec::<usize, MAX_RUNS>::new();
+            for index in 0..cursors.len() {
+                let same_key = {
+                    let min_key = &cursors[min_index]
+                        .current
+                        .as_ref()
+                        .ok_or(MapError::SerializationError)?
+                        .key;
+                    cursors[index]
+                        .current
+                        .as_ref()
+                        .is_some_and(|entry| entry.key.eq(min_key))
+                };
+                if same_key {
+                    duplicate_indices
+                        .push(index)
+                        .map_err(|_| MapStorageError::TooManyRuns {
+                            collection_id: self.id,
+                            max_runs: MAX_RUNS,
+                        })?;
+                }
+            }
+
+            let winning_entry = cursors[min_index]
+                .current
+                .take()
+                .ok_or(MapError::SerializationError)?;
+            for index in duplicate_indices.iter().copied() {
+                if index != min_index {
+                    cursors[index].current.take();
+                }
+                cursors[index].advance::<REGION_SIZE, IO>(self.id, flash, workspace)?;
+            }
+            writer.push::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>(
+                self.id,
+                storage,
+                flash,
+                workspace,
+                winning_entry,
+            )?;
         }
-        Ok(())
+
+        writer.finish::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>(
+            self.id, storage, flash, workspace,
+        )
     }
 
     pub(crate) fn move_unselected_runs_into(
@@ -1628,7 +2290,8 @@ where
 
         let entry_bytes_len_u32 =
             u32::try_from(entry_bytes_len).map_err(|_| MapError::SerializationError)?;
-        snapshot[SNAPSHOT_ENTRY_COUNT_SIZE..SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE]
+        snapshot
+            [SNAPSHOT_ENTRY_COUNT_SIZE..SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE]
             .copy_from_slice(&entry_bytes_len_u32.to_le_bytes());
         snapshot.copy_within(
             refs_staging_start..snapshot_len,
@@ -1770,10 +2433,12 @@ where
     ) -> Result<(), MapStorageError> {
         self.runs.clear();
         let mut offset = 0usize;
-        let run_count = usize::try_from(read_u32(manifest_payload, &mut offset)?)
-            .map_err(|_| MapStorageError::InvalidManifest {
-                collection_id,
-                region_index: manifest_region,
+        let run_count =
+            usize::try_from(read_u32(manifest_payload, &mut offset)?).map_err(|_| {
+                MapStorageError::InvalidManifest {
+                    collection_id,
+                    region_index: manifest_region,
+                }
             })?;
         if run_count > MAX_RUNS {
             return Err(MapStorageError::TooManyRuns {
@@ -1787,15 +2452,19 @@ where
             let first_region = read_u32(manifest_payload, &mut offset)?;
             let region_count = read_u32(manifest_payload, &mut offset)?;
             let approx_state_count = read_u32(manifest_payload, &mut offset)?;
-            let lower_key_len = usize::try_from(read_u32(manifest_payload, &mut offset)?)
-                .map_err(|_| MapStorageError::InvalidManifest {
-                    collection_id,
-                    region_index: manifest_region,
+            let lower_key_len =
+                usize::try_from(read_u32(manifest_payload, &mut offset)?).map_err(|_| {
+                    MapStorageError::InvalidManifest {
+                        collection_id,
+                        region_index: manifest_region,
+                    }
                 })?;
-            let upper_key_len = usize::try_from(read_u32(manifest_payload, &mut offset)?)
-                .map_err(|_| MapStorageError::InvalidManifest {
-                    collection_id,
-                    region_index: manifest_region,
+            let upper_key_len =
+                usize::try_from(read_u32(manifest_payload, &mut offset)?).map_err(|_| {
+                    MapStorageError::InvalidManifest {
+                        collection_id,
+                        region_index: manifest_region,
+                    }
                 })?;
             if region_count == 0 {
                 return Err(MapStorageError::InvalidManifest {
@@ -1804,18 +2473,20 @@ where
                 });
             }
 
-            let lower_end = offset
-                .checked_add(lower_key_len)
-                .ok_or(MapStorageError::InvalidManifest {
-                    collection_id,
-                    region_index: first_region,
-                })?;
-            let upper_end = lower_end.checked_add(upper_key_len).ok_or(
-                MapStorageError::InvalidManifest {
-                    collection_id,
-                    region_index: first_region,
-                },
-            )?;
+            let lower_end =
+                offset
+                    .checked_add(lower_key_len)
+                    .ok_or(MapStorageError::InvalidManifest {
+                        collection_id,
+                        region_index: first_region,
+                    })?;
+            let upper_end =
+                lower_end
+                    .checked_add(upper_key_len)
+                    .ok_or(MapStorageError::InvalidManifest {
+                        collection_id,
+                        region_index: first_region,
+                    })?;
             if upper_end > manifest_payload.len() {
                 return Err(MapStorageError::InvalidManifest {
                     collection_id,
@@ -1831,10 +2502,7 @@ where
             let upper_key = if upper_key_len == 0 {
                 None
             } else {
-                Some(
-                    from_bytes(&manifest_payload[lower_end..upper_end])
-                        .map_err(MapError::from)?,
-                )
+                Some(from_bytes(&manifest_payload[lower_end..upper_end]).map_err(MapError::from)?)
             };
             offset = upper_end;
 
@@ -2229,11 +2897,12 @@ where
                 self.largest_frontier_segment_ending_at(payload, generation, end_index)?
             };
             if let Some(region_index) = storage.last_free_list_head() {
-                storage.ensure_stage_region_append_room_with_rotation::<
-                    REGION_SIZE,
-                    REGION_COUNT,
-                    IO,
-                >(flash, workspace, region_index)?;
+                storage
+                    .ensure_stage_region_append_room_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
+                        flash,
+                        workspace,
+                        region_index,
+                    )?;
             }
             let region_index =
                 storage.reserve_next_region::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace)?;
@@ -2311,11 +2980,12 @@ where
                 Self::largest_snapshot_segment_ending_at(payload, generation, source, end_index)?
             };
             if let Some(region_index) = storage.last_free_list_head() {
-                storage.ensure_stage_region_append_room_with_rotation::<
-                    REGION_SIZE,
-                    REGION_COUNT,
-                    IO,
-                >(flash, workspace, region_index)?;
+                storage
+                    .ensure_stage_region_append_room_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
+                        flash,
+                        workspace,
+                        region_index,
+                    )?;
             }
             let region_index =
                 storage.reserve_next_region::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace)?;
@@ -2360,6 +3030,106 @@ where
             lower_key: Some(lower.key),
             upper_key: Some(upper.key),
         }))
+    }
+
+    pub(crate) fn commit_manifest_to_storage<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+        const MAX_COLLECTIONS: usize,
+        const MAX_PENDING_RECLAIMS: usize,
+    >(
+        &mut self,
+        storage: &mut StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        extra_newest: Option<MapRunDescriptor<K>>,
+    ) -> Result<u32, MapStorageError> {
+        let previous_region = storage
+            .collections()
+            .iter()
+            .find(|collection| collection.collection_id() == self.id)
+            .and_then(|collection| match collection.basis() {
+                crate::StartupCollectionBasis::Region(region_index) => Some(region_index),
+                _ => None,
+            });
+
+        let prior_chain_count = self
+            .runs
+            .iter()
+            .filter(|run| run.source == MapRunSource::RunChain)
+            .count();
+        let manifest_run_count = prior_chain_count
+            .checked_add(usize::from(extra_newest.is_some()))
+            .ok_or(MapStorageError::Map(MapError::SerializationError))?;
+        if manifest_run_count > MAX_RUNS {
+            return Err(MapStorageError::TooManyRuns {
+                collection_id: self.id,
+                max_runs: MAX_RUNS,
+            });
+        }
+
+        if let Some(region_index) = storage.last_free_list_head() {
+            storage.ensure_head_append_room_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
+                flash,
+                workspace,
+                self.id,
+                CollectionType::MAP_CODE,
+                region_index,
+            )?;
+        }
+        let manifest_region =
+            storage.reserve_next_region::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace)?;
+        {
+            let (payload, _) = workspace.encode_buffers();
+            let used = self.encode_manifest_into(payload, extra_newest.as_ref(), None)?;
+            storage.write_committed_region::<REGION_SIZE, REGION_COUNT, IO>(
+                flash,
+                manifest_region,
+                self.id,
+                MAP_MANIFEST_V1_FORMAT,
+                &payload[..used],
+            )?;
+        }
+        storage.append_head_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
+            flash,
+            workspace,
+            self.id,
+            CollectionType::MAP_CODE,
+            manifest_region,
+        )?;
+
+        if let Some(previous_region) = previous_region {
+            storage.append_reclaim_begin_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
+                flash,
+                workspace,
+                previous_region,
+            )?;
+        }
+
+        let mut retained = Vec::<MapRunDescriptor<K>, MAX_RUNS>::new();
+        if let Some(run) = extra_newest {
+            retained
+                .push(run)
+                .map_err(|_| MapStorageError::TooManyRuns {
+                    collection_id: self.id,
+                    max_runs: MAX_RUNS,
+                })?;
+        }
+        while !self.runs.is_empty() {
+            let run = self.runs.remove(0);
+            if run.source == MapRunSource::RunChain {
+                retained
+                    .push(run)
+                    .map_err(|_| MapStorageError::TooManyRuns {
+                        collection_id: self.id,
+                        max_runs: MAX_RUNS,
+                    })?;
+            }
+        }
+        self.runs = retained;
+        self.clear_frontier();
+        Ok(manifest_region)
     }
 
     /// Flushes this frontier into immutable run regions and commits a manifest head.
@@ -2444,8 +3214,7 @@ where
             let mut legacy_region = [0u8; REGION_SIZE];
             flash.read_region(legacy.first_region, 0, &mut legacy_region)?;
             let header = Header::decode(&legacy_region[..Header::ENCODED_LEN])?;
-            if header.collection_id != self.id || header.collection_format != MAP_REGION_V1_FORMAT
-            {
+            if header.collection_id != self.id || header.collection_format != MAP_REGION_V1_FORMAT {
                 return Err(MapStorageError::InvalidRun {
                     collection_id: self.id,
                     region_index: legacy.first_region,
@@ -2780,31 +3549,30 @@ pub(crate) fn map_head_region_references_region<const REGION_SIZE: usize, IO: Fl
     }
 
     let mut offset = 0usize;
-    let run_count = usize::try_from(read_u32(payload, &mut offset)?)
-        .map_err(|_| MapStorageError::InvalidManifest {
+    let run_count = usize::try_from(read_u32(payload, &mut offset)?).map_err(|_| {
+        MapStorageError::InvalidManifest {
             collection_id,
             region_index: head_region,
-        })?;
+        }
+    })?;
     let mut run_region = [0u8; REGION_SIZE];
     for _ in 0..run_count {
         let _generation = read_u64(payload, &mut offset)?;
         let first_region = read_u32(payload, &mut offset)?;
         let region_count = read_u32(payload, &mut offset)?;
         let _approx_state_count = read_u32(payload, &mut offset)?;
-        let lower_key_len =
-            usize::try_from(read_u32(payload, &mut offset)?).map_err(|_| {
-                MapStorageError::InvalidManifest {
-                    collection_id,
-                    region_index: head_region,
-                }
-            })?;
-        let upper_key_len =
-            usize::try_from(read_u32(payload, &mut offset)?).map_err(|_| {
-                MapStorageError::InvalidManifest {
-                    collection_id,
-                    region_index: head_region,
-                }
-            })?;
+        let lower_key_len = usize::try_from(read_u32(payload, &mut offset)?).map_err(|_| {
+            MapStorageError::InvalidManifest {
+                collection_id,
+                region_index: head_region,
+            }
+        })?;
+        let upper_key_len = usize::try_from(read_u32(payload, &mut offset)?).map_err(|_| {
+            MapStorageError::InvalidManifest {
+                collection_id,
+                region_index: head_region,
+            }
+        })?;
         let bounds_end = offset
             .checked_add(lower_key_len)
             .and_then(|end| end.checked_add(upper_key_len))
