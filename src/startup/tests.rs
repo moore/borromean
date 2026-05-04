@@ -293,7 +293,7 @@ fn open_formatted_store_from_fresh_format() -> (StorageMetadata, StartupState<8,
 //= type=test
 //# RING-STARTUP-001 Read `StorageMetadata`, validate `metadata_checksum`, and validate static geometry (`region_size`, `region_count`, `min_free_regions`, `erased_byte`, `wal_write_granule`, `wal_record_magic`, and storage version support).
 #[test]
-fn open_formatted_store_requires_metadata() {
+fn requirement_open_formatted_store_requires_metadata() {
     let mut flash = MockFlash::<64, 4, 32>::new(0xff);
     let error = open_formatted_store::<64, 4, _, 8, 4>(&mut flash).unwrap_err();
     assert_eq!(error, StartupError::MissingMetadata);
@@ -303,7 +303,7 @@ fn open_formatted_store_requires_metadata() {
 //= type=test
 //# RING-STARTUP-003 Select WAL tail as the unique candidate WAL region with the largest valid sequence. If no candidate WAL region exists, or if multiple candidate WAL regions share that largest valid sequence, return an error.
 #[test]
-fn open_formatted_store_rejects_duplicate_max_sequence_wal_candidates() {
+fn requirement_open_formatted_store_rejects_duplicate_max_sequence_wal_candidates() {
     let mut flash = MockFlash::<64, 4, 32>::new(0xff);
     flash.format_empty_store(1, 8, 0xa5).unwrap();
 
@@ -324,7 +324,7 @@ fn open_formatted_store_rejects_duplicate_max_sequence_wal_candidates() {
 //= type=test
 //# RING-STARTUP-006 Parse records in WAL order (region order, then offset order).
 #[test]
-fn open_formatted_store_rejects_post_corruption_record_at_the_next_wal_offset() {
+fn requirement_open_formatted_store_rejects_post_corruption_record_at_the_next_wal_offset() {
     let (wal_offset, error) = open_formatted_store_after_corrupt_slot_without_wal_recovery();
     assert_eq!(
         error,
@@ -342,7 +342,7 @@ fn open_formatted_store_rejects_post_corruption_record_at_the_next_wal_offset() 
 //# ignored corrupt/torn aligned slot until a later valid `wal_recovery`
 //# record is replayed.
 #[test]
-fn open_formatted_store_requires_wal_recovery_before_accepting_later_records() {
+fn requirement_open_formatted_store_requires_wal_recovery_before_accepting_later_records() {
     let (wal_offset, error) = open_formatted_store_after_corrupt_slot_without_wal_recovery();
     assert_eq!(
         error,
@@ -357,7 +357,7 @@ fn open_formatted_store_requires_wal_recovery_before_accepting_later_records() {
 //= type=test
 //# RING-STARTUP-021 Reconstruct runtime `free_list_tail` by following free-pointer links starting at `last_free_list_head` until reaching a free region whose free-pointer slot is uninitialized.
 #[test]
-fn open_formatted_store_rejects_invalid_free_list_chain() {
+fn requirement_open_formatted_store_rejects_invalid_free_list_chain() {
     let mut flash = MockFlash::<64, 4, 32>::new(0xff);
     flash.format_empty_store(1, 8, 0xa5).unwrap();
 
@@ -381,7 +381,7 @@ fn open_formatted_store_rejects_invalid_free_list_chain() {
 //= type=test
 //# RING-STARTUP-011 On `alloc_begin(region_index, free_list_head_after)`: if `ready_region` is already set, return an error because replay found two unmatched allocation reservations. if `last_free_list_head = none`, return an error because allocation cannot consume an empty durable free list. if `last_free_list_head != region_index`, return an error because `alloc_begin` did not consume the current durable free-list head. set durable `last_free_list_head` to `free_list_head_after`. set `ready_region = region_index`.
 #[test]
-fn open_formatted_store_replays_alloc_begin_into_allocator_runtime_state() {
+fn requirement_open_formatted_store_replays_alloc_begin_into_allocator_runtime_state() {
     let (_next_offset, state) = open_formatted_store_after_replayed_alloc_begin();
     assert_eq!(state.last_free_list_head(), Some(2));
     assert_eq!(state.ready_region(), Some(1));
@@ -391,7 +391,7 @@ fn open_formatted_store_replays_alloc_begin_into_allocator_runtime_state() {
 //= type=test
 //# RING-STARTUP-020 Initialize allocator state from `last_free_list_head`.
 #[test]
-fn open_formatted_store_initializes_allocator_state_after_alloc_begin() {
+fn requirement_open_formatted_store_initializes_allocator_state_after_alloc_begin() {
     let (_next_offset, state) = open_formatted_store_after_replayed_alloc_begin();
     assert_eq!(state.last_free_list_head(), Some(2));
     assert_eq!(state.free_list_tail(), Some(3));
@@ -401,7 +401,7 @@ fn open_formatted_store_initializes_allocator_state_after_alloc_begin() {
 //= type=test
 //# RING-STARTUP-022 If `ready_region` is set, hold it in memory as the next region to use before consuming another free-list entry.
 #[test]
-fn open_formatted_store_keeps_replayed_ready_region_reserved_in_memory() {
+fn requirement_open_formatted_store_keeps_replayed_ready_region_reserved_in_memory() {
     let (_next_offset, state) = open_formatted_store_after_replayed_alloc_begin();
     assert_eq!(state.ready_region(), Some(1));
     assert_eq!(state.last_free_list_head(), Some(2));
@@ -412,7 +412,7 @@ fn open_formatted_store_keeps_replayed_ready_region_reserved_in_memory() {
 //# `RING-STARTUP-RESULT-008` Ordered staged regions that have left
 //# `ready_region` but are not yet known to be free
 #[test]
-fn open_formatted_store_reports_replayed_staged_regions() {
+fn requirement_open_formatted_store_reports_replayed_staged_regions() {
     let (_next_offset, state) = open_formatted_store_after_replayed_stage_region();
     assert_eq!(state.staged_regions(), &[1]);
 }
@@ -423,7 +423,7 @@ fn open_formatted_store_reports_replayed_staged_regions() {
 //# `ready_region != region_index`, return an error. otherwise append
 //# `region_index` to staged regions and clear `ready_region`.
 #[test]
-fn open_formatted_store_replays_stage_region_into_staged_state() {
+fn requirement_open_formatted_store_replays_stage_region_into_staged_state() {
     let (_next_offset, state) = open_formatted_store_after_replayed_stage_region();
     assert_eq!(state.ready_region(), None);
     assert_eq!(state.staged_regions(), &[1]);
@@ -436,7 +436,7 @@ fn open_formatted_store_replays_stage_region_into_staged_state() {
 //# an unmatched valid `alloc_begin(region_index, free_list_head_after)`
 //# for the same region.
 #[test]
-fn open_formatted_store_rejects_stage_region_without_matching_ready_region() {
+fn requirement_open_formatted_store_rejects_stage_region_without_matching_ready_region() {
     let mut flash = MockFlash::<256, 4, 64>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
     let wal_offset = metadata.wal_record_area_offset().unwrap();
@@ -466,7 +466,7 @@ fn open_formatted_store_rejects_stage_region_without_matching_ready_region() {
 //# tail record. If no such slot exists, the tail region is currently full
 //# and the next WAL append must rotate via `link` to a new WAL region.
 #[test]
-fn open_formatted_store_recovers_append_point_after_replayed_alloc_begin() {
+fn requirement_open_formatted_store_recovers_append_point_after_replayed_alloc_begin() {
     let (next_offset, state) = open_formatted_store_after_replayed_alloc_begin();
     assert_eq!(state.wal_append_offset(), next_offset);
     assert_eq!(state.wal_head(), 0);
@@ -479,7 +479,7 @@ fn open_formatted_store_recovers_append_point_after_replayed_alloc_begin() {
 //# torn and ignore them using checksum validation and WAL tail recovery
 //# rules.
 #[test]
-fn open_formatted_store_ignores_torn_tail_slots_after_wal_recovery() {
+fn requirement_open_formatted_store_ignores_torn_tail_slots_after_wal_recovery() {
     let (next_offset, state) = open_formatted_store_after_torn_slot_with_wal_recovery();
 
     assert_eq!(state.wal_append_offset(), next_offset);
@@ -495,7 +495,7 @@ fn open_formatted_store_ignores_torn_tail_slots_after_wal_recovery() {
 //# corruption, infinite loops, or unbounded resource consumption
 //# amounting to denial of service.
 #[test]
-fn open_formatted_store_reports_an_error_for_intentionally_corrupted_wal_bytes() {
+fn requirement_open_formatted_store_reports_an_error_for_intentionally_corrupted_wal_bytes() {
     let (_wal_offset, error) = open_formatted_store_after_corrupt_slot_without_wal_recovery();
 
     assert!(matches!(
@@ -509,7 +509,7 @@ fn open_formatted_store_reports_an_error_for_intentionally_corrupted_wal_bytes()
 //# `RING-FORMAT-006` A `WALSnapshotHead` MUST be loadable into RAM before
 //# that collection accepts further mutations.
 #[test]
-fn open_formatted_store_tracks_live_collection_snapshot_basis() {
+fn requirement_open_formatted_store_tracks_live_collection_snapshot_basis() {
     let mut flash = MockFlash::<128, 4, 96>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
     let wal_offset = metadata.wal_record_area_offset().unwrap();
@@ -550,7 +550,8 @@ fn open_formatted_store_tracks_live_collection_snapshot_basis() {
 //# replay-tracked `collection_type`, and every later valid type-bearing
 //# record for that collection MUST carry the same `collection_type`.
 #[test]
-fn open_formatted_store_rejects_later_type_bearing_records_with_mismatched_collection_type() {
+fn requirement_open_formatted_store_rejects_later_type_bearing_records_with_mismatched_collection_type(
+) {
     let mut flash = MockFlash::<128, 4, 96>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
     init_user_region_header(&mut flash, 2, 4, CollectionId(7), 1);
@@ -771,7 +772,7 @@ fn open_formatted_store_rejects_update_after_drop_collection() {
 //# `reclaim_end(region_index)` MUST appear in WAL order and are matched
 //# by `region_index`.
 #[test]
-fn open_formatted_store_tracks_pending_reclaims_in_order() {
+fn requirement_open_formatted_store_tracks_pending_reclaims_in_order() {
     let mut flash = MockFlash::<128, 4, 96>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
     let wal_offset = metadata.wal_record_area_offset().unwrap();
@@ -806,7 +807,7 @@ fn open_formatted_store_tracks_pending_reclaims_in_order() {
 //= type=test
 //# `RING-FORMAT-015` An implementation MUST NOT open a database successfully if replay yields a live collection whose `collection_type` is unsupported by that implementation.
 #[test]
-fn open_formatted_store_rejects_unsupported_live_collection_type() {
+fn requirement_open_formatted_store_rejects_unsupported_live_collection_type() {
     let mut flash = MockFlash::<128, 4, 96>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
     let wal_offset = metadata.wal_record_area_offset().unwrap();
@@ -832,7 +833,7 @@ fn open_formatted_store_rejects_unsupported_live_collection_type() {
 //# `collection_type` is unsupported by the implementation, startup MUST
 //# fail.
 #[test]
-fn open_formatted_store_fails_startup_for_unsupported_live_collection_type() {
+fn requirement_open_formatted_store_fails_startup_for_unsupported_live_collection_type() {
     let mut flash = MockFlash::<128, 4, 96>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
     let wal_offset = metadata.wal_record_area_offset().unwrap();
@@ -858,7 +859,7 @@ fn open_formatted_store_fails_startup_for_unsupported_live_collection_type() {
 //# `collection_type` is unsupported MAY remain as inert metadata and
 //# does not by itself require startup failure.
 #[test]
-fn validate_live_collection_types_ignores_unsupported_dropped_tombstones() {
+fn requirement_validate_live_collection_types_ignores_unsupported_dropped_tombstones() {
     let collections = [StartupCollection {
         collection_id: CollectionId(7),
         collection_type: Some(0x1234),
@@ -873,7 +874,7 @@ fn validate_live_collection_types_ignores_unsupported_dropped_tombstones() {
 //= type=test
 //# RING-STARTUP-005 Walk the WAL region chain from the resulting WAL head to tail using `link` records.
 #[test]
-fn open_formatted_store_follows_completed_link_to_the_next_wal_tail() {
+fn requirement_open_formatted_store_follows_completed_link_to_the_next_wal_tail() {
     let state = open_formatted_store_after_completed_wal_rotation();
     assert_eq!(state.wal_head(), 0);
     assert_eq!(state.wal_tail(), 1);
@@ -883,7 +884,7 @@ fn open_formatted_store_follows_completed_link_to_the_next_wal_tail() {
 //= type=test
 //# RING-STARTUP-013 On `link(next_region_index, expected_sequence)`: if `ready_region = next_region_index`, clear `ready_region`.
 #[test]
-fn open_formatted_store_clears_ready_region_when_link_matches_it() {
+fn requirement_open_formatted_store_clears_ready_region_when_link_matches_it() {
     let state = open_formatted_store_after_completed_wal_rotation();
     assert_eq!(state.ready_region(), None);
 }
@@ -990,7 +991,8 @@ fn open_formatted_store_recovers_rotation_before_link() {
 //= type=test
 //# RING-STARTUP-018 On `wal_recovery()`: if `pending_wal_recovery_boundary` is clear, return an error. otherwise clear `pending_wal_recovery_boundary`.
 #[test]
-fn open_formatted_store_clears_pending_recovery_boundary_when_wal_recovery_is_replayed() {
+fn requirement_open_formatted_store_clears_pending_recovery_boundary_when_wal_recovery_is_replayed()
+{
     let (next_offset, state) = open_formatted_store_after_corrupt_slot_with_wal_recovery();
     assert_eq!(state.wal_append_offset(), next_offset);
     assert_eq!(state.ready_region(), None);
@@ -1001,7 +1003,7 @@ fn open_formatted_store_clears_pending_recovery_boundary_when_wal_recovery_is_re
 //= type=test
 //# RING-STARTUP-002 Scan all regions, collect candidate WAL regions (`collection_id == 0` plus `collection_format = wal_v1`) with valid headers, and track `max_seen_sequence` as the largest `sequence` value seen in any valid region header.
 #[test]
-fn open_formatted_store_scans_fresh_store_geometry_for_wal_candidates() {
+fn requirement_open_formatted_store_scans_fresh_store_geometry_for_wal_candidates() {
     let (metadata, state) = open_formatted_store_from_fresh_format();
     assert_eq!(state.metadata(), metadata);
     assert_eq!(state.wal_head(), 0);
@@ -1012,15 +1014,12 @@ fn open_formatted_store_scans_fresh_store_geometry_for_wal_candidates() {
 //= type=test
 //# RING-STARTUP-004 Read and validate the `WalRegionPrologue` stored at the start of the tail region's user-data area, and use its `wal_head_region_index` as the initial WAL-head candidate.
 #[test]
-fn open_formatted_store_uses_the_tail_prologue_as_the_initial_wal_head_candidate() {
+fn requirement_open_formatted_store_uses_the_tail_prologue_as_the_initial_wal_head_candidate() {
     let (_metadata, state) = open_formatted_store_from_fresh_format();
     assert_eq!(state.wal_head(), 0);
     assert_eq!(state.wal_tail(), 0);
 }
 
-//= spec/ring.md#startup-replay-algorithm
-//= type=test
-//# RING-STARTUP-020 Initialize allocator state from `last_free_list_head`.
 #[test]
 fn open_formatted_store_initializes_allocator_state_for_a_fresh_store() {
     let (_metadata, state) = open_formatted_store_from_fresh_format();
@@ -1032,7 +1031,7 @@ fn open_formatted_store_initializes_allocator_state_for_a_fresh_store() {
 //= type=test
 //# RING-STARTUP-023 Keep `max_seen_sequence` as the runtime source of the next region sequence.
 #[test]
-fn open_formatted_store_keeps_max_seen_sequence_for_the_next_region_header() {
+fn requirement_open_formatted_store_keeps_max_seen_sequence_for_the_next_region_header() {
     let (_metadata, state) = open_formatted_store_from_fresh_format();
     assert_eq!(state.max_seen_sequence(), 0);
 }
@@ -1041,7 +1040,8 @@ fn open_formatted_store_keeps_max_seen_sequence_for_the_next_region_header() {
 //= type=test
 //# `RING-STARTUP-027` If replay yields a live collection with unsupported or invalid retained collection data under that collection's normative specification, startup MUST fail before open succeeds.
 #[test]
-fn storage_open_path_rejects_invalid_retained_map_region_snapshot_and_update_payloads() {
+fn requirement_storage_open_path_rejects_invalid_retained_map_region_snapshot_and_update_payloads()
+{
     {
         let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
         let mut workspace = StorageWorkspace::<512>::new();

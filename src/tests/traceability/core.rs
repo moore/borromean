@@ -5,7 +5,7 @@ use super::*;
 //# `RING-IMPL-CORE-001` The core library crate MUST compile with
 //# `#![no_std]`.
 #[test]
-fn core_library_no_std_target_build_is_enforced_by_verification() {
+fn requirement_core_library_no_std_target_build_is_enforced_by_verification() {
     // `scripts/verify.sh` proves this requirement by building the
     // library for a no-std target triple.
 }
@@ -15,7 +15,7 @@ fn core_library_no_std_target_build_is_enforced_by_verification() {
 //# `RING-IMPL-CORE-002` The core library crate MUST NOT depend on the
 //# Rust `alloc` crate.
 #[test]
-fn core_library_alloc_policy_is_enforced_by_clippy_verification() {
+fn requirement_core_library_alloc_policy_is_enforced_by_clippy_verification() {
     // The mechanical enforcement for this requirement lives in
     // `clippy.toml`, the crate-level deny configuration in `src/lib.rs`,
     // and the lib-only clippy policy pass in `scripts/verify.sh`.
@@ -26,7 +26,7 @@ fn core_library_alloc_policy_is_enforced_by_clippy_verification() {
 //# `RING-IMPL-CORE-003` The core library crate MUST NOT depend on an
 //# async runtime, executor, scheduler, or timer facility.
 #[test]
-fn core_library_runtime_policy_is_enforced_by_verification() {
+fn requirement_core_library_runtime_policy_is_enforced_by_verification() {
     // `scripts/verify.sh` rejects banned runtime-style dependencies
     // through `cargo tree`, and `clippy.toml` rejects source-level use
     // of runtime or timer APIs in the non-test library target.
@@ -37,7 +37,7 @@ fn core_library_runtime_policy_is_enforced_by_verification() {
 //# `RING-IMPL-NONGOAL-001` Borromean core MUST NOT require a specific
 //# embedded framework, RTOS, or async executor.
 #[test]
-fn core_library_framework_and_rtos_policy_is_enforced_by_verification() {
+fn requirement_core_library_framework_and_rtos_policy_is_enforced_by_verification() {
     // `scripts/verify.sh` rejects framework, RTOS, and executor
     // dependency declarations through the dependency-tree policy check.
 }
@@ -47,7 +47,7 @@ fn core_library_framework_and_rtos_policy_is_enforced_by_verification() {
 //# `RING-IMPL-NONGOAL-002` Borromean core MUST NOT assume thread
 //# support, background workers, or heap-backed task scheduling.
 #[test]
-fn core_library_thread_and_worker_policy_is_enforced_by_clippy_verification() {
+fn requirement_core_library_thread_and_worker_policy_is_enforced_by_clippy_verification() {
     // The mechanical enforcement for this requirement lives in
     // `clippy.toml`, the crate-level deny configuration in `src/lib.rs`,
     // and the lib-only clippy policy pass in `scripts/verify.sh`.
@@ -60,7 +60,7 @@ fn core_library_thread_and_worker_policy_is_enforced_by_clippy_verification() {
 //# constrain implementation structure but MUST NOT weaken ring-level
 //# correctness requirements.
 #[test]
-fn storage_facade_preserves_ring_behavior_through_delegating_entry_points() {
+fn requirement_storage_facade_preserves_ring_behavior_through_delegating_entry_points() {
     let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =

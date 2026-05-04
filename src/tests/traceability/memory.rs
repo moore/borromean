@@ -9,7 +9,7 @@ use heapless::Vec as HeaplessVec;
 //# frames whose size is statically bounded by type parameters or API
 //# contracts.
 #[test]
-fn normal_operation_uses_caller_owned_buffers_without_heap_allocation() {
+fn requirement_normal_operation_uses_caller_owned_buffers_without_heap_allocation() {
     let mut flash = MockFlash::<256, 5, 1024>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
     let mut payload_buffer = [0u8; 64];
@@ -50,7 +50,7 @@ fn normal_operation_uses_caller_owned_buffers_without_heap_allocation() {
 //# heads, replay entries, and other bounded in-memory items MUST be an
 //# explicit compile-time or constructor-time capacity.
 #[test]
-fn explicit_collection_and_reclaim_capacities_fail_when_exhausted() {
+fn requirement_explicit_collection_and_reclaim_capacities_fail_when_exhausted() {
     let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =
@@ -79,7 +79,7 @@ fn explicit_collection_and_reclaim_capacities_fail_when_exhausted() {
 //# encoding, decoding, or staging MUST accept caller-provided buffers or
 //# borrow dedicated storage from a caller-provided workspace object.
 #[test]
-fn scratch_space_boundaries_are_enforced_on_caller_buffers() {
+fn requirement_scratch_space_boundaries_are_enforced_on_caller_buffers() {
     let mut map_buffer = [0u8; 128];
     let mut map = LsmMap::<u16, u16, 8>::new(CollectionId(4), &mut map_buffer).unwrap();
     map.set(1, 10).unwrap();
@@ -129,7 +129,7 @@ fn scratch_space_boundaries_are_enforced_on_caller_buffers() {
 //# duplicate copies of large record payloads in memory when a borrowed
 //# buffer or streaming decode is sufficient.
 #[test]
-fn map_round_trips_large_snapshots_using_only_borrowed_buffers() {
+fn requirement_map_round_trips_large_snapshots_using_only_borrowed_buffers() {
     let mut source_buffer = [0u8; 512];
     let mut source =
         LsmMap::<u16, HeaplessVec<u8, 96>, 8>::new(CollectionId(6), &mut source_buffer).unwrap();
@@ -168,7 +168,7 @@ fn map_round_trips_large_snapshots_using_only_borrowed_buffers() {
 //# format constants MUST be derivable from public constants, associated
 //# constants, or documented constructor contracts.
 #[test]
-fn disk_format_buffer_sizes_are_exposed_by_constants_or_workspace_contracts() {
+fn requirement_disk_format_buffer_sizes_are_exposed_by_constants_or_workspace_contracts() {
     assert_eq!(
         StorageMetadata::ENCODED_LEN,
         size_of::<u32>() * 6 + size_of::<u8>() * 2
@@ -199,7 +199,7 @@ fn disk_format_buffer_sizes_are_exposed_by_constants_or_workspace_contracts() {
 //# the same explicit-capacity and no-allocation rules as borromean
 //# core.
 #[test]
-fn map_in_memory_state_runs_inside_a_borrowed_buffer_without_allocating() {
+fn requirement_map_in_memory_state_runs_inside_a_borrowed_buffer_without_allocating() {
     let mut map_buffer = [0u8; 128];
     let mut map = LsmMap::<u16, u16, 8>::new(CollectionId(7), &mut map_buffer).unwrap();
 
@@ -222,7 +222,7 @@ fn map_in_memory_state_runs_inside_a_borrowed_buffer_without_allocating() {
 //# operation APIs close to the prototype's explicit buffer-passing style
 //# where that style avoids hidden allocation.
 #[test]
-fn map_updates_require_and_reuse_a_caller_provided_payload_buffer() {
+fn requirement_map_updates_require_and_reuse_a_caller_provided_payload_buffer() {
     let mut flash = MockFlash::<256, 5, 1024>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
     let mut storage =

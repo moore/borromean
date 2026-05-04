@@ -8,7 +8,7 @@ use ::core::task::Poll;
 //# collection-specific logic MUST remain separable modules with explicit
 //# interfaces.
 #[test]
-fn wal_storage_and_map_logic_are_exercised_through_separate_interfaces() {
+fn requirement_wal_storage_and_map_logic_are_exercised_through_separate_interfaces() {
     let metadata = StorageMetadata::new(256, 4, 1, 8, 0xff, 0xa5).unwrap();
 
     let record = WalRecord::Update {
@@ -65,7 +65,7 @@ fn wal_storage_and_map_logic_are_exercised_through_separate_interfaces() {
 //# `RING-IMPL-ARCH-004` Encoding and decoding code MUST be usable from
 //# pure tests without requiring live device I/O.
 #[test]
-fn encoding_and_decoding_round_trip_from_plain_byte_buffers() {
+fn requirement_encoding_and_decoding_round_trip_from_plain_byte_buffers() {
     let metadata = StorageMetadata::new(128, 4, 1, 8, 0xff, 0xa5).unwrap();
 
     let mut metadata_bytes = [0u8; StorageMetadata::ENCODED_LEN];
@@ -122,7 +122,7 @@ fn encoding_and_decoding_round_trip_from_plain_byte_buffers() {
 //# phase machines so that each durable transition is inspectable in code
 //# review and testable in isolation.
 #[test]
-fn startup_and_reclaim_expose_stepwise_intermediate_states_between_polls() {
+fn requirement_startup_and_reclaim_expose_stepwise_intermediate_states_between_polls() {
     let mut flash = MockFlash::<256, 4, 512>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
     let mut storage =

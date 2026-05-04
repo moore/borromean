@@ -1,21 +1,26 @@
-'$schema' = "https://awslabs.github.io/duvet/config/v0.4.json"
+'$schema' = "https://awslabs.github.io/duvet/config/v0.4.0.json"
 
 [[source]]
 pattern = "src/**/*.rs"
 
 [[specification]]
 source = "spec/ring.md"
+format = "markdown"
 
 [[specification]]
 source = "spec/implementation.md"
+format = "markdown"
 
 [[specification]]
 source = "spec/map.md"
+format = "markdown"
+
+[[specification]]
+source = "spec/implementation-policy.md"
+format = "markdown"
 
 [report.html]
 enabled = true
-path = ".duvet/reports/report.html"
 
-[report.json]
+[report.snapshot]
 enabled = true
-path = ".duvet/reports/report.json"

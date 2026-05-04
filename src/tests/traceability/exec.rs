@@ -86,7 +86,7 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize> 
 //# require one or more device interactions MUST be expressible as a
 //# single future.
 #[test]
-fn each_fallible_storage_operation_is_drivable_as_one_future() {
+fn requirement_each_fallible_storage_operation_is_drivable_as_one_future() {
     const REGION_SIZE: usize = 512;
     const REGION_COUNT: usize = 5;
 
@@ -171,7 +171,7 @@ fn each_fallible_storage_operation_is_drivable_as_one_future() {
 //# polled by the caller and when the caller-provided I/O object becomes
 //# ready; they MUST NOT rely on background tasks internal to borromean.
 #[test]
-fn operation_futures_advance_only_when_the_caller_polls_them() {
+fn requirement_operation_futures_advance_only_when_the_caller_polls_them() {
     const REGION_SIZE: usize = 256;
     const REGION_COUNT: usize = 4;
 
@@ -206,7 +206,7 @@ fn operation_futures_advance_only_when_the_caller_polls_them() {
 //# executor MUST be sufficient to drive any borromean operation future
 //# to completion.
 #[test]
-fn single_threaded_poll_loop_drives_operation_futures_to_completion() {
+fn requirement_single_threaded_poll_loop_drives_operation_futures_to_completion() {
     const REGION_SIZE: usize = 512;
     const REGION_COUNT: usize = 5;
 
@@ -277,7 +277,7 @@ fn single_threaded_poll_loop_drives_operation_futures_to_completion() {
 //# unless and until a separate concurrency specification defines
 //# stronger sharing rules.
 #[test]
-fn storage_can_be_reused_only_after_an_operation_future_is_finished_or_dropped() {
+fn requirement_storage_can_be_reused_only_after_an_operation_future_is_finished_or_dropped() {
     let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =

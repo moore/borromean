@@ -29,7 +29,7 @@ fn storage_with_max_seen_sequence() -> (MockFlash<128, 4, 256>, StorageWorkspace
 //# an equivalent construction that makes overflow and underflow
 //# impossible by construction.
 #[test]
-fn boundary_sensitive_storage_and_map_lengths_stay_in_range() {
+fn requirement_boundary_sensitive_storage_and_map_lengths_stay_in_range() {
     assert_eq!(CollectionId(u64::MAX).increment(), None);
 
     let metadata = StorageMetadata::new(128, 4, 1, 8, 0xff, 0xa5).unwrap();
@@ -57,7 +57,7 @@ fn boundary_sensitive_storage_and_map_lengths_stay_in_range() {
 //# return an explicit error rather than wrap, saturate, or silently
 //# truncate.
 #[test]
-fn arithmetic_boundary_failures_surface_explicit_error_variants() {
+fn requirement_arithmetic_boundary_failures_surface_explicit_error_variants() {
     let mut flash = MockFlash::<64, 4, 256>::new(0xff);
     let mut workspace = StorageWorkspace::<64>::new();
     let storage =
@@ -94,7 +94,7 @@ fn arithmetic_boundary_failures_surface_explicit_error_variants() {
 //# integer behavior for correctness unless a future disk-format
 //# requirement explicitly defines modulo arithmetic for that field.
 #[test]
-fn sequence_advancement_stops_at_the_maximum_value_instead_of_wrapping() {
+fn requirement_sequence_advancement_stops_at_the_maximum_value_instead_of_wrapping() {
     assert_eq!(CollectionId(u64::MAX).increment(), None);
 
     let (mut flash, mut workspace, storage) = storage_with_max_seen_sequence();
@@ -121,7 +121,7 @@ fn sequence_advancement_stops_at_the_maximum_value_instead_of_wrapping() {
 //# lose information MUST be checked and MUST fail explicitly if the
 //# value is out of range for the destination type.
 #[test]
-fn lossy_integer_width_conversions_fail_with_explicit_map_errors() {
+fn requirement_lossy_integer_width_conversions_fail_with_explicit_map_errors() {
     let mut map_buffer = [0u8; 70_000];
     let mut map =
         LsmMap::<u16, HeaplessVec<u8, 66_000>, 8>::new(CollectionId(12), &mut map_buffer).unwrap();

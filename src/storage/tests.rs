@@ -174,7 +174,7 @@ fn committed_region_sequence_progress() -> CommittedRegionSequenceProgress {
 //# `min_free_regions`, `wal_write_granule`, `erased_byte`,
 //# `wal_record_magic`, `metadata_checksum`) and sync metadata.
 #[test]
-fn format_writes_metadata_before_reopening_the_fresh_store() {
+fn requirement_format_writes_metadata_before_reopening_the_fresh_store() {
     let mut flash = MockFlash::<128, 4, 64>::new(0xff);
     let state = format::<128, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
     let metadata = flash.metadata().copied().unwrap();
@@ -197,7 +197,7 @@ fn format_writes_metadata_before_reopening_the_fresh_store() {
 //# `RING-FORMAT-STORAGE-POST-001` WAL head and WAL tail MUST both be
 //# region `0`.
 #[test]
-fn format_starts_with_region_zero_as_wal_head_and_tail() {
+fn requirement_format_starts_with_region_zero_as_wal_head_and_tail() {
     let mut flash = MockFlash::<128, 4, 64>::new(0xff);
     let state = format::<128, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
 
@@ -210,7 +210,7 @@ fn format_starts_with_region_zero_as_wal_head_and_tail() {
 //# `RING-CORE-010` The durable free list MUST be FIFO so allocations
 //# consume the oldest free regions first.
 #[test]
-fn reserve_next_region_consumes_the_oldest_free_regions_first() {
+fn requirement_reserve_next_region_consumes_the_oldest_free_regions_first() {
     let progress = committed_region_sequence_progress();
 
     assert_eq!(progress.first_region, 1);
@@ -223,7 +223,7 @@ fn reserve_next_region_consumes_the_oldest_free_regions_first() {
 //# MUST first durably reserve that region with
 //# `alloc_begin(region_index, free_list_head_after)`.
 #[test]
-fn committed_region_write_uses_a_region_previously_reserved_by_alloc_begin() {
+fn requirement_committed_region_write_uses_a_region_previously_reserved_by_alloc_begin() {
     let mut flash = MockFlash::<512, 5, 256>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut state = format::<512, 5, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
@@ -275,7 +275,7 @@ fn committed_region_write_uses_a_region_previously_reserved_by_alloc_begin() {
 //# MUST first make `alloc_begin(region_index, free_list_head_after)`
 //# durable.
 #[test]
-fn committed_region_write_waits_for_alloc_begin_sync() {
+fn requirement_committed_region_write_waits_for_alloc_begin_sync() {
     let mut flash = MockFlash::<512, 5, 256>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut state = format::<512, 5, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
@@ -333,7 +333,7 @@ fn committed_region_write_waits_for_alloc_begin_sync() {
 //# head MUST first make the allocator advance durable with
 //# `alloc_begin(region_index, free_list_head_after)`.
 #[test]
-fn reopen_after_alloc_begin_recovers_the_advanced_allocator_state() {
+fn requirement_reopen_after_alloc_begin_recovers_the_advanced_allocator_state() {
     let mut flash = MockFlash::<512, 5, 256>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut state = format::<512, 5, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
@@ -368,7 +368,7 @@ fn format_returns_fresh_runtime_state() {
 //# `RING-FORMAT-STORAGE-POST-002` A user collection durable head MUST
 //# NOT exist after formatting.
 #[test]
-fn format_starts_with_no_user_collection_durable_head() {
+fn requirement_format_starts_with_no_user_collection_durable_head() {
     let mut flash = MockFlash::<128, 4, 64>::new(0xff);
     let state = format::<128, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
 
@@ -382,7 +382,7 @@ fn format_starts_with_no_user_collection_durable_head() {
 //# WAL, and all user collection identifiers MUST be nonzero stable 64-bit
 //# nonces that are never recycled.
 #[test]
-fn user_collection_ids_are_nonzero_u64_values_and_are_not_recycled() {
+fn requirement_user_collection_ids_are_nonzero_u64_values_and_are_not_recycled() {
     assert_eq!(size_of::<CollectionId>(), size_of::<u64>());
 
     let mut flash = MockFlash::<256, 4, 128>::new(0xff);
@@ -428,7 +428,7 @@ fn user_collection_ids_are_nonzero_u64_values_and_are_not_recycled() {
 //# `collection_type = wal` for `collection_id = 0`, and user collections
 //# MUST NOT use that collection type.
 #[test]
-fn wal_collection_type_is_reserved_for_collection_id_zero() {
+fn requirement_wal_collection_type_is_reserved_for_collection_id_zero() {
     assert_eq!(
         StorageRuntime::<8, 4>::validate_supported_head_collection_type(
             CollectionId(0),
@@ -671,7 +671,7 @@ fn append_new_collection_and_update_refresh_runtime_state() {
 //# `new_collection(collection_id, collection_type)` before any later
 //# record for that collection may be appended.
 #[test]
-fn append_update_requires_a_prior_new_collection_record() {
+fn requirement_append_update_requires_a_prior_new_collection_record() {
     let mut flash = MockFlash::<256, 4, 128>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
     let mut state = format::<256, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
@@ -763,7 +763,8 @@ fn append_head_and_drop_refresh_runtime_state() {
 //# reclaimable once they are no longer physically reachable from live
 //# state.
 #[test]
-fn drop_collection_tombstones_the_collection_forbids_later_records_and_starts_reclaim() {
+fn requirement_drop_collection_tombstones_the_collection_forbids_later_records_and_starts_reclaim()
+{
     let mut flash = MockFlash::<256, 4, 128>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
     let mut state = format::<256, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
@@ -810,7 +811,7 @@ fn drop_collection_tombstones_the_collection_forbids_later_records_and_starts_re
 //# WAL transaction bounded by durable `reclaim_begin(region_index)` and
 //# `reclaim_end(region_index)` records.
 #[test]
-fn append_alloc_and_reclaim_methods_refresh_runtime_state() {
+fn requirement_append_alloc_and_reclaim_methods_refresh_runtime_state() {
     let mut flash = MockFlash::<256, 4, 128>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
     let mut state = format::<256, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
@@ -888,7 +889,7 @@ fn append_rotation_start_and_finish_move_to_new_tail() {
 //# `sequence = max_seen_sequence + 1`, after which that value becomes the
 //# new in-memory `max_seen_sequence`.
 #[test]
-fn committed_region_allocations_advance_sequence_from_max_seen_sequence() {
+fn requirement_committed_region_allocations_advance_sequence_from_max_seen_sequence() {
     let progress = committed_region_sequence_progress();
 
     assert_eq!(progress.first_region, 1);
@@ -900,12 +901,6 @@ fn committed_region_allocations_advance_sequence_from_max_seen_sequence() {
     assert_eq!(progress.max_seen_after_second, progress.second_sequence);
 }
 
-//= spec/ring.md#storage-requirements
-//= type=test
-//# `RING-STORAGE-003` Each newly allocated region, whether for a user
-//# collection or a newly initialized WAL region, MUST use
-//# `sequence = max_seen_sequence + 1`, after which that value becomes the
-//# new in-memory `max_seen_sequence`.
 #[test]
 fn wal_rotation_initializes_the_next_wal_region_at_max_seen_sequence_plus_one() {
     let mut flash = MockFlash::<128, 4, 128>::new(0xff);
@@ -930,7 +925,7 @@ fn wal_rotation_initializes_the_next_wal_region_at_max_seen_sequence_plus_one() 
 //# strictly monotonic `sequence` ordering even if crashes or abandoned
 //# allocations leave gaps.
 #[test]
-fn later_region_writes_keep_sequence_numbers_strictly_monotonic() {
+fn requirement_later_region_writes_keep_sequence_numbers_strictly_monotonic() {
     let progress = committed_region_sequence_progress();
 
     assert!(progress.first_sequence < progress.second_sequence);
@@ -943,7 +938,7 @@ fn later_region_writes_keep_sequence_numbers_strictly_monotonic() {
 //# durable free-list chain rather than by a distinct on-disk header
 //# encoding.
 #[test]
-fn free_region_membership_is_defined_by_the_free_list_chain() {
+fn requirement_free_region_membership_is_defined_by_the_free_list_chain() {
     let mut flash = MockFlash::<512, 5, 256>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut state = format::<512, 5, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
@@ -967,7 +962,7 @@ fn free_region_membership_is_defined_by_the_free_list_chain() {
 //# in its free-pointer footer are uninterpreted stale data and MUST NOT
 //# be used to infer free-list membership.
 #[test]
-fn stale_footer_bytes_do_not_make_a_reserved_region_free() {
+fn requirement_stale_footer_bytes_do_not_make_a_reserved_region_free() {
     let mut flash = MockFlash::<512, 5, 256>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut state = format::<512, 5, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
@@ -993,7 +988,7 @@ fn stale_footer_bytes_do_not_make_a_reserved_region_free() {
 //# `ready_region` from the single allocator slot without committing a
 //# collection head.
 #[test]
-fn stage_ready_region_detaches_ready_region_and_allows_next_allocation() {
+fn requirement_stage_ready_region_detaches_ready_region_and_allows_next_allocation() {
     let mut flash = MockFlash::<512, 5, 512>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut state = format::<512, 5, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
@@ -1071,7 +1066,7 @@ fn stage_ready_region_rejects_non_ready_region() {
 //# `RING-STORAGE-007` The free-pointer footer of a region MUST NOT be
 //# written while that region is allocated for live use.
 #[test]
-fn committed_region_writes_do_not_write_a_live_free_pointer_footer() {
+fn requirement_committed_region_writes_do_not_write_a_live_free_pointer_footer() {
     let mut flash = MockFlash::<512, 5, 256>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut state = format::<512, 5, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
@@ -1124,7 +1119,7 @@ fn committed_region_writes_do_not_write_a_live_free_pointer_footer() {
 //# free-list chain, that region MUST NOT be erased until it is allocated
 //# for reuse.
 #[test]
-fn free_regions_are_erased_only_when_reused() {
+fn requirement_free_regions_are_erased_only_when_reused() {
     let mut flash = MockFlash::<512, 5, 256>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut state = format::<512, 5, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
@@ -1157,7 +1152,7 @@ fn free_regions_are_erased_only_when_reused() {
 //# `RING-STORAGE-009` A WAL region MUST have `collection_id = 0` and
 //# `collection_format = wal_v1`.
 #[test]
-fn initialized_wal_regions_use_reserved_wal_header_fields() {
+fn requirement_initialized_wal_regions_use_reserved_wal_header_fields() {
     let mut flash = MockFlash::<128, 4, 32>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
 
@@ -1181,7 +1176,7 @@ fn initialized_wal_regions_use_reserved_wal_header_fields() {
 //# `RING-WAL-RECLAIM-POST-007` The reclaimed region MUST be erased
 //# before reuse.
 #[test]
-fn initialized_wal_region_erases_the_reclaimed_region_before_reuse() {
+fn requirement_initialized_wal_region_erases_the_reclaimed_region_before_reuse() {
     let mut flash = MockFlash::<128, 4, 32>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
 
@@ -1211,7 +1206,7 @@ fn initialized_wal_region_erases_the_reclaimed_region_before_reuse() {
 //= type=test
 //# `RING-REPLAY-ASSUME-001` A WAL region MUST be erased before reuse.
 #[test]
-fn initialized_wal_region_erases_the_wal_region_before_reuse() {
+fn requirement_initialized_wal_region_erases_the_wal_region_before_reuse() {
     let mut flash = MockFlash::<128, 4, 32>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
 

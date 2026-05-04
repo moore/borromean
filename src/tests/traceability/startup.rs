@@ -8,7 +8,7 @@ use ::core::task::Poll;
 //# operation that can suspend between device interactions without
 //# losing its replay context.
 #[test]
-fn open_future_preserves_replay_context_across_pending_polls() {
+fn requirement_open_future_preserves_replay_context_across_pending_polls() {
     let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =
@@ -61,7 +61,7 @@ fn open_future_preserves_replay_context_across_pending_polls() {
 //# `RING-IMPL-STARTUP-002` Startup replay state MUST itself obey the
 //# same no-allocation rule as steady-state operation.
 #[test]
-fn startup_open_paths_complete_without_heap_allocation() {
+fn requirement_startup_open_paths_complete_without_heap_allocation() {
     let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =
@@ -96,7 +96,7 @@ fn startup_open_paths_complete_without_heap_allocation() {
 //# that storage MUST come from a caller-provided workspace or other
 //# bounded static storage.
 #[test]
-fn startup_can_reuse_the_same_caller_workspace_across_repeated_opens() {
+fn requirement_startup_can_reuse_the_same_caller_workspace_across_repeated_opens() {
     let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =
@@ -139,7 +139,7 @@ fn startup_can_reuse_the_same_caller_workspace_across_repeated_opens() {
 //# allocation, or reclaim state MUST be expressible through the same
 //# operation framework used for normal foreground work.
 #[test]
-fn blocking_and_future_open_recover_the_same_pending_reclaim_state() {
+fn requirement_blocking_and_future_open_recover_the_same_pending_reclaim_state() {
     let (mut blocking_flash, mut blocking_workspace, _, first_region, second_region) =
         super::super::replace_map_into_pending_reclaim_with_empty_free_list();
     let reopened_blocking =

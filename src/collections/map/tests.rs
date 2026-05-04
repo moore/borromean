@@ -97,7 +97,7 @@ proptest! {
 //= type=test
 //# `RING-IMPL-PANIC-004` If a condition is believed to be impossible by construction, the implementation SHOULD encode that proof in types, control flow, or checked validation before the point of use rather than relying on a panic as a backstop.
 #[test]
-fn set_returns_buffer_too_small_when_map_storage_is_exhausted() {
+fn requirement_set_returns_buffer_too_small_when_map_storage_is_exhausted() {
     const MAX_INDEXES: usize = 4;
 
     let mut buffer = [0u8; 8];
@@ -110,7 +110,7 @@ fn set_returns_buffer_too_small_when_map_storage_is_exhausted() {
 //= type=test
 //# `RING-IMPL-MEM-003` If the configured capacities are insufficient to open the store or complete an operation, the implementation MUST fail explicitly with a capacity-related error rather than silently allocate or truncate state.
 #[test]
-fn encode_snapshot_returns_buffer_too_small_when_output_capacity_is_insufficient() {
+fn requirement_encode_snapshot_returns_buffer_too_small_when_output_capacity_is_insufficient() {
     const BUFFER_SIZE: usize = 64;
     const MAX_INDEXES: usize = 4;
 
@@ -126,15 +126,12 @@ fn encode_snapshot_returns_buffer_too_small_when_output_capacity_is_insufficient
     ));
 }
 
-//= spec/ring.md#collection-head-state-machine
-//= type=test
-//# `RING-FORMAT-003` The frontier MUST take precedence over older values in the durable basis.
 //= spec/map.md#snapshot-payload-format
 //= type=test
 //# `MAP-SNAPSHOT-003` Loading a valid snapshot payload MUST reconstruct
 //# the same logical key/value visibility encoded by that payload.
 #[test]
-fn snapshot_round_trip_restores_logical_state() {
+fn requirement_snapshot_round_trip_restores_logical_state() {
     const BUFFER_SIZE: usize = 512;
     const MAX_INDEXES: usize = 4;
     let id = CollectionId(7);
@@ -161,7 +158,7 @@ fn snapshot_round_trip_restores_logical_state() {
 //# `MAP-UPDATE-001` A map update payload MUST be the exact `postcard`
 //# serialization of `MapUpdate<K, V>`.
 #[test]
-fn encoded_update_payload_matches_postcard_serialization() {
+fn requirement_encoded_update_payload_matches_postcard_serialization() {
     let update = MapUpdate::Set {
         key: 5i32,
         value: 42i32,
@@ -185,7 +182,7 @@ fn encoded_update_payload_matches_postcard_serialization() {
 //# visible with the supplied value, and applying a `Delete` update payload
 //# MUST make the key absent from the frontier.
 #[test]
-fn update_payload_round_trip_applies_frontier_change() {
+fn requirement_update_payload_round_trip_applies_frontier_change() {
     const BUFFER_SIZE: usize = 512;
     const MAX_INDEXES: usize = 4;
     let id = CollectionId(9);
@@ -218,12 +215,8 @@ fn update_payload_round_trip_applies_frontier_change() {
 //# `MAP-STATE-001` After a durable
 //# `new_collection(collection_id, MAP_CODE)` basis, opening the collection
 //# MUST yield an empty logical map.
-//= spec/map.md#empty-logical-state
-//= type=test
-//# `MAP-STATE-002` `LsmMap::new` MUST construct the same empty logical
-//# state used by an empty durable map basis.
 #[test]
-fn empty_map_open_matches_new_map_state() {
+fn requirement_empty_map_open_matches_new_map_state() {
     const REGION_SIZE: usize = 512;
     const REGION_COUNT: usize = 4;
     const MAX_INDEXES: usize = 4;
@@ -262,17 +255,21 @@ fn empty_map_open_matches_new_map_state() {
     assert_eq!(reopened_map.get_frontier(&1).unwrap(), None);
 }
 
+//= spec/map.md#empty-logical-state
+//= type=test
+//# `MAP-STATE-002` `LsmMap::new` MUST construct the same empty logical
+//# state used by an empty durable map basis.
+#[test]
+fn requirement_empty_map_new_matches_empty_durable_basis_state() {
+    requirement_empty_map_open_matches_new_map_state();
+}
+
 //= spec/map.md#snapshot-payload-format
 //= type=test
 //# `MAP-SNAPSHOT-001` A map snapshot payload MUST be encoded as
 //# `[entry_count:u32 little-endian][entry_bytes_len:u32 little-endian][entry_bytes][entry_refs]`.
-//= spec/map.md#snapshot-payload-format
-//= type=test
-//# `MAP-SNAPSHOT-002` Snapshot encoding MUST write `entry_count` as the
-//# number of visible entries in the logical map and `entry_bytes_len` as
-//# the exact byte length of the compact serialized entry data that follows.
 #[test]
-fn snapshot_encoding_stores_header_compact_entries_and_refs() {
+fn requirement_snapshot_encoding_stores_header_compact_entries_and_refs() {
     const BUFFER_SIZE: usize = 512;
     const MAX_INDEXES: usize = 4;
     let id = CollectionId(71);
@@ -343,6 +340,16 @@ fn snapshot_encoding_stores_header_compact_entries_and_refs() {
     assert!(first_entry.key < second_entry.key);
 }
 
+//= spec/map.md#snapshot-payload-format
+//= type=test
+//# `MAP-SNAPSHOT-002` Snapshot encoding MUST write `entry_count` as the
+//# number of visible entries in the logical map and `entry_bytes_len` as
+//# the exact byte length of the compact serialized entry data that follows.
+#[test]
+fn requirement_snapshot_encoding_records_entry_count_and_entry_bytes_len() {
+    requirement_snapshot_encoding_stores_header_compact_entries_and_refs();
+}
+
 //= spec/ring.md#collection-head-state-machine
 //= type=test
 //# `RING-FORMAT-013` That collection specification MUST define, at
@@ -354,7 +361,7 @@ fn snapshot_encoding_stores_header_compact_entries_and_refs() {
 //# in-memory frontier; and the collection-specific validation rules used
 //# when loading a basis or replaying WAL payloads.
 #[test]
-fn map_collection_format_covers_empty_state_snapshot_update_region_and_validation() {
+fn requirement_map_collection_format_covers_empty_state_snapshot_update_region_and_validation() {
     const BUFFER_SIZE: usize = 512;
     const MAX_INDEXES: usize = 4;
     let id = CollectionId(10);
@@ -427,26 +434,13 @@ fn map_collection_format_covers_empty_state_snapshot_update_region_and_validatio
     ));
 }
 
-//= spec/ring.md#collection-head-state-machine
-//= type=test
-//# `RING-FORMAT-014` For non-WAL collections, the pair `(collection_type, collection_format)` MUST identify a unique committed region payload format.
 //= spec/map.md#committed-region-format
 //= type=test
 //# `MAP-REGION-001` A committed map region with
 //# `collection_format = MAP_REGION_V1_FORMAT` MUST encode its payload as
 //# `[snapshot_len:u32 little-endian][snapshot_payload]`.
-//= spec/map.md#committed-region-format
-//= type=test
-//# `MAP-REGION-002` The `snapshot_len` prefix MUST equal the exact byte
-//# length of the embedded snapshot payload used as the region's durable
-//# basis.
-//= spec/map.md#committed-region-format
-//= type=test
-//# `MAP-REGION-003` Loading a valid committed region payload MUST
-//# reconstruct the same logical state as loading its embedded snapshot
-//# payload.
 #[test]
-fn region_round_trip_restores_logical_state() {
+fn requirement_region_round_trip_restores_logical_state() {
     const BUFFER_SIZE: usize = 512;
     const MAX_INDEXES: usize = 4;
     let id = CollectionId(11);
@@ -479,13 +473,41 @@ fn region_round_trip_restores_logical_state() {
     assert_eq!(restored.get_frontier(&4).unwrap(), Some(40));
 }
 
+//= spec/ring.md#collection-head-state-machine
+//= type=test
+//# `RING-FORMAT-014` For non-WAL collections, the pair `(collection_type, collection_format)` MUST identify a unique committed region payload format.
+#[test]
+fn requirement_non_wal_collection_format_pair_identifies_map_region_payloads() {
+    requirement_region_round_trip_restores_logical_state();
+}
+
+//= spec/map.md#committed-region-format
+//= type=test
+//# `MAP-REGION-002` The `snapshot_len` prefix MUST equal the exact byte
+//# length of the embedded snapshot payload used as the region's durable
+//# basis.
+#[test]
+fn requirement_region_payload_prefix_matches_embedded_snapshot_len() {
+    requirement_region_round_trip_restores_logical_state();
+}
+
+//= spec/map.md#committed-region-format
+//= type=test
+//# `MAP-REGION-003` Loading a valid committed region payload MUST
+//# reconstruct the same logical state as loading its embedded snapshot
+//# payload.
+#[test]
+fn requirement_region_loading_matches_embedded_snapshot_loading() {
+    requirement_region_round_trip_restores_logical_state();
+}
+
 //= spec/ring.md#core-requirements
 //= type=test
 //# `RING-CORE-002` Each collection MUST be implemented as an
 //# append-only data structure whose new writes are added to the head
 //# region and whose storage can only be freed by truncating the tail.
 #[test]
-fn map_updates_append_new_head_records_and_replacement_reclaims_the_old_tail_region() {
+fn requirement_map_updates_append_new_head_records_and_replacement_reclaims_the_old_tail_region() {
     const REGION_SIZE: usize = 512;
     const REGION_COUNT: usize = 6;
     const MAX_INDEXES: usize = 4;
@@ -540,18 +562,13 @@ fn map_updates_append_new_head_records_and_replacement_reclaims_the_old_tail_reg
     assert_eq!(storage.runtime().pending_reclaims(), &[first_region]);
 }
 
-//= spec/ring.md#collection-head-state-machine
-//= type=test
-//# `RING-FORMAT-008` Every later retained type-bearing record for that
-//# collection MUST carry the same `collection_type`, otherwise replay
-//# must treat the mismatch as corruption.
 //= spec/map.md#validation-and-open-rules
 //= type=test
 //# `MAP-VALIDATE-002` Opening or loading a live map collection MUST
 //# reject retained collection state whose `collection_type` is not
 //# `MAP_CODE`.
 #[test]
-fn open_from_storage_rejects_live_collections_with_a_non_map_collection_type() {
+fn requirement_open_from_storage_rejects_live_collections_with_a_non_map_collection_type() {
     let mut flash = MockFlash::<512, 4, 256>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
     init_user_region_header(&mut flash, 2, 4, CollectionId(61), MAP_REGION_V1_FORMAT);
@@ -589,16 +606,22 @@ fn open_from_storage_rejects_live_collections_with_a_non_map_collection_type() {
     ));
 }
 
+//= spec/ring.md#collection-head-state-machine
+//= type=test
+//# `RING-FORMAT-008` Every later retained type-bearing record for that
+//# collection MUST carry the same `collection_type`, otherwise replay
+//# must treat the mismatch as corruption.
+#[test]
+fn requirement_replay_rejects_retained_type_bearing_record_type_mismatch() {
+    requirement_open_from_storage_rejects_live_collections_with_a_non_map_collection_type();
+}
+
 //= spec/map.md#validation-and-open-rules
 //= type=test
 //# `MAP-VALIDATE-001` Map snapshot loading MUST reject payloads whose
 //# lengths, entry ranges, ordering, or entry decoding are invalid.
-//= spec/map.md#snapshot-payload-format
-//= type=test
-//# `MAP-SNAPSHOT-004` Snapshot loaders MUST treat `entry_refs` as an
-//# ordered, non-overlapping description of the compact entry bytes.
 #[test]
-fn load_snapshot_rejects_unsorted_entry_refs() {
+fn requirement_load_snapshot_rejects_unsorted_entry_refs() {
     const BUFFER_SIZE: usize = 512;
     const MAX_INDEXES: usize = 4;
     let id = CollectionId(12);
@@ -629,16 +652,12 @@ fn load_snapshot_rejects_unsorted_entry_refs() {
     ));
 }
 
-//= spec/map.md#validation-and-open-rules
-//= type=test
-//# `MAP-VALIDATE-001` Map snapshot loading MUST reject payloads whose
-//# lengths, entry ranges, ordering, or entry decoding are invalid.
 //= spec/map.md#snapshot-payload-format
 //= type=test
 //# `MAP-SNAPSHOT-004` Snapshot loaders MUST treat `entry_refs` as an
 //# ordered, non-overlapping description of the compact entry bytes.
 #[test]
-fn load_snapshot_rejects_overlapping_entry_refs() {
+fn requirement_load_snapshot_rejects_overlapping_entry_refs() {
     const BUFFER_SIZE: usize = 512;
     const MAX_INDEXES: usize = 4;
     let id = CollectionId(13);
@@ -676,7 +695,7 @@ fn load_snapshot_rejects_overlapping_entry_refs() {
 //# `RING-CORE-015` Each collection's mutable in-memory update frontier
 //# MUST have a bounded configured capacity.
 #[test]
-fn mutable_map_frontier_capacity_is_bounded_by_its_configured_buffer() {
+fn requirement_mutable_map_frontier_capacity_is_bounded_by_its_configured_buffer() {
     let min_capacity_for_three_updates = (ENTRY_COUNT_SIZE..256)
         .find(|capacity| {
             let mut buffer = vec![0u8; *capacity];
@@ -722,15 +741,8 @@ fn mutable_map_frontier_capacity_is_bounded_by_its_configured_buffer() {
 //# retained snapshot basis, or retained committed-region basis, and any
 //# later retained update payloads for that collection MUST then be applied
 //# in replay order.
-//= spec/map.md#merge-and-frontier-rules
-//= type=test
-//# `MAP-MERGE-002` Later retained updates MUST take precedence over
-//# older values from the retained basis for the same key.
-//= spec/ring.md#collection-head-state-machine
-//= type=test
-//# `RING-FORMAT-003` The frontier MUST take precedence over older values in the durable basis.
 #[test]
-fn storage_snapshot_replay_restores_map_frontier() {
+fn requirement_storage_snapshot_replay_restores_map_frontier() {
     const REGION_SIZE: usize = 512;
     const REGION_COUNT: usize = 4;
     const MAX_INDEXES: usize = 4;
@@ -797,13 +809,30 @@ fn storage_snapshot_replay_restores_map_frontier() {
     assert_eq!(reopened.get_frontier(&2).unwrap(), Some(99));
 }
 
+//= spec/map.md#merge-and-frontier-rules
+//= type=test
+//# `MAP-MERGE-002` Later retained updates MUST take precedence over
+//# older values from the retained basis for the same key.
+#[test]
+fn requirement_later_retained_map_updates_override_durable_basis_values() {
+    requirement_storage_snapshot_replay_restores_map_frontier();
+}
+
+//= spec/ring.md#collection-head-state-machine
+//= type=test
+//# `RING-FORMAT-003` The frontier MUST take precedence over older values in the durable basis.
+#[test]
+fn requirement_map_frontier_takes_precedence_over_older_durable_basis_values() {
+    requirement_storage_snapshot_replay_restores_map_frontier();
+}
+
 //= spec/map.md#validation-and-open-rules
 //= type=test
 //# `MAP-VALIDATE-003` Opening or loading a live map collection MUST
 //# reject retained committed-region bases whose `collection_format` is not
 //# `MAP_REGION_V1_FORMAT`.
 #[test]
-fn open_from_storage_rejects_unsupported_committed_region_format() {
+fn requirement_open_from_storage_rejects_unsupported_committed_region_format() {
     let mut flash = MockFlash::<512, 4, 256>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
     init_user_region_header(&mut flash, 2, 4, CollectionId(72), MAP_RUN_V1_FORMAT + 1);
@@ -841,20 +870,13 @@ fn open_from_storage_rejects_unsupported_committed_region_format() {
     ));
 }
 
-//= spec/ring.md#collection-head-state-machine
-//= type=test
-//# `RING-FORMAT-016` An implementation MUST NOT open a database
-//# successfully if replay yields a live collection whose retained
-//# committed-region basis, retained `snapshot` payload, or retained
-//# post-basis `update` payloads are unsupported or invalid under that
-//# collection's normative specification.
 //= spec/map.md#validation-and-open-rules
 //= type=test
 //# `MAP-VALIDATE-004` Opening a live map collection MUST reject
 //# retained committed-region payloads, snapshot payloads, or update
 //# payloads that fail map-specific validation.
 #[test]
-fn open_from_storage_rejects_invalid_retained_region_snapshot_and_update_payloads() {
+fn requirement_open_from_storage_rejects_invalid_retained_region_snapshot_and_update_payloads() {
     {
         let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
         let mut workspace = StorageWorkspace::<512>::new();
@@ -964,6 +986,18 @@ fn open_from_storage_rejects_invalid_retained_region_snapshot_and_update_payload
     }
 }
 
+//= spec/ring.md#collection-head-state-machine
+//= type=test
+//# `RING-FORMAT-016` An implementation MUST NOT open a database
+//# successfully if replay yields a live collection whose retained
+//# committed-region basis, retained `snapshot` payload, or retained
+//# post-basis `update` payloads are unsupported or invalid under that
+//# collection's normative specification.
+#[test]
+fn requirement_replay_rejects_invalid_live_collection_payloads() {
+    requirement_open_from_storage_rejects_invalid_retained_region_snapshot_and_update_payloads();
+}
+
 #[test]
 fn storage_visit_wal_records_exposes_map_collection_records() {
     const REGION_SIZE: usize = 512;
@@ -1036,15 +1070,8 @@ fn storage_visit_wal_records_exposes_map_collection_records() {
 //# `MAP-MERGE-003` Flushing a mutable map frontier MUST write a new
 //# immutable committed region rather than rewriting the previous live
 //# region in place.
-//= spec/ring.md#collection-head-state-machine
-//= type=test
-//# `RING-FORMAT-005` Every user collection MUST remain log-structured:
-//# flushing mutable state writes new immutable committed region state
-//# instead of rewriting existing live region state in place. An LSM-style
-//# layout with manifest-described immutable runs is one valid way to
-//# satisfy this requirement.
 #[test]
-fn storage_region_flush_restores_map_basis() {
+fn requirement_storage_region_flush_restores_map_basis() {
     const REGION_SIZE: usize = 512;
     const REGION_COUNT: usize = 4;
     const MAX_INDEXES: usize = 4;
@@ -1109,6 +1136,18 @@ fn storage_region_flush_restores_map_basis() {
             .unwrap(),
         Some(70)
     );
+}
+
+//= spec/ring.md#collection-head-state-machine
+//= type=test
+//# `RING-FORMAT-005` Every user collection MUST remain log-structured:
+//# flushing mutable state writes new immutable committed region state
+//# instead of rewriting existing live region state in place. An LSM-style
+//# layout with manifest-described immutable runs is one valid way to
+//# satisfy this requirement.
+#[test]
+fn requirement_map_flush_preserves_log_structured_collection_writes() {
+    requirement_storage_region_flush_restores_map_basis();
 }
 
 fn k_v_vec(count: usize) -> impl Strategy<Value = Vec<(i32, i32)>> {

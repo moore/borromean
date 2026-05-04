@@ -7,7 +7,7 @@ use crate::disk::StorageMetadata;
 //# the backing flash erase-block size so every region can be erased
 //# independently.
 #[test]
-fn mock_flash_regions_occupy_fixed_independent_storage_spans() {
+fn requirement_mock_flash_regions_occupy_fixed_independent_storage_spans() {
     let mut flash = MockFlash::<16, 3, 16>::new(0xff);
     flash.write_region(0, 0, &[0x11, 0x22]).unwrap();
     flash.write_region(1, 0, &[0x33, 0x44]).unwrap();
@@ -30,7 +30,7 @@ fn mock_flash_regions_occupy_fixed_independent_storage_spans() {
 //= type=test
 //# `RING-FORMAT-STORAGE-PRE-001` Backing storage MUST be writable and erasable at region granularity.
 #[test]
-fn mock_flash_supports_region_granularity_write_and_erase() {
+fn requirement_mock_flash_supports_region_granularity_write_and_erase() {
     let mut flash = MockFlash::<8, 2, 16>::new(0xff);
     flash.write_region(0, 0, &[1, 2, 3, 4]).unwrap();
 
@@ -103,7 +103,7 @@ fn erase_restores_erased_bytes() {
 //= type=test
 //# RING-FORMAT-STORAGE-PRE-006 `region_count >= 2 + min_free_regions`.
 #[test]
-fn format_empty_store_rejects_too_few_regions() {
+fn requirement_format_empty_store_rejects_too_few_regions() {
     let mut flash = MockFlash::<64, 2, 16>::new(0xff);
     let error = flash.format_empty_store(1, 8, 0xa5).unwrap_err();
     assert_eq!(
@@ -119,7 +119,7 @@ fn format_empty_store_rejects_too_few_regions() {
 //= type=test
 //# `RING-FORMAT-STORAGE-PRE-003` Region `0` MUST be reserved as the initial WAL region.
 #[test]
-fn format_empty_store_reserves_region_zero_as_initial_wal_region() {
+fn requirement_format_empty_store_reserves_region_zero_as_initial_wal_region() {
     let mut flash = MockFlash::<64, 4, 32>::new(0xff);
     flash.format_empty_store(1, 8, 0xa5).unwrap();
 
@@ -136,7 +136,7 @@ fn format_empty_store_reserves_region_zero_as_initial_wal_region() {
 //# write a valid `WalRegionPrologue` with `wal_head_region_index = 0`,
 //# then sync region `0`.
 #[test]
-fn format_empty_store_initializes_region_zero_with_wal_header_and_prologue() {
+fn requirement_format_empty_store_initializes_region_zero_with_wal_header_and_prologue() {
     let mut flash = MockFlash::<64, 4, 32>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
 
@@ -172,7 +172,7 @@ fn format_empty_store_initializes_region_zero_with_wal_header_and_prologue() {
 //# `RING-FORMAT-STORAGE-POST-003` The free list MUST contain every non-WAL region in ascending region-index
 //# order.
 #[test]
-fn format_empty_store_populates_free_list_in_ascending_order() {
+fn requirement_format_empty_store_populates_free_list_in_ascending_order() {
     let mut flash = MockFlash::<64, 4, 32>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
 
@@ -205,7 +205,7 @@ fn format_empty_store_populates_free_list_in_ascending_order() {
 //# `RING-FREE-001` The free-pointer footer MUST occupy the final eight
 //# bytes of the region.
 #[test]
-fn format_empty_store_writes_free_pointer_footer_in_final_eight_bytes() {
+fn requirement_format_empty_store_writes_free_pointer_footer_in_final_eight_bytes() {
     let mut flash = MockFlash::<64, 4, 32>::new(0xff);
     flash.format_empty_store(1, 8, 0xa5).unwrap();
 
@@ -220,9 +220,6 @@ fn format_empty_store_writes_free_pointer_footer_in_final_eight_bytes() {
     assert_eq!(footer.next_tail, Some(2));
 }
 
-//= spec/ring.md#storage-metadata
-//= type=test
-//# `RING-META-005` Any bytes in the metadata region after the encoded `StorageMetadata` are reserved, MUST be left erased by formatting, and MUST be ignored on read.
 #[test]
 fn format_empty_store_leaves_reserved_metadata_bytes_erased() {
     let mut flash = MockFlash::<64, 4, 32>::new(0xff);
@@ -239,7 +236,7 @@ fn format_empty_store_leaves_reserved_metadata_bytes_erased() {
 //= type=test
 //# `RING-STORAGE-010` The metadata region MUST occupy exactly one `region_size` span at storage offset `0`, MUST NOT be counted in `region_count`, and data region `0` MUST begin immediately after that metadata region.
 #[test]
-fn format_empty_store_places_region_zero_immediately_after_metadata_region() {
+fn requirement_format_empty_store_places_region_zero_immediately_after_metadata_region() {
     let mut flash = MockFlash::<64, 4, 32>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
 
@@ -265,7 +262,7 @@ fn format_empty_store_places_region_zero_immediately_after_metadata_region() {
 //= type=test
 //# `RING-STORAGE-001` Storage MUST begin with a static metadata region that records version and configuration parameters that do not change after initialization.
 #[test]
-fn format_empty_store_begins_with_static_metadata_region() {
+fn requirement_format_empty_store_begins_with_static_metadata_region() {
     let mut flash = MockFlash::<64, 4, 32>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
 

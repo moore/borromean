@@ -8,7 +8,7 @@ use crate::{StorageOpenError, StorageRuntime};
 //# API inputs, corrupt on-storage state, exhausted capacities, and
 //# device errors.
 #[test]
-fn corrupt_storage_inputs_return_errors_instead_of_panicking() {
+fn requirement_corrupt_storage_inputs_return_errors_instead_of_panicking() {
     let metadata = StorageMetadata::new(128, 4, 1, 8, 0xff, 0xa5).unwrap();
 
     let mut metadata_bytes = [0u8; StorageMetadata::ENCODED_LEN];
@@ -63,7 +63,7 @@ fn corrupt_storage_inputs_return_errors_instead_of_panicking() {
 //# that can be caused by external input or storage state MUST be
 //# reported through explicit error results rather than by panicking.
 #[test]
-fn public_decode_and_open_paths_expose_explicit_error_results() {
+fn requirement_public_decode_and_open_paths_expose_explicit_error_results() {
     type Flash = MockFlash<256, 5, 2048>;
     type Workspace = StorageWorkspace<256>;
     type Store = Storage<8, 4>;
@@ -113,8 +113,12 @@ fn public_decode_and_open_paths_expose_explicit_error_results() {
         Store::open::<256, 5, Flash>;
     let _: CreateMapFn = Store::create_map::<256, 5, Flash>;
     let _: AppendMapUpdateFn = Store::append_map_update::<256, 5, Flash, u16, u16, 8>;
-    let _: fn(&mut Store, &mut Flash, &mut Workspace, &mut Map<'_>) -> Result<u32, MapStorageError> =
-        Store::flush_map::<256, 5, Flash, u16, u16, 8, 8>;
+    let _: fn(
+        &mut Store,
+        &mut Flash,
+        &mut Workspace,
+        &mut Map<'_>,
+    ) -> Result<u32, MapStorageError> = Store::flush_map::<256, 5, Flash, u16, u16, 8, 8>;
 
     // Borrow-returning map APIs need named helpers so the compiler can
     // also verify the lifetime relationship between the caller's buffer
@@ -145,7 +149,7 @@ fn public_decode_and_open_paths_expose_explicit_error_results() {
 //# `unreachable!()` in any path that can be reached from public APIs or
 //# from storage data under validation.
 #[test]
-fn panic_policy_is_enforced_by_clippy_verification() {
+fn requirement_panic_policy_is_enforced_by_clippy_verification() {
     // The mechanical enforcement for this requirement lives in the
     // repository clippy invocation from `scripts/verify.sh` together
     // with the crate-level deny configuration in `src/lib.rs`.

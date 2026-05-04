@@ -6,7 +6,7 @@ use super::*;
 //# into operation entry points or operation builders so the same
 //# `Storage` value can participate in externally driven async execution.
 #[test]
-fn caller_owned_storage_can_mix_future_and_blocking_entry_points() {
+fn requirement_caller_owned_storage_can_mix_future_and_blocking_entry_points() {
     const REGION_SIZE: usize = 256;
     const REGION_COUNT: usize = 5;
 
@@ -61,7 +61,7 @@ fn caller_owned_storage_can_mix_future_and_blocking_entry_points() {
 //# same storage engine from either blocking test shims or asynchronous
 //# device adapters without changing borromean correctness logic.
 #[test]
-fn blocking_and_future_entry_points_produce_equivalent_storage_state() {
+fn requirement_blocking_and_future_entry_points_produce_equivalent_storage_state() {
     const REGION_SIZE: usize = 256;
     const REGION_COUNT: usize = 5;
     let mut blocking_flash = MockFlash::<REGION_SIZE, REGION_COUNT, 2048>::new(0xff);
@@ -189,7 +189,7 @@ fn blocking_and_future_entry_points_produce_equivalent_storage_state() {
 //# adapters for common executors or embedded frameworks, but the core
 //# crate MUST remain usable without them.
 #[test]
-fn core_api_remains_usable_without_executor_or_framework_helpers() {
+fn requirement_core_api_remains_usable_without_executor_or_framework_helpers() {
     let mut flash = MockFlash::<256, 5, 256>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
     let mut storage =

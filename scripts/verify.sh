@@ -28,20 +28,7 @@ banned_platform_dependencies=(
 )
 
 tree_output="$(mktemp)"
-requirements_backup="$(mktemp -d)"
-requirements_root=".duvet/requirements"
-policy_requirements_root=".duvet/policy/requirements"
-policy_requirements_active=0
-
-restore_duvet_requirements() {
-    if [[ "$policy_requirements_active" -eq 1 && -d "$requirements_backup/original" ]]; then
-        rm -rf "$requirements_root"
-        mv "$requirements_backup/original" "$requirements_root"
-        policy_requirements_active=0
-    fi
-}
-
-trap 'restore_duvet_requirements; rm -f "$tree_output"; rm -rf "$requirements_backup"' EXIT
+trap 'rm -f "$tree_output"' EXIT
 
 echo "[verify] cargo test"
 cargo test
@@ -69,8 +56,8 @@ cargo clippy --lib --all-features -- \
     -D clippy::disallowed_types \
     -D clippy::disallowed_macros
 
-echo "[verify] cargo run --quiet --bin traceability_audit"
-cargo run --quiet --bin traceability_audit
+echo "[verify] cargo run --quiet --bin traceability_audit -- check-requirements"
+cargo run --quiet --bin traceability_audit -- check-requirements
 
 echo "[verify] cargo tree -e normal --prefix none"
 cargo tree -e normal --prefix none > "$tree_output"
@@ -89,12 +76,5 @@ for dependency in "${banned_platform_dependencies[@]}"; do
     fi
 done
 
-echo "[verify] duvet report --config-path .duvet/config.toml --ci true --require-citations false --require-tests true"
-duvet report --config-path .duvet/config.toml --ci true --require-citations false --require-tests true
-
-echo "[verify] duvet report --config-path .duvet/policy/config.toml --ci true --require-citations true --require-tests false"
-mv "$requirements_root" "$requirements_backup/original"
-cp -R "$policy_requirements_root" "$requirements_root"
-policy_requirements_active=1
-duvet report --config-path .duvet/policy/config.toml --ci true --require-citations true --require-tests false
-restore_duvet_requirements
+echo "[verify] duvet report --config-path .duvet/config.toml --require-tests true"
+duvet report --config-path .duvet/config.toml --require-tests true

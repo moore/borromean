@@ -27,7 +27,7 @@ fn encode_logical(record: WalRecord<'_>) -> ([u8; 128], usize) {
 //# `collection_type: u16`, `collection_format: u16`,
 //# `erased_byte: u8`, and `wal_record_magic: u8`.
 #[test]
-fn canonical_scalar_widths_match_storage_header_and_wal_field_sizes() {
+fn requirement_canonical_scalar_widths_match_storage_header_and_wal_field_sizes() {
     let metadata = metadata(16);
     assert_eq!(
         core::mem::size_of_val(&metadata.storage_version),
@@ -96,7 +96,7 @@ fn canonical_scalar_widths_match_storage_header_and_wal_field_sizes() {
 //# `0x8000..0xffff` for private deployment-local collection types that
 //# are not required to interoperate across deployments.
 #[test]
-fn collection_type_codes_use_reserved_global_namespace() {
+fn requirement_collection_type_codes_use_reserved_global_namespace() {
     assert_eq!(
         crate::CollectionType::Wal.stable_code(),
         Some(crate::CollectionType::WAL_CODE)
@@ -117,11 +117,6 @@ fn collection_type_codes_use_reserved_global_namespace() {
     assert_eq!(crate::CollectionType::MAP_CODE, 2);
 }
 
-//= spec/ring.md#canonical-on-disk-encoding
-//= type=test
-//# `RING-DISK-001` All fixed-width integer fields in `StorageMetadata`,
-//# `Header`, `WalRegionPrologue`, free-pointer footers, and logical WAL
-//# records MUST be encoded little-endian.
 #[test]
 fn logical_wal_records_encode_fixed_width_fields_little_endian() {
     let (logical, logical_len) = encode_logical(WalRecord::Head {
@@ -161,7 +156,7 @@ fn logical_wal_records_encode_fixed_width_fields_little_endian() {
 //# records MUST be encoded as `OptRegionIndex`, a one-byte tag followed,
 //# when the tag is `1`, by a `u32 region_index`.
 #[test]
-fn optional_region_indexes_use_a_tag_then_little_endian_region_index() {
+fn requirement_optional_region_indexes_use_a_tag_then_little_endian_region_index() {
     let (free_list_head_none, free_list_head_none_len) =
         encode_logical(WalRecord::FreeListHead { region_index: None });
     assert_eq!(
@@ -191,13 +186,6 @@ fn optional_region_indexes_use_a_tag_then_little_endian_region_index() {
     );
 }
 
-//= spec/ring.md#canonical-on-disk-encoding
-//= type=test
-//# `RING-DISK-006` `metadata_checksum`, `header_checksum`,
-//# `prologue_checksum`, `footer_checksum`, and `record_checksum` MUST all use the standard
-//# CRC-32C (Castagnoli) parameters (`poly = 0x1edc6f41`,
-//# `init = 0xffffffff`, `refin = true`, `refout = true`,
-//# `xorout = 0xffffffff`) and MUST be stored little-endian.
 #[test]
 fn logical_record_checksums_use_crc32c_and_store_little_endian_bytes() {
     assert_eq!(crc32(b"123456789"), 0xe306_9283);
@@ -223,7 +211,7 @@ fn logical_record_checksums_use_crc32c_and_store_little_endian_bytes() {
 //# earlier field in that structure, in on-disk order, and MUST exclude the
 //# checksum field itself and any later padding.
 #[test]
-fn record_checksums_cover_prior_logical_bytes_but_exclude_checksum_and_padding() {
+fn requirement_record_checksums_cover_prior_logical_bytes_but_exclude_checksum_and_padding() {
     let record = WalRecord::Update {
         collection_id: CollectionId(0x0102_0304_0506_0708),
         payload: &[0x11, 0x22, 0x33],
@@ -269,7 +257,7 @@ fn record_checksums_cover_prior_logical_bytes_but_exclude_checksum_and_padding()
 //= type=test
 //# RING-WAL-ENC-003 After the leading `record_magic`, the rest of the physical WAL record is encoded with deterministic byte-stuffing over the logical WAL record bytes:
 #[test]
-fn escape_codes_use_first_ascending_distinct_values() {
+fn requirement_escape_codes_use_first_ascending_distinct_values() {
     let escape_codes = WalEscapeCodes::derive(0x00, 0x02);
     assert_eq!(
         escape_codes,
@@ -287,7 +275,7 @@ fn escape_codes_use_first_ascending_distinct_values() {
 //# `RING-WAL-ENC-001` Every physical WAL record MUST begin with a
 //# one-byte `record_magic`.
 #[test]
-fn encoded_record_begins_with_record_magic() {
+fn requirement_encoded_record_begins_with_record_magic() {
     let metadata = metadata(16);
     let (physical, _encoded_len) = encode_physical(WalRecord::WalRecovery, metadata);
     assert_eq!(physical[0], 0xa5);
@@ -299,7 +287,7 @@ fn encoded_record_begins_with_record_magic() {
 //# `wal_record_magic`, and `wal_record_magic` must not equal
 //# `erased_byte`, the byte value returned by erased flash.
 #[test]
-fn wal_record_magic_must_match_storage_configuration_and_differ_from_erased_byte() {
+fn requirement_wal_record_magic_must_match_storage_configuration_and_differ_from_erased_byte() {
     let error = StorageMetadata::new(128, 8, 1, 16, 0xff, 0xff).unwrap_err();
     assert_eq!(error, DiskError::InvalidWalRecordMagic);
 
@@ -323,7 +311,7 @@ fn wal_record_magic_must_match_storage_configuration_and_differ_from_erased_byte
 //= type=test
 //# RING-WAL-ENC-006 After the full logical record through `record_checksum` has been decoded, any remaining bytes up to the aligned physical record end are padding. Those padding bytes MUST all equal `wal_escape_code_escape`.
 #[test]
-fn decode_rejects_non_escape_padding_bytes() {
+fn requirement_decode_rejects_non_escape_padding_bytes() {
     let metadata = metadata(16);
     let (mut physical, encoded_len) = encode_physical(WalRecord::WalRecovery, metadata);
     let escape_codes = WalEscapeCodes::derive(metadata.erased_byte, metadata.wal_record_magic);
@@ -344,7 +332,7 @@ fn decode_rejects_non_escape_padding_bytes() {
 //# rounded up to a multiple of
 //# `wal_write_granule`.
 #[test]
-fn encoded_record_len_is_rounded_to_wal_write_granule() {
+fn requirement_encoded_record_len_is_rounded_to_wal_write_granule() {
     let metadata = metadata(16);
     let (_physical, encoded_len) = encode_physical(
         WalRecord::Update {
@@ -362,7 +350,7 @@ fn encoded_record_len_is_rounded_to_wal_write_granule() {
 //# MUST be aligned to `wal_write_granule`, the smallest writable unit
 //# of the backing flash.
 #[test]
-fn consecutive_wal_record_start_offsets_stay_aligned_to_wal_write_granule() {
+fn requirement_consecutive_wal_record_start_offsets_stay_aligned_to_wal_write_granule() {
     let metadata = metadata(16);
     let initial_offset = metadata.wal_record_area_offset().unwrap();
     let (_first_physical, first_len) = encode_physical(WalRecord::WalRecovery, metadata);
@@ -397,7 +385,7 @@ fn update_record_round_trips_with_escaping_and_padding() {
 //# (`new_collection`, `drop_collection`, and `wal_recovery`) MUST still
 //# encode `payload_len = 0`.
 #[test]
-fn empty_payload_record_types_encode_zero_payload_len() {
+fn requirement_empty_payload_record_types_encode_zero_payload_len() {
     let (new_collection_logical, new_collection_len) = encode_logical(WalRecord::NewCollection {
         collection_id: CollectionId(7),
         collection_type: crate::CollectionType::MAP_CODE,
@@ -434,7 +422,7 @@ fn free_list_head_none_round_trips() {
 //# `wal_escape_code_erased`, `wal_escape_code_magic`, or
 //# `wal_escape_code_escape`; any other follower byte is corruption.
 #[test]
-fn decode_rejects_invalid_escape_sequence() {
+fn requirement_decode_rejects_invalid_escape_sequence() {
     let metadata = metadata(4);
     let record = WalRecord::Update {
         collection_id: CollectionId(7),
@@ -474,7 +462,7 @@ fn decode_rejects_invalid_escape_sequence() {
 //# `wal_recovery = 0x0b`,
 //# `stage_region = 0x0c`.
 #[test]
-fn record_types_use_canonical_byte_codes() {
+fn requirement_record_types_use_canonical_byte_codes() {
     let canonical_codes = [
         (WalRecordType::NewCollection, 0x01),
         (WalRecordType::Update, 0x02),
@@ -501,7 +489,7 @@ fn record_types_use_canonical_byte_codes() {
 //# `RING-WAL-LAYOUT-002` The logical field order before byte-stuffing
 //# MUST be exactly the order shown above.
 #[test]
-fn logical_record_fields_follow_canonical_order() {
+fn requirement_logical_record_fields_follow_canonical_order() {
     let payload = [0xaa, 0xbb];
     let (logical, logical_len) = encode_logical(WalRecord::Snapshot {
         collection_id: CollectionId(7),
@@ -526,7 +514,7 @@ fn logical_record_fields_follow_canonical_order() {
 //# `RING-WAL-LAYOUT-003` `payload_len` MUST equal the number of logical
 //# payload bytes only.
 #[test]
-fn payload_len_counts_only_logical_payload_bytes() {
+fn requirement_payload_len_counts_only_logical_payload_bytes() {
     let (alloc_begin_logical, _alloc_begin_len) = encode_logical(WalRecord::AllocBegin {
         region_index: 3,
         free_list_head_after: Some(4),
@@ -544,7 +532,7 @@ fn payload_len_counts_only_logical_payload_bytes() {
 //# `record_checksum`, the physical leading `record_magic`, and any
 //# physical padding.
 #[test]
-fn payload_len_excludes_omitted_fields_checksum_magic_and_padding() {
+fn requirement_payload_len_excludes_omitted_fields_checksum_magic_and_padding() {
     let metadata = metadata(16);
     let (logical, logical_len) = encode_logical(WalRecord::WalRecovery);
     let (physical, encoded_len) = encode_physical(WalRecord::WalRecovery, metadata);
@@ -561,7 +549,7 @@ fn payload_len_excludes_omitted_fields_checksum_magic_and_padding() {
 //# logical WAL record bytes from `record_type` through the final byte of
 //# the last field preceding `record_checksum`.
 #[test]
-fn record_checksum_covers_logical_prefix_bytes() {
+fn requirement_record_checksum_covers_logical_prefix_bytes() {
     let payload = [0xaa, 0xbb];
     let (logical, logical_len) = encode_logical(WalRecord::Snapshot {
         collection_id: CollectionId(7),
@@ -597,7 +585,7 @@ fn alloc_begin_round_trips_free_list_head_after() {
 //# `alloc_begin`, `stage_region`, `head`, `reclaim_begin`, and
 //# `reclaim_end` payloads are a single `u32 region_index`;
 #[test]
-fn stage_region_round_trips_region_index() {
+fn requirement_stage_region_round_trips_region_index() {
     let metadata = metadata(4);
     let record = WalRecord::StageRegion { region_index: 3 };
     let (physical, encoded_len) = encode_physical(record, metadata);

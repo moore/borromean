@@ -6,7 +6,7 @@ use super::*;
 //# the primitive operations needed to satisfy [spec/ring.md](ring.md):
 //# region or metadata reads, writes, erases, and durability barriers.
 #[test]
-fn flash_io_trait_exposes_only_primitive_storage_operations() {
+fn requirement_flash_io_trait_exposes_only_primitive_storage_operations() {
     struct SurfaceCheckedFlash;
 
     impl FlashIo for SurfaceCheckedFlash {
@@ -81,7 +81,7 @@ fn flash_io_trait_exposes_only_primitive_storage_operations() {
 //# `RING-IMPL-IO-002` The borromean I/O abstraction MUST be generic
 //# over the caller's concrete transport or flash driver type.
 #[test]
-fn flash_io_trait_accepts_caller_defined_driver_types() {
+fn requirement_flash_io_trait_accepts_caller_defined_driver_types() {
     const REGION_SIZE: usize = 256;
     const REGION_COUNT: usize = 5;
     let mut flash = ForwardingFlash::<REGION_SIZE, REGION_COUNT, 2048>::new(0xff);
@@ -105,7 +105,7 @@ fn flash_io_trait_accepts_caller_defined_driver_types() {
 //# `RING-IMPL-IO-003` The borromean I/O abstraction MUST be usable
 //# without dynamic dispatch and without heap allocation.
 #[test]
-fn flash_io_trait_supports_non_allocating_concrete_driver_usage() {
+fn requirement_flash_io_trait_supports_non_allocating_concrete_driver_usage() {
     const REGION_SIZE: usize = 256;
     const REGION_COUNT: usize = 5;
 
@@ -137,7 +137,7 @@ fn flash_io_trait_supports_non_allocating_concrete_driver_usage() {
 //# explicit durability barrier, the I/O abstraction MAY implement sync as
 //# a zero-cost completed operation.
 #[test]
-fn mock_flash_sync_can_complete_immediately() {
+fn requirement_mock_flash_sync_can_complete_immediately() {
     let mut flash = MockFlash::<128, 4, 8>::new(0xff);
     flash.clear_operations();
     flash.sync().unwrap();
@@ -150,7 +150,7 @@ fn mock_flash_sync_can_complete_immediately() {
 //# interrupt delivery as an external concern of the caller-provided I/O
 //# implementation rather than as an internal runtime service.
 #[test]
-fn flash_io_runtime_hook_policy_is_enforced_by_clippy_verification() {
+fn requirement_flash_io_runtime_hook_policy_is_enforced_by_clippy_verification() {
     // The mechanical enforcement for this requirement lives in
     // `clippy.toml`, the crate-level deny configuration in `src/lib.rs`,
     // and the lib-only clippy policy pass in `scripts/verify.sh`.

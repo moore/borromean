@@ -6,7 +6,7 @@ use super::*;
 //# shared storage engine for durability, ordering, and recovery rather
 //# than duplicating those mechanisms ad hoc.
 #[test]
-fn map_durability_and_recovery_only_change_when_the_shared_storage_engine_is_used() {
+fn requirement_map_durability_and_recovery_only_change_when_the_shared_storage_engine_is_used() {
     let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =
@@ -89,7 +89,7 @@ fn map_durability_and_recovery_only_change_when_the_shared_storage_engine_is_use
 //# drivable through the same runtime-agnostic future model as core
 //# storage operations.
 #[test]
-fn collection_operations_with_io_are_drivable_as_runtime_agnostic_futures() {
+fn requirement_collection_operations_with_io_are_drivable_as_runtime_agnostic_futures() {
     let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =

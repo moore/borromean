@@ -7,7 +7,7 @@ use ::core::task::Poll;
 //# `RING-IMPL-OP-001` A borromean future MUST NOT require spawning
 //# another borromean future in order to complete.
 #[test]
-fn each_public_operation_future_completes_when_polled_directly() {
+fn requirement_each_public_operation_future_completes_when_polled_directly() {
     const REGION_SIZE: usize = 512;
     const REGION_COUNT: usize = 5;
 
@@ -101,7 +101,7 @@ fn each_public_operation_future_completes_when_polled_directly() {
 //# durable step mandatory MUST occur in an order that allows the same
 //# operation to be retried or reconstructed after reset.
 #[test]
-fn flush_future_keeps_collection_basis_on_previous_state_until_head_commit() {
+fn requirement_flush_future_keeps_collection_basis_on_previous_state_until_head_commit() {
     for pending_polls in 1..=2 {
         let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
         let mut workspace = StorageWorkspace::<512>::new();
@@ -210,7 +210,7 @@ fn flush_future_keeps_collection_basis_on_previous_state_until_head_commit() {
 //# mutable borrows of large caller workspaces so embedded callers can
 //# reuse buffers across sequential operations.
 #[test]
-fn one_workspace_is_reusable_across_sequential_future_driven_operations() {
+fn requirement_one_workspace_is_reusable_across_sequential_future_driven_operations() {
     let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =
