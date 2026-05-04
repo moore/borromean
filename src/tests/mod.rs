@@ -187,6 +187,125 @@ fn free_list_chain<
     chain
 }
 
+#[test]
+fn collection_id_helpers_preserve_little_endian_and_overflow_semantics() {
+    let id = CollectionId::new(0x0102_0304_0506_0708);
+
+    assert_eq!(id.to_le_bytes(), 0x0102_0304_0506_0708u64.to_le_bytes());
+    assert_eq!(
+        id.increment(),
+        Some(CollectionId::new(0x0102_0304_0506_0709))
+    );
+    assert_eq!(CollectionId::new(u64::MAX).increment(), None);
+}
+
+#[test]
+fn storage_facade_accessors_reflect_runtime_state() {
+    let mut flash = MockFlash::<512, 4, 1024>::new(0xff);
+    let mut workspace = StorageWorkspace::<512>::new();
+    let mut storage =
+        Storage::<8, 4>::format::<512, 4, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+
+    assert_eq!(
+        storage.wal_append_offset(),
+        storage.runtime().wal_append_offset()
+    );
+    assert_eq!(
+        storage.pending_wal_recovery_boundary(),
+        storage.runtime().pending_wal_recovery_boundary()
+    );
+    assert_eq!(storage.tracked_user_collection_count(), 0);
+
+    storage
+        .append_new_collection::<512, 4, _>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(321),
+            CollectionType::MAP_CODE,
+        )
+        .unwrap();
+
+    assert_eq!(storage.tracked_user_collection_count(), 1);
+    assert_eq!(storage.collections()[0].collection_id(), CollectionId(321));
+}
+
+#[test]
+fn storage_facade_raw_wal_wrappers_update_runtime_state() {
+    let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
+    let mut workspace = StorageWorkspace::<512>::new();
+    let mut storage =
+        Storage::<8, 4>::format::<512, 5, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+
+    let collection_id = CollectionId(322);
+    storage
+        .append_new_collection::<512, 5, _>(
+            &mut flash,
+            &mut workspace,
+            collection_id,
+            CollectionType::MAP_CODE,
+        )
+        .unwrap();
+    storage
+        .append_drop_collection::<512, 5, _>(&mut flash, &mut workspace, collection_id)
+        .unwrap();
+    assert_eq!(
+        storage.collections()[0].basis(),
+        StartupCollectionBasis::Dropped
+    );
+
+    let free_head = storage.last_free_list_head().unwrap();
+    storage
+        .append_alloc_begin::<512, 5, _>(&mut flash, &mut workspace, free_head, Some(2))
+        .unwrap();
+    assert_eq!(storage.ready_region(), Some(free_head));
+    assert_eq!(storage.last_free_list_head(), Some(2));
+
+    storage
+        .append_free_list_head::<512, 5, _>(&mut flash, &mut workspace, None)
+        .unwrap();
+    assert_eq!(storage.last_free_list_head(), None);
+
+    storage
+        .append_reclaim_begin::<512, 5, _>(&mut flash, &mut workspace, 3)
+        .unwrap();
+    assert_eq!(storage.pending_reclaims(), &[3]);
+    storage
+        .append_reclaim_end::<512, 5, _>(&mut flash, &mut workspace, 3)
+        .unwrap();
+    assert_eq!(storage.pending_reclaims(), &[]);
+}
+
+#[test]
+fn storage_facade_rejects_unneeded_wal_recovery_record() {
+    let mut flash = MockFlash::<512, 4, 1024>::new(0xff);
+    let mut workspace = StorageWorkspace::<512>::new();
+    let mut storage =
+        Storage::<8, 4>::format::<512, 4, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+
+    assert!(matches!(
+        storage.append_wal_recovery::<512, 4, _>(&mut flash, &mut workspace),
+        Err(StorageRuntimeError::WalRecoveryNotNeeded)
+    ));
+}
+
+#[test]
+fn storage_facade_reports_and_clears_pending_wal_recovery_boundary() {
+    let mut flash = MockFlash::<256, 4, 1024>::new(0xff);
+    let mut workspace = StorageWorkspace::<256>::new();
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    let corrupt_offset = metadata.wal_record_area_offset().unwrap();
+    flash.write_region(0, corrupt_offset, &[0x10; 8]).unwrap();
+
+    let mut storage = Storage::<8, 4>::open::<256, 4, _>(&mut flash, &mut workspace).unwrap();
+    assert!(storage.pending_wal_recovery_boundary());
+
+    storage
+        .append_wal_recovery::<256, 4, _>(&mut flash, &mut workspace)
+        .unwrap();
+
+    assert!(!storage.pending_wal_recovery_boundary());
+}
+
 fn smallest_map_capacity_for_repeated_updates(update_count: usize) -> usize {
     (4..256)
         .find(|capacity| {
@@ -349,7 +468,7 @@ fn rotate_wal_tail_for_collection<const REGION_COUNT: usize>(
     workspace: &mut StorageWorkspace<512>,
     collection_id: CollectionId,
 ) -> u32 {
-    loop {
+    for _ in 0..128 {
         match storage.append_wal_rotation_start::<512, REGION_COUNT, _>(flash, workspace) {
             Ok(region_index) => {
                 storage
@@ -367,6 +486,8 @@ fn rotate_wal_tail_for_collection<const REGION_COUNT: usize>(
             Err(other) => panic!("unexpected rotation-start error: {other:?}"),
         }
     }
+
+    panic!("WAL tail rotation did not reach a valid rotation window");
 }
 
 fn wal_and_map_region_formats() -> (Header, Header) {

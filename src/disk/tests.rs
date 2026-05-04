@@ -218,6 +218,33 @@ fn requirement_storage_metadata_decode_ignores_reserved_trailing_bytes() {
     assert_eq!(StorageMetadata::decode(&buffer).unwrap(), metadata);
 }
 
+#[test]
+fn byte_helpers_advance_offsets_and_reject_short_buffers() {
+    let mut buffer = [0u8; 2];
+
+    let next = write_u8(&mut buffer, 1, 0x5a).unwrap();
+    assert_eq!(next, 2);
+    assert_eq!(buffer, [0, 0x5a]);
+    assert_eq!(
+        write_u8(&mut buffer, 2, 0xa5),
+        Err(DiskError::BufferTooSmall {
+            needed: 3,
+            available: 2,
+        })
+    );
+
+    let mut offset = 1usize;
+    assert_eq!(read_u8(&buffer, &mut offset).unwrap(), 0x5a);
+    assert_eq!(offset, 2);
+    assert_eq!(
+        read_u8(&buffer, &mut offset),
+        Err(DiskError::BufferTooSmall {
+            needed: 3,
+            available: 2,
+        })
+    );
+}
+
 //= spec/ring.md#header
 //= type=test
 //# `RING-HEADER-001` `Header` MUST be encoded as the exact byte

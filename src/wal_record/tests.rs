@@ -18,6 +18,147 @@ fn encode_logical(record: WalRecord<'_>) -> ([u8; 128], usize) {
     (logical, logical_len)
 }
 
+#[test]
+fn wal_byte_helpers_advance_offsets_and_reject_short_buffers() {
+    let mut buffer = [0u8; 4];
+
+    let offset = write_u8(&mut buffer, 1, 0x7a).unwrap();
+    assert_eq!(offset, 2);
+    let offset = write_bytes(&mut buffer, offset, &[0x7b, 0x7c]).unwrap();
+    assert_eq!(offset, 4);
+    assert_eq!(buffer, [0, 0x7a, 0x7b, 0x7c]);
+    assert_eq!(
+        write_u8(&mut buffer, 4, 0x7d),
+        Err(WalRecordError::BufferTooSmall {
+            needed: 5,
+            available: 4,
+        })
+    );
+
+    let mut read_offset = 1usize;
+    assert_eq!(read_u8(&buffer, &mut read_offset).unwrap(), 0x7a);
+    assert_eq!(read_offset, 2);
+    assert_eq!(read_u8(&buffer, &mut read_offset).unwrap(), 0x7b);
+    assert_eq!(read_offset, 3);
+    assert_eq!(read_u8(&buffer, &mut read_offset).unwrap(), 0x7c);
+    assert_eq!(read_offset, 4);
+    assert!(matches!(
+        read_u8(&buffer, &mut read_offset),
+        Err(WalRecordError::BufferTooSmall {
+            needed: 5,
+            available: 4,
+        })
+    ));
+    assert!(matches!(
+        write_bytes(&mut buffer, 1, &[1, 2, 3, 4]),
+        Err(WalRecordError::BufferTooSmall {
+            needed: 5,
+            available: 4,
+        })
+    ));
+}
+
+#[test]
+fn logical_byte_encoding_escapes_reserved_physical_bytes() {
+    let metadata = metadata(8);
+    let escape_codes = WalEscapeCodes::derive(metadata.erased_byte, metadata.wal_record_magic);
+    let mut output = [0u8; 8];
+
+    let offset =
+        encode_logical_byte(metadata.erased_byte, &mut output, 0, metadata, escape_codes).unwrap();
+    assert_eq!(offset, 2);
+    assert_eq!(
+        &output[..offset],
+        &[
+            escape_codes.wal_escape_byte,
+            escape_codes.wal_escape_code_erased,
+        ]
+    );
+
+    let offset = encode_logical_byte(
+        metadata.wal_record_magic,
+        &mut output,
+        0,
+        metadata,
+        escape_codes,
+    )
+    .unwrap();
+    assert_eq!(offset, 2);
+    assert_eq!(
+        &output[..offset],
+        &[
+            escape_codes.wal_escape_byte,
+            escape_codes.wal_escape_code_magic,
+        ]
+    );
+
+    let offset = encode_logical_byte(
+        escape_codes.wal_escape_byte,
+        &mut output,
+        0,
+        metadata,
+        escape_codes,
+    )
+    .unwrap();
+    assert_eq!(offset, 2);
+    assert_eq!(
+        &output[..offset],
+        &[
+            escape_codes.wal_escape_byte,
+            escape_codes.wal_escape_code_escape,
+        ]
+    );
+}
+
+#[test]
+fn decode_record_consumes_all_logical_bytes_and_reports_lengths() {
+    let metadata = metadata(8);
+    let record = WalRecord::Update {
+        collection_id: CollectionId(9),
+        payload: &[0xff, 0xa5, 0x00, 0x01],
+    };
+    let (physical, encoded_len) = encode_physical(record, metadata);
+    let mut logical = [0u8; 128];
+
+    let decoded = decode_record(&physical[..encoded_len], metadata, &mut logical).unwrap();
+
+    assert_eq!(decoded.record, record);
+    assert_eq!(decoded.encoded_len, encoded_len);
+    assert_eq!(
+        decoded.logical_len,
+        1 + size_of::<u64>() + size_of::<u32>() + 4 + size_of::<u32>()
+    );
+}
+
+#[test]
+fn decode_record_does_not_read_payload_header_before_all_header_bytes_arrive() {
+    let metadata = metadata(8);
+    let record = WalRecord::Update {
+        collection_id: CollectionId(9),
+        payload: &[0x01, 0x02],
+    };
+    let (physical, encoded_len) = encode_physical(record, metadata);
+    let mut logical = [0xffu8; 128];
+
+    let decoded = decode_record(&physical[..encoded_len], metadata, &mut logical).unwrap();
+
+    assert_eq!(decoded.record, record);
+}
+
+#[test]
+fn decode_record_rejects_empty_logical_scratch_before_writing_first_byte() {
+    let metadata = metadata(8);
+    let (physical, encoded_len) = encode_physical(WalRecord::WalRecovery, metadata);
+
+    assert!(matches!(
+        decode_record(&physical[..encoded_len], metadata, &mut []),
+        Err(WalRecordError::BufferTooSmall {
+            needed: 1,
+            available: 0,
+        })
+    ));
+}
+
 //= spec/ring.md#canonical-on-disk-encoding
 //= type=test
 //# `RING-DISK-002` The canonical scalar widths are:

@@ -6,6 +6,12 @@ use postcard::to_slice;
 use proptest::prelude::*;
 use std::{vec, vec::Vec};
 
+type LargeValue = ([u8; 16], [u8; 16]);
+
+fn large_value(byte: u8) -> LargeValue {
+    ([byte; 16], [byte; 16])
+}
+
 fn vec_and_indexes() -> impl Strategy<Value = (Vec<u8>, usize, usize)> {
     prop::collection::vec(0..1u8, (ENTRY_REF_SIZE * 2)..(10 * ENTRY_REF_SIZE)).prop_flat_map(
         |vec| {
@@ -52,6 +58,1289 @@ fn init_user_region_header<
     let mut header_bytes = [0u8; crate::Header::ENCODED_LEN];
     header.encode_into(&mut header_bytes).unwrap();
     flash.write_region(region_index, 0, &header_bytes).unwrap();
+}
+
+fn write_committed_payload<
+    const REGION_SIZE: usize,
+    const REGION_COUNT: usize,
+    const MAX_LOG: usize,
+>(
+    flash: &mut MockFlash<REGION_SIZE, REGION_COUNT, MAX_LOG>,
+    region_index: u32,
+    sequence: u64,
+    collection_id: CollectionId,
+    collection_format: u16,
+    payload: &[u8],
+) {
+    init_user_region_header(
+        flash,
+        region_index,
+        sequence,
+        collection_id,
+        collection_format,
+    );
+    flash
+        .write_region(region_index, Header::ENCODED_LEN, payload)
+        .unwrap();
+}
+
+fn snapshot_for_entries(entries: &[(i32, Option<i32>)]) -> ([u8; 512], usize) {
+    let mut buffer = [0u8; 512];
+    let mut map = LsmMap::<i32, i32, 8>::new(CollectionId(90), &mut buffer).unwrap();
+    for (key, value) in entries.iter().copied() {
+        match value {
+            Some(value) => map.set(key, value).unwrap(),
+            None => map.delete(key).unwrap(),
+        }
+    }
+
+    let mut snapshot = [0u8; 512];
+    let snapshot_len = map.encode_snapshot_into(&mut snapshot).unwrap();
+    (snapshot, snapshot_len)
+}
+
+#[test]
+fn map_descriptor_and_integer_helpers_cover_bounds() {
+    let bounded = MapRunDescriptor {
+        source: MapRunSource::RunChain,
+        generation: 3,
+        first_region: 2,
+        region_count: 1,
+        approx_state_count: 2,
+        lower_key: Some(10),
+        upper_key: Some(20),
+    };
+    assert!(!bounded.may_contain(&9));
+    assert!(bounded.may_contain(&10));
+    assert!(bounded.may_contain(&15));
+    assert!(bounded.may_contain(&20));
+    assert!(!bounded.may_contain(&21));
+
+    let mut bytes = [0u8; 12];
+    let mut offset = 0usize;
+    write_u32(&mut bytes, &mut offset, 0x0102_0304).unwrap();
+    write_u64(&mut bytes, &mut offset, 0x1112_1314_1516_1718).unwrap();
+    assert_eq!(offset, 12);
+    assert!(matches!(
+        write_u32(&mut bytes, &mut offset, 1),
+        Err(MapError::BufferTooSmall)
+    ));
+
+    let mut offset = 0usize;
+    assert_eq!(read_u32(&bytes, &mut offset).unwrap(), 0x0102_0304);
+    assert_eq!(
+        read_u64(&bytes, &mut offset).unwrap(),
+        0x1112_1314_1516_1718
+    );
+    assert_eq!(offset, 12);
+    assert!(matches!(
+        read_u32(&bytes, &mut offset),
+        Err(MapError::SerializationError)
+    ));
+
+    let mut exact = [0u8; size_of::<u32>()];
+    let mut offset = 0usize;
+    write_u32(&mut exact, &mut offset, 0x2122_2324).unwrap();
+    assert_eq!(offset, exact.len());
+    let mut offset = 0usize;
+    assert_eq!(read_u32(&exact, &mut offset).unwrap(), 0x2122_2324);
+    assert_eq!(offset, exact.len());
+
+    ensure_manifest_run_capacity::<2>(CollectionId(97), 2).unwrap();
+    assert!(matches!(
+        ensure_manifest_run_capacity::<2>(CollectionId(97), 3),
+        Err(MapStorageError::TooManyRuns {
+            collection_id: CollectionId(97),
+            max_runs: 2,
+        })
+    ));
+}
+
+#[test]
+fn snapshot_helpers_validate_ranges_and_lookup_semantics() {
+    let (snapshot, snapshot_len) =
+        snapshot_for_entries(&[(1, Some(10)), (2, None), (3, Some(30)), (4, Some(40))]);
+    let snapshot = &snapshot[..snapshot_len];
+
+    let (entry_count, entry_bytes_len, entries_offset, refs_start) =
+        snapshot_parts(snapshot).unwrap();
+    assert_eq!(entry_count, 4);
+    assert_eq!(
+        entries_offset,
+        SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE
+    );
+    assert_eq!(refs_start, snapshot_len - entry_count * ENTRY_REF_SIZE);
+    assert_eq!(
+        snapshot_len,
+        entries_offset + entry_bytes_len + entry_count * ENTRY_REF_SIZE
+    );
+
+    assert_eq!(
+        lookup_snapshot::<i32, i32>(snapshot, &0).unwrap(),
+        LookupResult::NotFound
+    );
+    assert_eq!(
+        lookup_snapshot::<i32, i32>(snapshot, &1).unwrap(),
+        LookupResult::Set(10)
+    );
+    assert_eq!(
+        lookup_snapshot::<i32, i32>(snapshot, &2).unwrap(),
+        LookupResult::Deleted
+    );
+    assert_eq!(
+        lookup_snapshot::<i32, i32>(snapshot, &4).unwrap(),
+        LookupResult::Set(40)
+    );
+    assert_eq!(
+        lookup_snapshot::<i32, i32>(snapshot, &5).unwrap(),
+        LookupResult::NotFound
+    );
+
+    let empty_range_len = snapshot_range_len(snapshot, entry_count, 0).unwrap();
+    assert_eq!(
+        empty_range_len,
+        SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE
+    );
+    assert_eq!(
+        snapshot_range_len(snapshot, 0, entry_count).unwrap(),
+        snapshot_len
+    );
+    assert!(matches!(
+        snapshot_range_len(snapshot, entry_count + 1, 0),
+        Err(MapError::IndexOutOfBounds)
+    ));
+    assert!(matches!(
+        snapshot_range_len(snapshot, entry_count - 1, 2),
+        Err(MapError::IndexOutOfBounds)
+    ));
+
+    let range_len = snapshot_range_len(snapshot, 1, 2).unwrap();
+    let mut range = [0u8; 512];
+    assert_eq!(
+        encode_snapshot_range_from_snapshot_into(snapshot, 1, 2, &mut range).unwrap(),
+        range_len
+    );
+    let range = &range[..range_len];
+    assert_eq!(
+        lookup_snapshot::<i32, i32>(range, &1).unwrap(),
+        LookupResult::NotFound
+    );
+    assert_eq!(
+        lookup_snapshot::<i32, i32>(range, &2).unwrap(),
+        LookupResult::Deleted
+    );
+    assert_eq!(
+        lookup_snapshot::<i32, i32>(range, &3).unwrap(),
+        LookupResult::Set(30)
+    );
+    assert!(matches!(
+        encode_snapshot_range_from_snapshot_into(snapshot, 1, 2, &mut [0u8; 8]),
+        Err(MapError::BufferTooSmall)
+    ));
+
+    let mut exact = vec![0u8; range_len];
+    assert_eq!(
+        encode_snapshot_range_from_snapshot_into(snapshot, 1, 2, exact.as_mut_slice()).unwrap(),
+        range_len
+    );
+}
+
+#[test]
+fn search_helpers_cover_even_windows_and_insert_positions() {
+    let (snapshot, snapshot_len) = snapshot_for_entries(&[
+        (1, Some(10)),
+        (3, Some(30)),
+        (5, Some(50)),
+        (7, Some(70)),
+        (9, Some(90)),
+        (11, Some(110)),
+    ]);
+    let snapshot = &snapshot[..snapshot_len];
+
+    assert_eq!(
+        lookup_snapshot::<i32, i32>(snapshot, &11).unwrap(),
+        LookupResult::Set(110)
+    );
+    assert_eq!(
+        lookup_snapshot::<i32, i32>(snapshot, &6).unwrap(),
+        LookupResult::NotFound
+    );
+
+    let mut buffer = [0u8; 512];
+    let mut map = LsmMap::<i32, i32, 8>::new(CollectionId(92), &mut buffer).unwrap();
+    for key in [1, 3, 5, 7, 9, 11] {
+        map.set(key, key * 10).unwrap();
+    }
+    map.validate_loaded_state().unwrap();
+
+    match map.find_index(&5).unwrap() {
+        SearchResult::Found(index) => assert_eq!(index, RecordIndex::new(2)),
+        result => panic!("unexpected search result: {result:?}"),
+    }
+    match map.find_index(&6).unwrap() {
+        SearchResult::NotFound(index) => assert_eq!(index, RecordIndex::new(3)),
+        result => panic!("unexpected search result: {result:?}"),
+    }
+}
+
+#[test]
+fn load_snapshot_accepts_reversed_adjacent_entry_storage() {
+    let first = Entry {
+        key: 1i32,
+        value: Some(10i32),
+    };
+    let second = Entry {
+        key: 2i32,
+        value: Some(20i32),
+    };
+    let mut first_bytes = [0u8; 32];
+    let first_len = to_slice(&first, &mut first_bytes).unwrap().len();
+    let mut second_bytes = [0u8; 32];
+    let second_len = to_slice(&second, &mut second_bytes).unwrap().len();
+
+    let entry_bytes_len = first_len + second_len;
+    let snapshot_len = SNAPSHOT_ENTRY_COUNT_SIZE
+        + SNAPSHOT_ENTRY_BYTES_LEN_SIZE
+        + entry_bytes_len
+        + 2 * ENTRY_REF_SIZE;
+    let entries_offset = SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE;
+    let refs_start = entries_offset + entry_bytes_len;
+    let mut snapshot = [0u8; 128];
+    snapshot[..SNAPSHOT_ENTRY_COUNT_SIZE].copy_from_slice(&2u32.to_le_bytes());
+    snapshot[SNAPSHOT_ENTRY_COUNT_SIZE..SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE]
+        .copy_from_slice(&(entry_bytes_len as u32).to_le_bytes());
+
+    snapshot[entries_offset..entries_offset + second_len]
+        .copy_from_slice(&second_bytes[..second_len]);
+    snapshot[entries_offset + second_len..entries_offset + entry_bytes_len]
+        .copy_from_slice(&first_bytes[..first_len]);
+
+    let first_start: RefType = (ENTRY_COUNT_SIZE + second_len).try_into().unwrap();
+    let first_end: RefType = (ENTRY_COUNT_SIZE + entry_bytes_len).try_into().unwrap();
+    let second_start: RefType = ENTRY_COUNT_SIZE.try_into().unwrap();
+    let second_end: RefType = (ENTRY_COUNT_SIZE + second_len).try_into().unwrap();
+    snapshot[refs_start..refs_start + ENTRY_REF_POINTER_SIZE]
+        .copy_from_slice(&first_start.to_le_bytes());
+    snapshot[refs_start + ENTRY_REF_POINTER_SIZE..refs_start + ENTRY_REF_SIZE]
+        .copy_from_slice(&first_end.to_le_bytes());
+    snapshot[refs_start + ENTRY_REF_SIZE..refs_start + ENTRY_REF_SIZE + ENTRY_REF_POINTER_SIZE]
+        .copy_from_slice(&second_start.to_le_bytes());
+    snapshot[refs_start + ENTRY_REF_SIZE + ENTRY_REF_POINTER_SIZE..refs_start + 2 * ENTRY_REF_SIZE]
+        .copy_from_slice(&second_end.to_le_bytes());
+
+    let mut buffer = [0u8; 128];
+    let mut map = LsmMap::<i32, i32, 4>::new(CollectionId(93), &mut buffer).unwrap();
+    map.load_snapshot(&snapshot[..snapshot_len]).unwrap();
+    assert_eq!(map.get_frontier(&1).unwrap(), Some(10));
+    assert_eq!(map.get_frontier(&2).unwrap(), Some(20));
+}
+
+#[test]
+fn snapshot_encoding_accepts_exact_empty_capacity_and_rejects_invalid_refs() {
+    let mut empty = [0u8; SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE];
+    let len = encode_snapshot_from_entries_into::<i32, i32>(&[], &mut empty).unwrap();
+    assert_eq!(len, empty.len());
+    assert_eq!(snapshot_parts(&empty).unwrap().0, 0);
+    assert!(matches!(
+        snapshot_parts(&[]),
+        Err(MapError::SerializationError)
+    ));
+
+    let (mut snapshot, snapshot_len) = snapshot_for_entries(&[(1, Some(10)), (2, Some(20))]);
+    let refs_offset = snapshot_len - ENTRY_REF_SIZE * 2;
+
+    let start_ref: RefType = (ENTRY_COUNT_SIZE - 1).try_into().unwrap();
+    let mut start = start_ref.to_le_bytes();
+    snapshot[refs_offset..refs_offset + ENTRY_REF_POINTER_SIZE].copy_from_slice(&start);
+    let mut dest_buffer = [0u8; 512];
+    let mut dest = LsmMap::<i32, i32, 8>::new(CollectionId(91), &mut dest_buffer).unwrap();
+    assert!(matches!(
+        dest.load_snapshot(&snapshot[..snapshot_len]),
+        Err(MapError::SerializationError)
+    ));
+
+    let (mut snapshot, snapshot_len) = snapshot_for_entries(&[(1, Some(10)), (2, Some(20))]);
+    let start_ref: RefType = ENTRY_COUNT_SIZE.try_into().unwrap();
+    start = start_ref.to_le_bytes();
+    let end_ref: RefType = ENTRY_COUNT_SIZE.try_into().unwrap();
+    let end = end_ref.to_le_bytes();
+    snapshot[refs_offset..refs_offset + ENTRY_REF_POINTER_SIZE].copy_from_slice(&start);
+    snapshot[refs_offset + ENTRY_REF_POINTER_SIZE..refs_offset + ENTRY_REF_SIZE]
+        .copy_from_slice(&end);
+    let mut dest_buffer = [0u8; 512];
+    let mut dest = LsmMap::<i32, i32, 8>::new(CollectionId(92), &mut dest_buffer).unwrap();
+    assert!(matches!(
+        dest.load_snapshot(&snapshot[..snapshot_len]),
+        Err(MapError::SerializationError)
+    ));
+
+    let (mut snapshot, snapshot_len) = snapshot_for_entries(&[(1, Some(10)), (2, Some(20))]);
+    let refs_offset = snapshot_len - ENTRY_REF_SIZE * 2;
+    let entry_bytes_len = snapshot_parts(&snapshot[..snapshot_len]).unwrap().1;
+    let too_large_end_ref: RefType = (ENTRY_COUNT_SIZE + entry_bytes_len + 1).try_into().unwrap();
+    snapshot[refs_offset + ENTRY_REF_POINTER_SIZE..refs_offset + ENTRY_REF_SIZE]
+        .copy_from_slice(&too_large_end_ref.to_le_bytes());
+    assert!(matches!(
+        snapshot_entry_bytes(&snapshot[..snapshot_len], 0),
+        Err(MapError::SerializationError)
+    ));
+}
+
+#[test]
+fn run_cursor_and_compaction_writer_helpers_cover_boundaries() {
+    let run = MapRunDescriptor {
+        source: MapRunSource::RunChain,
+        generation: 1,
+        first_region: 4,
+        region_count: 2,
+        approx_state_count: 2,
+        lower_key: Some(1),
+        upper_key: Some(2),
+    };
+    let mut cursor = RunEntryCursor::<i32, i32>::new(&run).unwrap();
+    cursor.order = Some(RunChainOrder::Ascending);
+    cursor.active_position = Some(0);
+    cursor.advance_segment_position().unwrap();
+    assert_eq!(cursor.next_segment_position, Some(1));
+    cursor.active_position = Some(1);
+    cursor.advance_segment_position().unwrap();
+    assert_eq!(cursor.next_segment_position, None);
+
+    cursor.order = Some(RunChainOrder::Descending);
+    cursor.active_position = Some(1);
+    cursor.advance_segment_position().unwrap();
+    assert_eq!(cursor.next_segment_position, Some(0));
+
+    let mut writer = CompactionRunWriter::<i32, LargeValue, 1>::new(3);
+    writer
+        .segment_entries
+        .push(Entry {
+            key: 1,
+            value: Some(large_value(7)),
+        })
+        .unwrap();
+    let mut workspace = StorageWorkspace::<64>::new();
+    assert!(!writer.segment_entries_fit(&mut workspace).unwrap());
+    writer.state_count = u32::MAX;
+    assert!(matches!(
+        writer.increment_state_count(),
+        Err(MapStorageError::Map(MapError::SerializationError))
+    ));
+}
+
+#[test]
+fn entry_refs_counts_and_checkpoints_preserve_exact_offsets() {
+    let mut refs = [0u8; ENTRY_COUNT_SIZE + ENTRY_REF_SIZE * 3];
+    EntryRef::write(
+        &mut refs,
+        RecordIndex::new(0),
+        RecordOffset(4),
+        RecordOffset(9),
+    )
+    .unwrap();
+    EntryRef::write(
+        &mut refs,
+        RecordIndex::new(1),
+        RecordOffset(9),
+        RecordOffset(13),
+    )
+    .unwrap();
+
+    assert_eq!(
+        EntryRef::read(&refs, RecordIndex::new(0)).unwrap(),
+        EntryRef { start: 4, end: 9 }
+    );
+    assert_eq!(
+        EntryRef::read(&refs, RecordIndex::new(1)).unwrap(),
+        EntryRef { start: 9, end: 13 }
+    );
+    assert_eq!(RecordIndex::new(1).previous(), RecordIndex::new(0));
+
+    let count = EntryCount(7);
+    count.write(&mut refs);
+    assert_eq!(&refs[..ENTRY_COUNT_SIZE], 7u32.to_le_bytes().as_slice());
+    assert_eq!(
+        EntryCount::decode(refs[..ENTRY_COUNT_SIZE].try_into().unwrap()).0,
+        7
+    );
+
+    let mut buffer = [0u8; 128];
+    let mut map = LsmMap::<i32, i32, 8>::new(CollectionId(93), &mut buffer).unwrap();
+    map.set(1, 10).unwrap();
+    map.set(2, 20).unwrap();
+    let mut scratch = [0u8; 128];
+    let checkpoint = map.checkpoint_into(&mut scratch).unwrap();
+    map.set(1, 99).unwrap();
+    assert_eq!(map.get_frontier(&1).unwrap(), Some(99));
+    map.restore_from_checkpoint(checkpoint, &scratch).unwrap();
+    assert_eq!(map.get_frontier(&1).unwrap(), Some(10));
+    assert_eq!(map.get_frontier(&2).unwrap(), Some(20));
+    assert!(matches!(
+        map.checkpoint_into(&mut [0u8; 127]),
+        Err(MapError::BufferTooSmall)
+    ));
+    assert!(matches!(
+        map.restore_from_checkpoint(checkpoint, &[0u8; 127]),
+        Err(MapError::BufferTooSmall)
+    ));
+}
+
+#[test]
+fn run_segment_payload_round_trip_preserves_header_bounds_and_snapshot() {
+    let entries = [
+        Entry {
+            key: 3i32,
+            value: Some(30i32),
+        },
+        Entry {
+            key: 5i32,
+            value: Some(50i32),
+        },
+    ];
+    let mut payload = [0u8; 256];
+    let used = encode_run_segment_from_entries_into(&mut payload, 11, Some(9), &entries).unwrap();
+    let view = parse_run_segment_payload(&payload[..used]).unwrap();
+
+    assert_eq!(view.generation, 11);
+    assert_eq!(view.next_region, Some(9));
+    assert_eq!(from_bytes::<i32>(view.lower_key).unwrap(), 3);
+    assert_eq!(from_bytes::<i32>(view.upper_key).unwrap(), 5);
+    assert_eq!(
+        lookup_snapshot::<i32, i32>(view.snapshot, &3).unwrap(),
+        LookupResult::Set(30)
+    );
+    assert_eq!(
+        lookup_snapshot::<i32, i32>(view.snapshot, &4).unwrap(),
+        LookupResult::NotFound
+    );
+    assert_eq!(
+        lookup_snapshot::<i32, i32>(view.snapshot, &5).unwrap(),
+        LookupResult::Set(50)
+    );
+    assert!(matches!(
+        encode_run_segment_from_entries_into::<i32, i32>(
+            &mut [0u8; RUN_SEGMENT_FIXED_SIZE - 1],
+            11,
+            None,
+            &entries
+        ),
+        Err(MapError::BufferTooSmall)
+    ));
+    assert!(matches!(
+        parse_run_segment_payload(&payload[..used - 1]),
+        Err(MapError::SerializationError)
+    ));
+}
+
+#[test]
+fn committed_region_and_legacy_snapshot_helpers_accept_exact_boundaries() {
+    const REGION_SIZE: usize = Header::ENCODED_LEN + FreePointerFooter::ENCODED_LEN;
+    let metadata = StorageMetadata::new(REGION_SIZE as u32, 2, 0, 8, 0xff, 0xa5).unwrap();
+    let mut flash = MockFlash::<REGION_SIZE, 2, 16>::new(0xff);
+    init_user_region_header(&mut flash, 0, 1, CollectionId(95), MAP_REGION_V1_FORMAT);
+
+    let mut region = [0u8; REGION_SIZE];
+    let (header, payload) = read_committed_region(&mut flash, metadata, 0, &mut region).unwrap();
+    assert_eq!(header.collection_id, CollectionId(95));
+    assert_eq!(payload, &[]);
+
+    const FULL_PAYLOAD_REGION_SIZE: usize = 64;
+    let full_payload_metadata = StorageMetadata::new(
+        (FULL_PAYLOAD_REGION_SIZE + FreePointerFooter::ENCODED_LEN) as u32,
+        2,
+        0,
+        8,
+        0xff,
+        0xa5,
+    )
+    .unwrap();
+    let mut flash = MockFlash::<FULL_PAYLOAD_REGION_SIZE, 2, 16>::new(0xff);
+    init_user_region_header(&mut flash, 0, 1, CollectionId(96), MAP_REGION_V1_FORMAT);
+    let mut region = [0u8; FULL_PAYLOAD_REGION_SIZE];
+    let (_, payload) =
+        read_committed_region(&mut flash, full_payload_metadata, 0, &mut region).unwrap();
+    assert_eq!(
+        payload.len(),
+        FULL_PAYLOAD_REGION_SIZE - Header::ENCODED_LEN
+    );
+
+    let mut legacy_payload = [0u8; REGION_SNAPSHOT_LEN_SIZE + EMPTY_MAP_SNAPSHOT.len()];
+    legacy_payload[..REGION_SNAPSHOT_LEN_SIZE]
+        .copy_from_slice(&(EMPTY_MAP_SNAPSHOT.len() as u32).to_le_bytes());
+    legacy_payload[REGION_SNAPSHOT_LEN_SIZE..].copy_from_slice(&EMPTY_MAP_SNAPSHOT);
+    assert_eq!(
+        legacy_snapshot_from_payload(&legacy_payload).unwrap(),
+        EMPTY_MAP_SNAPSHOT.as_slice()
+    );
+}
+
+#[test]
+fn loading_empty_snapshot_can_exactly_fill_frontier_header() {
+    let mut buffer = [0u8; ENTRY_COUNT_SIZE];
+    let mut map = LsmMap::<i32, i32, 0>::new(CollectionId(94), &mut buffer).unwrap();
+
+    map.load_snapshot(&EMPTY_MAP_SNAPSHOT).unwrap();
+
+    assert_eq!(map.get_frontier(&1).unwrap(), None);
+    assert_eq!(map.snapshot_len().unwrap(), EMPTY_MAP_SNAPSHOT.len());
+}
+
+#[test]
+fn run_descriptor_selection_and_generation_helpers_count_only_run_chains() {
+    let mut buffer = [0u8; 128];
+    let mut map = LsmMap::<i32, i32, 8, 4>::new(CollectionId(97), &mut buffer).unwrap();
+    map.runs
+        .push(MapRunDescriptor {
+            source: MapRunSource::RunChain,
+            generation: 2,
+            first_region: 10,
+            region_count: 2,
+            approx_state_count: 5,
+            lower_key: Some(1),
+            upper_key: Some(5),
+        })
+        .unwrap();
+    map.runs
+        .push(MapRunDescriptor {
+            source: MapRunSource::RunChain,
+            generation: 7,
+            first_region: 12,
+            region_count: 1,
+            approx_state_count: 2,
+            lower_key: Some(6),
+            upper_key: Some(9),
+        })
+        .unwrap();
+    map.runs
+        .push(MapRunDescriptor {
+            source: MapRunSource::LegacyRegion,
+            generation: 0,
+            first_region: 3,
+            region_count: 1,
+            approx_state_count: 99,
+            lower_key: None,
+            upper_key: None,
+        })
+        .unwrap();
+
+    assert_eq!(map.layer_count(), 3);
+    assert_eq!(map.run_count(), 3);
+    assert_eq!(map.live_run_region_count().unwrap(), 3);
+    assert_eq!(map.next_run_generation(), 8);
+    assert_eq!(map.selected_compaction_run_count(3).unwrap(), None);
+    assert_eq!(map.selected_compaction_run_count(2).unwrap(), Some(2));
+    assert_eq!(map.selected_compaction_state_count(0).unwrap(), 0);
+    assert_eq!(map.selected_compaction_state_count(2).unwrap(), 7);
+    assert!(matches!(
+        map.selected_compaction_state_count(3),
+        Err(MapError::SerializationError)
+    ));
+    assert!(matches!(
+        map.selected_compaction_state_count(5),
+        Err(MapError::IndexOutOfBounds)
+    ));
+}
+
+#[test]
+fn frontier_range_region_and_checkpoint_helpers_accept_exact_buffers() {
+    let mut buffer = [0u8; 256];
+    let mut map = LsmMap::<i32, i32, 8>::new(CollectionId(98), &mut buffer).unwrap();
+    for key in 1..=4 {
+        map.set(key, key * 10).unwrap();
+    }
+
+    let range_len = map.snapshot_range_len_from_frontier(1, 2).unwrap();
+    let mut range = vec![0u8; range_len];
+    assert_eq!(
+        map.encode_snapshot_range_into(1, 2, range.as_mut_slice())
+            .unwrap(),
+        range_len
+    );
+    assert_eq!(
+        lookup_snapshot::<i32, i32>(&range, &1).unwrap(),
+        LookupResult::NotFound
+    );
+    assert_eq!(
+        lookup_snapshot::<i32, i32>(&range, &2).unwrap(),
+        LookupResult::Set(20)
+    );
+    assert_eq!(
+        lookup_snapshot::<i32, i32>(&range, &3).unwrap(),
+        LookupResult::Set(30)
+    );
+    assert_eq!(
+        map.snapshot_range_len_from_frontier(4, 0).unwrap(),
+        SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE
+    );
+    assert!(matches!(
+        map.snapshot_range_len_from_frontier(5, 0),
+        Err(MapError::IndexOutOfBounds)
+    ));
+
+    let region_len = map.region_len().unwrap();
+    let mut region = vec![0u8; region_len];
+    assert_eq!(
+        map.encode_region_into(region.as_mut_slice()).unwrap(),
+        region_len
+    );
+    let mut restored_buffer = [0u8; 256];
+    let mut restored = LsmMap::<i32, i32, 8>::new(CollectionId(98), &mut restored_buffer).unwrap();
+    restored.load_region(&region).unwrap();
+    assert_eq!(restored.get_frontier(&1).unwrap(), Some(10));
+    assert_eq!(restored.get_frontier(&4).unwrap(), Some(40));
+
+    assert!(matches!(
+        map.encode_snapshot_range_into(1, 2, &mut [0u8; 8]),
+        Err(MapError::BufferTooSmall)
+    ));
+    assert!(matches!(
+        restored.load_region(&region[..REGION_SNAPSHOT_LEN_SIZE - 1]),
+        Err(MapError::SerializationError)
+    ));
+}
+
+#[test]
+fn manifest_descriptor_loading_validates_counts_bounds_and_lengths() {
+    let mut source_buffer = [0u8; 128];
+    let mut source = LsmMap::<i32, i32, 8, 2>::new(CollectionId(99), &mut source_buffer).unwrap();
+    source
+        .runs
+        .push(MapRunDescriptor {
+            source: MapRunSource::RunChain,
+            generation: 3,
+            first_region: 7,
+            region_count: 2,
+            approx_state_count: 5,
+            lower_key: Some(1),
+            upper_key: Some(9),
+        })
+        .unwrap();
+
+    let mut manifest = [0u8; 128];
+    let used = source
+        .encode_manifest_into(&mut manifest, None, None)
+        .unwrap();
+
+    let mut dest_buffer = [0u8; 128];
+    let mut dest = LsmMap::<i32, i32, 8, 1>::new(CollectionId(99), &mut dest_buffer).unwrap();
+    dest.load_manifest_descriptors(&manifest[..used], CollectionId(99), 4)
+        .unwrap();
+    assert_eq!(dest.run_count(), 1);
+    assert_eq!(dest.runs[0].generation, 3);
+    assert_eq!(dest.runs[0].first_region, 7);
+    assert_eq!(dest.runs[0].region_count, 2);
+    assert_eq!(dest.runs[0].lower_key, Some(1));
+    assert_eq!(dest.runs[0].upper_key, Some(9));
+
+    let mut too_many = [0u8; size_of::<u32>()];
+    too_many.copy_from_slice(&2u32.to_le_bytes());
+    assert!(matches!(
+        dest.load_manifest_descriptors(&too_many, CollectionId(99), 4),
+        Err(MapStorageError::TooManyRuns {
+            collection_id: CollectionId(99),
+            max_runs: 1,
+        })
+    ));
+
+    let mut zero_region_count = manifest;
+    zero_region_count[size_of::<u32>() + size_of::<u64>() + size_of::<u32>()
+        ..size_of::<u32>() + size_of::<u64>() + 2 * size_of::<u32>()]
+        .copy_from_slice(&0u32.to_le_bytes());
+    assert!(matches!(
+        dest.load_manifest_descriptors(&zero_region_count[..used], CollectionId(99), 4),
+        Err(MapStorageError::InvalidManifest {
+            collection_id: CollectionId(99),
+            region_index: 7,
+        })
+    ));
+    assert!(matches!(
+        dest.load_manifest_descriptors(&manifest[..used - 1], CollectionId(99), 4),
+        Err(MapStorageError::InvalidManifest {
+            collection_id: CollectionId(99),
+            region_index: 7,
+        }) | Err(MapStorageError::Map(MapError::SerializationError))
+    ));
+}
+
+#[test]
+fn snapshot_run_segment_helpers_plan_and_encode_exact_subranges() {
+    let (snapshot, snapshot_len) =
+        snapshot_for_entries(&[(1, Some(10)), (2, Some(20)), (3, Some(30))]);
+    let snapshot = &snapshot[..snapshot_len];
+    let mut workspace = StorageWorkspace::<128>::new();
+
+    let planned =
+        LsmMap::<i32, i32, 8>::planned_snapshot_run_region_count(&mut workspace, snapshot, 4)
+            .unwrap();
+    assert!(planned >= 1);
+
+    let mut payload = [0u8; 128];
+    let used = LsmMap::<i32, i32, 8>::encode_run_segment_from_snapshot_into(
+        &mut payload,
+        4,
+        Some(11),
+        snapshot,
+        1,
+        2,
+    )
+    .unwrap();
+    let view = parse_run_segment_payload(&payload[..used]).unwrap();
+    assert_eq!(view.generation, 4);
+    assert_eq!(view.next_region, Some(11));
+    assert_eq!(from_bytes::<i32>(view.lower_key).unwrap(), 2);
+    assert_eq!(from_bytes::<i32>(view.upper_key).unwrap(), 3);
+    assert_eq!(
+        lookup_snapshot::<i32, i32>(view.snapshot, &1).unwrap(),
+        LookupResult::NotFound
+    );
+    assert_eq!(
+        lookup_snapshot::<i32, i32>(view.snapshot, &2).unwrap(),
+        LookupResult::Set(20)
+    );
+}
+
+#[test]
+fn snapshot_run_planning_and_storage_write_cover_multi_region_snapshots() {
+    const MAX_INDEXES: usize = 16;
+
+    let mut source_buffer = [0u8; 2048];
+    let mut source =
+        LsmMap::<i32, LargeValue, MAX_INDEXES>::new(CollectionId(102), &mut source_buffer).unwrap();
+    for key in 0..10 {
+        source.set(key, large_value(key as u8)).unwrap();
+    }
+    let mut snapshot = [0u8; 2048];
+    let snapshot_len = source.encode_snapshot_into(&mut snapshot).unwrap();
+    let snapshot = &snapshot[..snapshot_len];
+
+    let mut planning_workspace = StorageWorkspace::<128>::new();
+    let planned = LsmMap::<i32, LargeValue, MAX_INDEXES>::planned_snapshot_run_region_count(
+        &mut planning_workspace,
+        snapshot,
+        17,
+    )
+    .unwrap();
+    assert!(planned > 1);
+
+    const REGION_SIZE: usize = 256;
+    const REGION_COUNT: usize = 16;
+    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 4096>::new(0xff);
+    let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
+    let mut storage = Storage::<8, 4>::format::<REGION_SIZE, REGION_COUNT, _>(
+        &mut flash,
+        &mut workspace,
+        1,
+        8,
+        0xa5,
+    )
+    .unwrap();
+    storage
+        .create_map::<REGION_SIZE, REGION_COUNT, _>(&mut flash, &mut workspace, CollectionId(102))
+        .unwrap();
+
+    let mut target_buffer = [0u8; 128];
+    let target =
+        LsmMap::<i32, LargeValue, MAX_INDEXES>::new(CollectionId(102), &mut target_buffer).unwrap();
+    let written = target
+        .write_snapshot_run_to_storage::<REGION_SIZE, REGION_COUNT, _, 8, 4>(
+            storage.runtime_mut(),
+            &mut flash,
+            &mut workspace,
+            snapshot,
+            17,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(written.approx_state_count, 10);
+    assert!(written.region_count > 1);
+    assert_eq!(written.lower_key, Some(0));
+    assert_eq!(written.upper_key, Some(9));
+
+    let mut empty = [0u8; SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE];
+    let empty_len = encode_snapshot_from_entries_into::<i32, LargeValue>(&[], &mut empty).unwrap();
+    assert!(target
+        .write_snapshot_run_to_storage::<REGION_SIZE, REGION_COUNT, _, 8, 4>(
+            storage.runtime_mut(),
+            &mut flash,
+            &mut workspace,
+            &empty[..empty_len],
+            18,
+        )
+        .unwrap()
+        .is_none());
+}
+
+#[test]
+fn frontier_run_planning_counts_all_committed_payload_segments() {
+    const MAX_INDEXES: usize = 16;
+
+    let mut buffer = [0u8; 2048];
+    let mut map =
+        LsmMap::<i32, LargeValue, MAX_INDEXES>::new(CollectionId(105), &mut buffer).unwrap();
+    for key in 0..10 {
+        map.set(key, large_value(key as u8)).unwrap();
+    }
+
+    let mut workspace = StorageWorkspace::<128>::new();
+    assert!(
+        map.planned_frontier_run_region_count(&mut workspace, 23)
+            .unwrap()
+            > 1
+    );
+}
+
+#[test]
+fn reclaim_run_regions_moves_run_segments_to_free_list_tail() {
+    const REGION_SIZE: usize = 256;
+    const REGION_COUNT: usize = 8;
+    const MAX_INDEXES: usize = 4;
+
+    let collection_id = CollectionId(106);
+    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 4096>::new(0xff);
+    let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
+    let mut storage = Storage::<8, 4>::format::<REGION_SIZE, REGION_COUNT, _>(
+        &mut flash,
+        &mut workspace,
+        1,
+        8,
+        0xa5,
+    )
+    .unwrap();
+    storage
+        .create_map::<REGION_SIZE, REGION_COUNT, _>(&mut flash, &mut workspace, collection_id)
+        .unwrap();
+
+    let (snapshot, snapshot_len) = snapshot_for_entries(&[(1, Some(10))]);
+    let mut buffer = [0u8; REGION_SIZE];
+    let mut map = LsmMap::<i32, i32, MAX_INDEXES>::new(collection_id, &mut buffer).unwrap();
+    let run = map
+        .write_snapshot_run_to_storage::<REGION_SIZE, REGION_COUNT, _, 8, 4>(
+            storage.runtime_mut(),
+            &mut flash,
+            &mut workspace,
+            &snapshot[..snapshot_len],
+            1,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(run.region_count, 1);
+    let first_region = run.first_region;
+    let previous_tail = storage.runtime().free_list_tail();
+    map.runs.push(run).unwrap();
+
+    map.reclaim_run_regions::<REGION_SIZE, REGION_COUNT, _, 8, 4>(
+        storage.runtime_mut(),
+        &mut flash,
+        &mut workspace,
+    )
+    .unwrap();
+    assert_ne!(storage.runtime().free_list_tail(), previous_tail);
+    assert_eq!(storage.runtime().free_list_tail(), Some(first_region));
+}
+
+#[test]
+fn commit_manifest_reclaims_previous_manifest_and_retains_only_run_chains() {
+    const REGION_SIZE: usize = 512;
+    const REGION_COUNT: usize = 12;
+    const MAX_INDEXES: usize = 8;
+    const MAX_RUNS: usize = 3;
+
+    let collection_id = CollectionId(107);
+    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 4096>::new(0xff);
+    let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
+    let mut storage = Storage::<8, 4>::format::<REGION_SIZE, REGION_COUNT, _>(
+        &mut flash,
+        &mut workspace,
+        1,
+        8,
+        0xa5,
+    )
+    .unwrap();
+    storage
+        .create_map::<REGION_SIZE, REGION_COUNT, _>(&mut flash, &mut workspace, collection_id)
+        .unwrap();
+
+    let mut buffer = [0u8; REGION_SIZE];
+    let mut map =
+        LsmMap::<i32, i32, MAX_INDEXES, MAX_RUNS>::new(collection_id, &mut buffer).unwrap();
+    map.set(1, 10).unwrap();
+    let first_manifest = map
+        .flush_to_storage::<REGION_SIZE, REGION_COUNT, _, 8, 4>(
+            storage.runtime_mut(),
+            &mut flash,
+            &mut workspace,
+        )
+        .unwrap();
+    map.runs
+        .push(MapRunDescriptor {
+            source: MapRunSource::LegacyRegion,
+            generation: 0,
+            first_region: 9,
+            region_count: 1,
+            approx_state_count: 1,
+            lower_key: None,
+            upper_key: None,
+        })
+        .unwrap();
+
+    let second_manifest = map
+        .commit_manifest_to_storage::<REGION_SIZE, REGION_COUNT, _, 8, 4>(
+            storage.runtime_mut(),
+            &mut flash,
+            &mut workspace,
+            None,
+        )
+        .unwrap();
+    assert_ne!(second_manifest, first_manifest);
+    assert!(storage
+        .runtime()
+        .pending_reclaims()
+        .contains(&first_manifest));
+    assert!(map
+        .runs
+        .iter()
+        .all(|run| run.source == MapRunSource::RunChain));
+}
+
+#[test]
+fn flush_to_storage_converts_valid_legacy_regions_and_enforces_run_capacity() {
+    const REGION_SIZE: usize = 256;
+    const REGION_COUNT: usize = 12;
+    let collection_id = CollectionId(108);
+
+    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 4096>::new(0xff);
+    let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
+    let mut storage = Storage::<8, 4>::format::<REGION_SIZE, REGION_COUNT, _>(
+        &mut flash,
+        &mut workspace,
+        1,
+        8,
+        0xa5,
+    )
+    .unwrap();
+    storage
+        .create_map::<REGION_SIZE, REGION_COUNT, _>(&mut flash, &mut workspace, collection_id)
+        .unwrap();
+
+    let mut legacy_buffer = [0u8; REGION_SIZE];
+    let mut legacy = LsmMap::<i32, i32, 4>::new(collection_id, &mut legacy_buffer).unwrap();
+    legacy.set(1, 10).unwrap();
+    let mut legacy_payload = [0u8; REGION_SIZE];
+    let legacy_used = legacy.encode_region_into(&mut legacy_payload).unwrap();
+    write_committed_payload(
+        &mut flash,
+        5,
+        1,
+        collection_id,
+        MAP_REGION_V1_FORMAT,
+        &legacy_payload[..legacy_used],
+    );
+    storage
+        .append_head::<REGION_SIZE, REGION_COUNT, _>(
+            &mut flash,
+            &mut workspace,
+            collection_id,
+            CollectionType::MAP_CODE,
+            5,
+        )
+        .unwrap();
+
+    let mut buffer = [0u8; REGION_SIZE];
+    let mut map = LsmMap::<i32, i32, 4, 2>::new(collection_id, &mut buffer).unwrap();
+    map.runs
+        .push(MapRunDescriptor {
+            source: MapRunSource::LegacyRegion,
+            generation: 0,
+            first_region: 5,
+            region_count: 1,
+            approx_state_count: 1,
+            lower_key: None,
+            upper_key: None,
+        })
+        .unwrap();
+    map.set(2, 20).unwrap();
+    map.flush_to_storage::<REGION_SIZE, REGION_COUNT, _, 8, 4>(
+        storage.runtime_mut(),
+        &mut flash,
+        &mut workspace,
+    )
+    .unwrap();
+    assert_eq!(map.runs.len(), 2);
+
+    let mut too_many_buffer = [0u8; REGION_SIZE];
+    let mut too_many = LsmMap::<i32, i32, 4, 1>::new(collection_id, &mut too_many_buffer).unwrap();
+    too_many
+        .runs
+        .push(MapRunDescriptor {
+            source: MapRunSource::RunChain,
+            generation: 11,
+            first_region: 6,
+            region_count: 1,
+            approx_state_count: 1,
+            lower_key: Some(1),
+            upper_key: Some(1),
+        })
+        .unwrap();
+    too_many.set(3, 30).unwrap();
+    assert!(matches!(
+        too_many.flush_to_storage::<REGION_SIZE, REGION_COUNT, _, 8, 4>(
+            storage.runtime_mut(),
+            &mut flash,
+            &mut workspace,
+        ),
+        Err(MapStorageError::TooManyRuns {
+            collection_id: found,
+            max_runs: 1,
+        }) if found == collection_id
+    ));
+}
+
+#[test]
+fn committed_run_storage_helpers_validate_headers_and_next_links() {
+    const REGION_SIZE: usize = 256;
+    let collection_id = CollectionId(100);
+    let metadata = StorageMetadata::new(REGION_SIZE as u32, 4, 0, 8, 0xff, 0xa5).unwrap();
+    let mut flash = MockFlash::<REGION_SIZE, 4, 1024>::new(0xff);
+    let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
+    let entries = [
+        Entry {
+            key: 4i32,
+            value: Some(40i32),
+        },
+        Entry {
+            key: 8i32,
+            value: Some(80i32),
+        },
+    ];
+    let mut payload = [0u8; REGION_SIZE];
+    let used = encode_run_segment_from_entries_into(&mut payload, 12, Some(3), &entries).unwrap();
+    write_committed_payload(
+        &mut flash,
+        2,
+        1,
+        collection_id,
+        MAP_RUN_V1_FORMAT,
+        &payload[..used],
+    );
+
+    assert_eq!(
+        read_run_segment_bounds::<i32, REGION_SIZE, _>(
+            collection_id,
+            12,
+            &mut flash,
+            &mut workspace,
+            2
+        )
+        .unwrap(),
+        (4, 8)
+    );
+    assert_eq!(
+        read_run_segment_next_region::<REGION_SIZE, _>(
+            collection_id,
+            12,
+            &mut flash,
+            &mut workspace,
+            2
+        )
+        .unwrap(),
+        Some(3)
+    );
+
+    init_user_region_header(&mut flash, 2, 2, collection_id, MAP_REGION_V1_FORMAT);
+    assert!(matches!(
+        read_run_segment_bounds::<i32, REGION_SIZE, _>(
+            collection_id,
+            12,
+            &mut flash,
+            &mut workspace,
+            2
+        ),
+        Err(MapStorageError::InvalidRun {
+            collection_id: found,
+            region_index: 2,
+        }) if found == collection_id
+    ));
+    let _ = metadata;
+}
+
+#[test]
+fn lookup_and_head_reference_helpers_follow_legacy_regions_and_manifest_runs() {
+    const REGION_SIZE: usize = 256;
+    let collection_id = CollectionId(101);
+    let metadata = StorageMetadata::new(REGION_SIZE as u32, 5, 0, 8, 0xff, 0xa5).unwrap();
+    let mut flash = MockFlash::<REGION_SIZE, 5, 1024>::new(0xff);
+    let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
+
+    let mut legacy_buffer = [0u8; REGION_SIZE];
+    let mut legacy = LsmMap::<i32, i32, 8>::new(collection_id, &mut legacy_buffer).unwrap();
+    legacy.set(1, 10).unwrap();
+    legacy.set(2, 20).unwrap();
+    let mut legacy_payload = [0u8; REGION_SIZE];
+    let legacy_used = legacy.encode_region_into(&mut legacy_payload).unwrap();
+    write_committed_payload(
+        &mut flash,
+        1,
+        1,
+        collection_id,
+        MAP_REGION_V1_FORMAT,
+        &legacy_payload[..legacy_used],
+    );
+
+    let mut map_buffer = [0u8; REGION_SIZE];
+    let map = LsmMap::<i32, i32, 8>::new(collection_id, &mut map_buffer).unwrap();
+    assert_eq!(
+        map.lookup_legacy_region::<REGION_SIZE, _>(&mut flash, &mut workspace, 1, &1)
+            .unwrap(),
+        LookupResult::Set(10)
+    );
+    assert_eq!(
+        map.lookup_legacy_region::<REGION_SIZE, _>(&mut flash, &mut workspace, 1, &3)
+            .unwrap(),
+        LookupResult::NotFound
+    );
+
+    let run_entries = [
+        Entry {
+            key: 5i32,
+            value: Some(50i32),
+        },
+        Entry {
+            key: 6i32,
+            value: Some(60i32),
+        },
+    ];
+    let mut run_payload = [0u8; REGION_SIZE];
+    let run_used =
+        encode_run_segment_from_entries_into(&mut run_payload, 14, None, &run_entries).unwrap();
+    write_committed_payload(
+        &mut flash,
+        2,
+        2,
+        collection_id,
+        MAP_RUN_V1_FORMAT,
+        &run_payload[..run_used],
+    );
+
+    let run = MapRunDescriptor {
+        source: MapRunSource::RunChain,
+        generation: 14,
+        first_region: 2,
+        region_count: 1,
+        approx_state_count: 2,
+        lower_key: Some(5),
+        upper_key: Some(6),
+    };
+    assert_eq!(
+        map.lookup_run_chain::<REGION_SIZE, _>(&mut flash, &mut workspace, &run, &6)
+            .unwrap(),
+        LookupResult::Set(60)
+    );
+    assert_eq!(
+        map.lookup_run_chain::<REGION_SIZE, _>(&mut flash, &mut workspace, &run, &7)
+            .unwrap(),
+        LookupResult::NotFound
+    );
+
+    let mut manifest_map_buffer = [0u8; REGION_SIZE];
+    let mut manifest_map =
+        LsmMap::<i32, i32, 8>::new(collection_id, &mut manifest_map_buffer).unwrap();
+    manifest_map.runs.push(run).unwrap();
+    let mut manifest_payload = [0u8; REGION_SIZE];
+    let manifest_used = manifest_map
+        .encode_manifest_into(&mut manifest_payload, None, None)
+        .unwrap();
+    write_committed_payload(
+        &mut flash,
+        3,
+        3,
+        collection_id,
+        MAP_MANIFEST_V1_FORMAT,
+        &manifest_payload[..manifest_used],
+    );
+
+    assert!(map_head_region_references_region::<REGION_SIZE, _>(
+        &mut flash,
+        metadata,
+        collection_id,
+        3,
+        2
+    )
+    .unwrap());
+    assert!(map_head_region_references_region::<REGION_SIZE, _>(
+        &mut flash,
+        metadata,
+        collection_id,
+        3,
+        3
+    )
+    .unwrap());
+    assert!(!map_head_region_references_region::<REGION_SIZE, _>(
+        &mut flash,
+        metadata,
+        collection_id,
+        3,
+        4
+    )
+    .unwrap());
+}
+
+#[test]
+fn open_from_storage_uses_only_target_collection_wal_records() {
+    const REGION_SIZE: usize = 512;
+    const REGION_COUNT: usize = 8;
+    let target_id = CollectionId(103);
+    let other_id = CollectionId(104);
+
+    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 4096>::new(0xff);
+    let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
+    let mut storage = Storage::<8, 4>::format::<REGION_SIZE, REGION_COUNT, _>(
+        &mut flash,
+        &mut workspace,
+        1,
+        8,
+        0xa5,
+    )
+    .unwrap();
+    storage
+        .create_map::<REGION_SIZE, REGION_COUNT, _>(&mut flash, &mut workspace, target_id)
+        .unwrap();
+    storage
+        .create_map::<REGION_SIZE, REGION_COUNT, _>(&mut flash, &mut workspace, other_id)
+        .unwrap();
+
+    let mut payload = [0u8; 128];
+    storage
+        .append_map_update::<REGION_SIZE, REGION_COUNT, _, i32, i32, 8>(
+            &mut flash,
+            &mut workspace,
+            target_id,
+            &MapUpdate::Set { key: 1, value: 10 },
+            &mut payload,
+        )
+        .unwrap();
+    storage
+        .append_map_update::<REGION_SIZE, REGION_COUNT, _, i32, i32, 8>(
+            &mut flash,
+            &mut workspace,
+            other_id,
+            &MapUpdate::Set { key: 1, value: 99 },
+            &mut payload,
+        )
+        .unwrap();
+    storage
+        .drop_map::<REGION_SIZE, REGION_COUNT, _>(&mut flash, &mut workspace, other_id)
+        .unwrap();
+
+    let mut target_buffer = [0u8; REGION_SIZE];
+    let opened = LsmMap::<i32, i32, 8>::open_from_storage::<REGION_SIZE, REGION_COUNT, _, 8, 4>(
+        storage.runtime(),
+        &mut flash,
+        &mut workspace,
+        target_id,
+        &mut target_buffer,
+    )
+    .unwrap();
+    assert_eq!(opened.get_frontier(&1).unwrap(), Some(10));
 }
 
 proptest! {

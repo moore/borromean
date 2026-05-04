@@ -1339,11 +1339,9 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
             .wal_append_offset
             .checked_add(encoded_len)
             .ok_or(StorageRuntimeError::WalRotationRequired)?;
-        if end > REGION_SIZE {
-            return Err(StorageRuntimeError::WalRotationRequired);
-        }
-
-        let remaining_after = REGION_SIZE - end;
+        let remaining_after = REGION_SIZE
+            .checked_sub(end)
+            .ok_or(StorageRuntimeError::WalRotationRequired)?;
         let Some(next_region_index) = self.last_free_list_head else {
             return if remaining_after == 0 || alloc_begin {
                 Err(StorageRuntimeError::WalRotationRequired)
@@ -1848,11 +1846,14 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         let mut offset = metadata
             .wal_record_area_offset()
             .map_err(|error| StorageRuntimeError::Startup(error.into()))?;
-        while offset < region_size {
+        loop {
+            let remaining = match region_size.checked_sub(offset) {
+                Some(0) => break,
+                Some(remaining) => remaining,
+                None => return Err(StorageRuntimeError::WalRotationRequired),
+            };
+
             let action = {
-                let remaining = region_size
-                    .checked_sub(offset)
-                    .ok_or(StorageRuntimeError::WalRotationRequired)?;
                 let (region_bytes, logical_scratch) = workspace.scan_buffers();
                 flash.read_region(plan.old_head, offset, &mut region_bytes[..remaining])?;
                 if region_bytes[0] == metadata.erased_byte {
@@ -1937,21 +1938,25 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         let mut current = self.last_free_list_head;
         let mut count = 0u32;
 
-        while let Some(region_index) = current {
+        for _ in 0..self.metadata.region_count {
+            let Some(region_index) = current else {
+                return Ok(count);
+            };
             count = count
                 .checked_add(1)
                 .ok_or(StorageRuntimeError::WalRotationRequired)?;
-            if count > self.metadata.region_count {
-                return Err(StorageRuntimeError::Startup(
-                    StartupError::InvalidFreeListChain { region_index },
-                ));
-            }
 
             current = read_free_pointer_successor::<REGION_SIZE, REGION_COUNT, IO>(
                 flash,
                 self.metadata,
                 region_index,
             )?;
+        }
+
+        if let Some(region_index) = current {
+            return Err(StorageRuntimeError::Startup(
+                StartupError::InvalidFreeListChain { region_index },
+            ));
         }
 
         Ok(count)
@@ -2005,18 +2010,13 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         target_region_index: u32,
     ) -> Result<bool, StorageRuntimeError> {
         let mut current = self.last_free_list_head;
-        let mut visited = 0u32;
 
-        while let Some(region_index) = current {
+        for _ in 0..self.metadata.region_count {
+            let Some(region_index) = current else {
+                return Ok(false);
+            };
             if region_index == target_region_index {
                 return Ok(true);
-            }
-
-            visited = visited
-                .checked_add(1)
-                .ok_or(StorageRuntimeError::WalRotationRequired)?;
-            if visited > self.metadata.region_count {
-                return Ok(false);
             }
 
             current = read_free_pointer_successor::<REGION_SIZE, REGION_COUNT, IO>(
@@ -2136,7 +2136,17 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
                 .map_err(|error| StorageRuntimeError::Startup(error.into()))?;
             let mut next_region = None;
 
-            while offset < limit {
+            loop {
+                match limit.checked_sub(offset) {
+                    Some(0) => break,
+                    Some(_) => {}
+                    None => {
+                        return Err(StorageVisitError::Storage(
+                            StorageRuntimeError::WalRotationRequired,
+                        ));
+                    }
+                }
+
                 if region_bytes[offset] == metadata.erased_byte {
                     break;
                 }
@@ -2381,7 +2391,7 @@ fn wal_chain_contains_region<const REGION_SIZE: usize, IO: FlashIo>(
 ) -> Result<bool, StorageRuntimeError> {
     let mut current_region = wal_head;
 
-    loop {
+    for _ in 0..metadata.region_count {
         if current_region == target_region_index {
             return Ok(true);
         }
@@ -2399,6 +2409,10 @@ fn wal_chain_contains_region<const REGION_SIZE: usize, IO: FlashIo>(
             region_index: current_region,
         }))?;
     }
+
+    Err(StorageRuntimeError::Startup(StartupError::BrokenWalChain {
+        region_index: current_region,
+    }))
 }
 
 fn find_link_target_in_wal_region<const REGION_SIZE: usize, IO: FlashIo>(
@@ -2415,7 +2429,13 @@ fn find_link_target_in_wal_region<const REGION_SIZE: usize, IO: FlashIo>(
     let mut offset = metadata
         .wal_record_area_offset()
         .map_err(|error| StorageRuntimeError::Startup(error.into()))?;
-    while offset < region_size {
+    loop {
+        match region_size.checked_sub(offset) {
+            Some(0) => break,
+            Some(_) => {}
+            None => return Err(StorageRuntimeError::WalRotationRequired),
+        }
+
         if region_bytes[offset] == metadata.erased_byte {
             return Ok(None);
         }

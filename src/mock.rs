@@ -143,6 +143,9 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize>
                 .checked_sub(source_offset)
                 .ok_or(MockError::OutOfBounds)?;
             let chunk_len = remaining.len().min(available);
+            if chunk_len == 0 {
+                return Err(MockError::OutOfBounds);
+            }
             remaining[..chunk_len]
                 .copy_from_slice(&source[source_offset..source_offset + chunk_len]);
             remaining = &mut remaining[chunk_len..];

@@ -1,12 +1,13 @@
 use super::*;
-use crate::wal_record::encode_record_into;
+use crate::wal_record::{encode_record_into, encoded_record_len};
 use crate::MockFlash;
 use crate::StorageWorkspace;
 use crate::{
-    CollectionId, CollectionType, Header, MockOperation, StartupCollectionBasis, WalRecord,
-    WalRegionPrologue,
+    CollectionId, CollectionType, Header, LsmMap, MockOperation, StartupCollectionBasis, Storage,
+    WalRecord, WalRegionPrologue,
 };
 use core::mem::size_of;
+use heapless::Vec;
 
 fn format<
     const REGION_SIZE: usize,
@@ -60,6 +61,79 @@ fn append_wal_record<const REGION_SIZE: usize, const REGION_COUNT: usize, const 
         .write_region(region_index, offset, &physical[..used])
         .unwrap();
     offset + used
+}
+
+fn append_exact_fill_update_record<
+    const REGION_SIZE: usize,
+    const REGION_COUNT: usize,
+    const MAX_LOG: usize,
+>(
+    flash: &mut MockFlash<REGION_SIZE, REGION_COUNT, MAX_LOG>,
+    metadata: StorageMetadata,
+    region_index: u32,
+    collection_id: CollectionId,
+) {
+    let offset = metadata.wal_record_area_offset().unwrap();
+    let mut physical = [0u8; REGION_SIZE];
+    let mut logical = [0u8; REGION_SIZE];
+    let payload = [0u8; REGION_SIZE];
+    let payload_len = (0..=payload.len())
+        .find(|payload_len| {
+            encoded_record_len(
+                WalRecord::Update {
+                    collection_id,
+                    payload: &payload[..*payload_len],
+                },
+                metadata,
+                &mut physical,
+                &mut logical,
+            )
+            .is_ok_and(|encoded_len| offset + encoded_len == REGION_SIZE)
+        })
+        .expect("update payload length should exactly fill the WAL region");
+
+    let next_offset = append_wal_record(
+        flash,
+        metadata,
+        region_index,
+        offset,
+        WalRecord::Update {
+            collection_id,
+            payload: &payload[..payload_len],
+        },
+    );
+    assert_eq!(next_offset, REGION_SIZE);
+}
+
+fn fill_until_append_reserve_requires_rotation<
+    const REGION_SIZE: usize,
+    const REGION_COUNT: usize,
+    const MAX_LOG: usize,
+    const MAX_COLLECTIONS: usize,
+    const MAX_PENDING_RECLAIMS: usize,
+>(
+    state: &mut StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+    flash: &mut MockFlash<REGION_SIZE, REGION_COUNT, MAX_LOG>,
+    workspace: &mut StorageWorkspace<REGION_SIZE>,
+    record: WalRecord<'_>,
+) {
+    for _ in 0..128 {
+        match state.ensure_append_reserve::<REGION_SIZE, REGION_COUNT, _>(workspace, flash, record)
+        {
+            Ok(()) => state
+                .append_update::<REGION_SIZE, REGION_COUNT, _>(
+                    flash,
+                    workspace,
+                    CollectionId(7),
+                    &[1, 2, 3, 4],
+                )
+                .unwrap(),
+            Err(StorageRuntimeError::WalRotationRequired) => return,
+            Err(other) => panic!("unexpected append-reserve error: {other:?}"),
+        }
+    }
+
+    panic!("append reserve did not reach the WAL rotation window");
 }
 
 fn init_user_region_header<
@@ -267,6 +341,38 @@ fn requirement_committed_region_write_uses_a_region_previously_reserved_by_alloc
             &[1, 2, 3],
         )
         .unwrap();
+}
+
+#[test]
+fn write_committed_region_accepts_payload_that_exactly_fills_committed_capacity() {
+    const REGION_SIZE: usize = 256;
+    const PAYLOAD_CAPACITY: usize =
+        REGION_SIZE - Header::ENCODED_LEN - FreePointerFooter::ENCODED_LEN;
+
+    let mut flash = MockFlash::<REGION_SIZE, 5, 1024>::new(0xff);
+    let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
+    let mut state = format::<REGION_SIZE, 5, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+    let payload = [0x5au8; PAYLOAD_CAPACITY];
+
+    let region_index = state
+        .reserve_next_region::<REGION_SIZE, 5, _>(&mut flash, &mut workspace)
+        .unwrap();
+
+    state
+        .write_committed_region::<REGION_SIZE, 5, _>(
+            &mut flash,
+            region_index,
+            CollectionId(7),
+            crate::MAP_REGION_V1_FORMAT,
+            &payload,
+        )
+        .unwrap();
+
+    let mut stored = [0u8; PAYLOAD_CAPACITY];
+    flash
+        .read_region(region_index, Header::ENCODED_LEN, &mut stored)
+        .unwrap();
+    assert_eq!(stored, payload);
 }
 
 //= spec/ring.md#durability-and-crash-semantics
@@ -1233,7 +1339,7 @@ fn normal_append_rejects_when_it_would_consume_rotation_reserve() {
         )
         .unwrap();
 
-    loop {
+    for _ in 0..64 {
         match state.append_update::<256, 4, _>(
             &mut flash,
             &mut workspace,
@@ -1246,6 +1352,11 @@ fn normal_append_rejects_when_it_would_consume_rotation_reserve() {
         }
     }
 
+    assert!(matches!(
+        state.append_update::<256, 4, _>(&mut flash, &mut workspace, CollectionId(7), &[1]),
+        Err(StorageRuntimeError::WalRotationRequired)
+    ));
+
     let next_region = state
         .append_wal_rotation_start::<256, 4, _>(&mut flash, &mut workspace)
         .unwrap();
@@ -1255,4 +1366,423 @@ fn normal_append_rejects_when_it_would_consume_rotation_reserve() {
     state
         .append_update::<256, 4, _>(&mut flash, &mut workspace, CollectionId(7), &[9])
         .unwrap();
+}
+
+#[test]
+fn append_wal_rotation_start_rejects_when_called_before_rotation_window() {
+    let mut flash = MockFlash::<256, 4, 512>::new(0xff);
+    let mut workspace = StorageWorkspace::<256>::new();
+    let mut state = format::<256, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+
+    assert!(matches!(
+        state.append_wal_rotation_start::<256, 4, _>(&mut flash, &mut workspace),
+        Err(StorageRuntimeError::InvalidRotationWindow {
+            remaining_after,
+            rotation_reserve,
+            ..
+        }) if remaining_after >= rotation_reserve
+    ));
+}
+
+#[test]
+fn ensure_head_append_room_with_rotation_rotates_when_tail_lacks_head_room() {
+    let mut flash = MockFlash::<256, 6, 2048>::new(0xff);
+    let mut workspace = StorageWorkspace::<256>::new();
+    let mut state = format::<256, 6, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+    state
+        .append_new_collection::<256, 6, _>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(7),
+            CollectionType::MAP_CODE,
+        )
+        .unwrap();
+
+    let target_region = state.last_free_list_head().unwrap();
+    fill_until_append_reserve_requires_rotation(
+        &mut state,
+        &mut flash,
+        &mut workspace,
+        WalRecord::Head {
+            collection_id: CollectionId(7),
+            collection_type: CollectionType::MAP_CODE,
+            region_index: target_region,
+        },
+    );
+
+    let tail_before = state.wal_tail();
+    state
+        .ensure_head_append_room_with_rotation::<256, 6, _>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(7),
+            CollectionType::MAP_CODE,
+            target_region,
+        )
+        .unwrap();
+    assert_ne!(state.wal_tail(), tail_before);
+}
+
+#[test]
+fn ensure_stage_region_append_room_with_rotation_rotates_when_tail_lacks_stage_room() {
+    let mut flash = MockFlash::<256, 6, 2048>::new(0xff);
+    let mut workspace = StorageWorkspace::<256>::new();
+    let mut state = format::<256, 6, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+    state
+        .append_new_collection::<256, 6, _>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(7),
+            CollectionType::MAP_CODE,
+        )
+        .unwrap();
+
+    let target_region = state.last_free_list_head().unwrap();
+    state.last_free_list_head = Some(99);
+
+    assert!(state
+        .ensure_stage_region_append_room_with_rotation::<256, 6, _>(
+            &mut flash,
+            &mut workspace,
+            target_region,
+        )
+        .is_err());
+}
+
+#[test]
+fn ensure_encoded_append_reserve_rejects_alloc_begin_when_no_free_region_remains() {
+    let mut flash = MockFlash::<128, 4, 128>::new(0xff);
+    let mut workspace = StorageWorkspace::<128>::new();
+    let mut state = format::<128, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+    state.last_free_list_head = None;
+
+    assert_eq!(state.last_free_list_head(), None);
+    assert_eq!(
+        state.ensure_encoded_append_reserve::<128, 4, _>(&mut workspace, &mut flash, 1, true),
+        Err(StorageRuntimeError::WalRotationRequired)
+    );
+}
+
+#[test]
+fn ensure_encoded_append_reserve_accepts_alloc_begin_at_exact_rotation_reserve_boundary() {
+    let mut flash = MockFlash::<256, 4, 512>::new(0xff);
+    let mut workspace = StorageWorkspace::<256>::new();
+    let mut state = format::<256, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+    let next_region = state.last_free_list_head().unwrap();
+    let free_list_head_after =
+        read_free_pointer_successor::<256, 4, _>(&mut flash, state.metadata(), next_region)
+            .unwrap();
+    let reserves = state
+        .rotation_reserves::<256, 4>(&mut workspace, next_region, free_list_head_after)
+        .unwrap();
+    let encoded_len = 1;
+    state.wal_append_offset = 256 - reserves.rotation_reserve - encoded_len;
+
+    assert_eq!(
+        state.ensure_encoded_append_reserve::<256, 4, _>(
+            &mut workspace,
+            &mut flash,
+            encoded_len,
+            true,
+        ),
+        Ok(())
+    );
+}
+
+#[test]
+fn classify_wal_head_reclaim_copies_only_the_retained_region_head() {
+    let mut flash = MockFlash::<512, 5, 512>::new(0xff);
+    let mut workspace = StorageWorkspace::<512>::new();
+    let mut state = format::<512, 5, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+    state
+        .append_new_collection::<512, 5, _>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(7),
+            CollectionType::MAP_CODE,
+        )
+        .unwrap();
+    let retained_region = state
+        .reserve_next_region::<512, 5, _>(&mut flash, &mut workspace)
+        .unwrap();
+    state
+        .write_committed_region::<512, 5, _>(
+            &mut flash,
+            retained_region,
+            CollectionId(7),
+            crate::MAP_REGION_V1_FORMAT,
+            &[1, 2, 3],
+        )
+        .unwrap();
+    state
+        .append_head::<512, 5, _>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(7),
+            CollectionType::MAP_CODE,
+            retained_region,
+        )
+        .unwrap();
+
+    let original_collections = state.collections.clone();
+    let mut active_collections = Vec::<CollectionId, 8>::new();
+    assert_eq!(
+        state
+            .classify_wal_head_record_for_reclaim(
+                &original_collections,
+                &mut active_collections,
+                WalRecord::Head {
+                    collection_id: CollectionId(7),
+                    collection_type: CollectionType::MAP_CODE,
+                    region_index: retained_region,
+                },
+            )
+            .unwrap(),
+        WalHeadReclaimAction::CopyEncoded
+    );
+    assert_eq!(
+        state
+            .classify_wal_head_record_for_reclaim(
+                &original_collections,
+                &mut active_collections,
+                WalRecord::Head {
+                    collection_id: CollectionId(7),
+                    collection_type: CollectionType::MAP_CODE,
+                    region_index: retained_region + 1,
+                },
+            )
+            .unwrap(),
+        WalHeadReclaimAction::Skip
+    );
+}
+
+#[test]
+fn classify_wal_head_reclaim_copies_only_retained_drop_tombstones() {
+    let mut flash = MockFlash::<256, 4, 512>::new(0xff);
+    let mut workspace = StorageWorkspace::<256>::new();
+    let mut live_state = format::<256, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+    live_state
+        .append_new_collection::<256, 4, _>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(7),
+            CollectionType::MAP_CODE,
+        )
+        .unwrap();
+
+    let live_collections = live_state.collections.clone();
+    let mut active_collections = Vec::<CollectionId, 8>::new();
+    assert_eq!(
+        live_state
+            .classify_wal_head_record_for_reclaim(
+                &live_collections,
+                &mut active_collections,
+                WalRecord::DropCollection {
+                    collection_id: CollectionId(7),
+                },
+            )
+            .unwrap(),
+        WalHeadReclaimAction::Skip
+    );
+
+    live_state
+        .append_drop_collection::<256, 4, _>(&mut flash, &mut workspace, CollectionId(7))
+        .unwrap();
+    let dropped_collections = live_state.collections.clone();
+    assert_eq!(
+        live_state
+            .classify_wal_head_record_for_reclaim(
+                &dropped_collections,
+                &mut active_collections,
+                WalRecord::DropCollection {
+                    collection_id: CollectionId(7),
+                },
+            )
+            .unwrap(),
+        WalHeadReclaimAction::CopyEncoded
+    );
+}
+
+#[test]
+fn ensure_foreground_allocation_headroom_rejects_using_the_minimum_free_reserve() {
+    let mut flash = MockFlash::<256, 5, 1024>::new(0xff);
+    let mut workspace = StorageWorkspace::<256>::new();
+    let mut state = format::<256, 5, _, 8, 4>(&mut flash, 3, 8, 0xa5).unwrap();
+    let _reserved = state
+        .reserve_next_region::<256, 5, _>(&mut flash, &mut workspace)
+        .unwrap();
+
+    assert_eq!(state.free_region_count::<256, 5, _>(&mut flash), Ok(3));
+    assert_eq!(
+        state.ensure_foreground_allocation_headroom::<256, 5, _>(&mut flash, &mut workspace),
+        Err(StorageRuntimeError::InsufficientFreeRegions {
+            free_regions: 3,
+            min_free_regions: 3,
+        })
+    );
+}
+
+#[test]
+fn copy_live_wal_head_reclaim_state_stops_when_a_record_ends_at_region_end() {
+    let mut flash = MockFlash::<128, 4, 512>::new(0xff);
+    let mut workspace = StorageWorkspace::<128>::new();
+    let mut state = format::<128, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+    let metadata = state.metadata();
+    append_exact_fill_update_record(&mut flash, metadata, state.wal_head(), CollectionId(77));
+    let plan = WalHeadReclaimPlan::<8> {
+        old_head: state.wal_head(),
+        new_head: state.wal_tail(),
+        original_collections: Vec::new(),
+    };
+
+    state
+        .copy_live_wal_head_reclaim_state::<128, 4, _>(&mut flash, &mut workspace, &plan)
+        .unwrap();
+}
+
+#[test]
+fn region_reachable_from_live_state_does_not_parse_non_map_region_heads_as_maps() {
+    let mut flash = MockFlash::<128, 4, 512>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    init_user_region_header(
+        &mut flash,
+        2,
+        4,
+        CollectionId(7),
+        CollectionType::CHANNEL_CODE,
+    );
+    let wal_offset = metadata.wal_record_area_offset().unwrap();
+    append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        wal_offset,
+        WalRecord::Head {
+            collection_id: CollectionId(7),
+            collection_type: CollectionType::CHANNEL_CODE,
+            region_index: 2,
+        },
+    );
+
+    let mut workspace = StorageWorkspace::<128>::new();
+    let state = open::<128, 4, _, 8, 4>(&mut flash).unwrap();
+    assert_eq!(
+        state
+            .region_reachable_from_live_state::<128, _>(&mut flash, &mut workspace, 3)
+            .unwrap(),
+        false
+    );
+}
+
+#[test]
+fn region_reachable_from_live_state_follows_map_head_references_to_run_regions() {
+    const REGION_SIZE: usize = 512;
+    const REGION_COUNT: usize = 32;
+    const MAX_INDEXES: usize = 128;
+    const MAX_RUNS: usize = 16;
+
+    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 16384>::new(0xff);
+    let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
+    let mut storage = Storage::<8, 8>::format::<REGION_SIZE, REGION_COUNT, _>(
+        &mut flash,
+        &mut workspace,
+        1,
+        8,
+        0xa5,
+    )
+    .unwrap();
+    let collection_id = CollectionId(707);
+    storage
+        .create_map::<REGION_SIZE, REGION_COUNT, _>(&mut flash, &mut workspace, collection_id)
+        .unwrap();
+
+    let mut map_buffer = [0u8; 8192];
+    let mut map =
+        LsmMap::<i32, i32, MAX_INDEXES, MAX_RUNS>::new(collection_id, &mut map_buffer).unwrap();
+    for key in 0..100 {
+        map.set(key, key * 10).unwrap();
+    }
+    storage
+        .flush_map::<REGION_SIZE, REGION_COUNT, _, i32, i32, MAX_INDEXES, MAX_RUNS>(
+            &mut flash,
+            &mut workspace,
+            &mut map,
+        )
+        .unwrap();
+
+    let run_region = (0..REGION_COUNT as u32)
+        .find(|region_index| {
+            read_header_from_flash::<REGION_SIZE, REGION_COUNT, _>(&mut flash, *region_index)
+                .is_ok_and(|header| {
+                    header.collection_id == collection_id
+                        && header.collection_format == crate::MAP_RUN_V1_FORMAT
+                })
+        })
+        .expect("flush should write at least one map run region");
+
+    assert!(storage
+        .runtime()
+        .region_reachable_from_live_state::<REGION_SIZE, _>(&mut flash, &mut workspace, run_region)
+        .unwrap());
+}
+
+#[test]
+fn drop_staged_region_in_memory_removes_only_the_matching_region() {
+    let mut flash = MockFlash::<128, 4, 128>::new(0xff);
+    let mut state = format::<128, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+    state.staged_regions.push(1).unwrap();
+    state.staged_regions.push(2).unwrap();
+
+    state.drop_staged_region_in_memory(1).unwrap();
+    assert_eq!(state.staged_regions(), &[2]);
+}
+
+#[test]
+fn visit_wal_records_stops_when_a_tail_record_ends_at_the_append_limit() {
+    let mut flash = MockFlash::<128, 4, 512>::new(0xff);
+    let mut workspace = StorageWorkspace::<128>::new();
+    let mut state = format::<128, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+    let metadata = state.metadata();
+    append_exact_fill_update_record(&mut flash, metadata, state.wal_tail(), CollectionId(77));
+    state.wal_append_offset = 128;
+
+    let mut visited = 0usize;
+    state
+        .visit_wal_records::<128, _, (), _>(&mut flash, &mut workspace, |_flash, record| {
+            assert!(matches!(
+                record,
+                WalRecord::Update {
+                    collection_id: CollectionId(77),
+                    ..
+                }
+            ));
+            visited += 1;
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(visited, 1);
+}
+
+#[test]
+fn wal_chain_contains_region_follows_the_durable_link_target() {
+    let mut flash = MockFlash::<128, 4, 512>::new(0xff);
+    let mut workspace = StorageWorkspace::<128>::new();
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    let wal_offset = metadata.wal_record_area_offset().unwrap();
+    append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        wal_offset,
+        WalRecord::Link {
+            next_region_index: 2,
+            expected_sequence: 1,
+        },
+    );
+    initialize_wal_region::<128, 4, _>(&mut flash, metadata, 2, 1, 0).unwrap();
+
+    assert_eq!(
+        wal_chain_contains_region::<128, _>(&mut flash, &mut workspace, metadata, 0, 2, 2),
+        Ok(true)
+    );
 }

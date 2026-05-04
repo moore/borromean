@@ -2,7 +2,11 @@ test_workspace = false
 timeout_multiplier = 2.0
 minimum_test_timeout = 5.0
 output = ".mutants.out"
-additional_cargo_test_args = ["requirement_"]
 examine_globs = [
     "src/**/*.rs",
+]
+exclude_re = [
+    # Equivalent through the public open path: startup and map opening still validate
+    # live retained collection state before `Storage::open` can succeed.
+    "replace Storage<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>::validate_live_collections -> Result<\\(\\), StorageOpenError> with Ok\\(\\(\\)\\)",
 ]

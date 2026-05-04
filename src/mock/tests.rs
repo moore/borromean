@@ -59,6 +59,63 @@ fn metadata_operations_are_logged() {
 }
 
 #[test]
+fn read_storage_spans_metadata_and_data_regions_with_bounds_checks() {
+    let mut flash = MockFlash::<4, 2, 16>::new(0xff);
+    flash.write_region(0, 0, &[0x10, 0x11, 0x12, 0x13]).unwrap();
+    flash.write_region(1, 0, &[0x20, 0x21, 0x22, 0x23]).unwrap();
+
+    let mut buffer = [0u8; 6];
+    flash.read_storage(2, &mut buffer).unwrap();
+    assert_eq!(buffer, [0xff, 0xff, 0x10, 0x11, 0x12, 0x13]);
+
+    flash.read_storage(6, &mut buffer).unwrap();
+    assert_eq!(buffer, [0x12, 0x13, 0x20, 0x21, 0x22, 0x23]);
+
+    assert_eq!(
+        flash.read_storage(12, &mut [0u8; 1]),
+        Err(MockError::OutOfBounds)
+    );
+}
+
+#[test]
+fn write_metadata_requires_metadata_region_large_enough() {
+    let mut flash = MockFlash::<8, 4, 8>::new(0xff);
+    let metadata = StorageMetadata::new(8, 4, 1, 4, 0xff, 0xa5).unwrap();
+
+    assert_eq!(flash.write_metadata(metadata), Err(MockError::OutOfBounds));
+    assert_eq!(flash.metadata(), None);
+}
+
+#[test]
+fn write_metadata_accepts_exact_metadata_region_size() {
+    let mut flash = MockFlash::<{ StorageMetadata::ENCODED_LEN }, 4, 8>::new(0xff);
+    let metadata =
+        StorageMetadata::new(StorageMetadata::ENCODED_LEN as u32, 4, 1, 4, 0xff, 0xa5).unwrap();
+
+    flash.write_metadata(metadata).unwrap();
+
+    assert_eq!(flash.metadata(), Some(&metadata));
+    assert_eq!(
+        StorageMetadata::decode(&flash.metadata_region[..]).unwrap(),
+        metadata
+    );
+}
+
+#[test]
+fn flash_io_trait_write_metadata_delegates_to_mock_flash() {
+    let mut flash = MockFlash::<64, 4, 8>::new(0xff);
+    let metadata = StorageMetadata::new(64, 4, 1, 4, 0xff, 0xa5).unwrap();
+
+    crate::FlashIo::write_metadata(&mut flash, metadata).unwrap();
+
+    assert_eq!(flash.metadata(), Some(&metadata));
+    assert_eq!(
+        crate::FlashIo::read_metadata(&mut flash).unwrap(),
+        Some(metadata)
+    );
+}
+
+#[test]
 fn erase_write_read_and_sync_are_logged() {
     let mut flash = MockFlash::<16, 2, 16>::new(0xff);
 
@@ -113,6 +170,15 @@ fn requirement_format_empty_store_rejects_too_few_regions() {
             min_free_regions: 1,
         }
     );
+}
+
+#[test]
+fn format_empty_store_accepts_exact_minimum_region_count() {
+    let mut flash = MockFlash::<64, 3, 16>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+
+    assert_eq!(metadata.region_count, 3);
+    assert_eq!(flash.metadata(), Some(&metadata));
 }
 
 //= spec/ring.md#format-storage-on-disk-initialization

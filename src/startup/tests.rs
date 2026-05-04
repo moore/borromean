@@ -320,6 +320,17 @@ fn requirement_open_formatted_store_rejects_duplicate_max_sequence_wal_candidate
     assert_eq!(error, StartupError::DuplicateWalTailSequence(0));
 }
 
+#[test]
+fn open_formatted_store_ignores_nonzero_collection_with_wal_format_when_selecting_tail() {
+    let mut flash = MockFlash::<128, 4, 64>::new(0xff);
+    flash.format_empty_store(1, 8, 0xa5).unwrap();
+    init_user_region_header(&mut flash, 1, 9, CollectionId(7), WAL_V1_FORMAT);
+
+    let state = open_formatted_store::<128, 4, _, 8, 4>(&mut flash).unwrap();
+    assert_eq!(state.wal_tail(), 0);
+    assert_eq!(state.max_seen_sequence(), 9);
+}
+
 //= spec/ring.md#startup-replay-algorithm
 //= type=test
 //# RING-STARTUP-006 Parse records in WAL order (region order, then offset order).
@@ -428,6 +439,91 @@ fn requirement_open_formatted_store_replays_stage_region_into_staged_state() {
     assert_eq!(state.ready_region(), None);
     assert_eq!(state.staged_regions(), &[1]);
     assert_eq!(state.last_free_list_head(), Some(2));
+}
+
+#[test]
+fn open_formatted_store_keeps_staged_regions_when_wal_head_control_is_replayed() {
+    let mut flash = MockFlash::<256, 4, 128>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    let wal_offset = metadata.wal_record_area_offset().unwrap();
+    let after_alloc = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        wal_offset,
+        WalRecord::AllocBegin {
+            region_index: 1,
+            free_list_head_after: Some(2),
+        },
+    );
+    let after_stage = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        after_alloc,
+        WalRecord::StageRegion { region_index: 1 },
+    );
+    append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        after_stage,
+        WalRecord::Head {
+            collection_id: CollectionId(0),
+            collection_type: CollectionType::WAL_CODE,
+            region_index: 0,
+        },
+    );
+
+    let state = open_formatted_store::<256, 4, _, 8, 4>(&mut flash).unwrap();
+    assert_eq!(state.staged_regions(), &[1]);
+}
+
+#[test]
+fn open_formatted_store_keeps_staged_regions_when_non_map_head_is_replayed() {
+    let mut flash = MockFlash::<256, 4, 128>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    let wal_offset = metadata.wal_record_area_offset().unwrap();
+    let after_alloc = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        wal_offset,
+        WalRecord::AllocBegin {
+            region_index: 1,
+            free_list_head_after: Some(2),
+        },
+    );
+    let after_stage = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        after_alloc,
+        WalRecord::StageRegion { region_index: 1 },
+    );
+    let after_head = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        after_stage,
+        WalRecord::Head {
+            collection_id: CollectionId(7),
+            collection_type: CollectionType::CHANNEL_CODE,
+            region_index: 2,
+        },
+    );
+    append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        after_head,
+        WalRecord::DropCollection {
+            collection_id: CollectionId(7),
+        },
+    );
+
+    let state = open_formatted_store::<256, 4, _, 8, 4>(&mut flash).unwrap();
+    assert_eq!(state.staged_regions(), &[1]);
 }
 
 //= spec/ring.md#wal-record-types
@@ -541,6 +637,36 @@ fn requirement_open_formatted_store_tracks_live_collection_snapshot_basis() {
     );
     assert_eq!(state.collections()[0].pending_update_count(), 0);
     assert!(state.pending_reclaims().is_empty());
+}
+
+#[test]
+fn open_formatted_store_counts_multiple_live_collections() {
+    let mut flash = MockFlash::<128, 4, 128>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    let wal_offset = metadata.wal_record_area_offset().unwrap();
+    let after_first = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        wal_offset,
+        WalRecord::NewCollection {
+            collection_id: CollectionId(7),
+            collection_type: CollectionType::MAP_CODE,
+        },
+    );
+    append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        after_first,
+        WalRecord::NewCollection {
+            collection_id: CollectionId(8),
+            collection_type: CollectionType::MAP_CODE,
+        },
+    );
+
+    let state = open_formatted_store::<128, 4, _, 8, 4>(&mut flash).unwrap();
+    assert_eq!(state.tracked_user_collection_count(), 2);
 }
 
 //= spec/ring.md#core-requirements
@@ -870,6 +996,79 @@ fn requirement_validate_live_collection_types_ignores_unsupported_dropped_tombst
     assert_eq!(validate_live_collection_types(&collections), Ok(()));
 }
 
+#[test]
+fn read_strict_wal_region_rejects_nonzero_collection_id_even_with_wal_format() {
+    let mut flash = MockFlash::<128, 4, 64>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    init_wal_region(&mut flash, 1, 1, 0, metadata.region_count);
+    init_user_region_header(&mut flash, 1, 1, CollectionId(7), WAL_V1_FORMAT);
+
+    assert_eq!(
+        read_strict_wal_region(&mut flash, 1, metadata.region_count),
+        Err(StartupError::InvalidWalRegion(1))
+    );
+}
+
+#[test]
+fn has_valid_wal_target_requires_both_wal_collection_id_and_format() {
+    let mut flash = MockFlash::<128, 4, 64>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    init_wal_region(&mut flash, 1, 1, 0, metadata.region_count);
+
+    init_user_region_header(&mut flash, 1, 1, CollectionId(7), WAL_V1_FORMAT);
+    assert_eq!(
+        has_valid_wal_target(&mut flash, 1, 1, metadata.region_count),
+        Ok(false)
+    );
+
+    init_user_region_header(
+        &mut flash,
+        1,
+        1,
+        CollectionId(0),
+        crate::MAP_REGION_V1_FORMAT,
+    );
+    assert_eq!(
+        has_valid_wal_target(&mut flash, 1, 1, metadata.region_count),
+        Ok(false)
+    );
+}
+
+#[test]
+fn validate_live_region_bases_rejects_committed_region_for_different_collection() {
+    let mut flash = MockFlash::<128, 4, 64>::new(0xff);
+    flash.format_empty_store(1, 8, 0xa5).unwrap();
+    init_user_region_header(
+        &mut flash,
+        2,
+        4,
+        CollectionId(8),
+        crate::MAP_REGION_V1_FORMAT,
+    );
+    let collections = [StartupCollection {
+        collection_id: CollectionId(7),
+        collection_type: Some(CollectionType::MAP_CODE),
+        basis: StartupCollectionBasis::Region(2),
+        pending_update_count: 0,
+    }];
+
+    assert_eq!(
+        validate_live_region_bases(&mut flash, &collections),
+        Err(StartupError::InvalidCommittedRegionHead {
+            collection_id: CollectionId(7),
+            region_index: 2,
+        })
+    );
+}
+
+#[test]
+fn ensure_region_index_in_range_rejects_region_count_boundary() {
+    assert_eq!(
+        ensure_region_index_in_range(4, 4),
+        Err(StartupError::InvalidRegionReference(4))
+    );
+}
+
 //= spec/ring.md#startup-replay-algorithm
 //= type=test
 //# RING-STARTUP-005 Walk the WAL region chain from the resulting WAL head to tail using `link` records.
@@ -985,6 +1184,91 @@ fn open_formatted_store_recovers_rotation_before_link() {
     assert_eq!(state.free_list_tail(), Some(3));
     assert_eq!(state.ready_region(), None);
     assert_eq!(state.max_seen_sequence(), 1);
+}
+
+#[test]
+fn open_formatted_store_recovers_rotation_when_only_the_link_record_fits_after_alloc_begin() {
+    const REGION_SIZE: usize = 256;
+
+    let mut flash = MockFlash::<REGION_SIZE, 4, 128>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    let wal_offset = metadata.wal_record_area_offset().unwrap();
+    let mut physical = [0u8; REGION_SIZE];
+    let mut logical = [0u8; REGION_SIZE];
+    let alloc_record = WalRecord::AllocBegin {
+        region_index: 1,
+        free_list_head_after: Some(2),
+    };
+    let alloc_len =
+        encoded_record_len(alloc_record, metadata, &mut physical, &mut logical).unwrap();
+    let link_len = encoded_record_len(
+        WalRecord::Link {
+            next_region_index: 1,
+            expected_sequence: 1,
+        },
+        metadata,
+        &mut physical,
+        &mut logical,
+    )
+    .unwrap();
+    let payload = [0u8; REGION_SIZE];
+    let payload_len = (0..=payload.len())
+        .find(|payload_len| {
+            encoded_record_len(
+                WalRecord::Snapshot {
+                    collection_id: CollectionId(7),
+                    collection_type: CollectionType::MAP_CODE,
+                    payload: &payload[..*payload_len],
+                },
+                metadata,
+                &mut physical,
+                &mut logical,
+            )
+            .is_ok_and(|filler_len| wal_offset + filler_len + alloc_len + link_len == REGION_SIZE)
+        })
+        .expect("snapshot payload should align alloc_begin to exact link capacity");
+    let after_filler = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        wal_offset,
+        WalRecord::Snapshot {
+            collection_id: CollectionId(7),
+            collection_type: CollectionType::MAP_CODE,
+            payload: &payload[..payload_len],
+        },
+    );
+    let after_alloc = append_wal_record(&mut flash, metadata, 0, after_filler, alloc_record);
+    assert_eq!(REGION_SIZE - after_alloc, link_len);
+
+    let state = open_formatted_store::<REGION_SIZE, 4, _, 8, 4>(&mut flash).unwrap();
+    assert_eq!(state.wal_tail(), 1);
+    assert_eq!(state.max_seen_sequence(), 1);
+}
+
+#[test]
+fn open_formatted_store_rejects_unrecovered_boundary_in_non_tail_wal_region() {
+    let mut flash = MockFlash::<128, 4, 96>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    let wal_offset = metadata.wal_record_area_offset().unwrap();
+    let after_link = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        wal_offset,
+        WalRecord::Link {
+            next_region_index: 1,
+            expected_sequence: 1,
+        },
+    );
+    init_wal_region(&mut flash, 1, 1, 0, metadata.region_count);
+    let corrupt_tail = [0x10; 128];
+    flash
+        .write_region(0, after_link, &corrupt_tail[..128 - after_link])
+        .unwrap();
+
+    let error = open_formatted_store::<128, 4, _, 8, 4>(&mut flash).unwrap_err();
+    assert_eq!(error, StartupError::BrokenWalChain { region_index: 0 });
 }
 
 //= spec/ring.md#startup-replay-algorithm

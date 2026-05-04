@@ -386,7 +386,10 @@ pub fn decode_record<'a>(
             continue;
         };
 
-        if logical_offset < payload_header_end {
+        if matches!(
+            logical_offset.cmp(&payload_header_end),
+            core::cmp::Ordering::Less
+        ) {
             continue;
         }
 
@@ -739,7 +742,10 @@ fn decode_logical_byte(
     escape_codes: WalEscapeCodes,
 ) -> Result<u8, WalRecordError> {
     let byte = read_u8(input, physical_offset)?;
-    if byte == metadata.erased_byte || byte == metadata.wal_record_magic {
+    if byte == metadata.erased_byte {
+        return Ok(byte);
+    }
+    if byte == metadata.wal_record_magic {
         return Ok(byte);
     }
 

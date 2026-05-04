@@ -82,3 +82,6 @@ impl<'a, T, const N: usize> VecLike<T> for VecLikeSlice<'a, T, N> {
         &mut self.items[..self.len]
     }
 }
+
+#[cfg(test)]
+mod tests;

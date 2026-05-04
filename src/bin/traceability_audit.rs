@@ -315,10 +315,10 @@ fn push_normative_item(items: &mut Vec<String>, item: &str) {
 
 fn strip_numbered_prefix(line: &str) -> Option<&str> {
     let bytes = line.as_bytes();
-    let mut index = 0usize;
-    while index < bytes.len() && bytes[index].is_ascii_digit() {
-        index += 1;
-    }
+    let index = bytes
+        .iter()
+        .position(|byte| !byte.is_ascii_digit())
+        .unwrap_or(bytes.len());
 
     if index == 0 || index + 1 >= bytes.len() || bytes[index] != b'.' || bytes[index + 1] != b' ' {
         return None;
