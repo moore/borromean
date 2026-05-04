@@ -2,7 +2,7 @@
 
 This guide is for contributors adding a new durably integrated collection type to Borromean.
 
-Today the map collection in [`src/collections/map/mod.rs`](../src/collections/map/mod.rs) is the only complete implemented example. The map specification also describes the intended whole-run LSM target design, but the current runtime still opens the map from one retained committed-region basis plus later WAL records. The experimental channel module in [`src/collections/channel/mod.rs`](../src/collections/channel/mod.rs) is useful as a public-API example, but it is not wired into startup, WAL replay, reclaim, or committed-region handling.
+Today the map collection in [`src/collections/map/mod.rs`](../src/collections/map/mod.rs) is the only complete implemented example. It uses the manifest-backed whole-run LSM design described in [`spec/map.md`](../spec/map.md): a collection head points to a manifest, the manifest lists immutable sorted run regions, and reads resolve the in-memory frontier plus durable runs newest-to-oldest. The experimental channel module in [`src/collections/channel/mod.rs`](../src/collections/channel/mod.rs) is useful as a public-API example, but it is not wired into startup, WAL replay, reclaim, or committed-region handling.
 
 The goal is to add a collection that:
 
@@ -27,7 +27,8 @@ Follow the same split that the map module uses:
 
 At minimum, a durable collection usually needs:
 
-- a stable committed-region format constant like `MAP_REGION_V1_FORMAT`
+- stable committed-region format constants like `MAP_MANIFEST_V1_FORMAT` and
+  `MAP_RUN_V1_FORMAT`
 - an empty snapshot byte sequence like `EMPTY_MAP_SNAPSHOT`
 - an `open_from_storage` helper that reconstructs the frontier from replay state
 - one or more helpers that turn typed operations into raw WAL payload bytes
@@ -86,6 +87,23 @@ if let Some(previous_region) = previous_region {
 storage.append_head(..., collection_id, CollectionType::FOO_CODE, region_index)?;
 ```
 
+For a multi-region collection, follow the map's staged-region pattern instead:
+
+```rust
+let segment = storage.reserve_next_region(...)?;
+storage.write_committed_region(..., segment, collection_id, FOO_SEGMENT_V1_FORMAT, segment_payload)?;
+storage.stage_ready_region(..., segment)?;
+
+let manifest = storage.reserve_next_region(...)?;
+storage.write_committed_region(..., manifest, collection_id, FOO_MANIFEST_V1_FORMAT, manifest_payload)?;
+storage.append_head(..., collection_id, CollectionType::FOO_CODE, manifest)?;
+```
+
+Only the final `head` changes the logical collection basis. Staged segments
+remain allocated but are not live collection state until the committed manifest
+references them. Reclaim and reachability must understand the manifest before
+old segment regions can be freed.
+
 That keeps WAL ordering, region allocation, reclaim, and crash recovery in one place.
 
 ## 4. Update Runtime Type Gates
@@ -109,14 +127,15 @@ Replay first reconstructs generic collection state, then `Storage::open` rejects
 - [`src/startup.rs`](../src/startup.rs): `validate_live_collection_types`
 - [`src/lib.rs`](../src/lib.rs): `Storage::validate_live_collections`
 
-Your collection-local `open_from_storage` helper should then rebuild its frontier from `StartupCollectionBasis`:
+Your collection-local `open_from_storage` helper should then rebuild its frontier or descriptor state from `StartupCollectionBasis`:
 
 - `Empty`: start from the collection's empty in-memory state
 - `WalSnapshot`: load the retained snapshot payload, then replay later updates
-- `Region(region_index)`: load the retained committed region, then replay later updates
+- `Region(region_index)`: load the retained committed region, or parse it as a
+  manifest whose payload names additional live regions, then replay later updates
 - `Dropped`: reject the open
 
-The map implementation in [`src/collections/map/mod.rs`](../src/collections/map/mod.rs) is the reference pattern. It scans retained WAL records with `visit_wal_records`, loads the selected basis when it appears, and applies later updates in order.
+The map implementation in [`src/collections/map/mod.rs`](../src/collections/map/mod.rs) is the reference pattern. It scans retained WAL records with `visit_wal_records`, loads the selected basis when it appears, parses manifest-listed run descriptors without materializing the runs, and applies later updates into the in-memory frontier in order.
 
 ## 6. Add Storage Facade Methods
 
@@ -127,6 +146,7 @@ Once the runtime and collection module exist, add the user-facing `Storage` help
 - `append_map_update` or `update_map_frontier`
 - `snapshot_map`
 - `flush_map` and `flush_map_future`
+- `compact_map` if the collection has a multi-region retained basis
 - `drop_map`
 
 For a new collection, keep the same ownership model:
@@ -244,16 +264,16 @@ For large logs, the most practical API is usually sequential reading from a curs
 
 ### Why A Log Collection Pushes The Current Runtime
 
-The current engine stores one retained committed-region basis per collection through `StartupCollectionBasis::Region(u32)`. That is enough for the implemented map path, because the whole compacted basis currently fits in one region. It is not enough for the target map design in [`spec/map.md`](../spec/map.md), where the map head is intended to become a manifest that keeps multiple immutable run regions live.
+The engine stores one retained collection head through `StartupCollectionBasis::Region(u32)`. For the map, that head is now a manifest region whose payload keeps multiple immutable run regions live. A log collection can use the same pattern: one head region describes the current live segment set, and collection-specific reachability keeps those segments allocated.
 
-An unbounded log is different. A single committed region cannot hold any number of records, so a true durable log needs a multi-region basis. That means the tutorial for a log collection should call out a required shared-runtime extension before the collection itself is wired in:
+An unbounded log is different from a map in its payload semantics, but it no longer needs a fundamentally new "many heads" runtime model. It needs a collection-specific manifest or segment-list format plus shared-runtime reachability support for that format:
 
-- replay state must be able to retain more than one committed region for a live collection
-- live-state reachability must understand that all regions in the retained log basis are still live
+- replay state must retain the committed manifest head
+- live-state reachability must understand that all manifest-listed log segments are still live
 - reclaim must only detach segments that are no longer reachable after append or truncate
-- open must be able to recover the retained segment set before replaying later WAL updates
+- open must recover the retained segment set from the manifest before replaying later WAL updates
 
-The important design rule does not change: make this a shared storage-engine feature, not a log-only side protocol. A log collection should use a generic retained-segment mechanism added to the runtime rather than quietly managing extra live regions behind the runtime's back.
+The important design rule does not change: make this visible to shared storage reachability, not a log-only side protocol. A log collection should not quietly manage extra live regions behind the runtime's back.
 
 ### Segment Layout
 

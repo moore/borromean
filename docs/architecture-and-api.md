@@ -31,7 +31,8 @@ The common storage flow is:
 2. Allocate a `StorageWorkspace<REGION_SIZE>`.
 3. Format or open the store through `Storage`.
 4. Create or open a map collection.
-5. Apply updates, snapshot the frontier, or flush it into a committed region.
+5. Apply updates, snapshot the frontier, or flush it into manifest-backed
+   committed runs.
 6. Re-open the store later and reconstruct collection state from replay.
 
 Two execution styles expose the same logic:
@@ -43,27 +44,31 @@ Both styles keep I/O and workspace dependencies explicit in the function signatu
 
 ## Durable Map Model
 
-The implemented durable map collection currently uses three payload shapes:
+The implemented durable map collection uses four payload shapes:
 
 - update payloads in WAL records
 - snapshot payloads in WAL records
-- committed-region payloads in map regions
+- legacy single-region map payloads, readable for compatibility
+- manifest and immutable run segment payloads in committed map regions
 
-`LsmMap` keeps a bounded in-memory frontier in a caller-owned buffer. When a map is reopened:
+`LsmMap` keeps a bounded in-memory frontier in a caller-owned buffer plus a
+bounded descriptor list for durable runs. It does not materialize committed
+runs into RAM during open. When a map is reopened:
 
 - the retained durable basis is selected from the replay-tracked empty basis, snapshot basis, or region basis
-- later retained update payloads are replayed in order
-- later updates override older basis values for the same key
+- a legacy map region is represented as a legacy source descriptor
+- a manifest region is parsed into newest-to-oldest immutable run descriptors
+- later retained update payloads are replayed into the frontier in order
+- reads check the frontier first, then read candidate run regions on demand
 
 The normative byte-level rules for those payloads live in [../spec/map.md](../spec/map.md).
 
-That same map specification now also records the intended target design
-for the map: a manifest-backed whole-run LSM where frontier flushes
-create immutable sorted runs, overlapping runs are read newest first,
-and asynchronous compaction replaces complete runs. The current runtime
-still retains one committed region basis per collection, so that target
-requires shared replay, reachability, and reclaim extensions before it
-can be implemented.
+Flushes now write immutable sorted run regions, stage them, write a manifest,
+and commit the manifest as the collection head. Reads use newest-wins semantics:
+newer runs may overlap older runs, and a newer tombstone masks older values.
+`Storage::compact_map` performs blocking whole-run compaction with the
+Target-Then-Greedy selection policy. A later async compaction API can mirror
+that blocking operation without changing the on-disk model.
 
 ## Module Guide
 
