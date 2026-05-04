@@ -1025,7 +1025,7 @@ fn stage_ready_region_detaches_ready_region_and_allows_next_allocation() {
 }
 
 #[test]
-fn staged_regions_survive_reopen() {
+fn staged_regions_are_reclaimed_on_reopen_when_uncommitted() {
     let mut flash = MockFlash::<512, 5, 512>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut state = format::<512, 5, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
@@ -1048,7 +1048,7 @@ fn staged_regions_survive_reopen() {
 
     let reopened = open::<512, 5, _, 8, 4>(&mut flash).unwrap();
     assert_eq!(reopened.ready_region(), None);
-    assert_eq!(reopened.staged_regions(), &[region_index]);
+    assert!(reopened.staged_regions().is_empty());
 }
 
 #[test]

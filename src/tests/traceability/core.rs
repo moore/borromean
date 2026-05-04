@@ -84,12 +84,12 @@ fn storage_facade_preserves_ring_behavior_through_delegating_entry_points() {
     let reopened = Storage::<8, 4>::open::<512, 5, _>(&mut flash, &mut workspace).unwrap();
     let mut map_buffer = [0u8; 512];
     let map = reopened
-        .open_map::<512, 5, _, u16, u16, 8>(
+        .open_map::<512, 5, _, u16, u16, 8, 8>(
             &mut flash,
             &mut workspace,
             CollectionId(86),
             &mut map_buffer,
         )
         .unwrap();
-    assert_eq!(map.get(&7).unwrap(), Some(70));
+    assert_eq!(map.get_frontier(&7).unwrap(), Some(70));
 }

@@ -132,10 +132,10 @@ fn each_fallible_storage_operation_is_drivable_as_one_future() {
 
     source.set(3, 30).unwrap();
     let committed_region = super::super::poll_until_ready(
-        storage.flush_map_future::<REGION_SIZE, REGION_COUNT, _, _, _, 8>(
+        storage.flush_map_future::<REGION_SIZE, REGION_COUNT, _, _, _, 8, 8>(
             &mut flash,
             &mut workspace,
-            &source,
+            &mut source,
         ),
         4,
     )
@@ -231,10 +231,10 @@ fn single_threaded_poll_loop_drives_operation_futures_to_completion() {
         let mut map = LsmMap::<u16, u16, 8>::new(CollectionId(81), &mut map_buffer).unwrap();
         map.set(7, 70).unwrap();
         super::super::poll_until_ready(
-            storage.flush_map_future::<REGION_SIZE, REGION_COUNT, _, _, _, 8>(
+            storage.flush_map_future::<REGION_SIZE, REGION_COUNT, _, _, _, 8, 8>(
                 &mut flash,
                 &mut workspace,
-                &map,
+                &mut map,
             ),
             4,
         )
@@ -255,14 +255,19 @@ fn single_threaded_poll_loop_drives_operation_futures_to_completion() {
 
     let mut reopened_map_buffer = [0u8; REGION_SIZE];
     let reopened_map = reopened
-        .open_map::<REGION_SIZE, REGION_COUNT, _, u16, u16, 8>(
+        .open_map::<REGION_SIZE, REGION_COUNT, _, u16, u16, 8, 8>(
             &mut flash,
             &mut workspace,
             CollectionId(81),
             &mut reopened_map_buffer,
         )
         .unwrap();
-    assert_eq!(reopened_map.get(&7).unwrap(), Some(70));
+    assert_eq!(
+        reopened_map
+            .get::<REGION_SIZE, _>(&mut flash, &mut workspace, &7)
+            .unwrap(),
+        Some(70)
+    );
 }
 
 //= spec/implementation.md#execution-requirements
@@ -287,7 +292,7 @@ fn storage_can_be_reused_only_after_an_operation_future_is_finished_or_dropped()
 
     {
         let future =
-            storage.flush_map_future::<512, 5, _, _, _, 8>(&mut flash, &mut workspace, &map);
+            storage.flush_map_future::<512, 5, _, _, _, 8, 8>(&mut flash, &mut workspace, &mut map);
         let mut future = pin!(future);
         assert!(matches!(
             super::super::poll_once(future.as_mut()),

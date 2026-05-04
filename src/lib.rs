@@ -56,14 +56,14 @@
 //!
 //! let mut map_buffer = [0u8; REGION_SIZE];
 //! let map = storage
-//!     .open_map::<REGION_SIZE, REGION_COUNT, _, u16, u16, 8>(
+//!     .open_map::<REGION_SIZE, REGION_COUNT, _, u16, u16, 8, 8>(
 //!         &mut flash,
 //!         &mut workspace,
 //!         CollectionId::new(1),
 //!         &mut map_buffer,
 //!     )
 //!     .unwrap();
-//! assert_eq!(map.get(&7).unwrap(), Some(70));
+//! assert_eq!(map.get_frontier(&7).unwrap(), Some(70));
 //! ```
 #![no_std]
 #![cfg_attr(
@@ -881,11 +881,12 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         K,
         V,
         const MAX_INDEXES: usize,
+        const MAX_RUNS: usize,
     >(
         &mut self,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
-        map: &mut LsmMap<'_, K, V, MAX_INDEXES>,
+        map: &mut LsmMap<'_, K, V, MAX_INDEXES, MAX_RUNS>,
         update: &MapUpdate<K, V>,
         payload_buffer: &mut [u8],
     ) -> Result<(), MapStorageError>
@@ -929,13 +930,12 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
                     map.restore_from_checkpoint(checkpoint, checkpoint_buffer)?;
                 }
 
-                self.flush_map::<REGION_SIZE, REGION_COUNT, IO, K, V, MAX_INDEXES>(
+                self.flush_map::<REGION_SIZE, REGION_COUNT, IO, K, V, MAX_INDEXES, MAX_RUNS>(
                     flash, workspace, map,
                 )?;
 
                 checkpoint = {
                     let (checkpoint_buffer, _) = workspace.encode_buffers();
-                    map.compact_in_place(checkpoint_buffer)?;
                     map.checkpoint_into(checkpoint_buffer)?
                 };
 
@@ -1011,11 +1011,12 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         K,
         V,
         const MAX_INDEXES: usize,
+        const MAX_RUNS: usize,
     >(
         &mut self,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
-        map: &LsmMap<'_, K, V, MAX_INDEXES>,
+        map: &mut LsmMap<'_, K, V, MAX_INDEXES, MAX_RUNS>,
     ) -> Result<u32, MapStorageError>
     where
         K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
@@ -1041,17 +1042,18 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         K,
         V,
         const MAX_INDEXES: usize,
+        const MAX_RUNS: usize,
     >(
         &'a mut self,
         flash: &'a mut IO,
         workspace: &'a mut StorageWorkspace<REGION_SIZE>,
-        map: &'a LsmMap<'a, K, V, MAX_INDEXES>,
+        map: &'a mut LsmMap<'a, K, V, MAX_INDEXES, MAX_RUNS>,
     ) -> impl Future<Output = Result<u32, MapStorageError>> + 'a
     where
         K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
         V: Debug + Serialize + for<'de> Deserialize<'de>,
     {
-        FlushMapFuture::<
+        YieldingFlushMapFuture::<
             MAX_COLLECTIONS,
             MAX_PENDING_RECLAIMS,
             REGION_SIZE,
@@ -1060,7 +1062,79 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
             K,
             V,
             MAX_INDEXES,
+            MAX_RUNS,
         >::new(self, flash, workspace, map)
+    }
+
+    /// Compacts a map's committed run set into one replacement manifest.
+    pub fn compact_map<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+        K,
+        V,
+        const MAX_INDEXES: usize,
+        const MAX_RUNS: usize,
+        const REGION_TARGET: usize,
+    >(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        collection_id: CollectionId,
+        scratch_buffer: &mut [u8],
+    ) -> Result<Option<u32>, MapStorageError>
+    where
+        K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
+        V: Debug + Serialize + for<'de> Deserialize<'de>,
+    {
+        if REGION_TARGET == 0 {
+            return Err(MapStorageError::InvalidRegionTarget);
+        }
+
+        let mut open_buffer = [0u8; REGION_SIZE];
+        let mut opened = LsmMap::<K, V, MAX_INDEXES, MAX_RUNS>::open_from_storage::<
+            REGION_SIZE,
+            REGION_COUNT,
+            IO,
+            MAX_COLLECTIONS,
+            MAX_PENDING_RECLAIMS,
+        >(
+            &self.state,
+            flash,
+            workspace,
+            collection_id,
+            &mut open_buffer,
+        )?;
+
+        let Some(selected_runs) = opened.selected_compaction_run_count(REGION_TARGET)? else {
+            return Ok(None);
+        };
+
+        let mut replacement =
+            LsmMap::<K, V, MAX_INDEXES, MAX_RUNS>::new(collection_id, scratch_buffer)?;
+        opened.materialize_run_prefix_into::<REGION_SIZE, IO>(
+            flash,
+            workspace,
+            selected_runs,
+            &mut replacement,
+        )?;
+        opened.move_unselected_runs_into(selected_runs, &mut replacement)?;
+        let manifest_region = replacement.flush_to_storage::<
+            REGION_SIZE,
+            REGION_COUNT,
+            IO,
+            MAX_COLLECTIONS,
+            MAX_PENDING_RECLAIMS,
+        >(&mut self.state, flash, workspace)?;
+        opened.reclaim_run_regions::<
+            REGION_SIZE,
+            REGION_COUNT,
+            IO,
+            MAX_COLLECTIONS,
+            MAX_PENDING_RECLAIMS,
+        >(&mut self.state, flash, workspace)?;
+        self.clear_dirty_frontier(collection_id);
+        Ok(Some(manifest_region))
     }
 
     /// Drops a live map collection and begins reclaim for its last region basis.
@@ -1122,18 +1196,19 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         K,
         V,
         const MAX_INDEXES: usize,
+        const MAX_RUNS: usize,
     >(
         &self,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
         collection_id: CollectionId,
         buffer: &'a mut [u8],
-    ) -> Result<LsmMap<'a, K, V, MAX_INDEXES>, MapStorageError>
+    ) -> Result<LsmMap<'a, K, V, MAX_INDEXES, MAX_RUNS>, MapStorageError>
     where
         K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
         V: Debug + Serialize + for<'de> Deserialize<'de>,
     {
-        LsmMap::<K, V, MAX_INDEXES>::open_from_storage::<
+        LsmMap::<K, V, MAX_INDEXES, MAX_RUNS>::open_from_storage::<
             REGION_SIZE,
             REGION_COUNT,
             IO,

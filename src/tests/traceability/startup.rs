@@ -46,14 +46,14 @@ fn open_future_preserves_replay_context_across_pending_polls() {
     };
     let mut map_buffer = [0u8; 512];
     let map = reopened
-        .open_map::<512, 5, _, u16, u16, 8>(
+        .open_map::<512, 5, _, u16, u16, 8, 8>(
             &mut flash,
             &mut workspace,
             CollectionId(83),
             &mut map_buffer,
         )
         .unwrap();
-    assert_eq!(map.get(&7).unwrap(), Some(70));
+    assert_eq!(map.get_frontier(&7).unwrap(), Some(70));
 }
 
 //= spec/implementation.md#startup-requirements

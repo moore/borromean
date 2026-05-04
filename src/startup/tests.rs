@@ -1078,7 +1078,7 @@ fn storage_open_path_rejects_invalid_retained_map_region_snapshot_and_update_pay
 
         let reopened = Storage::<8, 4>::open::<512, 5, _>(&mut flash, &mut workspace).unwrap();
         let mut reopen_buffer = [0u8; 512];
-        let result = reopened.open_map::<512, 5, _, i32, i32, 4>(
+        let result = reopened.open_map::<512, 5, _, i32, i32, 4, 4>(
             &mut flash,
             &mut workspace,
             CollectionId(43),
@@ -1111,7 +1111,7 @@ fn storage_open_path_rejects_invalid_retained_map_region_snapshot_and_update_pay
 
         let reopened = Storage::<8, 4>::open::<512, 4, _>(&mut flash, &mut workspace).unwrap();
         let mut reopen_buffer = [0u8; 512];
-        let result = reopened.open_map::<512, 4, _, i32, i32, 4>(
+        let result = reopened.open_map::<512, 4, _, i32, i32, 4, 4>(
             &mut flash,
             &mut workspace,
             CollectionId(44),
@@ -1138,7 +1138,7 @@ fn storage_open_path_rejects_invalid_retained_map_region_snapshot_and_update_pay
 
         let reopened = Storage::<8, 4>::open::<512, 4, _>(&mut flash, &mut workspace).unwrap();
         let mut reopen_buffer = [0u8; 512];
-        let result = reopened.open_map::<512, 4, _, i32, i32, 4>(
+        let result = reopened.open_map::<512, 4, _, i32, i32, 4, 4>(
             &mut flash,
             &mut workspace,
             CollectionId(45),

@@ -45,14 +45,14 @@ fn caller_owned_storage_can_mix_future_and_blocking_entry_points() {
 
     let mut map_buffer = [0u8; REGION_SIZE];
     let map = storage
-        .open_map::<REGION_SIZE, REGION_COUNT, _, u16, u16, 8>(
+        .open_map::<REGION_SIZE, REGION_COUNT, _, u16, u16, 8, 8>(
             &mut flash,
             &mut workspace,
             CollectionId(61),
             &mut map_buffer,
         )
         .unwrap();
-    assert_eq!(map.get(&7).unwrap(), Some(70));
+    assert_eq!(map.get_frontier(&7).unwrap(), Some(70));
 }
 
 //= spec/implementation.md#api-requirements
@@ -163,7 +163,7 @@ fn blocking_and_future_entry_points_produce_equivalent_storage_state() {
 
     let mut blocking_map_buffer = [0u8; REGION_SIZE];
     let blocking_map = reopened_blocking
-        .open_map::<REGION_SIZE, REGION_COUNT, _, u16, u16, 8>(
+        .open_map::<REGION_SIZE, REGION_COUNT, _, u16, u16, 8, 8>(
             &mut blocking_flash,
             &mut blocking_workspace,
             CollectionId(61),
@@ -172,15 +172,15 @@ fn blocking_and_future_entry_points_produce_equivalent_storage_state() {
         .unwrap();
     let mut future_map_buffer = [0u8; REGION_SIZE];
     let future_map = reopened_future
-        .open_map::<REGION_SIZE, REGION_COUNT, _, u16, u16, 8>(
+        .open_map::<REGION_SIZE, REGION_COUNT, _, u16, u16, 8, 8>(
             &mut future_flash,
             &mut future_workspace,
             CollectionId(61),
             &mut future_map_buffer,
         )
         .unwrap();
-    assert_eq!(blocking_map.get(&7).unwrap(), Some(70));
-    assert_eq!(future_map.get(&7).unwrap(), Some(70));
+    assert_eq!(blocking_map.get_frontier(&7).unwrap(), Some(70));
+    assert_eq!(future_map.get_frontier(&7).unwrap(), Some(70));
 }
 
 //= spec/implementation.md#api-requirements

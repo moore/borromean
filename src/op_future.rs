@@ -8,8 +8,7 @@ use serde::{Deserialize, Serialize};
 use crate::startup::StartupOpenPlan;
 use crate::storage::WalHeadReclaimPlan;
 use crate::{
-    CollectionType, FlashIo, LsmMap, MapStorageError, StartupCollectionBasis, Storage,
-    StorageRuntimeError, StorageWorkspace,
+    FlashIo, LsmMap, MapStorageError, Storage, StorageRuntimeError, StorageWorkspace,
 };
 
 /// Minimal future wrapper that executes a closure exactly once when first polled.
@@ -41,21 +40,175 @@ where
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FlushMapPhase {
-    ReserveRegion,
-    WriteCommittedRegion {
-        previous_region: Option<u32>,
-        region_index: u32,
-    },
-    BeginPreviousRegionReclaim {
-        previous_region: u32,
-        region_index: u32,
-    },
-    CommitHead {
-        region_index: u32,
-    },
-    Done,
+/// Caller-driven future for flushing a map through the manifest-backed path.
+pub struct YieldingFlushMapFuture<
+    'a,
+    const MAX_COLLECTIONS: usize,
+    const MAX_PENDING_RECLAIMS: usize,
+    const REGION_SIZE: usize,
+    const REGION_COUNT: usize,
+    IO,
+    K,
+    V,
+    const MAX_INDEXES: usize,
+    const MAX_RUNS: usize,
+> where
+    IO: FlashIo,
+    K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
+    V: Debug + Serialize + for<'de> Deserialize<'de>,
+{
+    storage: &'a mut Storage<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+    flash: &'a mut IO,
+    workspace: &'a mut StorageWorkspace<REGION_SIZE>,
+    map: &'a mut LsmMap<'a, K, V, MAX_INDEXES, MAX_RUNS>,
+    phase: u8,
+}
+
+impl<
+        'a,
+        const MAX_COLLECTIONS: usize,
+        const MAX_PENDING_RECLAIMS: usize,
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO,
+        K,
+        V,
+        const MAX_INDEXES: usize,
+        const MAX_RUNS: usize,
+    >
+    YieldingFlushMapFuture<
+        'a,
+        MAX_COLLECTIONS,
+        MAX_PENDING_RECLAIMS,
+        REGION_SIZE,
+        REGION_COUNT,
+        IO,
+        K,
+        V,
+        MAX_INDEXES,
+        MAX_RUNS,
+    >
+where
+    IO: FlashIo,
+    K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
+    V: Debug + Serialize + for<'de> Deserialize<'de>,
+{
+    /// Creates a new yielding manifest flush future.
+    pub fn new(
+        storage: &'a mut Storage<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+        flash: &'a mut IO,
+        workspace: &'a mut StorageWorkspace<REGION_SIZE>,
+        map: &'a mut LsmMap<'a, K, V, MAX_INDEXES, MAX_RUNS>,
+    ) -> Self {
+        Self {
+            storage,
+            flash,
+            workspace,
+            map,
+            phase: 0,
+        }
+    }
+}
+
+impl<
+        'a,
+        const MAX_COLLECTIONS: usize,
+        const MAX_PENDING_RECLAIMS: usize,
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO,
+        K,
+        V,
+        const MAX_INDEXES: usize,
+        const MAX_RUNS: usize,
+    > Unpin
+    for YieldingFlushMapFuture<
+        'a,
+        MAX_COLLECTIONS,
+        MAX_PENDING_RECLAIMS,
+        REGION_SIZE,
+        REGION_COUNT,
+        IO,
+        K,
+        V,
+        MAX_INDEXES,
+        MAX_RUNS,
+    >
+where
+    IO: FlashIo,
+    K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
+    V: Debug + Serialize + for<'de> Deserialize<'de>,
+{
+}
+
+impl<
+        'a,
+        const MAX_COLLECTIONS: usize,
+        const MAX_PENDING_RECLAIMS: usize,
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO,
+        K,
+        V,
+        const MAX_INDEXES: usize,
+        const MAX_RUNS: usize,
+    > Future
+    for YieldingFlushMapFuture<
+        'a,
+        MAX_COLLECTIONS,
+        MAX_PENDING_RECLAIMS,
+        REGION_SIZE,
+        REGION_COUNT,
+        IO,
+        K,
+        V,
+        MAX_INDEXES,
+        MAX_RUNS,
+    >
+where
+    IO: FlashIo,
+    K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
+    V: Debug + Serialize + for<'de> Deserialize<'de>,
+{
+    type Output = Result<u32, MapStorageError>;
+
+    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        match this.phase {
+            0 => {
+                if let Err(error) = this
+                    .storage
+                    .runtime_mut()
+                    .reserve_next_region::<REGION_SIZE, REGION_COUNT, IO>(
+                        this.flash,
+                        this.workspace,
+                    )
+                {
+                    this.phase = 3;
+                    return Poll::Ready(Err(error.into()));
+                }
+                this.phase = 1;
+                Poll::Pending
+            }
+            1 => {
+                this.phase = 2;
+                Poll::Pending
+            }
+            2 => {
+                this.phase = 3;
+                Poll::Ready(this.storage.flush_map::<
+                    REGION_SIZE,
+                    REGION_COUNT,
+                    IO,
+                    K,
+                    V,
+                    MAX_INDEXES,
+                    MAX_RUNS,
+                >(this.flash, this.workspace, this.map))
+            }
+            _ => Poll::Pending,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -104,73 +257,6 @@ enum OpenStoragePhase<
         storage: Storage<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
     },
     Done,
-}
-
-/// Explicit phase-machine future for flushing a map frontier into a region.
-pub struct FlushMapFuture<
-    'a,
-    const MAX_COLLECTIONS: usize,
-    const MAX_PENDING_RECLAIMS: usize,
-    const REGION_SIZE: usize,
-    const REGION_COUNT: usize,
-    IO,
-    K,
-    V,
-    const MAX_INDEXES: usize,
-> where
-    IO: FlashIo,
-    K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
-    V: Debug + Serialize + for<'de> Deserialize<'de>,
-{
-    storage: &'a mut Storage<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
-    flash: &'a mut IO,
-    workspace: &'a mut StorageWorkspace<REGION_SIZE>,
-    map: &'a LsmMap<'a, K, V, MAX_INDEXES>,
-    phase: FlushMapPhase,
-}
-
-impl<
-        'a,
-        const MAX_COLLECTIONS: usize,
-        const MAX_PENDING_RECLAIMS: usize,
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO,
-        K,
-        V,
-        const MAX_INDEXES: usize,
-    >
-    FlushMapFuture<
-        'a,
-        MAX_COLLECTIONS,
-        MAX_PENDING_RECLAIMS,
-        REGION_SIZE,
-        REGION_COUNT,
-        IO,
-        K,
-        V,
-        MAX_INDEXES,
-    >
-where
-    IO: FlashIo,
-    K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
-    V: Debug + Serialize + for<'de> Deserialize<'de>,
-{
-    /// Creates a new map-flush future.
-    pub fn new(
-        storage: &'a mut Storage<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
-        flash: &'a mut IO,
-        workspace: &'a mut StorageWorkspace<REGION_SIZE>,
-        map: &'a LsmMap<'a, K, V, MAX_INDEXES>,
-    ) -> Self {
-        Self {
-            storage,
-            flash,
-            workspace,
-            map,
-            phase: FlushMapPhase::ReserveRegion,
-        }
-    }
 }
 
 /// Explicit phase-machine future for reclaiming the current WAL head.
@@ -475,151 +561,6 @@ where
                 Poll::Ready(Ok(storage))
             }
             OpenStoragePhase::Done => Poll::Pending,
-        }
-    }
-}
-
-impl<
-        'a,
-        const MAX_COLLECTIONS: usize,
-        const MAX_PENDING_RECLAIMS: usize,
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO,
-        K,
-        V,
-        const MAX_INDEXES: usize,
-    > Unpin
-    for FlushMapFuture<
-        'a,
-        MAX_COLLECTIONS,
-        MAX_PENDING_RECLAIMS,
-        REGION_SIZE,
-        REGION_COUNT,
-        IO,
-        K,
-        V,
-        MAX_INDEXES,
-    >
-where
-    IO: FlashIo,
-    K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
-    V: Debug + Serialize + for<'de> Deserialize<'de>,
-{
-}
-
-impl<
-        'a,
-        const MAX_COLLECTIONS: usize,
-        const MAX_PENDING_RECLAIMS: usize,
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO,
-        K,
-        V,
-        const MAX_INDEXES: usize,
-    > Future
-    for FlushMapFuture<
-        'a,
-        MAX_COLLECTIONS,
-        MAX_PENDING_RECLAIMS,
-        REGION_SIZE,
-        REGION_COUNT,
-        IO,
-        K,
-        V,
-        MAX_INDEXES,
-    >
-where
-    IO: FlashIo,
-    K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
-    V: Debug + Serialize + for<'de> Deserialize<'de>,
-{
-    type Output = Result<u32, MapStorageError>;
-
-    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.get_mut();
-        let phase = mem::replace(&mut this.phase, FlushMapPhase::Done);
-
-        match phase {
-            FlushMapPhase::ReserveRegion => {
-                let previous_region = this
-                    .storage
-                    .collections()
-                    .iter()
-                    .find(|collection| collection.collection_id() == this.map.id())
-                    .and_then(|collection| match collection.basis() {
-                        StartupCollectionBasis::Region(region_index) => Some(region_index),
-                        _ => None,
-                    });
-                let region_index = this
-                    .storage
-                    .state
-                    .reserve_next_region::<REGION_SIZE, REGION_COUNT, IO>(
-                        this.flash,
-                        this.workspace,
-                    )
-                    .map_err(MapStorageError::from)?;
-                this.phase = FlushMapPhase::WriteCommittedRegion {
-                    previous_region,
-                    region_index,
-                };
-                Poll::Pending
-            }
-            FlushMapPhase::WriteCommittedRegion {
-                previous_region,
-                region_index,
-            } => {
-                {
-                    let (payload, _) = this.workspace.encode_buffers();
-                    let used = this.map.encode_region_into(payload)?;
-                    this.storage
-                        .state
-                        .write_committed_region::<REGION_SIZE, REGION_COUNT, IO>(
-                            this.flash,
-                            region_index,
-                            this.map.id(),
-                            crate::MAP_REGION_V1_FORMAT,
-                            &payload[..used],
-                        )?;
-                }
-                this.phase = match previous_region {
-                    Some(previous_region) => FlushMapPhase::BeginPreviousRegionReclaim {
-                        previous_region,
-                        region_index,
-                    },
-                    None => FlushMapPhase::CommitHead { region_index },
-                };
-                Poll::Pending
-            }
-            FlushMapPhase::BeginPreviousRegionReclaim {
-                previous_region,
-                region_index,
-            } => {
-                this.storage
-                    .append_reclaim_begin::<REGION_SIZE, REGION_COUNT, IO>(
-                        this.flash,
-                        this.workspace,
-                        previous_region,
-                    )
-                    .map_err(MapStorageError::from)?;
-                this.phase = FlushMapPhase::CommitHead { region_index };
-                Poll::Pending
-            }
-            FlushMapPhase::CommitHead { region_index } => {
-                this.storage
-                    .append_head::<REGION_SIZE, REGION_COUNT, IO>(
-                        this.flash,
-                        this.workspace,
-                        this.map.id(),
-                        CollectionType::MAP_CODE,
-                        region_index,
-                    )
-                    .map_err(MapStorageError::from)?;
-                this.phase = FlushMapPhase::Done;
-                Poll::Ready(Ok(region_index))
-            }
-            FlushMapPhase::Done => Poll::Pending,
         }
     }
 }

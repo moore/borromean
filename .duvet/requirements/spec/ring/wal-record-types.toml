@@ -99,7 +99,7 @@ target = "spec/ring.md#wal-record-types"
 # valid later WAL record in that region is the matching trailing `link`.
 #
 # Each WAL record encodes the following fields:
-# 
+#
 # 1. `RING-WAL-FIELD-001` `record_type`: one of `new_collection`, `update`, `snapshot`,
 # `alloc_begin`, `stage_region`, `head`, `drop_collection`, `link`,
 # `free_list_head`, `reclaim_begin`, `reclaim_end`, `wal_recovery`
@@ -118,9 +118,9 @@ target = "spec/ring.md#wal-record-types"
 # byte-stuffing encoding
 # 8. `RING-WAL-FIELD-008` `padding`: zero or more trailing `wal_escape_code_escape` bytes so
 # the physical encoded record size is a multiple of `wal_write_granule`
-# 
+#
 # Logical WAL record byte layout before byte-stuffing:
-# 
+#
 # ```text
 # LogicalWalRecord =
 #   record_type:u8
@@ -131,7 +131,7 @@ target = "spec/ring.md#wal-record-types"
 #   [free_list_head_after:OptRegionIndex if record_type = alloc_begin]
 #   record_checksum:u32
 # ```
-# 
+#
 # 1. `RING-WAL-LAYOUT-001` `record_type` MUST use these canonical byte
 # codes:
 # `new_collection = 0x01`,
@@ -168,23 +168,23 @@ target = "spec/ring.md#wal-record-types"
 # `free_list_head` payload is `OptRegionIndex`;
 # `new_collection`, `drop_collection`, and `wal_recovery` payloads are
 # empty.
-# 
+#
 # The record payloads are:
-# 
+#
 # 1. `RING-WAL-PAYLOAD-001` `new_collection`
 # Declares a new user collection with the given `collection_id` and
 # `collection_type`. Payload is empty. The record is the durable basis
 # decision for an empty collection with no committed regions, no
 # snapshots, and no updates in its durable basis.
-# 
+#
 # 2. `RING-WAL-PAYLOAD-002` `update`
 # Collection-local mutation delta. Applied in WAL order during replay.
-# 
+#
 # 3. `RING-WAL-PAYLOAD-003` `snapshot`
 # Full logical state for one collection at a point in time, tagged with
 # the collection type for that snapshot basis. Supersedes older `update`
 # records for that collection that appear before the snapshot.
-# 
+#
 # 4. `RING-WAL-PAYLOAD-004` `alloc_begin`
 # Reserves the current free-list head region for imminent use. The
 # payload contains the reserved `region_index`.
@@ -202,7 +202,7 @@ target = "spec/ring.md#wal-record-types"
 # `head(..., region_index)` or `link(... next_region_index = region_index ...)`
 # consumes it. This reservation exists only to preserve crash-safe
 # allocator state until consumption so the allocated region cannot leak.
-# 
+#
 # 5. `RING-WAL-PAYLOAD-005` `head`
 # Commits a collection to a durable region head. Payload contains
 # the target `region_index`. The record also carries the collection type for
@@ -220,7 +220,7 @@ target = "spec/ring.md#wal-record-types"
 # interpretation. Replay does not revalidate that not-free append-time
 # invariant; this is an intentional application of the checksum trust
 # model defined below.
-# 
+#
 # 6. `RING-WAL-PAYLOAD-006` `drop_collection`
 # Payload is empty. Durably tombstones a user collection. The record
 # detaches that collection's current durable basis from the live
@@ -231,12 +231,12 @@ target = "spec/ring.md#wal-record-types"
 # references to them. Any region associated with that dropped collection
 # may be added to the free list through normal reclaim processing if it
 # is not already reachable from the free-list chain.
-# 
+#
 # 7. `RING-WAL-PAYLOAD-007` `link`
 # Points from a full WAL region to the next WAL region. Payload contains
 # `next_region_index` and `expected_sequence` for the next WAL region
 # header.
-# 
+#
 # 8. `RING-WAL-PAYLOAD-008` `free_list_head`
 # Commits a new durable free-list head. Payload contains the new
 # `region_index` or `none` if the free list is empty. This record is used
@@ -247,24 +247,24 @@ target = "spec/ring.md#wal-record-types"
 # uninitialized tail slot in at most `region_count` visited regions. If
 # the payload is `none`, the record asserts that the durable free list is
 # empty.
-# 
+#
 # 9. `RING-WAL-PAYLOAD-009` `reclaim_begin`
 # Marks the start of reclaim for `region_index`. The payload contains the
 # region being freed. This record does not itself make the region free;
 # it only makes the reclaim intent durable before any live references to
 # that region are removed.
-# 
+#
 # 10. `RING-WAL-PAYLOAD-010` `reclaim_end`
 # Marks successful completion of reclaim for `region_index`. The payload
 # contains the same `region_index` as the matching `reclaim_begin`.
-# 
+#
 # 11. `RING-WAL-PAYLOAD-011` `wal_recovery`
 # Payload is empty. Marks that replay or a prior open detected and
 # intentionally skipped one or more corrupt/torn aligned WAL slots before
 # resuming WAL appends. `wal_recovery` has no direct collection or
 # allocator effect; it only makes that recovery boundary explicit and
 # durable.
-# 
+#
 # 12. `RING-WAL-PAYLOAD-012` `stage_region`
 # Detaches the current `ready_region` from the single allocator slot
 # without committing a collection head. The payload contains the staged
@@ -273,7 +273,7 @@ target = "spec/ring.md#wal-record-types"
 # or a later reclaim transaction proves it can be freed.
 #
 # Ordering and validity rules:
-# 
+#
 # 1. `RING-WAL-VALID-001` A valid `new_collection(collection_id, collection_type)` record is
 # invalid if `collection_id = 0`, if `collection_type` is missing or
 # corrupt, or if replay has already seen any prior valid record for that
@@ -391,9 +391,9 @@ target = "spec/ring.md#wal-record-types"
 # an unmatched valid `alloc_begin(region_index, free_list_head_after)`
 # for the same region. Replay MUST treat `stage_region` without that
 # matching `ready_region` as corruption.
-# 
+#
 # Checksum trust model:
-# 
+#
 # 1. `RING-CHECKSUM-001` During replay, borromean treats a WAL record,
 # region header, `WalRegionPrologue`, `StorageMetadata`, or free-pointer
 # footer with a valid checksum and otherwise valid local encoding as
@@ -414,9 +414,9 @@ target = "spec/ring.md#wal-record-types"
 # or unbounded resource consumption amounting to denial of service. All
 # replay walks, decoders, and collection-format handlers MUST remain
 # bounded by configured storage geometry and record sizes.
-# 
+#
 # Assumptions for replay correctness:
-# 
+#
 # 1. `RING-REPLAY-ASSUME-001` A WAL region MUST be erased before reuse.
 # 2. `RING-REPLAY-ASSUME-002` Replay's tail-resynchronization rule depends on this
 # erase-before-reuse guarantee so stale bytes from prior use cannot be

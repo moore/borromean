@@ -33,14 +33,14 @@ fn normal_operation_uses_caller_owned_buffers_without_heap_allocation() {
 
         let reopened = Storage::<8, 4>::open::<256, 5, _>(&mut flash, &mut workspace).unwrap();
         let map = reopened
-            .open_map::<256, 5, _, u16, u16, 8>(
+            .open_map::<256, 5, _, u16, u16, 8, 8>(
                 &mut flash,
                 &mut workspace,
                 CollectionId(90),
                 &mut map_buffer,
             )
             .unwrap();
-        assert_eq!(map.get(&7).unwrap(), Some(70));
+        assert_eq!(map.get_frontier(&7).unwrap(), Some(70));
     });
 }
 
@@ -153,11 +153,11 @@ fn map_round_trips_large_snapshots_using_only_borrowed_buffers() {
     });
 
     assert_eq!(
-        reopened.get(&1).unwrap(),
+        reopened.get_frontier(&1).unwrap(),
         Some(HeaplessVec::<u8, 96>::from_slice(&[0x11; 96]).unwrap())
     );
     assert_eq!(
-        reopened.get(&2).unwrap(),
+        reopened.get_frontier(&2).unwrap(),
         Some(HeaplessVec::<u8, 96>::from_slice(&[0x22; 96]).unwrap())
     );
 }
@@ -206,8 +206,8 @@ fn map_in_memory_state_runs_inside_a_borrowed_buffer_without_allocating() {
     assert_no_alloc("map set/get", || {
         map.set(1, 10).unwrap();
         map.set(2, 20).unwrap();
-        assert_eq!(map.get(&1).unwrap(), Some(10));
-        assert_eq!(map.get(&2).unwrap(), Some(20));
+        assert_eq!(map.get_frontier(&1).unwrap(), Some(10));
+        assert_eq!(map.get_frontier(&2).unwrap(), Some(20));
     });
 
     let mut tiny_buffer = [0u8; 16];
@@ -256,13 +256,13 @@ fn map_updates_require_and_reuse_a_caller_provided_payload_buffer() {
     let reopened = Storage::<8, 4>::open::<256, 5, _>(&mut flash, &mut workspace).unwrap();
     let mut map_buffer = [0u8; 256];
     let map = reopened
-        .open_map::<256, 5, _, u16, u16, 8>(
+        .open_map::<256, 5, _, u16, u16, 8, 8>(
             &mut flash,
             &mut workspace,
             CollectionId(9),
             &mut map_buffer,
         )
         .unwrap();
-    assert_eq!(map.get(&1).unwrap(), Some(10));
-    assert_eq!(map.get(&2).unwrap(), Some(20));
+    assert_eq!(map.get_frontier(&1).unwrap(), Some(10));
+    assert_eq!(map.get_frontier(&2).unwrap(), Some(20));
 }

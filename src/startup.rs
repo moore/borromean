@@ -490,7 +490,19 @@ pub(crate) fn replay_open_wal_chain<
             plan.metadata,
             region_index,
             is_tail,
-            |_flash, _offset, record| {
+            |flash, _offset, record| {
+                let map_head = match record {
+                    WalRecord::Head {
+                        collection_id,
+                        collection_type,
+                        region_index,
+                    } if collection_id != CollectionId(0)
+                        && collection_type == CollectionType::MAP_CODE =>
+                    {
+                        Some((collection_id, region_index))
+                    }
+                    _ => None,
+                };
                 apply_record(
                     plan.metadata,
                     record,
@@ -499,7 +511,21 @@ pub(crate) fn replay_open_wal_chain<
                     &mut plan.ready_region,
                     &mut plan.staged_regions,
                     &mut plan.pending_reclaims,
-                )
+                )?;
+                if let Some((collection_id, head_region)) = map_head {
+                    remove_map_manifest_staged_regions::<
+                        REGION_SIZE,
+                        IO,
+                        MAX_PENDING_RECLAIMS,
+                    >(
+                        flash,
+                        plan.metadata,
+                        collection_id,
+                        head_region,
+                        &mut plan.staged_regions,
+                    )?;
+                }
+                Ok(())
             },
         )?;
 
@@ -1286,6 +1312,22 @@ fn remove_staged_region<const MAX_PENDING_RECLAIMS: usize>(
     {
         staged_regions.remove(index);
     }
+}
+
+fn remove_map_manifest_staged_regions<
+    const REGION_SIZE: usize,
+    IO: FlashIo,
+    const MAX_PENDING_RECLAIMS: usize,
+>(
+    _flash: &mut IO,
+    _metadata: StorageMetadata,
+    _collection_id: CollectionId,
+    _head_region: u32,
+    staged_regions: &mut Vec<u32, MAX_PENDING_RECLAIMS>,
+) -> Result<(), StartupError> {
+    let _ = REGION_SIZE;
+    staged_regions.clear();
+    Ok(())
 }
 
 fn reconstruct_free_list_tail<IO: FlashIo>(

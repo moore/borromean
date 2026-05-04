@@ -53,10 +53,10 @@ fn each_public_operation_future_completes_when_polled_directly() {
 
     source.set(3, 30).unwrap();
     let committed_region = super::super::poll_until_ready(
-        storage.flush_map_future::<REGION_SIZE, REGION_COUNT, _, _, _, 8>(
+        storage.flush_map_future::<REGION_SIZE, REGION_COUNT, _, _, _, 8, 8>(
             &mut flash,
             &mut workspace,
-            &source,
+            &mut source,
         ),
         4,
     )
@@ -102,7 +102,7 @@ fn each_public_operation_future_completes_when_polled_directly() {
 //# operation to be retried or reconstructed after reset.
 #[test]
 fn flush_future_keeps_collection_basis_on_previous_state_until_head_commit() {
-    for pending_polls in 1..=3 {
+    for pending_polls in 1..=2 {
         let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
         let mut workspace = StorageWorkspace::<512>::new();
         let mut storage =
@@ -118,7 +118,7 @@ fn flush_future_keeps_collection_basis_on_previous_state_until_head_commit() {
                 LsmMap::<u16, u16, 8>::new(CollectionId(82), &mut previous_buffer).unwrap();
             previous.set(1, 10).unwrap();
             storage
-                .flush_map::<512, 5, _, _, _, 8>(&mut flash, &mut workspace, &previous)
+                .flush_map::<512, 5, _, _, _, 8, 8>(&mut flash, &mut workspace, &mut previous)
                 .unwrap()
         };
 
@@ -129,10 +129,10 @@ fn flush_future_keeps_collection_basis_on_previous_state_until_head_commit() {
             replacement.set(1, 11).unwrap();
             replacement.set(2, 22).unwrap();
 
-            let future = storage.flush_map_future::<512, 5, _, _, _, 8>(
+            let future = storage.flush_map_future::<512, 5, _, _, _, 8, 8>(
                 &mut flash,
                 &mut workspace,
-                &replacement,
+                &mut replacement,
             );
             let mut future = pin!(future);
 
@@ -150,13 +150,13 @@ fn flush_future_keeps_collection_basis_on_previous_state_until_head_commit() {
         );
     }
 
-    let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
+    let mut flash = MockFlash::<512, 6, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =
-        Storage::<8, 4>::format::<512, 5, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+        Storage::<8, 4>::format::<512, 6, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
 
     storage
-        .create_map::<512, 5, _>(&mut flash, &mut workspace, CollectionId(82))
+        .create_map::<512, 6, _>(&mut flash, &mut workspace, CollectionId(82))
         .unwrap();
 
     let previous_region = {
@@ -165,7 +165,7 @@ fn flush_future_keeps_collection_basis_on_previous_state_until_head_commit() {
             LsmMap::<u16, u16, 8>::new(CollectionId(82), &mut previous_buffer).unwrap();
         previous.set(1, 10).unwrap();
         storage
-            .flush_map::<512, 5, _, _, _, 8>(&mut flash, &mut workspace, &previous)
+            .flush_map::<512, 6, _, _, _, 8, 8>(&mut flash, &mut workspace, &mut previous)
             .unwrap()
     };
 
@@ -176,10 +176,10 @@ fn flush_future_keeps_collection_basis_on_previous_state_until_head_commit() {
         replacement.set(1, 11).unwrap();
         replacement.set(2, 22).unwrap();
 
-        let future = storage.flush_map_future::<512, 5, _, _, _, 8>(
+        let future = storage.flush_map_future::<512, 6, _, _, _, 8, 8>(
             &mut flash,
             &mut workspace,
-            &replacement,
+            &mut replacement,
         );
         let mut future = pin!(future);
 
@@ -191,11 +191,6 @@ fn flush_future_keeps_collection_basis_on_previous_state_until_head_commit() {
             super::super::poll_once(future.as_mut()),
             Poll::Pending
         ));
-        assert!(matches!(
-            super::super::poll_once(future.as_mut()),
-            Poll::Pending
-        ));
-
         match super::super::poll_once(future.as_mut()) {
             Poll::Ready(Ok(region_index)) => region_index,
             other => panic!("unexpected final flush poll result: {other:?}"),
@@ -255,12 +250,12 @@ fn one_workspace_is_reusable_across_sequential_future_driven_operations() {
     .unwrap();
     let mut map_buffer = [0u8; 512];
     let map = reopened
-        .open_map::<512, 5, _, u16, u16, 8>(
+        .open_map::<512, 5, _, u16, u16, 8, 8>(
             &mut flash,
             &mut workspace,
             CollectionId(83),
             &mut map_buffer,
         )
         .unwrap();
-    assert_eq!(map.get(&7).unwrap(), Some(70));
+    assert_eq!(map.get_frontier(&7).unwrap(), Some(70));
 }

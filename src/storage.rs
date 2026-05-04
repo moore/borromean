@@ -309,25 +309,37 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
             return Ok(region_index);
         }
 
-        self.complete_detached_pending_reclaims::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace)?;
-        self.ensure_foreground_allocation_headroom::<REGION_SIZE, REGION_COUNT, IO>(
-            flash, workspace,
-        )?;
+        if self.staged_regions.is_empty() {
+            self.complete_detached_pending_reclaims::<REGION_SIZE, REGION_COUNT, IO>(
+                flash, workspace,
+            )?;
+            self.ensure_foreground_allocation_headroom::<REGION_SIZE, REGION_COUNT, IO>(
+                flash, workspace,
+            )?;
+        }
 
-        let region_index = self
-            .last_free_list_head
-            .ok_or(StorageRuntimeError::NoFreeRegionForRotation)?;
-        let free_list_head_after = read_free_pointer_successor::<REGION_SIZE, REGION_COUNT, IO>(
-            flash,
-            self.metadata,
-            region_index,
-        )?;
-        self.append_alloc_begin::<REGION_SIZE, REGION_COUNT, IO>(
-            flash,
-            workspace,
-            region_index,
-            free_list_head_after,
-        )?;
+        let region_index = loop {
+            let region_index = self
+                .last_free_list_head
+                .ok_or(StorageRuntimeError::NoFreeRegionForRotation)?;
+            let free_list_head_after = read_free_pointer_successor::<REGION_SIZE, REGION_COUNT, IO>(
+                flash,
+                self.metadata,
+                region_index,
+            )?;
+            match self.append_alloc_begin::<REGION_SIZE, REGION_COUNT, IO>(
+                flash,
+                workspace,
+                region_index,
+                free_list_head_after,
+            ) {
+                Ok(()) => break region_index,
+                Err(StorageRuntimeError::WalRotationRequired) => {
+                    self.rotate_wal_tail::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace)?;
+                }
+                Err(error) => return Err(error),
+            }
+        };
         self.ready_region
             .ok_or(StorageRuntimeError::InvalidRotationState {
                 ready_region: None,
@@ -613,6 +625,91 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         )
     }
 
+    /// Appends a `head` record, rotating the WAL first if the current tail lacks room.
+    pub(crate) fn append_head_with_rotation<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        collection_id: CollectionId,
+        collection_type: u16,
+        region_index: u32,
+    ) -> Result<(), StorageRuntimeError> {
+        Self::validate_supported_head_collection_type(collection_id, collection_type)?;
+        let collection = self.find_collection(collection_id);
+        if let Some(collection) = collection {
+            if collection.basis() == StartupCollectionBasis::Dropped {
+                return Err(StorageRuntimeError::DroppedCollection(collection_id));
+            }
+            if let Some(expected) = collection.collection_type() {
+                if expected != collection_type {
+                    return Err(StorageRuntimeError::CollectionTypeMismatch {
+                        collection_id,
+                        expected,
+                        actual: collection_type,
+                    });
+                }
+            }
+        }
+
+        let header = read_header_from_flash::<REGION_SIZE, REGION_COUNT, IO>(flash, region_index)
+            .map_err(|_| StorageRuntimeError::InvalidHeadTarget {
+            collection_id,
+            region_index,
+        })?;
+        if header.collection_id != collection_id {
+            return Err(StorageRuntimeError::InvalidHeadTarget {
+                collection_id,
+                region_index,
+            });
+        }
+
+        self.append_record_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
+            flash,
+            workspace,
+            WalRecord::Head {
+                collection_id,
+                collection_type,
+                region_index,
+            },
+        )
+    }
+
+    /// Ensures a `head` record can be appended, rotating before a ready region is held.
+    pub(crate) fn ensure_head_append_room_with_rotation<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        collection_id: CollectionId,
+        collection_type: u16,
+        region_index: u32,
+    ) -> Result<(), StorageRuntimeError> {
+        loop {
+            match self.ensure_append_reserve::<REGION_SIZE, REGION_COUNT, IO>(
+                workspace,
+                flash,
+                WalRecord::Head {
+                    collection_id,
+                    collection_type,
+                    region_index,
+                },
+            ) {
+                Ok(()) => return Ok(()),
+                Err(StorageRuntimeError::WalRotationRequired) => {
+                    self.rotate_wal_tail::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace)?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
     /// Appends an `alloc_begin` record for a free-list region.
     pub fn append_alloc_begin<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
         &mut self,
@@ -665,6 +762,60 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         )
     }
 
+    /// Appends `stage_region`, rotating the WAL first if the current tail lacks room.
+    pub(crate) fn stage_ready_region_with_rotation<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        region_index: u32,
+    ) -> Result<(), StorageRuntimeError> {
+        if self.ready_region != Some(region_index) {
+            return Err(StorageRuntimeError::InvalidStageRegion {
+                region_index,
+                ready_region: self.ready_region,
+            });
+        }
+        if self.staged_regions.contains(&region_index) {
+            return Err(StorageRuntimeError::DuplicateStagedRegion(region_index));
+        }
+
+        self.append_record_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
+            flash,
+            workspace,
+            WalRecord::StageRegion { region_index },
+        )
+    }
+
+    /// Ensures `stage_region` can be appended, rotating before a ready region is held.
+    pub(crate) fn ensure_stage_region_append_room_with_rotation<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        region_index: u32,
+    ) -> Result<(), StorageRuntimeError> {
+        loop {
+            match self.ensure_append_reserve::<REGION_SIZE, REGION_COUNT, IO>(
+                workspace,
+                flash,
+                WalRecord::StageRegion { region_index },
+            ) {
+                Ok(()) => return Ok(()),
+                Err(StorageRuntimeError::WalRotationRequired) => {
+                    self.rotate_wal_tail::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace)?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
     /// Appends a `reclaim_begin` record for a detached region.
     pub fn append_reclaim_begin<
         const REGION_SIZE: usize,
@@ -687,6 +838,28 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         )
     }
 
+    /// Appends `reclaim_begin`, rotating the WAL first if the current tail lacks room.
+    pub(crate) fn append_reclaim_begin_with_rotation<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        region_index: u32,
+    ) -> Result<(), StorageRuntimeError> {
+        if self.pending_reclaims.contains(&region_index) {
+            return Err(StorageRuntimeError::DuplicatePendingReclaim(region_index));
+        }
+
+        self.append_record_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
+            flash,
+            workspace,
+            WalRecord::ReclaimBegin { region_index },
+        )
+    }
+
     /// Appends a `reclaim_end` record for a pending region reclaim.
     pub fn append_reclaim_end<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
         &mut self,
@@ -699,6 +872,28 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         }
 
         self.append_record::<REGION_SIZE, REGION_COUNT, IO>(
+            flash,
+            workspace,
+            WalRecord::ReclaimEnd { region_index },
+        )
+    }
+
+    /// Appends `reclaim_end`, rotating the WAL first if the current tail lacks room.
+    pub(crate) fn append_reclaim_end_with_rotation<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        region_index: u32,
+    ) -> Result<(), StorageRuntimeError> {
+        if !self.pending_reclaims.contains(&region_index) {
+            return Err(StorageRuntimeError::InvalidReclaimEnd(region_index));
+        }
+
+        self.append_record_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
             flash,
             workspace,
             WalRecord::ReclaimEnd { region_index },
@@ -765,7 +960,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         flash.sync()?;
 
         if self.last_free_list_head.is_none() {
-            self.append_free_list_head::<REGION_SIZE, REGION_COUNT, IO>(
+            self.append_free_list_head_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
                 flash,
                 workspace,
                 Some(region_index),
@@ -775,7 +970,11 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
             }
         }
 
-        self.append_reclaim_end::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace, region_index)
+        self.append_reclaim_end_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
+            flash,
+            workspace,
+            region_index,
+        )
     }
 
     /// Appends a `free_list_head` record.
@@ -790,6 +989,24 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         region_index: Option<u32>,
     ) -> Result<(), StorageRuntimeError> {
         self.append_record::<REGION_SIZE, REGION_COUNT, IO>(
+            flash,
+            workspace,
+            WalRecord::FreeListHead { region_index },
+        )
+    }
+
+    /// Appends `free_list_head`, rotating the WAL first if the current tail lacks room.
+    pub(crate) fn append_free_list_head_with_rotation<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        region_index: Option<u32>,
+    ) -> Result<(), StorageRuntimeError> {
+        self.append_record_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
             flash,
             workspace,
             WalRecord::FreeListHead { region_index },
@@ -1236,12 +1453,53 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
             }
 
             if self.region_is_on_free_list::<REGION_SIZE, REGION_COUNT, IO>(flash, region_index)? {
-                self.append_reclaim_end::<REGION_SIZE, REGION_COUNT, IO>(
+                self.append_reclaim_end_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
                     flash,
                     workspace,
                     region_index,
                 )?;
             } else {
+                self.complete_pending_reclaim::<REGION_SIZE, REGION_COUNT, IO>(
+                    flash,
+                    workspace,
+                    region_index,
+                )?;
+            }
+        }
+
+        Ok(())
+    }
+
+    pub(crate) fn recover_abandoned_staged_regions<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+    ) -> Result<(), StorageRuntimeError> {
+        let staged_regions = self.staged_regions.clone();
+        for region_index in staged_regions {
+            if !self.staged_regions.contains(&region_index) {
+                continue;
+            }
+
+            if self.region_reachable_from_live_state::<REGION_SIZE, IO>(
+                flash,
+                workspace,
+                region_index,
+            )? {
+                self.drop_staged_region_in_memory(region_index)?;
+                continue;
+            }
+
+            self.append_reclaim_begin::<REGION_SIZE, REGION_COUNT, IO>(
+                flash,
+                workspace,
+                region_index,
+            )?;
+            if self.pending_reclaims.contains(&region_index) {
                 self.complete_pending_reclaim::<REGION_SIZE, REGION_COUNT, IO>(
                     flash,
                     workspace,
@@ -1378,7 +1636,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
             }
 
             if self.region_is_on_free_list::<REGION_SIZE, REGION_COUNT, IO>(flash, region_index)? {
-                self.append_reclaim_end::<REGION_SIZE, REGION_COUNT, IO>(
+                self.append_reclaim_end_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
                     flash,
                     workspace,
                     region_index,
@@ -1407,6 +1665,65 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         for _ in 0..self.metadata.region_count {
             let free_regions = self.free_region_count::<REGION_SIZE, REGION_COUNT, IO>(flash)?;
             if free_regions > self.metadata.min_free_regions {
+                return Ok(());
+            }
+
+            match self.reclaim_wal_head::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace) {
+                Ok(_) => {}
+                Err(
+                    StorageRuntimeError::WalHeadReclaimRequiresMultipleWalRegions
+                    | StorageRuntimeError::WalHeadReclaimBlockedByRecoveryBoundary
+                    | StorageRuntimeError::WalHeadReclaimBlockedByReadyRegion(_)
+                    | StorageRuntimeError::WalHeadReclaimBlockedByStagedRegions
+                    | StorageRuntimeError::WalHeadReclaimBlockedByPendingReclaims
+                    | StorageRuntimeError::WalHeadReclaimBlockedByRecord(_),
+                ) => {
+                    return Err(StorageRuntimeError::InsufficientFreeRegions {
+                        free_regions,
+                        min_free_regions: self.metadata.min_free_regions,
+                    });
+                }
+                Err(error) => return Err(error),
+            }
+        }
+
+        let free_regions = self.free_region_count::<REGION_SIZE, REGION_COUNT, IO>(flash)?;
+        Err(StorageRuntimeError::InsufficientFreeRegions {
+            free_regions,
+            min_free_regions: self.metadata.min_free_regions,
+        })
+    }
+
+    /// Ensures a multi-region foreground operation can allocate all planned regions.
+    pub(crate) fn ensure_foreground_allocation_headroom_for<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        allocations_needed: u32,
+    ) -> Result<(), StorageRuntimeError> {
+        if allocations_needed == 0 {
+            return Ok(());
+        }
+
+        let required_free_regions = self
+            .metadata
+            .min_free_regions
+            .checked_add(allocations_needed)
+            .ok_or(StorageRuntimeError::InsufficientFreeRegions {
+                free_regions: self.free_region_count::<REGION_SIZE, REGION_COUNT, IO>(flash)?,
+                min_free_regions: self.metadata.min_free_regions,
+            })?;
+
+        for _ in 0..self.metadata.region_count {
+            self.complete_detached_pending_reclaims::<REGION_SIZE, REGION_COUNT, IO>(
+                flash, workspace,
+            )?;
+            let free_regions = self.free_region_count::<REGION_SIZE, REGION_COUNT, IO>(flash)?;
+            if free_regions >= required_free_regions {
                 return Ok(());
             }
 
@@ -1646,10 +1963,30 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         workspace: &mut StorageWorkspace<REGION_SIZE>,
         target_region_index: u32,
     ) -> Result<bool, StorageRuntimeError> {
-        if self.collections.iter().any(|collection| {
-            collection.basis() == StartupCollectionBasis::Region(target_region_index)
-        }) {
-            return Ok(true);
+        for collection in self.collections.iter() {
+            let StartupCollectionBasis::Region(head_region) = collection.basis() else {
+                continue;
+            };
+            if head_region == target_region_index {
+                return Ok(true);
+            }
+            if collection.collection_type() == Some(CollectionType::MAP_CODE)
+                && crate::collections::map::map_head_region_references_region::<REGION_SIZE, IO>(
+                    flash,
+                    self.metadata,
+                    collection.collection_id(),
+                    head_region,
+                    target_region_index,
+                )
+                .map_err(|_| {
+                    StorageRuntimeError::Startup(StartupError::InvalidCommittedRegionHead {
+                        collection_id: collection.collection_id(),
+                        region_index: head_region,
+                    })
+                })?
+            {
+                return Ok(true);
+            }
         }
 
         wal_chain_contains_region::<REGION_SIZE, IO>(
@@ -1704,6 +2041,24 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
             return Err(StorageRuntimeError::InvalidReclaimEnd(region_index));
         };
         self.pending_reclaims.remove(index);
+        Ok(())
+    }
+
+    fn drop_staged_region_in_memory(
+        &mut self,
+        region_index: u32,
+    ) -> Result<(), StorageRuntimeError> {
+        let Some(index) = self
+            .staged_regions
+            .iter()
+            .position(|staged| *staged == region_index)
+        else {
+            return Err(StorageRuntimeError::InvalidStageRegion {
+                region_index,
+                ready_region: self.ready_region,
+            });
+        };
+        self.staged_regions.remove(index);
         Ok(())
     }
 }
@@ -1868,6 +2223,7 @@ pub fn open<
         MAX_PENDING_RECLAIMS,
     >(flash, workspace)?;
     state.recover_pending_reclaims::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace)?;
+    state.recover_abandoned_staged_regions::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace)?;
     Ok(state)
 }
 

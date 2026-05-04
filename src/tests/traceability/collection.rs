@@ -22,14 +22,14 @@ fn map_durability_and_recovery_only_change_when_the_shared_storage_engine_is_use
 
     let mut before_snapshot_buffer = [0u8; 512];
     let before_snapshot = storage
-        .open_map::<512, 5, _, u16, u16, 8>(
+        .open_map::<512, 5, _, u16, u16, 8, 8>(
             &mut flash,
             &mut workspace,
             CollectionId(84),
             &mut before_snapshot_buffer,
         )
         .unwrap();
-    assert_eq!(before_snapshot.get(&1).unwrap(), None);
+    assert_eq!(before_snapshot.get_frontier(&1).unwrap(), None);
 
     storage
         .snapshot_map::<512, 5, _, _, _, 8>(&mut flash, &mut workspace, &source)
@@ -37,26 +37,26 @@ fn map_durability_and_recovery_only_change_when_the_shared_storage_engine_is_use
 
     let mut after_snapshot_buffer = [0u8; 512];
     let after_snapshot = storage
-        .open_map::<512, 5, _, u16, u16, 8>(
+        .open_map::<512, 5, _, u16, u16, 8, 8>(
             &mut flash,
             &mut workspace,
             CollectionId(84),
             &mut after_snapshot_buffer,
         )
         .unwrap();
-    assert_eq!(after_snapshot.get(&1).unwrap(), Some(10));
+    assert_eq!(after_snapshot.get_frontier(&1).unwrap(), Some(10));
 
     source.set(2, 20).unwrap();
     let mut before_update_buffer = [0u8; 512];
     let before_update = storage
-        .open_map::<512, 5, _, u16, u16, 8>(
+        .open_map::<512, 5, _, u16, u16, 8, 8>(
             &mut flash,
             &mut workspace,
             CollectionId(84),
             &mut before_update_buffer,
         )
         .unwrap();
-    assert_eq!(before_update.get(&2).unwrap(), None);
+    assert_eq!(before_update.get_frontier(&2).unwrap(), None);
 
     let mut payload_buffer = [0u8; 64];
     storage
@@ -72,15 +72,15 @@ fn map_durability_and_recovery_only_change_when_the_shared_storage_engine_is_use
     let mut reopened_buffer = [0u8; 512];
     let reopened = Storage::<8, 4>::open::<512, 5, _>(&mut flash, &mut workspace).unwrap();
     let reopened_map = reopened
-        .open_map::<512, 5, _, u16, u16, 8>(
+        .open_map::<512, 5, _, u16, u16, 8, 8>(
             &mut flash,
             &mut workspace,
             CollectionId(84),
             &mut reopened_buffer,
         )
         .unwrap();
-    assert_eq!(reopened_map.get(&1).unwrap(), Some(10));
-    assert_eq!(reopened_map.get(&2).unwrap(), Some(20));
+    assert_eq!(reopened_map.get_frontier(&1).unwrap(), Some(10));
+    assert_eq!(reopened_map.get_frontier(&2).unwrap(), Some(20));
 }
 
 //= spec/implementation.md#collection-requirements
@@ -124,7 +124,7 @@ fn collection_operations_with_io_are_drivable_as_runtime_agnostic_futures() {
 
     source.set(3, 30).unwrap();
     let committed_region = super::super::poll_until_ready(
-        storage.flush_map_future::<512, 5, _, _, _, 8>(&mut flash, &mut workspace, &source),
+        storage.flush_map_future::<512, 5, _, _, _, 8, 8>(&mut flash, &mut workspace, &mut source),
         4,
     )
     .unwrap();

@@ -152,8 +152,8 @@ fn snapshot_round_trip_restores_logical_state() {
     let mut restored = LsmMap::<i32, i32, MAX_INDEXES>::new(id, &mut dest_buffer).unwrap();
     restored.load_snapshot(&snapshot[..snapshot_len]).unwrap();
 
-    assert_eq!(restored.get(&1).unwrap(), None);
-    assert_eq!(restored.get(&2).unwrap(), Some(20));
+    assert_eq!(restored.get_frontier(&1).unwrap(), None);
+    assert_eq!(restored.get_frontier(&2).unwrap(), Some(20));
 }
 
 //= spec/map.md#update-payload-format
@@ -200,7 +200,7 @@ fn update_payload_round_trip_applies_frontier_change() {
     )
     .unwrap();
     map.apply_update_payload(&set_payload[..set_len]).unwrap();
-    assert_eq!(map.get(&5).unwrap(), Some(42));
+    assert_eq!(map.get_frontier(&5).unwrap(), Some(42));
 
     let mut delete_payload = [0u8; 64];
     let delete_len = LsmMap::<i32, i32, MAX_INDEXES>::encode_update_into(
@@ -210,7 +210,7 @@ fn update_payload_round_trip_applies_frontier_change() {
     .unwrap();
     map.apply_update_payload(&delete_payload[..delete_len])
         .unwrap();
-    assert_eq!(map.get(&5).unwrap(), None);
+    assert_eq!(map.get_frontier(&5).unwrap(), None);
 }
 
 //= spec/map.md#empty-logical-state
@@ -231,7 +231,7 @@ fn empty_map_open_matches_new_map_state() {
 
     let mut empty_buffer = [0u8; REGION_SIZE];
     let empty = LsmMap::<i32, i32, MAX_INDEXES>::new(id, &mut empty_buffer).unwrap();
-    assert_eq!(empty.get(&1).unwrap(), None);
+    assert_eq!(empty.get_frontier(&1).unwrap(), None);
 
     let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 1024>::new(0xff);
     let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
@@ -251,7 +251,7 @@ fn empty_map_open_matches_new_map_state() {
         Storage::<8, 4>::open::<REGION_SIZE, REGION_COUNT, _>(&mut flash, &mut workspace).unwrap();
     let mut reopen_buffer = [0u8; REGION_SIZE];
     let reopened_map = reopened
-        .open_map::<REGION_SIZE, REGION_COUNT, _, i32, i32, MAX_INDEXES>(
+        .open_map::<REGION_SIZE, REGION_COUNT, _, i32, i32, MAX_INDEXES, MAX_INDEXES>(
             &mut flash,
             &mut workspace,
             id,
@@ -259,7 +259,7 @@ fn empty_map_open_matches_new_map_state() {
         )
         .unwrap();
 
-    assert_eq!(reopened_map.get(&1).unwrap(), None);
+    assert_eq!(reopened_map.get_frontier(&1).unwrap(), None);
 }
 
 //= spec/map.md#snapshot-payload-format
@@ -362,7 +362,7 @@ fn map_collection_format_covers_empty_state_snapshot_update_region_and_validatio
     {
         let mut empty_buffer = [0u8; BUFFER_SIZE];
         let empty = LsmMap::<i32, i32, MAX_INDEXES>::new(id, &mut empty_buffer).unwrap();
-        assert_eq!(empty.get(&1).unwrap(), None);
+        assert_eq!(empty.get_frontier(&1).unwrap(), None);
     }
 
     let mut source_buffer = [0u8; BUFFER_SIZE];
@@ -385,14 +385,14 @@ fn map_collection_format_covers_empty_state_snapshot_update_region_and_validatio
     from_snapshot
         .load_snapshot(&snapshot[..snapshot_len])
         .unwrap();
-    assert_eq!(from_snapshot.get(&1).unwrap(), Some(10));
-    assert_eq!(from_snapshot.get(&2).unwrap(), Some(20));
+    assert_eq!(from_snapshot.get_frontier(&1).unwrap(), Some(10));
+    assert_eq!(from_snapshot.get_frontier(&2).unwrap(), Some(20));
 
     from_snapshot
         .apply_update_payload(&update_payload[..update_len])
         .unwrap();
-    assert_eq!(from_snapshot.get(&1).unwrap(), Some(10));
-    assert_eq!(from_snapshot.get(&2).unwrap(), Some(99));
+    assert_eq!(from_snapshot.get_frontier(&1).unwrap(), Some(10));
+    assert_eq!(from_snapshot.get_frontier(&2).unwrap(), Some(99));
 
     let mut region = [0u8; BUFFER_SIZE];
     let region_len = source.encode_region_into(&mut region).unwrap();
@@ -404,8 +404,8 @@ fn map_collection_format_covers_empty_state_snapshot_update_region_and_validatio
     let mut from_region =
         LsmMap::<i32, i32, MAX_INDEXES>::new(id, &mut from_region_buffer).unwrap();
     from_region.load_region(&region[..region_len]).unwrap();
-    assert_eq!(from_region.get(&1).unwrap(), Some(10));
-    assert_eq!(from_region.get(&2).unwrap(), Some(20));
+    assert_eq!(from_region.get_frontier(&1).unwrap(), Some(10));
+    assert_eq!(from_region.get_frontier(&2).unwrap(), Some(20));
 
     let mut invalid_snapshot = snapshot;
     let refs_offset = snapshot_len - ENTRY_REF_SIZE * 2;
@@ -471,12 +471,12 @@ fn region_round_trip_restores_logical_state() {
     let mut direct_buffer = [0u8; BUFFER_SIZE];
     let mut direct = LsmMap::<i32, i32, MAX_INDEXES>::new(id, &mut direct_buffer).unwrap();
     direct.load_snapshot(&region[4..4 + snapshot_len]).unwrap();
-    assert_eq!(direct.get(&3).unwrap(), Some(30));
-    assert_eq!(direct.get(&4).unwrap(), Some(40));
+    assert_eq!(direct.get_frontier(&3).unwrap(), Some(30));
+    assert_eq!(direct.get_frontier(&4).unwrap(), Some(40));
     restored.load_region(&region[..region_len]).unwrap();
 
-    assert_eq!(restored.get(&3).unwrap(), Some(30));
-    assert_eq!(restored.get(&4).unwrap(), Some(40));
+    assert_eq!(restored.get_frontier(&3).unwrap(), Some(30));
+    assert_eq!(restored.get_frontier(&4).unwrap(), Some(40));
 }
 
 //= spec/ring.md#core-requirements
@@ -487,7 +487,7 @@ fn region_round_trip_restores_logical_state() {
 #[test]
 fn map_updates_append_new_head_records_and_replacement_reclaims_the_old_tail_region() {
     const REGION_SIZE: usize = 512;
-    const REGION_COUNT: usize = 5;
+    const REGION_COUNT: usize = 6;
     const MAX_INDEXES: usize = 4;
 
     let mut buffer = [0u8; REGION_SIZE];
@@ -499,7 +499,7 @@ fn map_updates_append_new_head_records_and_replacement_reclaims_the_old_tail_reg
     map.set(1, 20).unwrap();
     assert!(map.next_record_offset.0 > first_end);
     assert_eq!(&map.map[..first_end], first_prefix.as_slice());
-    assert_eq!(map.get(&1).unwrap(), Some(20));
+    assert_eq!(map.get_frontier(&1).unwrap(), Some(20));
 
     let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 1024>::new(0xff);
     let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
@@ -793,8 +793,8 @@ fn storage_snapshot_replay_restores_map_frontier() {
         )
         .unwrap();
 
-    assert_eq!(reopened.get(&1).unwrap(), Some(10));
-    assert_eq!(reopened.get(&2).unwrap(), Some(99));
+    assert_eq!(reopened.get_frontier(&1).unwrap(), Some(10));
+    assert_eq!(reopened.get_frontier(&2).unwrap(), Some(99));
 }
 
 //= spec/map.md#validation-and-open-rules
@@ -806,7 +806,7 @@ fn storage_snapshot_replay_restores_map_frontier() {
 fn open_from_storage_rejects_unsupported_committed_region_format() {
     let mut flash = MockFlash::<512, 4, 256>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
-    init_user_region_header(&mut flash, 2, 4, CollectionId(72), MAP_REGION_V1_FORMAT + 1);
+    init_user_region_header(&mut flash, 2, 4, CollectionId(72), MAP_RUN_V1_FORMAT + 1);
     let wal_offset = metadata.wal_record_area_offset().unwrap();
     append_wal_record(
         &mut flash,
@@ -837,7 +837,7 @@ fn open_from_storage_rejects_unsupported_committed_region_format() {
             collection_id: CollectionId(72),
             region_index: 2,
             actual,
-        }) if actual == MAP_REGION_V1_FORMAT + 1
+        }) if actual == MAP_RUN_V1_FORMAT + 1
     ));
 }
 
@@ -891,7 +891,7 @@ fn open_from_storage_rejects_invalid_retained_region_snapshot_and_update_payload
 
         let reopened = Storage::<8, 4>::open::<512, 5, _>(&mut flash, &mut workspace).unwrap();
         let mut reopen_buffer = [0u8; 512];
-        let result = reopened.open_map::<512, 5, _, i32, i32, 4>(
+        let result = reopened.open_map::<512, 5, _, i32, i32, 4, 4>(
             &mut flash,
             &mut workspace,
             CollectionId(40),
@@ -924,7 +924,7 @@ fn open_from_storage_rejects_invalid_retained_region_snapshot_and_update_payload
 
         let reopened = Storage::<8, 4>::open::<512, 4, _>(&mut flash, &mut workspace).unwrap();
         let mut reopen_buffer = [0u8; 512];
-        let result = reopened.open_map::<512, 4, _, i32, i32, 4>(
+        let result = reopened.open_map::<512, 4, _, i32, i32, 4, 4>(
             &mut flash,
             &mut workspace,
             CollectionId(41),
@@ -951,7 +951,7 @@ fn open_from_storage_rejects_invalid_retained_region_snapshot_and_update_payload
 
         let reopened = Storage::<8, 4>::open::<512, 4, _>(&mut flash, &mut workspace).unwrap();
         let mut reopen_buffer = [0u8; 512];
-        let result = reopened.open_map::<512, 4, _, i32, i32, 4>(
+        let result = reopened.open_map::<512, 4, _, i32, i32, 4, 4>(
             &mut flash,
             &mut workspace,
             CollectionId(42),
@@ -1097,8 +1097,18 @@ fn storage_region_flush_restores_map_basis() {
         )
         .unwrap();
 
-    assert_eq!(reopened.get(&5).unwrap(), Some(50));
-    assert_eq!(reopened.get(&7).unwrap(), Some(70));
+    assert_eq!(
+        reopened
+            .get::<REGION_SIZE, _>(&mut flash, &mut workspace, &5)
+            .unwrap(),
+        Some(50)
+    );
+    assert_eq!(
+        reopened
+            .get::<REGION_SIZE, _>(&mut flash, &mut workspace, &7)
+            .unwrap(),
+        Some(70)
+    );
 }
 
 fn k_v_vec(count: usize) -> impl Strategy<Value = Vec<(i32, i32)>> {
@@ -1125,7 +1135,7 @@ proptest! {
             map.set(*key, *value).expect("insert failed");
             if *key != last_key {
                 let got = map
-                .get(&last_key)
+                .get_frontier(&last_key)
                 .expect("could not get key")
                 .expect("got None for key");
 
@@ -1167,7 +1177,7 @@ proptest! {
 
 
             let got = map
-            .get(key)
+            .get_frontier(key)
             .expect("could not get key");
 
             if *key == delete_key {

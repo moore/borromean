@@ -113,8 +113,8 @@ fn public_decode_and_open_paths_expose_explicit_error_results() {
         Store::open::<256, 5, Flash>;
     let _: CreateMapFn = Store::create_map::<256, 5, Flash>;
     let _: AppendMapUpdateFn = Store::append_map_update::<256, 5, Flash, u16, u16, 8>;
-    let _: fn(&mut Store, &mut Flash, &mut Workspace, &Map<'_>) -> Result<u32, MapStorageError> =
-        Store::flush_map::<256, 5, Flash, u16, u16, 8>;
+    let _: fn(&mut Store, &mut Flash, &mut Workspace, &mut Map<'_>) -> Result<u32, MapStorageError> =
+        Store::flush_map::<256, 5, Flash, u16, u16, 8, 8>;
 
     // Borrow-returning map APIs need named helpers so the compiler can
     // also verify the lifetime relationship between the caller's buffer
@@ -129,7 +129,7 @@ fn public_decode_and_open_paths_expose_explicit_error_results() {
     fn assert_map_load_snapshot_signature<'a>(_: fn(&mut Map<'a>, &[u8]) -> Result<(), MapError>) {}
     fn assert_open_from_storage_signature<'a>(_: OpenFromStorageFn<'a>) {}
 
-    assert_open_map_signature(Store::open_map::<256, 5, Flash, u16, u16, 8>);
+    assert_open_map_signature(Store::open_map::<256, 5, Flash, u16, u16, 8, 8>);
     assert_map_new_signature(LsmMap::<u16, u16, 8>::new);
     assert_map_set_signature(LsmMap::<u16, u16, 8>::set);
     assert_map_load_snapshot_signature(LsmMap::<u16, u16, 8>::load_snapshot);

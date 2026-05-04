@@ -34,7 +34,7 @@ fn wal_storage_and_map_logic_are_exercised_through_separate_interfaces() {
     let mut source = LsmMap::<u16, u16, 8>::new(CollectionId(7), &mut source_buffer).unwrap();
     source.set(5, 50).unwrap();
     let region_index = storage
-        .flush_map::<256, 4, _, _, _, 8>(&mut flash, &mut workspace, &source)
+        .flush_map::<256, 4, _, _, _, 8, 8>(&mut flash, &mut workspace, &mut source)
         .unwrap();
 
     let reopened = Storage::<8, 4>::open::<256, 4, _>(&mut flash, &mut workspace).unwrap();
@@ -45,14 +45,19 @@ fn wal_storage_and_map_logic_are_exercised_through_separate_interfaces() {
 
     let mut reopened_buffer = [0u8; 256];
     let reopened_map = reopened
-        .open_map::<256, 4, _, u16, u16, 8>(
+        .open_map::<256, 4, _, u16, u16, 8, 8>(
             &mut flash,
             &mut workspace,
             CollectionId(7),
             &mut reopened_buffer,
         )
         .unwrap();
-    assert_eq!(reopened_map.get(&5).unwrap(), Some(50));
+    assert_eq!(
+        reopened_map
+            .get::<256, _>(&mut flash, &mut workspace, &5)
+            .unwrap(),
+        Some(50)
+    );
 }
 
 //= spec/implementation.md#architecture-requirements
