@@ -471,7 +471,8 @@ fn decode_rejects_invalid_escape_sequence() {
 //# `free_list_head = 0x08`,
 //# `reclaim_begin = 0x09`,
 //# `reclaim_end = 0x0a`,
-//# `wal_recovery = 0x0b`.
+//# `wal_recovery = 0x0b`,
+//# `stage_region = 0x0c`.
 #[test]
 fn record_types_use_canonical_byte_codes() {
     let canonical_codes = [
@@ -486,6 +487,7 @@ fn record_types_use_canonical_byte_codes() {
         (WalRecordType::ReclaimBegin, 0x09),
         (WalRecordType::ReclaimEnd, 0x0a),
         (WalRecordType::WalRecovery, 0x0b),
+        (WalRecordType::StageRegion, 0x0c),
     ];
 
     for (record_type, code) in canonical_codes {
@@ -581,6 +583,23 @@ fn alloc_begin_round_trips_free_list_head_after() {
         region_index: 3,
         free_list_head_after: Some(4),
     };
+    let (physical, encoded_len) = encode_physical(record, metadata);
+    let mut decode_scratch = [0u8; 128];
+    let decoded = decode_record(&physical[..encoded_len], metadata, &mut decode_scratch).unwrap();
+    assert_eq!(decoded.record, record);
+}
+
+//= spec/ring.md#wal-record-types
+//= type=test
+//# `RING-WAL-LAYOUT-006` Payload bytes are encoded canonically by record
+//# type:
+//# `update` and `snapshot` payloads are opaque collection-defined bytes;
+//# `alloc_begin`, `stage_region`, `head`, `reclaim_begin`, and
+//# `reclaim_end` payloads are a single `u32 region_index`;
+#[test]
+fn stage_region_round_trips_region_index() {
+    let metadata = metadata(4);
+    let record = WalRecord::StageRegion { region_index: 3 };
     let (physical, encoded_len) = encode_physical(record, metadata);
     let mut decode_scratch = [0u8; 128];
     let decoded = decode_record(&physical[..encoded_len], metadata, &mut decode_scratch).unwrap();

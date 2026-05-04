@@ -106,6 +106,8 @@ pub enum WalRecordType {
     Snapshot,
     /// Reserves a free region for future use.
     AllocBegin,
+    /// Detaches a ready region from the single allocation slot.
+    StageRegion,
     /// Commits a new collection or WAL head.
     Head,
     /// Drops a collection.
@@ -137,6 +139,7 @@ impl WalRecordType {
             Self::ReclaimBegin => 0x09,
             Self::ReclaimEnd => 0x0a,
             Self::WalRecovery => 0x0b,
+            Self::StageRegion => 0x0c,
         }
     }
 
@@ -154,6 +157,7 @@ impl WalRecordType {
             0x09 => Ok(Self::ReclaimBegin),
             0x0a => Ok(Self::ReclaimEnd),
             0x0b => Ok(Self::WalRecovery),
+            0x0c => Ok(Self::StageRegion),
             _ => Err(WalRecordError::InvalidRecordType(code)),
         }
     }
@@ -203,6 +207,11 @@ pub enum WalRecord<'a> {
         /// Successor free-list head after reserving the region.
         free_list_head_after: Option<u32>,
     },
+    /// `stage_region(region_index)`.
+    StageRegion {
+        /// Allocated region being detached from `ready_region`.
+        region_index: u32,
+    },
     /// `head(collection_id, collection_type, region_index)`.
     Head {
         /// Collection whose head is being updated.
@@ -251,6 +260,7 @@ impl<'a> WalRecord<'a> {
             Self::Update { .. } => WalRecordType::Update,
             Self::Snapshot { .. } => WalRecordType::Snapshot,
             Self::AllocBegin { .. } => WalRecordType::AllocBegin,
+            Self::StageRegion { .. } => WalRecordType::StageRegion,
             Self::Head { .. } => WalRecordType::Head,
             Self::DropCollection { .. } => WalRecordType::DropCollection,
             Self::Link { .. } => WalRecordType::Link,
@@ -498,6 +508,10 @@ fn encode_logical_record(
             offset = write_u32(buffer, offset, region_index)?;
             offset = write_opt_region_index(buffer, offset, free_list_head_after)?;
         }
+        WalRecord::StageRegion { region_index } => {
+            offset = write_u32(buffer, offset, size_of::<u32>() as u32)?;
+            offset = write_u32(buffer, offset, region_index)?;
+        }
         WalRecord::Head {
             collection_id,
             collection_type,
@@ -595,6 +609,17 @@ fn parse_logical_record(logical: &[u8]) -> Result<WalRecord<'_>, WalRecordError>
                 region_index,
                 free_list_head_after,
             })
+        }
+        WalRecordType::StageRegion => {
+            let payload_len = read_u32(logical, &mut offset)?;
+            if payload_len != size_of::<u32>() as u32 {
+                return Err(WalRecordError::PayloadLengthMismatch {
+                    record_type,
+                    payload_len,
+                });
+            }
+            let region_index = read_u32(logical, &mut offset)?;
+            Ok(WalRecord::StageRegion { region_index })
         }
         WalRecordType::Head => {
             let collection_id = CollectionId(read_u64(logical, &mut offset)?);

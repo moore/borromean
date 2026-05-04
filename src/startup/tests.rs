@@ -224,6 +224,35 @@ fn open_formatted_store_after_replayed_alloc_begin() -> (usize, StartupState<8, 
     )
 }
 
+fn open_formatted_store_after_replayed_stage_region() -> (usize, StartupState<8, 4>) {
+    let mut flash = MockFlash::<256, 4, 64>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    let wal_offset = metadata.wal_record_area_offset().unwrap();
+
+    let after_alloc = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        wal_offset,
+        WalRecord::AllocBegin {
+            region_index: 1,
+            free_list_head_after: Some(2),
+        },
+    );
+    let next_offset = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        after_alloc,
+        WalRecord::StageRegion { region_index: 1 },
+    );
+
+    (
+        next_offset,
+        open_formatted_store::<256, 4, _, 8, 4>(&mut flash).unwrap(),
+    )
+}
+
 fn open_formatted_store_after_completed_wal_rotation() -> StartupState<8, 4> {
     let mut flash = MockFlash::<128, 4, 64>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
@@ -376,6 +405,57 @@ fn open_formatted_store_keeps_replayed_ready_region_reserved_in_memory() {
     let (_next_offset, state) = open_formatted_store_after_replayed_alloc_begin();
     assert_eq!(state.ready_region(), Some(1));
     assert_eq!(state.last_free_list_head(), Some(2));
+}
+
+//= spec/ring.md#startup-replay-algorithm
+//= type=test
+//# `RING-STARTUP-RESULT-008` Ordered staged regions that have left
+//# `ready_region` but are not yet known to be free
+#[test]
+fn open_formatted_store_reports_replayed_staged_regions() {
+    let (_next_offset, state) = open_formatted_store_after_replayed_stage_region();
+    assert_eq!(state.staged_regions(), &[1]);
+}
+
+//= spec/ring.md#startup-replay-algorithm
+//= type=test
+//# RING-STARTUP-011A On `stage_region(region_index)`: if
+//# `ready_region != region_index`, return an error. otherwise append
+//# `region_index` to staged regions and clear `ready_region`.
+#[test]
+fn open_formatted_store_replays_stage_region_into_staged_state() {
+    let (_next_offset, state) = open_formatted_store_after_replayed_stage_region();
+    assert_eq!(state.ready_region(), None);
+    assert_eq!(state.staged_regions(), &[1]);
+    assert_eq!(state.last_free_list_head(), Some(2));
+}
+
+//= spec/ring.md#wal-record-types
+//= type=test
+//# `RING-WAL-VALID-028` `stage_region(region_index)` MUST be preceded by
+//# an unmatched valid `alloc_begin(region_index, free_list_head_after)`
+//# for the same region.
+#[test]
+fn open_formatted_store_rejects_stage_region_without_matching_ready_region() {
+    let mut flash = MockFlash::<256, 4, 64>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    let wal_offset = metadata.wal_record_area_offset().unwrap();
+
+    append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        wal_offset,
+        WalRecord::StageRegion { region_index: 1 },
+    );
+
+    assert_eq!(
+        open_formatted_store::<256, 4, _, 8, 4>(&mut flash).unwrap_err(),
+        StartupError::InvalidStageRegion {
+            region_index: 1,
+            ready_region: None,
+        }
+    );
 }
 
 //= spec/ring.md#wal-record-types

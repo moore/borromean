@@ -77,6 +77,15 @@ pub enum StartupError {
         /// Newly discovered conflicting ready region.
         next: u32,
     },
+    /// Replay saw `stage_region` without the matching ready region.
+    InvalidStageRegion {
+        /// Region named by the stage record.
+        region_index: u32,
+        /// Ready region replay expected at that point.
+        ready_region: Option<u32>,
+    },
+    /// Replay saw the same staged region more than once.
+    DuplicateStagedRegion(u32),
     /// Replay saw a duplicate pending reclaim marker.
     DuplicatePendingReclaim(u32),
     /// Replay saw a reclaim end without a matching begin.
@@ -109,6 +118,8 @@ pub enum StartupError {
     TooManyTrackedCollections,
     /// Replay exceeded `MAX_PENDING_RECLAIMS`.
     TooManyPendingReclaims,
+    /// Replay exceeded the staged-region tracking capacity.
+    TooManyStagedRegions,
     /// Replay found a live collection type not supported by this build.
     UnsupportedLiveCollectionType(u16),
     /// A checked length conversion or addition overflowed.
@@ -189,6 +200,7 @@ pub struct StartupState<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS
     ready_region: Option<u32>,
     max_seen_sequence: u64,
     collections: Vec<StartupCollection, MAX_COLLECTIONS>,
+    staged_regions: Vec<u32, MAX_PENDING_RECLAIMS>,
     pending_reclaims: Vec<u32, MAX_PENDING_RECLAIMS>,
     pending_wal_recovery_boundary: bool,
 }
@@ -239,6 +251,11 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
     /// Returns the replay-tracked collections.
     pub fn collections(&self) -> &[StartupCollection] {
         self.collections.as_slice()
+    }
+
+    /// Returns allocated regions staged outside the single ready-region slot.
+    pub fn staged_regions(&self) -> &[u32] {
+        self.staged_regions.as_slice()
     }
 
     /// Returns regions still pending reclaim completion.
@@ -300,6 +317,7 @@ pub(crate) struct StartupOpenPlan<
     collections: Vec<StartupCollection, MAX_COLLECTIONS>,
     last_free_list_head: Option<u32>,
     ready_region: Option<u32>,
+    staged_regions: Vec<u32, MAX_PENDING_RECLAIMS>,
     pending_reclaims: Vec<u32, MAX_PENDING_RECLAIMS>,
     wal_append_offset: usize,
     pending_wal_recovery_boundary: bool,
@@ -398,6 +416,7 @@ pub(crate) fn begin_open_formatted_store<
             None
         },
         ready_region: None,
+        staged_regions: Vec::new(),
         pending_reclaims: Vec::new(),
         wal_append_offset: usize::try_from(metadata.region_size)
             .map_err(|_| StartupError::LengthOverflow)?,
@@ -471,14 +490,14 @@ pub(crate) fn replay_open_wal_chain<
             plan.metadata,
             region_index,
             is_tail,
-            |flash, _offset, record| {
+            |_flash, _offset, record| {
                 apply_record(
-                    flash,
                     plan.metadata,
                     record,
                     &mut plan.collections,
                     &mut plan.last_free_list_head,
                     &mut plan.ready_region,
+                    &mut plan.staged_regions,
                     &mut plan.pending_reclaims,
                 )
             },
@@ -517,6 +536,7 @@ pub(crate) fn finish_open_formatted_store<
         ready_region: plan.ready_region,
         max_seen_sequence: plan.max_seen_sequence,
         collections: plan.collections.clone(),
+        staged_regions: plan.staged_regions.clone(),
         pending_reclaims: plan.pending_reclaims.clone(),
         pending_wal_recovery_boundary: plan.pending_wal_recovery_boundary,
     })
@@ -893,13 +913,13 @@ where
     })
 }
 
-fn apply_record<IO: FlashIo, const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>(
-    _flash: &mut IO,
+fn apply_record<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>(
     metadata: StorageMetadata,
     record: WalRecord<'_>,
     collections: &mut Vec<StartupCollection, MAX_COLLECTIONS>,
     last_free_list_head: &mut Option<u32>,
     ready_region: &mut Option<u32>,
+    staged_regions: &mut Vec<u32, MAX_PENDING_RECLAIMS>,
     pending_reclaims: &mut Vec<u32, MAX_PENDING_RECLAIMS>,
 ) -> Result<(), StartupError> {
     match record {
@@ -999,6 +1019,23 @@ fn apply_record<IO: FlashIo, const MAX_COLLECTIONS: usize, const MAX_PENDING_REC
             *last_free_list_head = free_list_head_after;
             *ready_region = Some(region_index);
         }
+        WalRecord::StageRegion { region_index } => {
+            ensure_region_index_in_range(region_index, metadata.region_count)?;
+            if *ready_region != Some(region_index) {
+                return Err(StartupError::InvalidStageRegion {
+                    region_index,
+                    ready_region: *ready_region,
+                });
+            }
+            if staged_regions.contains(&region_index) {
+                return Err(StartupError::DuplicateStagedRegion(region_index));
+            }
+
+            staged_regions
+                .push(region_index)
+                .map_err(|_| StartupError::TooManyStagedRegions)?;
+            *ready_region = None;
+        }
         WalRecord::Head {
             collection_id,
             collection_type,
@@ -1043,6 +1080,7 @@ fn apply_record<IO: FlashIo, const MAX_COLLECTIONS: usize, const MAX_PENDING_REC
             if *ready_region == Some(region_index) {
                 *ready_region = None;
             }
+            remove_staged_region(staged_regions, region_index);
         }
         WalRecord::DropCollection { collection_id } => {
             if collection_id == CollectionId(0) {
@@ -1078,6 +1116,7 @@ fn apply_record<IO: FlashIo, const MAX_COLLECTIONS: usize, const MAX_PENDING_REC
             if *ready_region == Some(next_region_index) {
                 *ready_region = None;
             }
+            remove_staged_region(staged_regions, next_region_index);
         }
         WalRecord::FreeListHead { region_index } => {
             if let Some(region_index) = region_index {
@@ -1090,6 +1129,7 @@ fn apply_record<IO: FlashIo, const MAX_COLLECTIONS: usize, const MAX_PENDING_REC
             if pending_reclaims.contains(&region_index) {
                 return Err(StartupError::DuplicatePendingReclaim(region_index));
             }
+            remove_staged_region(staged_regions, region_index);
 
             pending_reclaims
                 .push(region_index)
@@ -1234,6 +1274,18 @@ fn find_collection_mut<const MAX_COLLECTIONS: usize>(
 ) -> Option<&mut StartupCollection> {
     let index = find_collection(collections.as_slice(), collection_id)?;
     collections.get_mut(index)
+}
+
+fn remove_staged_region<const MAX_PENDING_RECLAIMS: usize>(
+    staged_regions: &mut Vec<u32, MAX_PENDING_RECLAIMS>,
+    region_index: u32,
+) {
+    if let Some(index) = staged_regions
+        .iter()
+        .position(|staged| *staged == region_index)
+    {
+        staged_regions.remove(index);
+    }
 }
 
 fn reconstruct_free_list_tail<IO: FlashIo>(

@@ -2,7 +2,7 @@ target = "spec/ring.md#startup-replay-algorithm"
 
 # Startup Replay Algorithm
 #
-# Startup recovery reconstructs seven things:
+# Startup recovery reconstructs eight things:
 # 
 # 1. `RING-STARTUP-RESULT-001` Durable collection states (live heads plus dropped tombstones)
 # 2. `RING-STARTUP-RESULT-002` In-memory working state for collections with uncommitted updates
@@ -16,6 +16,8 @@ target = "spec/ring.md#startup-replay-algorithm"
 # further if startup recovery initializes an incomplete WAL rotation
 # 7. `RING-STARTUP-RESULT-007` Ordered incomplete reclaim transactions that still need post-replay
 # recovery work
+# 8. `RING-STARTUP-RESULT-008` Ordered staged regions that have left
+# `ready_region` but are not yet known to be free
 # 
 # Algorithm:
 # 
@@ -101,7 +103,7 @@ target = "spec/ring.md#startup-replay-algorithm"
 # per collection optional live `collection_type`, `last_head`,
 # `basis_pos`, and
 # `pending_updates`, plus global `last_free_list_head`, optional
-# reserved `ready_region`, ordered pending region reclaims, and the
+# reserved `ready_region`, ordered staged regions, ordered pending region reclaims, and the
 # replay-local `pending_wal_recovery_boundary`.
 # Initialize `last_free_list_head` to `Some(1)` iff `region_count >= 2`,
 # otherwise `None`, because format establishes that as the initial
@@ -136,6 +138,10 @@ target = "spec/ring.md#startup-replay-algorithm"
 # `alloc_begin` did not consume the current durable free-list head.
 # set durable `last_free_list_head` to `free_list_head_after`.
 # set `ready_region = region_index`.
+# 12. `RING-STARTUP-011A` On `stage_region(region_index)`:
+# if `ready_region != region_index`, return an error.
+# otherwise append `region_index` to staged regions and clear
+# `ready_region`.
 # 12. `RING-STARTUP-012` On `head(collection_id, collection_type, region_index)`:
 # if `collection_id = 0`, this is a WAL-head control record. Its replay
 # effect was already consumed in step 4 while determining the WAL-head
@@ -163,11 +169,16 @@ target = "spec/ring.md#startup-replay-algorithm"
 # retargeted the collection to an already allocated existing region or
 # refers to a region whose historical `alloc_begin` was already consumed
 # and later reclaimed.
+# If `region_index` is in staged regions, remove it from staged regions
+# because the head directly makes that region live.
 # 13. `RING-STARTUP-013` On `link(next_region_index, expected_sequence)`:
 # if `ready_region = next_region_index`, clear `ready_region`.
 # otherwise leave `ready_region` unchanged because this `link` may refer
 # to a WAL-region allocation whose historical `alloc_begin` was already
 # consumed and later reclaimed.
+# If `next_region_index` is in staged regions, remove it from staged
+# regions because the link directly makes that region part of the WAL
+# chain.
 # 14. `RING-STARTUP-014` On `drop_collection(collection_id)`:
 # if `collection_id` is not tracked, create replay state for that
 # collection because older retained basis records may already have been
@@ -183,7 +194,8 @@ target = "spec/ring.md#startup-replay-algorithm"
 # set tentative durable `last_free_list_head` to `region_index_or_none`.
 # 16. `RING-STARTUP-016` On `reclaim_begin(region_index)`:
 # append `region_index` to pending reclaims unless a later matching
-# `reclaim_end` removes it.
+# `reclaim_end` removes it. If `region_index` is in staged regions,
+# remove it from staged regions because reclaim now owns the cleanup.
 # 17. `RING-STARTUP-017` On `reclaim_end(region_index)`:
 # mark the matching pending reclaim as finished.
 # 18. `RING-STARTUP-018` On `wal_recovery()`:

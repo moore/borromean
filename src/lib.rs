@@ -376,6 +376,11 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         self.state.pending_reclaims()
     }
 
+    /// Returns allocated regions staged outside the single ready-region slot.
+    pub fn staged_regions(&self) -> &[u32] {
+        self.state.staged_regions()
+    }
+
     /// Returns whether replay left an open WAL recovery boundary.
     pub fn pending_wal_recovery_boundary(&self) -> bool {
         self.state.pending_wal_recovery_boundary()
@@ -585,6 +590,17 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
                 region_index,
                 free_list_head_after,
             )
+    }
+
+    /// Appends `stage_region` for the current ready region.
+    pub fn stage_ready_region<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        region_index: u32,
+    ) -> Result<(), StorageRuntimeError> {
+        self.state
+            .stage_ready_region::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace, region_index)
     }
 
     /// Appends a `free_list_head` WAL record.

@@ -4,22 +4,22 @@ target = "spec/ring.md#wal-record-types"
 #
 # All WAL records are append-only and ordered by physical write order
 # within the WAL region chain.
-# 
+#
 # WAL record encoding and alignment:
-# 
+#
 # Let `wal_record_area_offset` be the first offset within a WAL region
 # that is both:
 # past the end of the region `Header` plus `WalRegionPrologue`; and
 # aligned to `wal_write_granule`.
 # Replay and append scanning consider candidate WAL record starts only at
 # aligned offsets greater than or equal to `wal_record_area_offset`.
-# 
+#
 # Let `wal_escape_byte`, `wal_escape_code_erased`,
 # `wal_escape_code_magic`, and `wal_escape_code_escape` be the first four
 # byte values in ascending order that are distinct from both
 # `erased_byte` and `wal_record_magic`. Because only those two byte
 # values are reserved globally, such a four-byte choice always exists.
-# 
+#
 # 1. `RING-WAL-ENC-001` Every physical WAL record MUST begin with a
 # one-byte `record_magic`.
 # 2. `RING-WAL-ENC-002` `record_magic` MUST equal the storage's configured
@@ -97,22 +97,23 @@ target = "spec/ring.md#wal-record-types"
 # unambiguously recognizable as the WAL-rotation-start record during
 # startup recovery. Once that rotation `alloc_begin` is durable, the only
 # valid later WAL record in that region is the matching trailing `link`.
-# 
+#
 # Each WAL record encodes the following fields:
 # 
 # 1. `RING-WAL-FIELD-001` `record_type`: one of `new_collection`, `update`, `snapshot`,
-# `alloc_begin`, `head`, `drop_collection`, `link`, `free_list_head`,
-# `reclaim_begin`, `reclaim_end`, `wal_recovery`
+# `alloc_begin`, `stage_region`, `head`, `drop_collection`, `link`,
+# `free_list_head`, `reclaim_begin`, `reclaim_end`, `wal_recovery`
 # 2. `RING-WAL-FIELD-002` `collection_id`: required for `new_collection`, `update`,
 # `snapshot`, `head`, and `drop_collection`
 # 3. `RING-WAL-FIELD-003` `collection_type`: required for `new_collection`, `snapshot`, and
-# `head`; omitted for `update`, `alloc_begin`, `drop_collection`, `link`,
-# `free_list_head`, `reclaim_begin`, `reclaim_end`, and `wal_recovery`
+# `head`; omitted for `update`, `alloc_begin`, `stage_region`,
+# `drop_collection`, `link`, `free_list_head`, `reclaim_begin`,
+# `reclaim_end`, and `wal_recovery`
 # 4. `RING-WAL-FIELD-004` `payload_len`: payload size in bytes
 # 5. `RING-WAL-FIELD-005` `payload`: opaque bytes defined by `record_type`
 # 6. `RING-WAL-FIELD-006` `free_list_head_after`: required for `alloc_begin`; omitted for
-# `update`, `snapshot`, `head`, `drop_collection`, `link`, `free_list_head`,
-# `reclaim_begin`, `reclaim_end`, and `wal_recovery`
+# `update`, `snapshot`, `stage_region`, `head`, `drop_collection`, `link`,
+# `free_list_head`, `reclaim_begin`, `reclaim_end`, and `wal_recovery`
 # 7. `RING-WAL-FIELD-007` `record_checksum`: checksum covering the full logical record before
 # byte-stuffing encoding
 # 8. `RING-WAL-FIELD-008` `padding`: zero or more trailing `wal_escape_code_escape` bytes so
@@ -143,7 +144,8 @@ target = "spec/ring.md#wal-record-types"
 # `free_list_head = 0x08`,
 # `reclaim_begin = 0x09`,
 # `reclaim_end = 0x0a`,
-# `wal_recovery = 0x0b`.
+# `wal_recovery = 0x0b`,
+# `stage_region = 0x0c`.
 # 2. `RING-WAL-LAYOUT-002` The logical field order before byte-stuffing
 # MUST be exactly the order shown above.
 # 3. `RING-WAL-LAYOUT-003` `payload_len` MUST equal the number of logical
@@ -159,8 +161,8 @@ target = "spec/ring.md#wal-record-types"
 # 6. `RING-WAL-LAYOUT-006` Payload bytes are encoded canonically by record
 # type:
 # `update` and `snapshot` payloads are opaque collection-defined bytes;
-# `alloc_begin`, `head`, `reclaim_begin`, and `reclaim_end` payloads are
-# a single `u32 region_index`;
+# `alloc_begin`, `stage_region`, `head`, `reclaim_begin`, and
+# `reclaim_end` payloads are a single `u32 region_index`;
 # `link` payload is `next_region_index:u32` followed by
 # `expected_sequence:u64`;
 # `free_list_head` payload is `OptRegionIndex`;
@@ -263,6 +265,13 @@ target = "spec/ring.md#wal-record-types"
 # allocator effect; it only makes that recovery boundary explicit and
 # durable.
 # 
+# 12. `RING-WAL-PAYLOAD-012` `stage_region`
+# Detaches the current `ready_region` from the single allocator slot
+# without committing a collection head. The payload contains the staged
+# `region_index`. Replay keeps the region allocated and unavailable for
+# reuse until a later collection-specific reachability rule makes it live
+# or a later reclaim transaction proves it can be freed.
+#
 # Ordering and validity rules:
 # 
 # 1. `RING-WAL-VALID-001` A valid `new_collection(collection_id, collection_type)` record is
@@ -378,6 +387,10 @@ target = "spec/ring.md#wal-record-types"
 # in WAL order and are matched by `region_index`.
 # 27. `RING-WAL-VALID-027` `reclaim_end(region_index)` is only valid if preceded by a valid
 # `reclaim_begin(region_index)`.
+# 28. `RING-WAL-VALID-028` `stage_region(region_index)` MUST be preceded by
+# an unmatched valid `alloc_begin(region_index, free_list_head_after)`
+# for the same region. Replay MUST treat `stage_region` without that
+# matching `ready_region` as corruption.
 # 
 # Checksum trust model:
 # 
@@ -419,7 +432,10 @@ target = "spec/ring.md#wal-record-types"
 # free_list_head_after)`.
 # 5. `RING-REPLAY-ASSUME-005` If replay ends with an unmatched `alloc_begin(region_index, ...)`, that
 # region is treated as a reserved `ready_region` for the next allocation
-# instead of being returned to the free list.
+# instead of being returned to the free list. If replay sees a matching
+# `stage_region(region_index)`, the region leaves `ready_region` but
+# remains allocated until collection-specific reachability or reclaim
+# handles it.
 
 [[spec]]
 level = "MUST"
@@ -493,7 +509,8 @@ codes:
 `free_list_head = 0x08`,
 `reclaim_begin = 0x09`,
 `reclaim_end = 0x0a`,
-`wal_recovery = 0x0b`.
+`wal_recovery = 0x0b`,
+`stage_region = 0x0c`.
 '''
 
 [[spec]]
@@ -551,6 +568,21 @@ in WAL order and are matched by `region_index`.
 [[spec]]
 level = "MUST"
 quote = '''
+`RING-WAL-VALID-028` `stage_region(region_index)` MUST be preceded by
+an unmatched valid `alloc_begin(region_index, free_list_head_after)`
+for the same region.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
+Replay MUST treat `stage_region` without that
+matching `ready_region` as corruption.
+'''
+
+[[spec]]
+level = "MUST"
+quote = '''
 `RING-CHECKSUM-005` An implementation MUST ensure that even intentionally corrupted
 storage eventually produces a reported error rather than memory
 unsafety, undefined behavior, control-flow corruption, infinite loops,
@@ -578,4 +610,3 @@ quote = '''
 allocator advance durable with `alloc_begin(region_index,
 free_list_head_after)`.
 '''
-

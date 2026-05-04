@@ -61,6 +61,17 @@ pub enum StorageRuntimeError {
     },
     /// More than one ready region was observed.
     DoubleReadyRegion(u32),
+    /// A stage request did not match the current ready region.
+    InvalidStageRegion {
+        /// Region requested by the caller.
+        region_index: u32,
+        /// Ready region currently tracked in memory.
+        ready_region: Option<u32>,
+    },
+    /// A region was staged more than once.
+    DuplicateStagedRegion(u32),
+    /// The configured staged-region capacity was exceeded.
+    TooManyStagedRegions,
     /// A reclaim end was requested for a non-pending region.
     InvalidReclaimEnd(u32),
     /// A region was marked pending reclaim more than once.
@@ -93,6 +104,8 @@ pub enum StorageRuntimeError {
     WalHeadReclaimBlockedByRecoveryBoundary,
     /// WAL-head reclaim is blocked by a reserved ready region.
     WalHeadReclaimBlockedByReadyRegion(u32),
+    /// WAL-head reclaim is blocked by staged allocated regions.
+    WalHeadReclaimBlockedByStagedRegions,
     /// WAL-head reclaim is blocked by pending collection-region reclaims.
     WalHeadReclaimBlockedByPendingReclaims,
     /// WAL-head reclaim is blocked by a retained record kind.
@@ -177,6 +190,7 @@ pub struct StorageRuntime<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAI
     ready_region: Option<u32>,
     max_seen_sequence: u64,
     collections: Vec<StartupCollection, MAX_COLLECTIONS>,
+    staged_regions: Vec<u32, MAX_PENDING_RECLAIMS>,
     pending_reclaims: Vec<u32, MAX_PENDING_RECLAIMS>,
     pending_wal_recovery_boundary: bool,
 }
@@ -260,6 +274,11 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
     /// Returns the replay-tracked collections.
     pub fn collections(&self) -> &[StartupCollection] {
         self.collections.as_slice()
+    }
+
+    /// Returns allocated regions staged outside the single ready-region slot.
+    pub fn staged_regions(&self) -> &[u32] {
+        self.staged_regions.as_slice()
     }
 
     /// Returns regions still pending reclaim completion.
@@ -619,6 +638,30 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
                 region_index,
                 free_list_head_after,
             },
+        )
+    }
+
+    /// Appends `stage_region` for the current ready region.
+    pub fn stage_ready_region<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        region_index: u32,
+    ) -> Result<(), StorageRuntimeError> {
+        if self.ready_region != Some(region_index) {
+            return Err(StorageRuntimeError::InvalidStageRegion {
+                region_index,
+                ready_region: self.ready_region,
+            });
+        }
+        if self.staged_regions.contains(&region_index) {
+            return Err(StorageRuntimeError::DuplicateStagedRegion(region_index));
+        }
+
+        self.append_record::<REGION_SIZE, REGION_COUNT, IO>(
+            flash,
+            workspace,
+            WalRecord::StageRegion { region_index },
         )
     }
 
@@ -1264,6 +1307,10 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
                 let _ = region_index;
                 Ok(WalHeadReclaimAction::Skip)
             }
+            WalRecord::StageRegion { region_index } => {
+                let _ = region_index;
+                Ok(WalHeadReclaimAction::Skip)
+            }
             WalRecord::Head {
                 collection_id: CollectionId(0),
                 region_index,
@@ -1369,6 +1416,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
                     StorageRuntimeError::WalHeadReclaimRequiresMultipleWalRegions
                     | StorageRuntimeError::WalHeadReclaimBlockedByRecoveryBoundary
                     | StorageRuntimeError::WalHeadReclaimBlockedByReadyRegion(_)
+                    | StorageRuntimeError::WalHeadReclaimBlockedByStagedRegions
                     | StorageRuntimeError::WalHeadReclaimBlockedByPendingReclaims
                     | StorageRuntimeError::WalHeadReclaimBlockedByRecord(_),
                 ) => {
@@ -1403,6 +1451,9 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
             return Err(StorageRuntimeError::WalHeadReclaimBlockedByReadyRegion(
                 region_index,
             ));
+        }
+        if !self.staged_regions.is_empty() {
+            return Err(StorageRuntimeError::WalHeadReclaimBlockedByStagedRegions);
         }
         if !self.pending_reclaims.is_empty() {
             return Err(StorageRuntimeError::WalHeadReclaimBlockedByPendingReclaims);
@@ -1860,6 +1911,13 @@ pub(crate) fn from_startup_state<
             .map_err(|_| StorageRuntimeError::TooManyPendingReclaims)?;
     }
 
+    let mut staged_regions = Vec::new();
+    for region_index in startup.staged_regions().iter().copied() {
+        staged_regions
+            .push(region_index)
+            .map_err(|_| StorageRuntimeError::TooManyStagedRegions)?;
+    }
+
     Ok(StorageRuntime {
         metadata: startup.metadata(),
         wal_head: startup.wal_head(),
@@ -1870,6 +1928,7 @@ pub(crate) fn from_startup_state<
         ready_region: startup.ready_region(),
         max_seen_sequence: startup.max_seen_sequence(),
         collections,
+        staged_regions,
         pending_reclaims,
         pending_wal_recovery_boundary: startup.pending_wal_recovery_boundary(),
     })

@@ -987,6 +987,85 @@ fn stale_footer_bytes_do_not_make_a_reserved_region_free() {
     assert_eq!(state.ready_region(), Some(reserved_region));
 }
 
+//= spec/ring.md#wal-record-types
+//= type=test
+//# `RING-WAL-PAYLOAD-012` `stage_region` detaches the current
+//# `ready_region` from the single allocator slot without committing a
+//# collection head.
+#[test]
+fn stage_ready_region_detaches_ready_region_and_allows_next_allocation() {
+    let mut flash = MockFlash::<512, 5, 512>::new(0xff);
+    let mut workspace = StorageWorkspace::<512>::new();
+    let mut state = format::<512, 5, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+
+    let first_region = state
+        .reserve_next_region::<512, 5, _>(&mut flash, &mut workspace)
+        .unwrap();
+    state
+        .write_committed_region::<512, 5, _>(
+            &mut flash,
+            first_region,
+            CollectionId(7),
+            crate::MAP_REGION_V1_FORMAT,
+            &[1, 2, 3],
+        )
+        .unwrap();
+    state
+        .stage_ready_region::<512, 5, _>(&mut flash, &mut workspace, first_region)
+        .unwrap();
+
+    assert_eq!(state.ready_region(), None);
+    assert_eq!(state.staged_regions(), &[first_region]);
+
+    let second_region = state
+        .reserve_next_region::<512, 5, _>(&mut flash, &mut workspace)
+        .unwrap();
+    assert_ne!(second_region, first_region);
+    assert_eq!(state.ready_region(), Some(second_region));
+}
+
+#[test]
+fn staged_regions_survive_reopen() {
+    let mut flash = MockFlash::<512, 5, 512>::new(0xff);
+    let mut workspace = StorageWorkspace::<512>::new();
+    let mut state = format::<512, 5, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+
+    let region_index = state
+        .reserve_next_region::<512, 5, _>(&mut flash, &mut workspace)
+        .unwrap();
+    state
+        .write_committed_region::<512, 5, _>(
+            &mut flash,
+            region_index,
+            CollectionId(7),
+            crate::MAP_REGION_V1_FORMAT,
+            &[1, 2, 3],
+        )
+        .unwrap();
+    state
+        .stage_ready_region::<512, 5, _>(&mut flash, &mut workspace, region_index)
+        .unwrap();
+
+    let reopened = open::<512, 5, _, 8, 4>(&mut flash).unwrap();
+    assert_eq!(reopened.ready_region(), None);
+    assert_eq!(reopened.staged_regions(), &[region_index]);
+}
+
+#[test]
+fn stage_ready_region_rejects_non_ready_region() {
+    let mut flash = MockFlash::<512, 5, 256>::new(0xff);
+    let mut workspace = StorageWorkspace::<512>::new();
+    let mut state = format::<512, 5, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+
+    assert_eq!(
+        state.stage_ready_region::<512, 5, _>(&mut flash, &mut workspace, 1),
+        Err(StorageRuntimeError::InvalidStageRegion {
+            region_index: 1,
+            ready_region: None,
+        })
+    );
+}
+
 //= spec/ring.md#storage-requirements
 //= type=test
 //# `RING-STORAGE-007` The free-pointer footer of a region MUST NOT be

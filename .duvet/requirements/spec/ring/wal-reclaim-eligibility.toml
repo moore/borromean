@@ -62,10 +62,11 @@ target = "spec/ring.md#wal-reclaim-eligibility"
 # live if either:
 # it is the last valid free-list-head decision in replay order; or
 # its reservation is still needed to recover unmatched `ready_region`.
-# Its reservation role exists only until `head` or `link` durably
-# consumes the allocated region; after that point, retaining the record
-# is no longer required for region-consumption validity. It becomes
-# reclaimable once both of the conditions above are false.
+# Its reservation role exists only until `head`, `link`, or
+# `stage_region` durably consumes the allocated region; after that point,
+# retaining the record is no longer required for region-consumption
+# validity. It becomes reclaimable once both of the conditions above are
+# false.
 # 10. `RING-WAL-RECLAIM-010` `reclaim_begin(region_index)` record:
 # live only if replay still needs it to reconstruct an incomplete reclaim
 # transaction for `region_index` that would remain pending after replay.
@@ -84,6 +85,12 @@ target = "spec/ring.md#wal-reclaim-eligibility"
 # Once those later dependent records are reclaimable or have been
 # superseded by newer durable state, the `wal_recovery` record is
 # reclaimable too.
+# 13. `RING-WAL-RECLAIM-013` `stage_region(region_index)` record:
+# live while replay needs it to reconstruct `region_index` as staged.
+# It becomes reclaimable only after a later retained `head`, `link`, or
+# `reclaim_begin` record consumes that staged state, or after an
+# equivalent manifest-aware reachability summary preserves the same
+# staged-region safety state outside the candidate WAL region.
 # 
 # WAL-region reclaim preconditions:
 # 
@@ -92,7 +99,9 @@ target = "spec/ring.md#wal-reclaim-eligibility"
 # already represented durably outside the candidate (typically by newer
 # `snapshot`, `drop_collection`, or by
 # `head(collection_id, collection_type, region_index)` plus newer
-# updates).
+# updates). A live `stage_region` record must either be preserved by an
+# equivalent retained record or block WAL-head reclaim until
+# manifest-aware reachability can replace it safely.
 # 3. `RING-WAL-RECLAIM-PRE-003` After planned metadata updates, startup replay MUST still be able to walk a
 # valid WAL chain from head to tail.
 # 
@@ -103,8 +112,9 @@ target = "spec/ring.md#wal-reclaim-eligibility"
 # 2. `RING-WAL-RECLAIM-POST-002` The recovered free-list head MUST match pre-reclaim allocator state.
 # 3. `RING-WAL-RECLAIM-POST-003` The recovered `ready_region`, if any, MUST match pre-reclaim allocator
 # state.
-# 4. `RING-WAL-RECLAIM-POST-004` The ordered set of incomplete reclaim transactions that replay would
-# continue matches pre-reclaim crash-recovery state.
+# 4. `RING-WAL-RECLAIM-POST-004` The ordered staged regions and the ordered set of incomplete reclaim
+# transactions that replay would continue match pre-reclaim
+# crash-recovery state.
 # 5. `RING-WAL-RECLAIM-POST-005` Startup step 4 MUST recover the same effective WAL head after
 # reclaim as before reclaim, using the current tail region's
 # `WalRegionPrologue` plus the last valid tail-local
@@ -121,9 +131,9 @@ target = "spec/ring.md#wal-reclaim-eligibility"
 # 
 # 1. `RING-WAL-RECLAIM-SAFE-001` Reclaim MUST NOT change replay result: the recovered `last_head` and
 # `pending_updates` for every collection, the recovered
-# `last_free_list_head`, reserved `ready_region`, ordered incomplete
-# reclaim state, and reconstructed `free_list_tail`, after reclaim must
-# match the pre-reclaim logical state.
+# `last_free_list_head`, reserved `ready_region`, ordered staged regions,
+# ordered incomplete reclaim state, and reconstructed `free_list_tail`,
+# after reclaim must match the pre-reclaim logical state.
 # 
 # Example timeline for an already-live collection (`collection_id = 7`):
 # 
@@ -209,8 +219,8 @@ level = "MUST"
 quote = '''
 `RING-WAL-RECLAIM-SAFE-001` Reclaim MUST NOT change replay result: the recovered `last_head` and
 `pending_updates` for every collection, the recovered
-`last_free_list_head`, reserved `ready_region`, ordered incomplete
-reclaim state, and reconstructed `free_list_tail`, after reclaim must
-match the pre-reclaim logical state.
+`last_free_list_head`, reserved `ready_region`, ordered staged regions,
+ordered incomplete reclaim state, and reconstructed `free_list_tail`,
+after reclaim must match the pre-reclaim logical state.
 '''
 

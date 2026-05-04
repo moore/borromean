@@ -1034,6 +1034,38 @@ fn storage_reclaim_wal_head_updates_runtime_head_to_next_region() {
     assert_eq!(storage.wal_tail(), next_region);
 }
 
+//= spec/ring.md#wal-reclaim-eligibility
+//= type=test
+//# `RING-WAL-RECLAIM-013` `stage_region(region_index)` record:
+//# live while replay needs it to reconstruct `region_index` as staged.
+#[test]
+fn storage_reclaim_wal_head_blocks_on_live_staged_region() {
+    let (mut flash, mut workspace, mut storage, _) = setup_storage_with_stale_wal_head();
+
+    let staged_region = storage
+        .runtime_mut()
+        .reserve_next_region::<512, 6, _>(&mut flash, &mut workspace)
+        .unwrap();
+    storage
+        .runtime()
+        .write_committed_region::<512, 6, _>(
+            &mut flash,
+            staged_region,
+            CollectionId(31),
+            MAP_REGION_V1_FORMAT,
+            &[1, 2, 3],
+        )
+        .unwrap();
+    storage
+        .stage_ready_region::<512, 6, _>(&mut flash, &mut workspace, staged_region)
+        .unwrap();
+
+    assert_eq!(
+        storage.reclaim_wal_head::<512, 6, _>(&mut flash, &mut workspace),
+        Err(StorageRuntimeError::WalHeadReclaimBlockedByStagedRegions)
+    );
+}
+
 //= spec/ring.md#core-requirements
 //= type=test
 //# `RING-CORE-008` Borromean MUST model WAL-head movement as ordinary
@@ -1253,7 +1285,12 @@ fn storage_reclaim_wal_head_reopen_keeps_the_wal_chain_walkable() {
 
 //= spec/ring.md#wal-reclaim-eligibility
 //= type=test
-//# `RING-WAL-RECLAIM-SAFE-001` Reclaim MUST NOT change replay result: the recovered `last_head` and `pending_updates` for every collection, the recovered `last_free_list_head`, reserved `ready_region`, ordered incomplete reclaim state, and reconstructed `free_list_tail`, after reclaim must match the pre-reclaim logical state.
+//# `RING-WAL-RECLAIM-SAFE-001` Reclaim MUST NOT change replay result:
+//# the recovered `last_head` and `pending_updates` for every
+//# collection, the recovered `last_free_list_head`, reserved
+//# `ready_region`, ordered staged regions, ordered incomplete reclaim
+//# state, and reconstructed `free_list_tail`, after reclaim must match
+//# the pre-reclaim logical state.
 #[test]
 fn storage_reclaim_wal_head_reopen_preserves_replay_result() {
     let (mut flash, mut workspace, storage, reopened, _, _) =
@@ -1264,6 +1301,7 @@ fn storage_reclaim_wal_head_reopen_preserves_replay_result() {
         reopened.last_free_list_head(),
         storage.last_free_list_head()
     );
+    assert_eq!(reopened.staged_regions(), storage.staged_regions());
     assert_eq!(reopened.ready_region(), storage.ready_region());
     assert_eq!(reopened.pending_reclaims(), storage.pending_reclaims());
     assert_eq!(reopened.free_list_tail(), storage.free_list_tail());
@@ -1975,7 +2013,11 @@ fn storage_reopen_after_replacement_reconstructs_free_list_tail() {
 
 //= spec/ring.md#startup-replay-algorithm
 //= type=test
-//# RING-STARTUP-007 Maintain replay state: per collection optional live `collection_type`, `last_head`, `basis_pos`, and `pending_updates`, plus global `last_free_list_head`, optional reserved `ready_region`, ordered pending region reclaims, and the replay-local `pending_wal_recovery_boundary`.
+//# RING-STARTUP-007 Maintain replay state: per collection optional live
+//# `collection_type`, `last_head`, `basis_pos`, and `pending_updates`,
+//# plus global `last_free_list_head`, optional reserved `ready_region`,
+//# ordered staged regions, ordered pending region reclaims, and the
+//# replay-local `pending_wal_recovery_boundary`.
 #[test]
 fn storage_reopen_after_replacement_recovers_collection_and_reclaim_state() {
     let (mut flash, mut workspace, _, reopened, _, second_region) =
@@ -1985,6 +2027,7 @@ fn storage_reopen_after_replacement_recovers_collection_and_reclaim_state() {
         reopened.collections()[0].basis(),
         StartupCollectionBasis::Region(second_region)
     );
+    assert!(reopened.staged_regions().is_empty());
     assert!(reopened.pending_reclaims().is_empty());
     assert_eq!(reopened.ready_region(), None);
 
