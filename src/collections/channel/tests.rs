@@ -2,8 +2,12 @@ use super::*;
 
 use crate::vec_like::VecLikeSlice;
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-001` Channel construction MUST initialize a channel with the requested
+//# collection id, first member, next sequence 0, and first member last sequence 0.
 #[test]
-fn test_new_channel() {
+fn requirement_test_new_channel() {
     let id = CollectionId(1);
     let member = MemberId { id: 1 };
 
@@ -41,8 +45,12 @@ fn test_new_channel() {
     );
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-002` Adding a new channel member MUST succeed when member storage has
+//# capacity and MUST retain both existing and added members.
 #[test]
-fn test_add_member() {
+fn requirement_test_add_member() {
     let id = CollectionId(1);
     let initial_member = MemberId { id: 1 };
     let new_member = MemberId { id: 2 };
@@ -83,8 +91,12 @@ fn test_add_member() {
     assert!(channel.members.iter().any(|m| m.member == new_member));
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-003` Adding a channel member beyond configured member capacity MUST fail
+//# with UserLimitReached after filling available slots.
 #[test]
-fn test_add_member_limit() {
+fn requirement_test_add_member_limit() {
     let id = CollectionId(1);
     let initial_member = MemberId { id: 1 };
 
@@ -125,8 +137,12 @@ fn test_add_member_limit() {
     assert!(matches!(result, Err(ChannelError::UserLimitReached)));
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-004` Channel last-sequence lookup MUST return the stored sequence for an
+//# existing member and MemberNotFound for an unknown member.
 #[test]
-fn test_get_last_sequence() {
+fn requirement_test_get_last_sequence() {
     let id = CollectionId(1);
     let initial_member = MemberId { id: 1 };
 
@@ -169,8 +185,12 @@ fn test_get_last_sequence() {
     assert!(matches!(seq, Err(ChannelError::MemberNotFound(_))));
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-005` Channel next-sequence allocation MUST return the current sequence and
+//# increment subsequent next_sequence monotonically.
 #[test]
-fn test_get_next_sequence() {
+fn requirement_test_get_next_sequence() {
     let id = CollectionId(1);
     let initial_member = MemberId { id: 1 };
 
@@ -211,8 +231,12 @@ fn test_get_next_sequence() {
     assert_eq!(channel.next_sequence, ChannelSequence(2));
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-006` Adding an already-present channel member MUST be idempotent and MUST
+//# NOT create duplicate member entries.
 #[test]
-fn test_duplicate_member_add() {
+fn requirement_test_duplicate_member_add() {
     let id = CollectionId(1);
     let member = MemberId { id: 1 };
 
@@ -246,8 +270,12 @@ fn test_duplicate_member_add() {
     assert_eq!(channel.members.get(0).unwrap().member, member);
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-007` Checkpoint channel commands MUST retain the previous checkpoint
+//# address, exact command count, and member sequence snapshot.
 #[test]
-fn checkpoint_command_reports_exact_command_count() {
+fn requirement_checkpoint_command_reports_exact_command_count() {
     let previous = CommandAddress {
         region: 7u32,
         offset: 11,
@@ -270,8 +298,12 @@ fn checkpoint_command_reports_exact_command_count() {
     assert_eq!(checkpoint.sequences(), sequences.as_slice());
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-008` Recording a used channel sequence MUST update the member last
+//# sequence, track that member only once for checkpoint pressure, and reject unknown members.
 #[test]
-fn use_sequence_updates_member_once_and_tracks_checkpoint_pressure() {
+fn requirement_use_sequence_updates_member_once_and_tracks_checkpoint_pressure() {
     let id = CollectionId(1);
     let member = MemberId { id: 1 };
     let other = MemberId { id: 2 };

@@ -1,7 +1,11 @@
 use super::*;
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-121` VecLikeSlice MUST report empty state, length, capacity, and slice
+//# contents from its logical items.
 #[test]
-fn slice_adapter_reports_len_capacity_and_empty_state() {
+fn requirement_slice_adapter_reports_len_capacity_and_empty_state() {
     let mut backing = [0u8; 3];
     let mut values = VecLikeSlice::new(&mut backing);
 
@@ -17,8 +21,12 @@ fn slice_adapter_reports_len_capacity_and_empty_state() {
     assert_eq!(values.as_slice(), &[10, 20]);
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-122` VecLikeSlice clear MUST remove only logical items, restore empty
+//# length, and allow reuse of underlying capacity.
 #[test]
-fn slice_adapter_clear_removes_only_logical_items() {
+fn requirement_slice_adapter_clear_removes_only_logical_items() {
     let mut backing = [0u8; 2];
     let mut values = VecLikeSlice::new(&mut backing);
 

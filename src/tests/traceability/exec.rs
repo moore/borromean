@@ -1,8 +1,8 @@
 use super::*;
-use ::core::pin::pin;
-use ::core::task::Poll;
 use std::cell::Cell;
+use std::pin::pin;
 use std::rc::Rc;
+use std::task::Poll;
 
 struct ObservedFlash<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize> {
     inner: MockFlash<REGION_SIZE, REGION_COUNT, MAX_LOG>,

@@ -14,8 +14,10 @@ for storage semantics and executable implementation constraints.
 This policy specification keeps normative requirements adjacent to the
 text that motivates them.
 
-1. `RING-IMPL-FORMAT-001` Each normative requirement in [spec/implementation.md](implementation.md) or this specification MUST start with a stable identifier such as `RING-IMPL-CORE-001`.
-2. `RING-IMPL-FORMAT-002` Each normative requirement in [spec/implementation.md](implementation.md) or this specification MUST use explicit RFC-2119 normative language.
+1. `RING-IMPL-FORMAT-001` Each normative requirement in [spec/implementation.md](implementation.md)
+   or this specification MUST start with a stable identifier such as `RING-IMPL-CORE-001`.
+2. `RING-IMPL-FORMAT-002` Each normative requirement in [spec/implementation.md](implementation.md)
+   or this specification MUST use explicit RFC-2119 normative language.
 
 These identifiers are intended to be Duvet traceability targets for
 implementation-architecture decisions and repository policy
@@ -58,3 +60,8 @@ entry MUST still be dedicated to a single requirement identifier.
 harness entries MUST be defined only in dedicated test modules or
 files rather than inside the functional implementation module they
 exercise.
+6. `RING-IMPL-TEST-006` Functional library test entry points MUST be
+requirement-derived and traced with exactly one Duvet requirement or
+todo block; untraced `#[test]` functions MAY exist only in
+tooling-specific test suites that verify repository tooling rather
+than functional library behavior.

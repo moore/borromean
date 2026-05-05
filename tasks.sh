@@ -18,6 +18,21 @@ run_clippy() {
     cargo clippy --all-targets --all-features -- -D warnings
 }
 
+run_cargo_format() {
+    echo "==> cargo fmt --all"
+    cargo fmt --all
+}
+
+run_markdown_format() {
+    echo "==> rumdl fmt ."
+    rumdl fmt . --respect-gitignore
+}
+
+run_format() {
+    run_cargo_format
+    run_markdown_format
+}
+
 run_duvet() {
     echo "==> cargo run --quiet --bin traceability_audit -- check-requirements"
     cargo run --quiet --bin traceability_audit -- check-requirements
@@ -39,10 +54,12 @@ Usage: ./tasks.sh [task...]
 Tasks:
   all      Run the full repository verification lane
   verify   Run the full repository verification lane
+  fmt      Run Rust and markdown formatting
   test     Run cargo test
   clippy   Run cargo clippy
+  md       Run markdown formatting
   duvet    Validate traceability annotations and generate the Duvet report
-  mutants  Run requirement-filtered cargo-mutants after validating annotations
+  mutants  Manually run cargo-mutants after validating annotations
 USAGE
 }
 
@@ -51,11 +68,17 @@ run_task() {
         all|verify)
             run_verify
             ;;
+        fmt)
+            run_format
+            ;;
         test)
             run_test
             ;;
         clippy)
             run_clippy
+            ;;
+        md)
+            run_markdown_format
             ;;
         duvet)
             run_duvet

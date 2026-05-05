@@ -1,6 +1,6 @@
 use super::*;
-use ::core::pin::pin;
-use ::core::task::Poll;
+use std::pin::pin;
+use std::task::Poll;
 
 //= spec/implementation.md#startup-requirements
 //= type=test

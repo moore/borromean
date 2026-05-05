@@ -5,10 +5,13 @@
 Borromean splits storage behavior into three layers:
 
 - ring-level storage rules in [../spec/ring.md](../spec/ring.md)
-- implementation architecture and API constraints in [../spec/implementation.md](../spec/implementation.md)
+- implementation architecture and API constraints in
+  [../spec/implementation.md](../spec/implementation.md)
 - collection-specific payload rules such as [../spec/map.md](../spec/map.md)
 
-The code follows the same split. Shared storage logic handles WAL sequencing, replay, reclaim, and committed-region writes. Collection code defines how a collection's payload bytes are interpreted and how its in-memory frontier merges with the retained durable basis.
+The code follows the same split. Shared storage logic handles WAL sequencing, replay, reclaim, and
+committed-region writes. Collection code defines how a collection's payload bytes are interpreted
+and how its in-memory frontier merges with the retained durable basis.
 
 ## Supported API Surface
 
@@ -21,7 +24,9 @@ The Tier 1 supported API for readers and integrators is:
 - `LsmMap` and `MapUpdate` for the durable map collection
 - `MockFlash` for tests and examples
 
-Everything else is documented as advanced reference material. Those modules are useful when inspecting implementation details, debugging traceability, or extending the engine, but they are not the primary onboarding path.
+Everything else is documented as advanced reference material. Those modules are useful when
+inspecting implementation details, debugging traceability, or extending the engine, but they are not
+the primary onboarding path.
 
 ## Storage Lifecycle
 
@@ -55,7 +60,8 @@ The implemented durable map collection uses four payload shapes:
 bounded descriptor list for durable runs. It does not materialize committed
 runs into RAM during open. When a map is reopened:
 
-- the retained durable basis is selected from the replay-tracked empty basis, snapshot basis, or region basis
+- the retained durable basis is selected from the replay-tracked empty basis, snapshot basis, or
+  region basis
 - a legacy map region is represented as a legacy source descriptor
 - a manifest region is parsed into newest-to-oldest immutable run descriptors
 - later retained update payloads are replayed into the frontier in order
@@ -75,14 +81,20 @@ that blocking operation without changing the on-disk model.
 - `src/lib.rs`: public crate entrypoint and ergonomic wrapper API
 - `src/storage.rs`: shared runtime state and low-level WAL or reclaim operations
 - `src/startup.rs`: replay and recovery logic used by open
-- `src/collections/map/mod.rs`: map payload encoding, frontier logic, and map-specific storage helpers
+- `src/collections/map/mod.rs`: map payload encoding, frontier logic, and map-specific storage
+  helpers
 - `src/mock.rs`: in-memory flash model used by tests and examples
-- `src/disk.rs` and `src/wal_record.rs`: advanced reference surfaces for exact bytes on disk and in WAL records
+- `src/disk.rs` and `src/wal_record.rs`: advanced reference surfaces for exact bytes on disk and in
+  WAL records
 
 ## Contributor Guide
 
-If you are adding a new durably integrated collection type, start with [implementing-a-collection.md](./implementing-a-collection.md). That tutorial walks through the current integration points in `lib`, `storage`, `startup`, and the collection module itself.
+If you are adding a new durably integrated collection type, start with
+[implementing-a-collection.md](./implementing-a-collection.md). That tutorial walks through the
+current integration points in `lib`, `storage`, `startup`, and the collection module itself.
 
 ## Experimental Surface
 
-The exported `channel` module is still experimental. It has API documentation so readers can inspect the design, but it is not yet backed by the durable storage engine and is out of scope for the current collection specifications.
+The exported `channel` module is still experimental. It has API documentation so readers can inspect
+the design, but it is not yet backed by the durable storage engine and is out of scope for the
+current collection specifications.

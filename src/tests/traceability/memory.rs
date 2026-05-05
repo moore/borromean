@@ -1,6 +1,6 @@
 use super::*;
-use ::core::mem::size_of;
 use heapless::Vec as HeaplessVec;
+use std::mem::size_of;
 
 //= spec/implementation.md#core-requirements
 //= type=test

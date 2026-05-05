@@ -187,8 +187,12 @@ fn free_list_chain<
     chain
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-092` CollectionId helpers MUST expose little-endian bytes and checked
+//# increment semantics, returning none on u64 overflow.
 #[test]
-fn collection_id_helpers_preserve_little_endian_and_overflow_semantics() {
+fn requirement_collection_id_helpers_preserve_little_endian_and_overflow_semantics() {
     let id = CollectionId::new(0x0102_0304_0506_0708);
 
     assert_eq!(id.to_le_bytes(), 0x0102_0304_0506_0708u64.to_le_bytes());
@@ -199,8 +203,12 @@ fn collection_id_helpers_preserve_little_endian_and_overflow_semantics() {
     assert_eq!(CollectionId::new(u64::MAX).increment(), None);
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-093` Storage facade accessors MUST reflect underlying runtime state and
+//# tracked collection metadata.
 #[test]
-fn storage_facade_accessors_reflect_runtime_state() {
+fn requirement_storage_facade_accessors_reflect_runtime_state() {
     let mut flash = MockFlash::<512, 4, 1024>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =
@@ -229,8 +237,12 @@ fn storage_facade_accessors_reflect_runtime_state() {
     assert_eq!(storage.collections()[0].collection_id(), CollectionId(321));
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-094` Storage facade raw WAL wrapper methods MUST update runtime
+//# collection, allocator, free-list, and reclaim state.
 #[test]
-fn storage_facade_raw_wal_wrappers_update_runtime_state() {
+fn requirement_storage_facade_raw_wal_wrappers_update_runtime_state() {
     let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =
@@ -275,8 +287,12 @@ fn storage_facade_raw_wal_wrappers_update_runtime_state() {
     assert_eq!(storage.pending_reclaims(), &[]);
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-095` Storage facade WAL recovery append MUST reject recovery records when
+//# no recovery boundary is pending.
 #[test]
-fn storage_facade_rejects_unneeded_wal_recovery_record() {
+fn requirement_storage_facade_rejects_unneeded_wal_recovery_record() {
     let mut flash = MockFlash::<512, 4, 1024>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =
@@ -288,8 +304,12 @@ fn storage_facade_rejects_unneeded_wal_recovery_record() {
     ));
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-096` Storage facade recovery status MUST report pending WAL recovery
+//# boundaries and clear them after appending wal_recovery.
 #[test]
-fn storage_facade_reports_and_clears_pending_wal_recovery_boundary() {
+fn requirement_storage_facade_reports_and_clears_pending_wal_recovery_boundary() {
     let mut flash = MockFlash::<256, 4, 1024>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
@@ -740,8 +760,12 @@ fn setup_storage_with_live_empty_head_map_in_wal_head() -> (
     (flash, workspace, storage, next_region)
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-097` Storage format futures MUST poll to completion and return initialized
+//# storage state.
 #[test]
-fn storage_format_future_polls_to_completion() {
+fn requirement_storage_format_future_polls_to_completion() {
     let mut flash = MockFlash::<256, 4, 128>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
 
@@ -761,8 +785,12 @@ fn storage_format_future_polls_to_completion() {
     assert_eq!(storage.free_list_tail(), Some(3));
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-098` Storage open futures MUST poll to completion and replay collection
+//# pending update state.
 #[test]
-fn storage_open_future_polls_to_completion() {
+fn requirement_storage_open_future_polls_to_completion() {
     let mut flash = MockFlash::<256, 4, 128>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
 
@@ -793,8 +821,12 @@ fn storage_open_future_polls_to_completion() {
     assert_eq!(reopened.collections()[0].pending_update_count(), 1);
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-099` Storage open futures MUST yield pending between startup phases before
+//# completing with recovered WAL head and tail.
 #[test]
-fn storage_open_future_yields_between_startup_phases() {
+fn requirement_storage_open_future_yields_between_startup_phases() {
     let mut flash = MockFlash::<256, 4, 256>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
     Storage::<8, 4>::format::<256, 4, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
@@ -814,8 +846,12 @@ fn storage_open_future_yields_between_startup_phases() {
     assert_eq!(reopened.wal_tail(), 0);
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-100` Dropping a partially polled storage open future MUST leave the store
+//# openable with unchanged recovered state.
 #[test]
-fn storage_open_future_drop_before_completion_leaves_store_openable() {
+fn requirement_storage_open_future_drop_before_completion_leaves_store_openable() {
     let mut flash = MockFlash::<256, 4, 256>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
     Storage::<8, 4>::format::<256, 4, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
@@ -833,8 +869,12 @@ fn storage_open_future_drop_before_completion_leaves_store_openable() {
     assert!(reopened.collections().is_empty());
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-101` Storage WAL-head reclaim futures MUST poll to completion, update WAL
+//# head to the reclaimed successor, and append the old head to the free-list tail.
 #[test]
-fn storage_reclaim_wal_head_future_polls_to_completion() {
+fn requirement_storage_reclaim_wal_head_future_polls_to_completion() {
     let (mut flash, mut workspace, mut storage, next_region) = setup_storage_with_stale_wal_head();
 
     let reclaimed_head = poll_until_ready(
@@ -848,8 +888,12 @@ fn storage_reclaim_wal_head_future_polls_to_completion() {
     assert_eq!(storage.free_list_tail(), Some(0));
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-102` Storage WAL-head reclaim futures MUST yield between reclaim phases
+//# before completing with updated WAL head.
 #[test]
-fn storage_reclaim_wal_head_future_yields_between_reclaim_phases() {
+fn requirement_storage_reclaim_wal_head_future_yields_between_reclaim_phases() {
     let (mut flash, mut workspace, mut storage, next_region) = setup_storage_with_stale_wal_head();
 
     let (first, second, third, fourth, fifth, reclaimed_head) = {
@@ -878,8 +922,12 @@ fn storage_reclaim_wal_head_future_yields_between_reclaim_phases() {
     assert_eq!(storage.wal_head(), next_region);
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-103` Dropping a WAL-head reclaim future after reclaim begins MUST leave
+//# the store recoverable with original WAL head and live collection basis.
 #[test]
-fn storage_reclaim_wal_head_future_drop_after_reclaim_begin_remains_recoverable() {
+fn requirement_storage_reclaim_wal_head_future_drop_after_reclaim_begin_remains_recoverable() {
     let (mut flash, mut workspace, mut storage, _next_region) = setup_storage_with_stale_wal_head();
     let original_head = storage.wal_head();
 
@@ -902,7 +950,8 @@ fn storage_reclaim_wal_head_future_drop_after_reclaim_begin_remains_recoverable(
 
 //= spec/implementation.md#operation-requirements
 //= type=test
-//# `RING-IMPL-OP-002` A borromean future MUST either complete with a terminal result or remain safely resumable by further polling after any `Poll::Pending`.
+//# `RING-IMPL-OP-002` A borromean future MUST either complete with a terminal result or remain
+//# safely resumable by further polling after any `Poll::Pending`.
 #[test]
 fn requirement_storage_map_operation_futures_poll_to_completion() {
     let mut flash = MockFlash::<512, 7, 2048>::new(0xff);
@@ -964,7 +1013,9 @@ fn requirement_storage_map_operation_futures_poll_to_completion() {
 
 //= spec/implementation.md#execution-requirements
 //= type=test
-//# `RING-IMPL-EXEC-005` Await boundaries inside borromean operations MUST align only with externally visible I/O steps or with pure in-memory decision points that preserve the ring ordering rules.
+//# `RING-IMPL-EXEC-005` Await boundaries inside borromean operations MUST align only with
+//# externally visible I/O steps or with pure in-memory decision points that preserve the ring
+//# ordering rules.
 #[test]
 fn requirement_storage_flush_map_future_yields_between_durable_phases() {
     let mut flash = MockFlash::<512, 7, 2048>::new(0xff);
@@ -1003,7 +1054,8 @@ fn requirement_storage_flush_map_future_yields_between_durable_phases() {
 
 //= spec/implementation.md#operation-requirements
 //= type=test
-//# `RING-IMPL-OP-003` If an operation future is dropped before completion, any already-issued durable writes MUST still satisfy the crash-safety rules from [spec/ring.md](ring.md).
+//# `RING-IMPL-OP-003` If an operation future is dropped before completion, any already-issued
+//# durable writes MUST still satisfy the crash-safety rules from [spec/ring.md](ring.md).
 #[test]
 fn requirement_storage_flush_map_future_drop_after_region_write_remains_recoverable() {
     let mut flash = MockFlash::<512, 7, 2048>::new(0xff);
@@ -1044,7 +1096,8 @@ fn requirement_storage_flush_map_future_drop_after_region_write_remains_recovera
 
 //= spec/implementation.md#architecture-requirements
 //= type=test
-//# `RING-IMPL-ARCH-001` `Storage` MUST own logical storage state and configuration, but MUST NOT require long-lived ownership of the backing I/O object.
+//# `RING-IMPL-ARCH-001` `Storage` MUST own logical storage state and configuration, but MUST NOT
+//# require long-lived ownership of the backing I/O object.
 #[test]
 fn requirement_storage_format_returns_logical_state_without_owning_backend() {
     let mut flash = MockFlash::<256, 4, 128>::new(0xff);
@@ -1062,8 +1115,12 @@ fn requirement_storage_format_returns_logical_state_without_owning_backend() {
     assert_eq!(storage.tracked_user_collection_count(), 0);
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-104` Storage append operations MUST persist new collection and update
+//# records so reopening through flash restores the collection and pending update state.
 #[test]
-fn storage_append_and_reopen_round_trip_through_flash() {
+fn requirement_storage_append_and_reopen_round_trip_through_flash() {
     let mut flash = MockFlash::<256, 4, 256>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
 
@@ -1104,7 +1161,8 @@ fn storage_append_and_reopen_round_trip_through_flash() {
 
 //= spec/ring.md#collection-head-state-machine
 //= type=test
-//# `RING-FORMAT-012` Every non-WAL `collection_type` that may appear durably on disk MUST have a corresponding normative collection specification.
+//# `RING-FORMAT-012` Every non-WAL `collection_type` that may appear durably on disk MUST have a
+//# corresponding normative collection specification.
 #[test]
 fn requirement_storage_append_new_collection_rejects_unsupported_channel_collection() {
     let mut flash = MockFlash::<256, 4, 256>::new(0xff);
@@ -1126,7 +1184,8 @@ fn requirement_storage_append_new_collection_rejects_unsupported_channel_collect
 
 //= spec/implementation.md#api-requirements
 //= type=test
-//# `RING-IMPL-API-001` Public entry points for format, open, replay, and mutating collection operations MUST make their workspace and I/O dependencies explicit in the function signature.
+//# `RING-IMPL-API-001` Public entry points for format, open, replay, and mutating collection
+//# operations MUST make their workspace and I/O dependencies explicit in the function signature.
 #[test]
 fn requirement_storage_rotation_api_keeps_backend_explicit() {
     let mut flash = MockFlash::<128, 4, 256>::new(0xff);
@@ -1146,8 +1205,12 @@ fn requirement_storage_rotation_api_keeps_backend_explicit() {
     assert_eq!(storage.ready_region(), None);
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-105` WAL-head reclaim MUST update runtime WAL head and tail to the next
+//# region.
 #[test]
-fn storage_reclaim_wal_head_updates_runtime_head_to_next_region() {
+fn requirement_storage_reclaim_wal_head_updates_runtime_head_to_next_region() {
     let (mut flash, mut workspace, mut storage, next_region) = setup_storage_with_stale_wal_head();
 
     let reclaimed_head = storage
@@ -1337,8 +1400,12 @@ fn requirement_storage_reclaim_wal_head_copies_live_updates_after_basis_to_tail(
     assert_eq!(storage.collections()[0].pending_update_count(), 1);
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-106` WAL-head reclaim MUST rewrite a live empty-head map as a WAL snapshot
+//# basis while preserving pending updates.
 #[test]
-fn storage_reclaim_wal_head_rewrites_empty_head_map_as_snapshot_basis() {
+fn requirement_storage_reclaim_wal_head_rewrites_empty_head_map_as_snapshot_basis() {
     let (mut flash, mut workspace, mut storage, next_region) =
         setup_storage_with_live_empty_head_map_in_wal_head();
 
@@ -1472,7 +1539,8 @@ fn requirement_storage_reclaim_wal_head_reopen_preserves_free_list_head() {
 
 //= spec/ring.md#wal-reclaim-eligibility
 //= type=test
-//# `RING-WAL-RECLAIM-POST-003` The recovered `ready_region`, if any, MUST match pre-reclaim allocator state.
+//# `RING-WAL-RECLAIM-POST-003` The recovered `ready_region`, if any, MUST match pre-reclaim
+//# allocator state.
 #[test]
 fn requirement_storage_reclaim_wal_head_reopen_preserves_ready_region() {
     let (_, _, _, reopened, _, expected_ready_region) =
@@ -1512,8 +1580,12 @@ fn requirement_storage_reclaim_wal_head_reopen_has_no_broken_link_path() {
     );
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-107` Storage operations MUST work through any FlashIo backend that
+//# implements the trait, including delegating backends.
 #[test]
-fn storage_works_through_flash_io_trait_backend() {
+fn requirement_storage_works_through_flash_io_trait_backend() {
     let mut flash = DelegatingFlash::<256, 4, 256>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
 
@@ -1537,8 +1609,12 @@ fn storage_works_through_flash_io_trait_backend() {
     assert_eq!(reopened.collections()[0].pending_update_count(), 1);
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-108` Storage map APIs MUST restore snapshot basis values and later typed
+//# updates when opening a map.
 #[test]
-fn storage_map_api_restores_snapshot_and_updates() {
+fn requirement_storage_map_api_restores_snapshot_and_updates() {
     let mut flash = MockFlash::<512, 4, 1024>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =
@@ -1861,7 +1937,8 @@ fn requirement_storage_map_frontier_continues_accumulating_updates_after_an_over
 
 //= spec/implementation.md#api-requirements
 //= type=test
-//# `RING-IMPL-API-003` Collection implementations MUST define their opaque payload semantics above the shared storage primitives rather than bypassing WAL and region-management invariants.
+//# `RING-IMPL-API-003` Collection implementations MUST define their opaque payload semantics above
+//# the shared storage primitives rather than bypassing WAL and region-management invariants.
 #[test]
 fn requirement_storage_map_api_appends_typed_updates() {
     let mut flash = MockFlash::<512, 7, 2048>::new(0xff);
@@ -1906,8 +1983,12 @@ fn requirement_storage_map_api_appends_typed_updates() {
     assert_eq!(reopened.get_frontier(&4).unwrap(), None);
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-109` Storage map flush API MUST write a committed region basis, clear
+//# ready_region, and preserve flushed key/value lookups.
 #[test]
-fn storage_map_api_flushes_committed_region_basis() {
+fn requirement_storage_map_api_flushes_committed_region_basis() {
     let mut flash = MockFlash::<512, 4, 1024>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =
@@ -1955,8 +2036,12 @@ fn storage_map_api_flushes_committed_region_basis() {
     );
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-110` Targeted then greedy map compaction MUST reduce selected runs while
+//# preserving unselected runs and all visible key/value lookups.
 #[test]
-fn storage_compact_map_target_then_greedy_preserves_unselected_runs() {
+fn requirement_storage_compact_map_target_then_greedy_preserves_unselected_runs() {
     const REGION_SIZE: usize = 1024;
     const REGION_COUNT: usize = 18;
     const MAX_INDEXES: usize = 16;
@@ -2076,8 +2161,12 @@ fn storage_compact_map_target_then_greedy_preserves_unselected_runs() {
     );
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-111` Map compaction MUST preserve tombstone masking so deleted keys remain
+//# absent and later live keys remain visible.
 #[test]
-fn storage_compact_map_preserves_tombstone_masking() {
+fn requirement_storage_compact_map_preserves_tombstone_masking() {
     const REGION_SIZE: usize = 1024;
     const REGION_COUNT: usize = 14;
     const MAX_INDEXES: usize = 8;
@@ -2177,8 +2266,12 @@ fn storage_compact_map_preserves_tombstone_masking() {
     );
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-112` Map compaction MUST stream replacements larger than frontier capacity
+//# into a single run while preserving all visible key/value lookups across repeated compaction.
 #[test]
-fn storage_compact_map_streams_replacement_larger_than_frontier_capacity() {
+fn requirement_storage_compact_map_streams_replacement_larger_than_frontier_capacity() {
     const REGION_SIZE: usize = 1024;
     const REGION_COUNT: usize = 40;
     const MAX_INDEXES: usize = 4;
@@ -2353,8 +2446,12 @@ fn requirement_storage_map_replacement_flush_records_reclaim_after_new_head() {
     assert!(saw_replacement_head);
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-113` Reopening after a map replacement flush MUST complete pending reclaim
+//# of the replaced region and preserve the replacement map value.
 #[test]
-fn storage_map_replacement_flush_is_completed_during_reopen() {
+fn requirement_storage_map_replacement_flush_is_completed_during_reopen() {
     let mut flash = MockFlash::<512, 7, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =
@@ -2462,15 +2559,24 @@ fn replace_map_and_reopen_empty_free_list() -> (
     )
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-114` Reopening after replacement with an empty free list MUST initialize
+//# free-list head from the recovered reclaimed region.
 #[test]
-fn storage_reopen_after_replacement_initializes_allocator_from_recovered_free_list_head() {
+fn requirement_storage_reopen_after_replacement_initializes_allocator_from_recovered_free_list_head(
+) {
     let (_, _, _, reopened, first_region, _) = replace_map_and_reopen_empty_free_list();
 
     assert_eq!(reopened.last_free_list_head(), Some(first_region));
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-115` Reopening after replacement with an empty free list MUST reconstruct
+//# free-list tail from the recovered reclaimed region.
 #[test]
-fn storage_reopen_after_replacement_reconstructs_free_list_tail() {
+fn requirement_storage_reopen_after_replacement_reconstructs_free_list_tail() {
     let (_, _, _, reopened, first_region, _) = replace_map_and_reopen_empty_free_list();
 
     assert_eq!(reopened.free_list_tail(), Some(first_region));
@@ -2521,7 +2627,8 @@ fn requirement_storage_reopen_after_replacement_recovers_collection_and_reclaim_
 
 //= spec/ring.md#region-reclaim
 //= type=test
-//# `RING-REGION-RECLAIM-PRE-002` After the detach step, the reclaimed region `r` MUST no longer be reachable from any live collection head or live WAL state.
+//# `RING-REGION-RECLAIM-PRE-002` After the detach step, the reclaimed region `r` MUST no longer be
+//# reachable from any live collection head or live WAL state.
 #[test]
 fn requirement_storage_replacement_flush_detaches_reclaimed_region_from_live_state() {
     let (_, _, storage, first_region, second_region) =
@@ -2536,7 +2643,8 @@ fn requirement_storage_replacement_flush_detaches_reclaimed_region_from_live_sta
 
 //= spec/ring.md#region-reclaim
 //= type=test
-//# `RING-REGION-RECLAIM-PRE-003` `r` MUST NOT already be reachable from the free-list chain, unless this procedure is being re-entered during crash recovery.
+//# `RING-REGION-RECLAIM-PRE-003` `r` MUST NOT already be reachable from the free-list chain, unless
+//# this procedure is being re-entered during crash recovery.
 #[test]
 fn requirement_storage_replacement_flush_keeps_detached_region_out_of_free_list_chain() {
     let (flash, _, storage, first_region, _) =
@@ -2548,7 +2656,9 @@ fn requirement_storage_replacement_flush_keeps_detached_region_out_of_free_list_
 
 //= spec/ring.md#region-reclaim
 //= type=test
-//# `RING-REGION-RECLAIM-SEM-003` If `t_prev = none`, reclaim MUST NOT write any predecessor link and MUST durably append `free_list_head(r)` and set `free_list_head = r` and `free_list_tail = r`.
+//# `RING-REGION-RECLAIM-SEM-003` If `t_prev = none`, reclaim MUST NOT write any predecessor link
+//# and MUST durably append `free_list_head(r)` and set `free_list_head = r` and `free_list_tail =
+//# r`.
 #[test]
 fn requirement_storage_reopen_after_replacement_recovers_singleton_free_list_for_reclaimed_region()
 {
@@ -2589,7 +2699,8 @@ fn requirement_storage_reopen_after_replacement_leaves_new_free_list_tail_uninit
 
 //= spec/ring.md#region-reclaim
 //= type=test
-//# `RING-REGION-RECLAIM-ORDER-005` The reclaim procedure MUST be idempotent across crashes between any two steps above.
+//# `RING-REGION-RECLAIM-ORDER-005` The reclaim procedure MUST be idempotent across crashes between
+//# any two steps above.
 #[test]
 fn requirement_storage_reopen_after_replacement_recovers_reclaim_idempotently() {
     let (mut flash, mut workspace, _, reopened_once, _, _) =
@@ -2650,8 +2761,12 @@ fn requirement_storage_map_flush_rejects_consuming_min_free_region_reserve() {
     ));
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-116` Map flush MUST complete detached pending reclaims before allocating
+//# from the minimum free-region reserve.
 #[test]
-fn storage_map_flush_completes_detached_reclaims_before_using_reserve() {
+fn requirement_storage_map_flush_completes_detached_reclaims_before_using_reserve() {
     let mut flash = MockFlash::<512, 9, 4096>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =
@@ -2980,8 +3095,12 @@ fn requirement_storage_complete_pending_reclaim_syncs_the_tail_link_before_recla
     assert!(first_sync < reclaim_end_write);
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-117` Reopening after a premature reclaim_begin before replacement detaches
+//# the old head MUST discard the pending reclaim and preserve the old map basis and value.
 #[test]
-fn storage_reopen_discards_reclaim_begin_before_replacement_detaches_old_head() {
+fn requirement_storage_reopen_discards_reclaim_begin_before_replacement_detaches_old_head() {
     let mut flash = MockFlash::<512, 7, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =
@@ -3027,8 +3146,13 @@ fn storage_reopen_discards_reclaim_begin_before_replacement_detaches_old_head() 
     );
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-118` Dropping a map with committed-region basis MUST start reclaim for
+//# that region, tombstone the collection, complete reclaim on reopen, and reject reopening the
+//# dropped map.
 #[test]
-fn storage_drop_map_starts_reclaim_for_committed_region_basis() {
+fn requirement_storage_drop_map_starts_reclaim_for_committed_region_basis() {
     let mut flash = MockFlash::<512, 7, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =
@@ -3078,8 +3202,12 @@ fn storage_drop_map_starts_reclaim_for_committed_region_basis() {
     ));
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-119` Reopening after a premature reclaim_begin before drop detaches the
+//# live region MUST discard the pending reclaim and preserve the live map basis and value.
 #[test]
-fn storage_reopen_discards_reclaim_begin_before_drop_detaches_live_region() {
+fn requirement_storage_reopen_discards_reclaim_begin_before_drop_detaches_live_region() {
     let mut flash = MockFlash::<512, 7, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =
@@ -3180,8 +3308,12 @@ fn requirement_storage_drop_map_records_reclaim_before_drop() {
     );
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-120` Dropping a map whose basis is a WAL snapshot MUST tombstone the
+//# collection without starting a region reclaim.
 #[test]
-fn storage_drop_map_from_snapshot_basis_has_no_region_reclaim() {
+fn requirement_storage_drop_map_from_snapshot_basis_has_no_region_reclaim() {
     let mut flash = MockFlash::<512, 7, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =

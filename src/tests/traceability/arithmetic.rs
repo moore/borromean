@@ -1,6 +1,6 @@
 use super::*;
-use ::core::mem::size_of;
 use heapless::Vec as HeaplessVec;
+use std::mem::size_of;
 
 fn storage_with_max_seen_sequence() -> (MockFlash<128, 4, 256>, StorageWorkspace<128>, Storage<8, 4>)
 {

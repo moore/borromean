@@ -1,9 +1,10 @@
 use super::{
     check_annotation_shape, collect_annotation_block, collect_normative_requirement_items,
-    contains_inline_test_body, contains_normative_language, extract_requirement_ids,
-    inline_test_module_offenders, is_dedicated_test_file, multi_requirement_harness_offenders,
-    relative_display, spec_requirement_format_offenders, strip_numbered_prefix, ParsedBlock,
-    Summary,
+    contains_inline_test_body, contains_normative_language, extract_all_requirement_ids,
+    extract_requirement_ids, functional_untraced_test_offenders, inline_test_module_offenders,
+    is_dedicated_test_file, is_functional_test_file, multi_requirement_harness_offenders,
+    normalize_requirement_whitespace, relative_display, spec_requirement_format_offenders,
+    strip_numbered_prefix, ParsedBlock, Summary,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -68,7 +69,8 @@ fn parsed_block_empty_requires_all_trace_vectors_to_be_empty() {
 
 //= spec/implementation-policy.md#requirements-format
 //= type=test
-//# `RING-IMPL-FORMAT-001` Each normative requirement in [spec/implementation.md](implementation.md) or this specification MUST start with a stable identifier such as `RING-IMPL-CORE-001`.
+//# `RING-IMPL-FORMAT-001` Each normative requirement in [spec/implementation.md](implementation.md)
+//# or this specification MUST start with a stable identifier such as `RING-IMPL-CORE-001`.
 #[test]
 fn requirement_ring_impl_format_001_rejects_missing_stable_ids() {
     let workspace = TempWorkspace::new("");
@@ -86,7 +88,8 @@ fn requirement_ring_impl_format_001_rejects_missing_stable_ids() {
 
 //= spec/implementation-policy.md#requirements-format
 //= type=test
-//# `RING-IMPL-FORMAT-002` Each normative requirement in [spec/implementation.md](implementation.md) or this specification MUST use explicit RFC-2119 normative language.
+//# `RING-IMPL-FORMAT-002` Each normative requirement in [spec/implementation.md](implementation.md)
+//# or this specification MUST use explicit RFC-2119 normative language.
 #[test]
 fn requirement_ring_impl_format_002_rejects_missing_normative_language() {
     let workspace = TempWorkspace::new("");
@@ -102,9 +105,27 @@ fn requirement_ring_impl_format_002_rejects_missing_normative_language() {
     assert!(error.contains("no normative requirement items"));
 }
 
+#[test]
+fn requirement_format_rejects_test_name_placeholder_requirements() {
+    let workspace = TempWorkspace::new("");
+    workspace.write_spec(
+        "spec/example.md",
+        "1. `RING-EXAMPLE-001` The implementation MUST preserve the functional behavior exercised by the requirement_example regression test.\n",
+    );
+
+    let error = spec_requirement_format_offenders(&workspace.root, "spec/example.md", "RING-")
+        .unwrap()
+        .unwrap();
+
+    assert!(error.contains("test-name placeholder"));
+}
+
 //= spec/implementation-policy.md#verification-requirements
 //= type=test
-//# `RING-IMPL-TEST-001` Every normative requirement in [spec/ring.md](ring.md) or [spec/implementation.md](implementation.md) MUST have at least one dedicated automated test function or dedicated compile-time test case whose primary purpose is to verify that single requirement.
+//# `RING-IMPL-TEST-001` Every normative requirement in [spec/ring.md](ring.md) or
+//# [spec/implementation.md](implementation.md) MUST have at least one dedicated automated test
+//# function or dedicated compile-time test case whose primary purpose is to verify that single
+//# requirement.
 #[test]
 fn requirement_ring_impl_test_001_accepts_single_requirement_and_todo_tests() {
     let source = format!(
@@ -162,7 +183,8 @@ fn rejects_todo_trace_without_todo_prefix() {
 
 //= spec/implementation-policy.md#verification-requirements
 //= type=test
-//# `RING-IMPL-TEST-002` A top-level automated test function MUST NOT claim to verify multiple normative requirement identifiers.
+//# `RING-IMPL-TEST-002` A top-level automated test function MUST NOT claim to verify multiple
+//# normative requirement identifiers.
 #[test]
 fn requirement_ring_impl_test_002_rejects_multi_requirement_tests() {
     let source = format!(
@@ -182,7 +204,9 @@ fn requirement_ring_impl_test_002_rejects_multi_requirement_tests() {
 
 //= spec/implementation-policy.md#verification-requirements
 //= type=test
-//# `RING-IMPL-TEST-003` Shared setup, fixtures, helper functions, macros, and data generators MAY be reused across requirement-specific tests, but the final traced test entry point MUST remain specific to one requirement identifier.
+//# `RING-IMPL-TEST-003` Shared setup, fixtures, helper functions, macros, and data generators MAY
+//# be reused across requirement-specific tests, but the final traced test entry point MUST remain
+//# specific to one requirement identifier.
 #[test]
 fn requirement_ring_impl_test_003_rejects_traced_helpers() {
     let source = format!(
@@ -202,7 +226,9 @@ fn requirement_ring_impl_test_003_rejects_traced_helpers() {
 
 //= spec/implementation-policy.md#verification-requirements
 //= type=test
-//# `RING-IMPL-TEST-004` When a requirement is verified by a compile-fail, compile-pass, or other non-runtime harness, that harness entry MUST still be dedicated to a single requirement identifier.
+//# `RING-IMPL-TEST-004` When a requirement is verified by a compile-fail, compile-pass, or other
+//# non-runtime harness, that harness entry MUST still be dedicated to a single requirement
+//# identifier.
 #[test]
 fn requirement_ring_impl_test_004_rejects_multi_requirement_harness_entries() {
     let workspace = TempWorkspace::new("");
@@ -229,7 +255,9 @@ fn single_requirement_harness_entries_are_not_offenders() {
 
 //= spec/implementation-policy.md#verification-requirements
 //= type=test
-//# `RING-IMPL-TEST-005` Automated test functions and compile-time test harness entries MUST be defined only in dedicated test modules or files rather than inside the functional implementation module they exercise.
+//# `RING-IMPL-TEST-005` Automated test functions and compile-time test harness entries MUST be
+//# defined only in dedicated test modules or files rather than inside the functional implementation
+//# module they exercise.
 #[test]
 fn requirement_ring_impl_test_005_rejects_inline_test_modules() {
     let workspace = TempWorkspace::new("fn helper() {}\n\n#[test]\nfn inline_test() {}\n");
@@ -237,6 +265,45 @@ fn requirement_ring_impl_test_005_rejects_inline_test_modules() {
     let error = inline_test_module_offenders(&workspace.root).unwrap();
 
     assert!(error.contains("non-test source files"));
+}
+
+//= spec/implementation-policy.md#verification-requirements
+//= type=test
+//# `RING-IMPL-TEST-006` Functional library test entry points MUST be
+//# requirement-derived and traced with exactly one Duvet requirement or
+//# todo block; untraced `#[test]` functions MAY exist only in
+//# tooling-specific test suites that verify repository tooling rather
+//# than functional library behavior.
+#[test]
+fn requirement_ring_impl_test_006_rejects_untraced_functional_test_entries() {
+    let workspace = TempWorkspace::new("");
+    workspace.write_harness(
+        "src/storage/tests.rs",
+        "\n#[test]\nfn storage_regression() {}\n\nfn helper() {}\n",
+    );
+
+    let error = functional_untraced_test_offenders(&workspace.root).unwrap();
+
+    assert!(error.contains("src/storage/tests.rs:3"));
+    assert!(error.contains("storage_regression"));
+    assert!(!error.contains("helper"));
+}
+
+#[test]
+fn functional_untraced_test_checker_accepts_traced_entries_and_tooling_tests() {
+    let source = format!(
+        "\n{eq} spec/ring.md#anchor\n{eq} type=test\n{quote} `RING-EXAMPLE-001` The storage layer MUST preserve data.\n#[test]\nfn requirement_storage_regression() {{}}\n",
+        eq = "//=",
+        quote = "//#"
+    );
+    let workspace = TempWorkspace::new("");
+    workspace.write_harness("src/storage/tests.rs", &source);
+    workspace.write_harness(
+        "src/bin/traceability_audit/tests.rs",
+        "\n#[test]\nfn checker_unit_test() {}\n",
+    );
+
+    assert_eq!(functional_untraced_test_offenders(&workspace.root), None);
 }
 
 #[test]
@@ -276,6 +343,42 @@ fn rejects_duplicate_requirement_traces() {
 }
 
 #[test]
+fn rejects_duplicate_requirement_traces_with_only_wrapping_differences() {
+    let source = format!(
+        "\n{eq} spec/ring.md#anchor\n{eq} type=test\n{quote} `RING-EXAMPLE-001` The parser MUST parse wrapped citations.\n#[test]\nfn requirement_one() {{}}\n\n{eq} spec/ring.md#anchor\n{eq} type=test\n{quote} `RING-EXAMPLE-001` The parser MUST parse\n{quote} wrapped citations.\n#[test]\nfn requirement_two() {{}}\n",
+        eq = "//=",
+        quote = "//#"
+    );
+    let workspace = TempWorkspace::new(&source);
+    let mut errors = Vec::new();
+
+    check_annotation_shape(&workspace.root, &mut errors);
+
+    assert!(errors
+        .iter()
+        .any(|error| error.contains("duplicates requirement")));
+}
+
+#[test]
+fn accepts_spec_quotes_with_only_wrapping_differences() {
+    let source = format!(
+        "\n{eq} spec/ring.md#anchor\n{eq} type=test\n{quote} `RING-EXAMPLE-001` The parser MUST parse\n{quote} wrapped citations.\n#[test]\nfn requirement_wrapped_quote() {{}}\n",
+        eq = "//=",
+        quote = "//#"
+    );
+    let workspace = TempWorkspace::new(&source);
+    workspace.write_spec(
+        "spec/ring.md",
+        "1. `RING-EXAMPLE-001` The parser MUST parse wrapped citations.\n",
+    );
+    let mut errors = Vec::new();
+
+    check_annotation_shape(&workspace.root, &mut errors);
+
+    assert_eq!(errors, Vec::<String>::new());
+}
+
+#[test]
 fn rejects_missing_requirement_prefix() {
     let source = format!(
         "\n{eq} spec/ring.md#anchor\n{eq} type=test\n{quote} `RING-EXAMPLE-001` The parser MUST parse things.\n#[test]\nfn parses_things() {{}}\n",
@@ -290,6 +393,23 @@ fn rejects_missing_requirement_prefix() {
     assert!(errors
         .iter()
         .any(|error| error.contains("requirement_ prefix")));
+}
+
+#[test]
+fn rejects_trace_quotes_that_are_test_name_placeholders() {
+    let source = format!(
+        "\n{eq} spec/ring.md#anchor\n{eq} type=test\n{quote} `RING-EXAMPLE-001` The implementation MUST preserve the functional behavior exercised by the requirement_example regression test.\n#[test]\nfn requirement_example() {{}}\n",
+        eq = "//=",
+        quote = "//#"
+    );
+    let workspace = TempWorkspace::new(&source);
+    let mut errors = Vec::new();
+
+    check_annotation_shape(&workspace.root, &mut errors);
+
+    assert!(errors
+        .iter()
+        .any(|error| error.contains("test-name placeholder")));
 }
 
 #[test]
@@ -365,6 +485,10 @@ fn numbered_prefix_and_normative_language_helpers_cover_boundaries() {
     ));
     assert!(contains_normative_language("The system MAY defer work."));
     assert!(!contains_normative_language("The system must work."));
+    assert_eq!(
+        normalize_requirement_whitespace("`RING-X-001` The system\nMUST work."),
+        "`RING-X-001` The system MUST work."
+    );
 }
 
 #[test]
@@ -384,6 +508,20 @@ fn inline_and_dedicated_test_file_helpers_classify_paths_precisely() {
     assert!(!is_dedicated_test_file(&PathBuf::from(
         "src/example/mod.rs"
     )));
+
+    let root = PathBuf::from("/repo");
+    assert!(is_functional_test_file(
+        &root,
+        &root.join("src/storage/tests.rs")
+    ));
+    assert!(is_functional_test_file(
+        &root,
+        &root.join("src/tests/traceability/io.rs")
+    ));
+    assert!(!is_functional_test_file(
+        &root,
+        &root.join("src/bin/traceability_audit/tests.rs")
+    ));
 }
 
 #[test]
@@ -395,6 +533,10 @@ fn extract_requirement_ids_and_relative_display_are_stable() {
     assert_eq!(
         extract_requirement_ids("//# `RING-` is not an id."),
         Vec::<String>::new()
+    );
+    assert_eq!(
+        extract_all_requirement_ids("1. `RING-EXAMPLE-003` Numbered specs work."),
+        vec!["RING-EXAMPLE-003"]
     );
 
     let root = PathBuf::from("/tmp/trace-root");

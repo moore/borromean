@@ -343,8 +343,12 @@ fn requirement_committed_region_write_uses_a_region_previously_reserved_by_alloc
         .unwrap();
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-063` Committed region writes MUST accept a payload that exactly fills
+//# committed payload capacity and persist the full payload bytes.
 #[test]
-fn write_committed_region_accepts_payload_that_exactly_fills_committed_capacity() {
+fn requirement_write_committed_region_accepts_payload_that_exactly_fills_committed_capacity() {
     const REGION_SIZE: usize = 256;
     const PAYLOAD_CAPACITY: usize =
         REGION_SIZE - Header::ENCODED_LEN - FreePointerFooter::ENCODED_LEN;
@@ -454,8 +458,12 @@ fn requirement_reopen_after_alloc_begin_recovers_the_advanced_allocator_state() 
     assert_eq!(reopened.free_list_tail(), Some(4));
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-064` Formatting storage MUST return fresh runtime state with metadata, WAL
+//# head/tail, allocator, collection, and reclaim fields initialized.
 #[test]
-fn format_returns_fresh_runtime_state() {
+fn requirement_format_returns_fresh_runtime_state() {
     let mut flash = MockFlash::<128, 4, 64>::new(0xff);
     let state = format::<128, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
 
@@ -571,8 +579,12 @@ fn requirement_wal_collection_type_is_reserved_for_collection_id_zero() {
     );
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-065` WAL record visitation MUST report snapshot and update records after a
+//# new collection in durable WAL order.
 #[test]
-fn visit_wal_records_reports_snapshot_and_update_records() {
+fn requirement_visit_wal_records_reports_snapshot_and_update_records() {
     let mut flash = MockFlash::<256, 4, 512>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
     let mut state = format::<256, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
@@ -621,8 +633,12 @@ fn visit_wal_records_reports_snapshot_and_update_records() {
     );
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-066` Opening storage MUST return replayed runtime state with append
+//# offset, max sequence, collection type, committed basis, and pending update count.
 #[test]
-fn open_returns_replayed_collection_runtime_state() {
+fn requirement_open_returns_replayed_collection_runtime_state() {
     let mut flash = MockFlash::<256, 4, 96>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
     init_user_region_header(&mut flash, 2, 4, CollectionId(7), 1);
@@ -677,8 +693,12 @@ fn open_returns_replayed_collection_runtime_state() {
     assert_eq!(state.collections()[0].pending_update_count(), 0);
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-067` Opening storage MUST complete reclaims for regions already on the
+//# free list and clear pending reclaim state.
 #[test]
-fn open_completes_reclaims_already_on_the_free_list() {
+fn requirement_open_completes_reclaims_already_on_the_free_list() {
     let mut flash = MockFlash::<256, 4, 96>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
     let wal_offset = metadata.wal_record_area_offset().unwrap();
@@ -708,8 +728,12 @@ fn open_completes_reclaims_already_on_the_free_list() {
     assert!(state.pending_reclaims().is_empty());
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-068` Opening storage MUST discard pending reclaim records for regions
+//# still reachable from live collection state.
 #[test]
-fn open_discards_pending_reclaims_for_still_live_regions() {
+fn requirement_open_discards_pending_reclaims_for_still_live_regions() {
     let mut flash = MockFlash::<256, 4, 128>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
     init_user_region_header(&mut flash, 2, 4, CollectionId(7), 1);
@@ -743,8 +767,12 @@ fn open_discards_pending_reclaims_for_still_live_regions() {
     assert!(state.pending_reclaims().is_empty());
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-069` Appending a new collection and update MUST refresh runtime collection
+//# state and pending update count.
 #[test]
-fn append_new_collection_and_update_refresh_runtime_state() {
+fn requirement_append_new_collection_and_update_refresh_runtime_state() {
     let mut flash = MockFlash::<256, 4, 512>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
     let mut state = format::<256, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
@@ -788,8 +816,12 @@ fn requirement_append_update_requires_a_prior_new_collection_record() {
     );
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-070` Appending a snapshot MUST move the collection to WAL snapshot basis
+//# and clear prior pending updates.
 #[test]
-fn append_snapshot_resets_pending_updates() {
+fn requirement_append_snapshot_resets_pending_updates() {
     let mut flash = MockFlash::<256, 4, 512>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
     let mut state = format::<256, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
@@ -822,8 +854,12 @@ fn append_snapshot_resets_pending_updates() {
     assert_eq!(state.collections()[0].pending_update_count(), 0);
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-071` Appending head and drop records MUST refresh runtime basis to
+//# committed region and then dropped tombstone while reducing tracked live collection count.
 #[test]
-fn append_head_and_drop_refresh_runtime_state() {
+fn requirement_append_head_and_drop_refresh_runtime_state() {
     let mut flash = MockFlash::<256, 4, 128>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
     let mut state = format::<256, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
@@ -939,8 +975,12 @@ fn requirement_append_alloc_and_reclaim_methods_refresh_runtime_state() {
     assert!(state.pending_reclaims().is_empty());
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-072` Appending WAL recovery MUST clear pending recovery boundary and
+//# advance append offset; appending free-list-head MUST refresh allocator head and tail.
 #[test]
-fn append_free_list_head_and_wal_recovery_refresh_runtime_state() {
+fn requirement_append_free_list_head_and_wal_recovery_refresh_runtime_state() {
     let mut flash = MockFlash::<256, 4, 128>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
@@ -964,8 +1004,12 @@ fn append_free_list_head_and_wal_recovery_refresh_runtime_state() {
     assert_eq!(state.free_list_tail(), Some(3));
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-073` WAL rotation start/finish appends MUST reserve the next free region,
+//# advance allocator state, then move WAL tail to the new region and clear ready_region.
 #[test]
-fn append_rotation_start_and_finish_move_to_new_tail() {
+fn requirement_append_rotation_start_and_finish_move_to_new_tail() {
     let mut flash = MockFlash::<128, 4, 128>::new(0xff);
     let mut workspace = StorageWorkspace::<128>::new();
     let mut state = format::<128, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
@@ -1007,8 +1051,12 @@ fn requirement_committed_region_allocations_advance_sequence_from_max_seen_seque
     assert_eq!(progress.max_seen_after_second, progress.second_sequence);
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-074` WAL rotation MUST initialize the new WAL region at max_seen_sequence
+//# + 1 and update runtime max_seen_sequence.
 #[test]
-fn wal_rotation_initializes_the_next_wal_region_at_max_seen_sequence_plus_one() {
+fn requirement_wal_rotation_initializes_the_next_wal_region_at_max_seen_sequence_plus_one() {
     let mut flash = MockFlash::<128, 4, 128>::new(0xff);
     let mut workspace = StorageWorkspace::<128>::new();
     let mut state = format::<128, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
@@ -1125,8 +1173,12 @@ fn requirement_stage_ready_region_detaches_ready_region_and_allows_next_allocati
     assert_eq!(state.ready_region(), Some(second_region));
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-075` Reopening with uncommitted staged regions MUST reclaim staged regions
+//# and leave no ready or staged regions live.
 #[test]
-fn staged_regions_are_reclaimed_on_reopen_when_uncommitted() {
+fn requirement_staged_regions_are_reclaimed_on_reopen_when_uncommitted() {
     let mut flash = MockFlash::<512, 5, 512>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut state = format::<512, 5, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
@@ -1152,8 +1204,12 @@ fn staged_regions_are_reclaimed_on_reopen_when_uncommitted() {
     assert!(reopened.staged_regions().is_empty());
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-076` Staging a region MUST reject region indexes that do not match the
+//# current ready_region.
 #[test]
-fn stage_ready_region_rejects_non_ready_region() {
+fn requirement_stage_ready_region_rejects_non_ready_region() {
     let mut flash = MockFlash::<512, 5, 256>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut state = format::<512, 5, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
@@ -1325,8 +1381,12 @@ fn requirement_initialized_wal_region_erases_the_wal_region_before_reuse() {
     ));
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-077` Normal WAL appends MUST reject writes that would consume rotation
+//# reserve until WAL rotation completes, after which appends may continue.
 #[test]
-fn normal_append_rejects_when_it_would_consume_rotation_reserve() {
+fn requirement_normal_append_rejects_when_it_would_consume_rotation_reserve() {
     let mut flash = MockFlash::<256, 4, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
     let mut state = format::<256, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
@@ -1368,8 +1428,12 @@ fn normal_append_rejects_when_it_would_consume_rotation_reserve() {
         .unwrap();
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-078` WAL rotation start MUST reject calls made before the WAL tail has
+//# entered the rotation window.
 #[test]
-fn append_wal_rotation_start_rejects_when_called_before_rotation_window() {
+fn requirement_append_wal_rotation_start_rejects_when_called_before_rotation_window() {
     let mut flash = MockFlash::<256, 4, 512>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
     let mut state = format::<256, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
@@ -1384,8 +1448,12 @@ fn append_wal_rotation_start_rejects_when_called_before_rotation_window() {
     ));
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-079` Head append room checks MUST perform WAL rotation when the current
+//# tail lacks room for a head record.
 #[test]
-fn ensure_head_append_room_with_rotation_rotates_when_tail_lacks_head_room() {
+fn requirement_ensure_head_append_room_with_rotation_rotates_when_tail_lacks_head_room() {
     let mut flash = MockFlash::<256, 6, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
     let mut state = format::<256, 6, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
@@ -1423,8 +1491,12 @@ fn ensure_head_append_room_with_rotation_rotates_when_tail_lacks_head_room() {
     assert_ne!(state.wal_tail(), tail_before);
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-080` Stage-region append room checks MUST reject staging when allocator
+//# state no longer matches the target region.
 #[test]
-fn ensure_stage_region_append_room_with_rotation_rotates_when_tail_lacks_stage_room() {
+fn requirement_ensure_stage_region_append_room_with_rotation_rotates_when_tail_lacks_stage_room() {
     let mut flash = MockFlash::<256, 6, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
     let mut state = format::<256, 6, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
@@ -1449,8 +1521,12 @@ fn ensure_stage_region_append_room_with_rotation_rotates_when_tail_lacks_stage_r
         .is_err());
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-081` Encoded append reserve checks for alloc_begin MUST require a free
+//# region and return WalRotationRequired when none remains.
 #[test]
-fn ensure_encoded_append_reserve_rejects_alloc_begin_when_no_free_region_remains() {
+fn requirement_ensure_encoded_append_reserve_rejects_alloc_begin_when_no_free_region_remains() {
     let mut flash = MockFlash::<128, 4, 128>::new(0xff);
     let mut workspace = StorageWorkspace::<128>::new();
     let mut state = format::<128, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
@@ -1463,8 +1539,13 @@ fn ensure_encoded_append_reserve_rejects_alloc_begin_when_no_free_region_remains
     );
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-082` Encoded append reserve checks MUST allow alloc_begin when the tail
+//# has exactly the rotation reserve plus encoded record length remaining.
 #[test]
-fn ensure_encoded_append_reserve_accepts_alloc_begin_at_exact_rotation_reserve_boundary() {
+fn requirement_ensure_encoded_append_reserve_accepts_alloc_begin_at_exact_rotation_reserve_boundary(
+) {
     let mut flash = MockFlash::<256, 4, 512>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
     let mut state = format::<256, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
@@ -1489,8 +1570,12 @@ fn ensure_encoded_append_reserve_accepts_alloc_begin_at_exact_rotation_reserve_b
     );
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-083` WAL-head reclaim classification MUST copy only head records that
+//# still reference the retained live region and skip stale head records.
 #[test]
-fn classify_wal_head_reclaim_copies_only_the_retained_region_head() {
+fn requirement_classify_wal_head_reclaim_copies_only_the_retained_region_head() {
     let mut flash = MockFlash::<512, 5, 512>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut state = format::<512, 5, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
@@ -1556,8 +1641,12 @@ fn classify_wal_head_reclaim_copies_only_the_retained_region_head() {
     );
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-084` WAL-head reclaim classification MUST copy drop tombstones only for
+//# collections that remain dropped and skip drops for live collections.
 #[test]
-fn classify_wal_head_reclaim_copies_only_retained_drop_tombstones() {
+fn requirement_classify_wal_head_reclaim_copies_only_retained_drop_tombstones() {
     let mut flash = MockFlash::<256, 4, 512>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
     let mut live_state = format::<256, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
@@ -1603,8 +1692,12 @@ fn classify_wal_head_reclaim_copies_only_retained_drop_tombstones() {
     );
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-085` Foreground allocation headroom checks MUST reject allocations that
+//# would consume the configured minimum free-region reserve.
 #[test]
-fn ensure_foreground_allocation_headroom_rejects_using_the_minimum_free_reserve() {
+fn requirement_ensure_foreground_allocation_headroom_rejects_using_the_minimum_free_reserve() {
     let mut flash = MockFlash::<256, 5, 1024>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
     let mut state = format::<256, 5, _, 8, 4>(&mut flash, 3, 8, 0xa5).unwrap();
@@ -1622,8 +1715,12 @@ fn ensure_foreground_allocation_headroom_rejects_using_the_minimum_free_reserve(
     );
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-086` WAL-head reclaim copying MUST stop cleanly when a copied tail record
+//# ends exactly at the region end.
 #[test]
-fn copy_live_wal_head_reclaim_state_stops_when_a_record_ends_at_region_end() {
+fn requirement_copy_live_wal_head_reclaim_state_stops_when_a_record_ends_at_region_end() {
     let mut flash = MockFlash::<128, 4, 512>::new(0xff);
     let mut workspace = StorageWorkspace::<128>::new();
     let mut state = format::<128, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
@@ -1640,8 +1737,12 @@ fn copy_live_wal_head_reclaim_state_stops_when_a_record_ends_at_region_end() {
         .unwrap();
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-087` Live-state reachability checks MUST NOT parse non-map collection
+//# heads as maps.
 #[test]
-fn region_reachable_from_live_state_does_not_parse_non_map_region_heads_as_maps() {
+fn requirement_region_reachable_from_live_state_does_not_parse_non_map_region_heads_as_maps() {
     let mut flash = MockFlash::<128, 4, 512>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
     init_user_region_header(
@@ -1666,16 +1767,17 @@ fn region_reachable_from_live_state_does_not_parse_non_map_region_heads_as_maps(
 
     let mut workspace = StorageWorkspace::<128>::new();
     let state = open::<128, 4, _, 8, 4>(&mut flash).unwrap();
-    assert_eq!(
-        state
-            .region_reachable_from_live_state::<128, _>(&mut flash, &mut workspace, 3)
-            .unwrap(),
-        false
-    );
+    assert!(!state
+        .region_reachable_from_live_state::<128, _>(&mut flash, &mut workspace, 3)
+        .unwrap());
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-088` Live-state reachability checks MUST follow live map manifest heads to
+//# referenced run regions.
 #[test]
-fn region_reachable_from_live_state_follows_map_head_references_to_run_regions() {
+fn requirement_region_reachable_from_live_state_follows_map_head_references_to_run_regions() {
     const REGION_SIZE: usize = 512;
     const REGION_COUNT: usize = 32;
     const MAX_INDEXES: usize = 128;
@@ -1726,8 +1828,12 @@ fn region_reachable_from_live_state_follows_map_head_references_to_run_regions()
         .unwrap());
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-089` Dropping a staged region in memory MUST remove only the matching
+//# staged region and preserve other staged regions.
 #[test]
-fn drop_staged_region_in_memory_removes_only_the_matching_region() {
+fn requirement_drop_staged_region_in_memory_removes_only_the_matching_region() {
     let mut flash = MockFlash::<128, 4, 128>::new(0xff);
     let mut state = format::<128, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
     state.staged_regions.push(1).unwrap();
@@ -1737,8 +1843,12 @@ fn drop_staged_region_in_memory_removes_only_the_matching_region() {
     assert_eq!(state.staged_regions(), &[2]);
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-090` WAL record visitation MUST process a tail record that ends exactly at
+//# the append limit and then stop.
 #[test]
-fn visit_wal_records_stops_when_a_tail_record_ends_at_the_append_limit() {
+fn requirement_visit_wal_records_stops_when_a_tail_record_ends_at_the_append_limit() {
     let mut flash = MockFlash::<128, 4, 512>::new(0xff);
     let mut workspace = StorageWorkspace::<128>::new();
     let mut state = format::<128, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
@@ -1763,8 +1873,12 @@ fn visit_wal_records_stops_when_a_tail_record_ends_at_the_append_limit() {
     assert_eq!(visited, 1);
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-091` WAL-chain membership checks MUST follow durable link targets to
+//# determine whether a region belongs to the chain.
 #[test]
-fn wal_chain_contains_region_follows_the_durable_link_target() {
+fn requirement_wal_chain_contains_region_follows_the_durable_link_target() {
     let mut flash = MockFlash::<128, 4, 512>::new(0xff);
     let mut workspace = StorageWorkspace::<128>::new();
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();

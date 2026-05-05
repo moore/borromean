@@ -30,6 +30,12 @@ banned_platform_dependencies=(
 tree_output="$(mktemp)"
 trap 'rm -f "$tree_output"' EXIT
 
+echo "[verify] cargo fmt --all -- --check"
+cargo fmt --all -- --check
+
+echo "[verify] rumdl check . --respect-gitignore"
+rumdl check . --respect-gitignore
+
 echo "[verify] cargo test"
 cargo test
 

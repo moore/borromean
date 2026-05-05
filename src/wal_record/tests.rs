@@ -18,8 +18,12 @@ fn encode_logical(record: WalRecord<'_>) -> ([u8; 128], usize) {
     (logical, logical_len)
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-123` WAL byte helpers MUST advance offsets for byte and byte-slice reads
+//# and writes and report BufferTooSmall with needed and available sizes on short buffers.
 #[test]
-fn wal_byte_helpers_advance_offsets_and_reject_short_buffers() {
+fn requirement_wal_byte_helpers_advance_offsets_and_reject_short_buffers() {
     let mut buffer = [0u8; 4];
 
     let offset = write_u8(&mut buffer, 1, 0x7a).unwrap();
@@ -58,8 +62,12 @@ fn wal_byte_helpers_advance_offsets_and_reject_short_buffers() {
     ));
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-124` Logical WAL byte encoding MUST escape erased byte, record magic, and
+//# escape byte with distinct derived escape codes.
 #[test]
-fn logical_byte_encoding_escapes_reserved_physical_bytes() {
+fn requirement_logical_byte_encoding_escapes_reserved_physical_bytes() {
     let metadata = metadata(8);
     let escape_codes = WalEscapeCodes::derive(metadata.erased_byte, metadata.wal_record_magic);
     let mut output = [0u8; 8];
@@ -110,8 +118,12 @@ fn logical_byte_encoding_escapes_reserved_physical_bytes() {
     );
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-125` WAL record decoding MUST consume all encoded physical bytes and
+//# report encoded and logical lengths for decoded records.
 #[test]
-fn decode_record_consumes_all_logical_bytes_and_reports_lengths() {
+fn requirement_decode_record_consumes_all_logical_bytes_and_reports_lengths() {
     let metadata = metadata(8);
     let record = WalRecord::Update {
         collection_id: CollectionId(9),
@@ -130,8 +142,12 @@ fn decode_record_consumes_all_logical_bytes_and_reports_lengths() {
     );
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-126` WAL record decoding MUST wait until all payload-header bytes are
+//# available before reading payload metadata.
 #[test]
-fn decode_record_does_not_read_payload_header_before_all_header_bytes_arrive() {
+fn requirement_decode_record_does_not_read_payload_header_before_all_header_bytes_arrive() {
     let metadata = metadata(8);
     let record = WalRecord::Update {
         collection_id: CollectionId(9),
@@ -145,8 +161,12 @@ fn decode_record_does_not_read_payload_header_before_all_header_bytes_arrive() {
     assert_eq!(decoded.record, record);
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-127` WAL record decoding MUST reject an empty logical scratch buffer
+//# before writing the first decoded logical byte.
 #[test]
-fn decode_record_rejects_empty_logical_scratch_before_writing_first_byte() {
+fn requirement_decode_record_rejects_empty_logical_scratch_before_writing_first_byte() {
     let metadata = metadata(8);
     let (physical, encoded_len) = encode_physical(WalRecord::WalRecovery, metadata);
 
@@ -258,8 +278,12 @@ fn requirement_collection_type_codes_use_reserved_global_namespace() {
     assert_eq!(crate::CollectionType::MAP_CODE, 2);
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-128` Logical WAL record encoding MUST serialize fixed-width fields
+//# little-endian in canonical order.
 #[test]
-fn logical_wal_records_encode_fixed_width_fields_little_endian() {
+fn requirement_logical_wal_records_encode_fixed_width_fields_little_endian() {
     let (logical, logical_len) = encode_logical(WalRecord::Head {
         collection_id: CollectionId(0x0102_0304_0506_0708),
         collection_type: crate::CollectionType::MAP_CODE,
@@ -327,8 +351,12 @@ fn requirement_optional_region_indexes_use_a_tag_then_little_endian_region_index
     );
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-129` Logical WAL record checksums MUST use CRC-32C over logical prefix
+//# bytes and store the checksum little-endian.
 #[test]
-fn logical_record_checksums_use_crc32c_and_store_little_endian_bytes() {
+fn requirement_logical_record_checksums_use_crc32c_and_store_little_endian_bytes() {
     assert_eq!(crc32(b"123456789"), 0xe306_9283);
 
     let payload = [0xaa, 0xbb];
@@ -396,7 +424,8 @@ fn requirement_record_checksums_cover_prior_logical_bytes_but_exclude_checksum_a
 
 //= spec/ring.md#wal-record-types
 //= type=test
-//# RING-WAL-ENC-003 After the leading `record_magic`, the rest of the physical WAL record is encoded with deterministic byte-stuffing over the logical WAL record bytes:
+//# RING-WAL-ENC-003 After the leading `record_magic`, the rest of the physical WAL record is
+//# encoded with deterministic byte-stuffing over the logical WAL record bytes:
 #[test]
 fn requirement_escape_codes_use_first_ascending_distinct_values() {
     let escape_codes = WalEscapeCodes::derive(0x00, 0x02);
@@ -450,7 +479,9 @@ fn requirement_wal_record_magic_must_match_storage_configuration_and_differ_from
 
 //= spec/ring.md#wal-record-types
 //= type=test
-//# RING-WAL-ENC-006 After the full logical record through `record_checksum` has been decoded, any remaining bytes up to the aligned physical record end are padding. Those padding bytes MUST all equal `wal_escape_code_escape`.
+//# RING-WAL-ENC-006 After the full logical record through `record_checksum` has been decoded, any
+//# remaining bytes up to the aligned physical record end are padding. Those padding bytes MUST all
+//# equal `wal_escape_code_escape`.
 #[test]
 fn requirement_decode_rejects_non_escape_padding_bytes() {
     let metadata = metadata(16);
@@ -507,8 +538,12 @@ fn requirement_consecutive_wal_record_start_offsets_stay_aligned_to_wal_write_gr
     assert_eq!((initial_offset + first_len + second_len) % 16, 0);
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-130` Update WAL records MUST round-trip through physical escaping,
+//# padding, and decoding without changing payload bytes.
 #[test]
-fn update_record_round_trips_with_escaping_and_padding() {
+fn requirement_update_record_round_trips_with_escaping_and_padding() {
     let metadata = metadata(8);
     let record = WalRecord::Update {
         collection_id: CollectionId(7),
@@ -545,8 +580,12 @@ fn requirement_empty_payload_record_types_encode_zero_payload_len() {
     assert_eq!(wal_recovery_len, 9);
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-131` Free-list-head WAL records with no region index MUST round-trip
+//# through physical encoding and decoding.
 #[test]
-fn free_list_head_none_round_trips() {
+fn requirement_free_list_head_none_round_trips() {
     let metadata = metadata(4);
     let record = WalRecord::FreeListHead { region_index: None };
     let (physical, encoded_len) = encode_physical(record, metadata);
@@ -705,8 +744,12 @@ fn requirement_record_checksum_covers_logical_prefix_bytes() {
     assert_eq!(u32::from_le_bytes(checksum_bytes), expected_checksum);
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-132` Alloc-begin WAL records MUST round-trip free_list_head_after through
+//# physical encoding and decoding.
 #[test]
-fn alloc_begin_round_trips_free_list_head_after() {
+fn requirement_alloc_begin_round_trips_free_list_head_after() {
     let metadata = metadata(4);
     let record = WalRecord::AllocBegin {
         region_index: 3,

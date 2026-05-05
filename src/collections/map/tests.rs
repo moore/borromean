@@ -99,8 +99,13 @@ fn snapshot_for_entries(entries: &[(i32, Option<i32>)]) -> ([u8; 512], usize) {
     (snapshot, snapshot_len)
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-009` Map run descriptors MUST use inclusive lower and upper key bounds for
+//# may_contain, integer helpers MUST advance offsets and reject short buffers, and manifest
+//# capacity checks MUST reject excess runs.
 #[test]
-fn map_descriptor_and_integer_helpers_cover_bounds() {
+fn requirement_map_descriptor_and_integer_helpers_cover_bounds() {
     let bounded = MapRunDescriptor {
         source: MapRunSource::RunChain,
         generation: 3,
@@ -156,8 +161,13 @@ fn map_descriptor_and_integer_helpers_cover_bounds() {
     ));
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-010` Snapshot helpers MUST validate snapshot layout, preserve
+//# set/delete/not-found lookup semantics, encode exact subranges, and reject out-of-bounds or
+//# undersized buffers.
 #[test]
-fn snapshot_helpers_validate_ranges_and_lookup_semantics() {
+fn requirement_snapshot_helpers_validate_ranges_and_lookup_semantics() {
     let (snapshot, snapshot_len) =
         snapshot_for_entries(&[(1, Some(10)), (2, None), (3, Some(30)), (4, Some(40))]);
     let snapshot = &snapshot[..snapshot_len];
@@ -245,8 +255,12 @@ fn snapshot_helpers_validate_ranges_and_lookup_semantics() {
     );
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-011` Snapshot and frontier search helpers MUST find even-window keys and
+//# return the correct insertion position for missing keys.
 #[test]
-fn search_helpers_cover_even_windows_and_insert_positions() {
+fn requirement_search_helpers_cover_even_windows_and_insert_positions() {
     let (snapshot, snapshot_len) = snapshot_for_entries(&[
         (1, Some(10)),
         (3, Some(30)),
@@ -283,8 +297,12 @@ fn search_helpers_cover_even_windows_and_insert_positions() {
     }
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-012` Loading a snapshot MUST use entry reference offsets rather than
+//# physical entry byte order so reversed adjacent entry storage still loads sorted keys.
 #[test]
-fn load_snapshot_accepts_reversed_adjacent_entry_storage() {
+fn requirement_load_snapshot_accepts_reversed_adjacent_entry_storage() {
     let first = Entry {
         key: 1i32,
         value: Some(10i32),
@@ -335,8 +353,12 @@ fn load_snapshot_accepts_reversed_adjacent_entry_storage() {
     assert_eq!(map.get_frontier(&2).unwrap(), Some(20));
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-013` Snapshot encoding MUST accept exact empty snapshot capacity and
+//# snapshot decoding MUST reject invalid entry references.
 #[test]
-fn snapshot_encoding_accepts_exact_empty_capacity_and_rejects_invalid_refs() {
+fn requirement_snapshot_encoding_accepts_exact_empty_capacity_and_rejects_invalid_refs() {
     let mut empty = [0u8; SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE];
     let len = encode_snapshot_from_entries_into::<i32, i32>(&[], &mut empty).unwrap();
     assert_eq!(len, empty.len());
@@ -386,8 +408,13 @@ fn snapshot_encoding_accepts_exact_empty_capacity_and_rejects_invalid_refs() {
     ));
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-014` Run cursors MUST advance segment positions correctly for ascending
+//# and descending run chains, and compaction writers MUST report segment-fit and state-count
+//# overflow errors.
 #[test]
-fn run_cursor_and_compaction_writer_helpers_cover_boundaries() {
+fn requirement_run_cursor_and_compaction_writer_helpers_cover_boundaries() {
     let run = MapRunDescriptor {
         source: MapRunSource::RunChain,
         generation: 1,
@@ -428,8 +455,13 @@ fn run_cursor_and_compaction_writer_helpers_cover_boundaries() {
     ));
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-015` Entry reference and entry count helpers MUST preserve exact
+//# serialized offsets and counts, and map checkpoints MUST restore prior frontier state while
+//# rejecting undersized buffers.
 #[test]
-fn entry_refs_counts_and_checkpoints_preserve_exact_offsets() {
+fn requirement_entry_refs_counts_and_checkpoints_preserve_exact_offsets() {
     let mut refs = [0u8; ENTRY_COUNT_SIZE + ENTRY_REF_SIZE * 3];
     EntryRef::write(
         &mut refs,
@@ -485,8 +517,12 @@ fn entry_refs_counts_and_checkpoints_preserve_exact_offsets() {
     ));
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-016` Run segment payloads MUST round-trip generation, next-region link,
+//# key bounds, and snapshot lookup semantics, and reject undersized or truncated payloads.
 #[test]
-fn run_segment_payload_round_trip_preserves_header_bounds_and_snapshot() {
+fn requirement_run_segment_payload_round_trip_preserves_header_bounds_and_snapshot() {
     let entries = [
         Entry {
             key: 3i32,
@@ -532,8 +568,12 @@ fn run_segment_payload_round_trip_preserves_header_bounds_and_snapshot() {
     ));
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-017` Committed-region helpers MUST accept boundary-sized payload regions
+//# and legacy snapshot helpers MUST decode exact empty-snapshot payloads.
 #[test]
-fn committed_region_and_legacy_snapshot_helpers_accept_exact_boundaries() {
+fn requirement_committed_region_and_legacy_snapshot_helpers_accept_exact_boundaries() {
     const REGION_SIZE: usize = Header::ENCODED_LEN + FreePointerFooter::ENCODED_LEN;
     let metadata = StorageMetadata::new(REGION_SIZE as u32, 2, 0, 8, 0xff, 0xa5).unwrap();
     let mut flash = MockFlash::<REGION_SIZE, 2, 16>::new(0xff);
@@ -574,8 +614,12 @@ fn committed_region_and_legacy_snapshot_helpers_accept_exact_boundaries() {
     );
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-018` Loading an empty snapshot MUST fit in a frontier buffer containing
+//# only the entry-count header and MUST leave lookups empty.
 #[test]
-fn loading_empty_snapshot_can_exactly_fill_frontier_header() {
+fn requirement_loading_empty_snapshot_can_exactly_fill_frontier_header() {
     let mut buffer = [0u8; ENTRY_COUNT_SIZE];
     let mut map = LsmMap::<i32, i32, 0>::new(CollectionId(94), &mut buffer).unwrap();
 
@@ -585,8 +629,12 @@ fn loading_empty_snapshot_can_exactly_fill_frontier_header() {
     assert_eq!(map.snapshot_len().unwrap(), EMPTY_MAP_SNAPSHOT.len());
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-019` Map run selection and generation helpers MUST count only run-chain
+//# regions for live region totals, compaction selection, and next generation calculations.
 #[test]
-fn run_descriptor_selection_and_generation_helpers_count_only_run_chains() {
+fn requirement_run_descriptor_selection_and_generation_helpers_count_only_run_chains() {
     let mut buffer = [0u8; 128];
     let mut map = LsmMap::<i32, i32, 8, 4>::new(CollectionId(97), &mut buffer).unwrap();
     map.runs
@@ -641,8 +689,12 @@ fn run_descriptor_selection_and_generation_helpers_count_only_run_chains() {
     ));
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-020` Frontier range, region encoding, and checkpoint helpers MUST accept
+//# exact-size buffers, preserve lookup state, and reject undersized or malformed inputs.
 #[test]
-fn frontier_range_region_and_checkpoint_helpers_accept_exact_buffers() {
+fn requirement_frontier_range_region_and_checkpoint_helpers_accept_exact_buffers() {
     let mut buffer = [0u8; 256];
     let mut map = LsmMap::<i32, i32, 8>::new(CollectionId(98), &mut buffer).unwrap();
     for key in 1..=4 {
@@ -699,8 +751,12 @@ fn frontier_range_region_and_checkpoint_helpers_accept_exact_buffers() {
     ));
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-021` Manifest descriptor loading MUST preserve run metadata and reject too
+//# many runs, zero-length run chains, and truncated descriptor payloads.
 #[test]
-fn manifest_descriptor_loading_validates_counts_bounds_and_lengths() {
+fn requirement_manifest_descriptor_loading_validates_counts_bounds_and_lengths() {
     let mut source_buffer = [0u8; 128];
     let mut source = LsmMap::<i32, i32, 8, 2>::new(CollectionId(99), &mut source_buffer).unwrap();
     source
@@ -762,8 +818,12 @@ fn manifest_descriptor_loading_validates_counts_bounds_and_lengths() {
     ));
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-022` Snapshot run segment helpers MUST plan at least one region and encode
+//# requested snapshot subranges with generation, next-region link, bounds, and lookup semantics.
 #[test]
-fn snapshot_run_segment_helpers_plan_and_encode_exact_subranges() {
+fn requirement_snapshot_run_segment_helpers_plan_and_encode_exact_subranges() {
     let (snapshot, snapshot_len) =
         snapshot_for_entries(&[(1, Some(10)), (2, Some(20)), (3, Some(30))]);
     let snapshot = &snapshot[..snapshot_len];
@@ -799,8 +859,13 @@ fn snapshot_run_segment_helpers_plan_and_encode_exact_subranges() {
     );
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-023` Snapshot run planning and storage writes MUST split snapshots that
+//# exceed one committed run payload across multiple run regions, return a descriptor with the exact
+//# state count and lower and upper keys, and return no descriptor for an empty snapshot.
 #[test]
-fn snapshot_run_planning_and_storage_write_cover_multi_region_snapshots() {
+fn requirement_snapshot_run_planning_and_storage_write_cover_multi_region_snapshots() {
     const MAX_INDEXES: usize = 16;
 
     let mut source_buffer = [0u8; 2048];
@@ -870,8 +935,12 @@ fn snapshot_run_planning_and_storage_write_cover_multi_region_snapshots() {
         .is_none());
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-024` Frontier run planning MUST count every committed run payload segment
+//# required for frontier contents that exceed one run-region payload.
 #[test]
-fn frontier_run_planning_counts_all_committed_payload_segments() {
+fn requirement_frontier_run_planning_counts_all_committed_payload_segments() {
     const MAX_INDEXES: usize = 16;
 
     let mut buffer = [0u8; 2048];
@@ -889,8 +958,12 @@ fn frontier_run_planning_counts_all_committed_payload_segments() {
     );
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-025` Reclaiming map run regions MUST move all tracked run-chain regions to
+//# the storage free-list tail.
 #[test]
-fn reclaim_run_regions_moves_run_segments_to_free_list_tail() {
+fn requirement_reclaim_run_regions_moves_run_segments_to_free_list_tail() {
     const REGION_SIZE: usize = 256;
     const REGION_COUNT: usize = 8;
     const MAX_INDEXES: usize = 4;
@@ -938,8 +1011,12 @@ fn reclaim_run_regions_moves_run_segments_to_free_list_tail() {
     assert_eq!(storage.runtime().free_list_tail(), Some(first_region));
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-026` Committing a map manifest MUST reclaim the previous manifest region
+//# and retain only run-chain descriptors in the manifest state.
 #[test]
-fn commit_manifest_reclaims_previous_manifest_and_retains_only_run_chains() {
+fn requirement_commit_manifest_reclaims_previous_manifest_and_retains_only_run_chains() {
     const REGION_SIZE: usize = 512;
     const REGION_COUNT: usize = 12;
     const MAX_INDEXES: usize = 8;
@@ -1002,8 +1079,12 @@ fn commit_manifest_reclaims_previous_manifest_and_retains_only_run_chains() {
         .all(|run| run.source == MapRunSource::RunChain));
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-027` Flushing a map to storage MUST convert valid legacy region bases into
+//# run-chain descriptors and reject flushes that exceed configured run capacity.
 #[test]
-fn flush_to_storage_converts_valid_legacy_regions_and_enforces_run_capacity() {
+fn requirement_flush_to_storage_converts_valid_legacy_regions_and_enforces_run_capacity() {
     const REGION_SIZE: usize = 256;
     const REGION_COUNT: usize = 12;
     let collection_id = CollectionId(108);
@@ -1095,8 +1176,12 @@ fn flush_to_storage_converts_valid_legacy_regions_and_enforces_run_capacity() {
     ));
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-028` Committed run storage helpers MUST read run segment bounds and next
+//# links only from matching map-run regions and reject non-run region headers.
 #[test]
-fn committed_run_storage_helpers_validate_headers_and_next_links() {
+fn requirement_committed_run_storage_helpers_validate_headers_and_next_links() {
     const REGION_SIZE: usize = 256;
     let collection_id = CollectionId(100);
     let metadata = StorageMetadata::new(REGION_SIZE as u32, 4, 0, 8, 0xff, 0xa5).unwrap();
@@ -1163,8 +1248,13 @@ fn committed_run_storage_helpers_validate_headers_and_next_links() {
     let _ = metadata;
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-029` Map lookup helpers MUST read both legacy region snapshots and
+//# manifest run chains, and head-reference checks MUST report manifest and run regions as
+//# reachable.
 #[test]
-fn lookup_and_head_reference_helpers_follow_legacy_regions_and_manifest_runs() {
+fn requirement_lookup_and_head_reference_helpers_follow_legacy_regions_and_manifest_runs() {
     const REGION_SIZE: usize = 256;
     let collection_id = CollectionId(101);
     let metadata = StorageMetadata::new(REGION_SIZE as u32, 5, 0, 8, 0xff, 0xa5).unwrap();
@@ -1284,8 +1374,12 @@ fn lookup_and_head_reference_helpers_follow_legacy_regions_and_manifest_runs() {
     .unwrap());
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-030` Opening a map from storage MUST replay only WAL records for the
+//# requested collection and ignore updates and drop records for other collections.
 #[test]
-fn open_from_storage_uses_only_target_collection_wal_records() {
+fn requirement_open_from_storage_uses_only_target_collection_wal_records() {
     const REGION_SIZE: usize = 512;
     const REGION_COUNT: usize = 8;
     let target_id = CollectionId(103);
@@ -1345,8 +1439,11 @@ fn open_from_storage_uses_only_target_collection_wal_records() {
 
 proptest! {
 
+    //= spec/implementation.md#functional-regression-requirements
+    //= type=test
+    //# `RING-IMPL-REGRESSION-031` Entry reference serialization MUST preserve independent start and end offsets for distinct record indexes.
     #[test]
-    fn check_entry_ref(
+    fn requirement_check_entry_ref(
         (buffer, index1, index2) in vec_and_indexes(),
         start1 in 0..RefType::MAX,
         end1 in 0..RefType::MAX,
@@ -1384,7 +1481,9 @@ proptest! {
 
 //= spec/implementation.md#panic-requirements
 //= type=test
-//# `RING-IMPL-PANIC-004` If a condition is believed to be impossible by construction, the implementation SHOULD encode that proof in types, control flow, or checked validation before the point of use rather than relying on a panic as a backstop.
+//# `RING-IMPL-PANIC-004` If a condition is believed to be impossible by construction, the
+//# implementation SHOULD encode that proof in types, control flow, or checked validation before the
+//# point of use rather than relying on a panic as a backstop.
 #[test]
 fn requirement_set_returns_buffer_too_small_when_map_storage_is_exhausted() {
     const MAX_INDEXES: usize = 4;
@@ -1397,7 +1496,9 @@ fn requirement_set_returns_buffer_too_small_when_map_storage_is_exhausted() {
 
 //= spec/implementation.md#memory-requirements
 //= type=test
-//# `RING-IMPL-MEM-003` If the configured capacities are insufficient to open the store or complete an operation, the implementation MUST fail explicitly with a capacity-related error rather than silently allocate or truncate state.
+//# `RING-IMPL-MEM-003` If the configured capacities are insufficient to open the store or complete
+//# an operation, the implementation MUST fail explicitly with a capacity-related error rather than
+//# silently allocate or truncate state.
 #[test]
 fn requirement_encode_snapshot_returns_buffer_too_small_when_output_capacity_is_insufficient() {
     const BUFFER_SIZE: usize = 64;
@@ -1764,7 +1865,8 @@ fn requirement_region_round_trip_restores_logical_state() {
 
 //= spec/ring.md#collection-head-state-machine
 //= type=test
-//# `RING-FORMAT-014` For non-WAL collections, the pair `(collection_type, collection_format)` MUST identify a unique committed region payload format.
+//# `RING-FORMAT-014` For non-WAL collections, the pair `(collection_type, collection_format)` MUST
+//# identify a unique committed region payload format.
 #[test]
 fn requirement_non_wal_collection_format_pair_identifies_map_region_payloads() {
     requirement_region_round_trip_restores_logical_state();
@@ -2287,8 +2389,12 @@ fn requirement_replay_rejects_invalid_live_collection_payloads() {
     requirement_open_from_storage_rejects_invalid_retained_region_snapshot_and_update_payloads();
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-032` Storage WAL record visitation for maps MUST expose typed
+//# new-collection and snapshot records for map collections in durable order.
 #[test]
-fn storage_visit_wal_records_exposes_map_collection_records() {
+fn requirement_storage_visit_wal_records_exposes_map_collection_records() {
     const REGION_SIZE: usize = 512;
     const REGION_COUNT: usize = 4;
     const MAX_INDEXES: usize = 4;
@@ -2445,8 +2551,11 @@ fn k_v_vec(count: usize) -> impl Strategy<Value = Vec<(i32, i32)>> {
 
 proptest! {
 
+    //= spec/implementation.md#functional-regression-requirements
+    //= type=test
+    //# `RING-IMPL-REGRESSION-033` Map read/write operations MUST return the latest inserted values for generated key/value workloads.
     #[test]
-    fn test_read_write(entries in k_v_vec(100)) {
+    fn requirement_test_read_write(entries in k_v_vec(100)) {
         const BUFFER_SIZE: usize = 2048;
         let mut buffer = vec![0u8; BUFFER_SIZE];
         let id = CollectionId(1);
@@ -2479,8 +2588,11 @@ proptest! {
 
 proptest! {
 
+    //= spec/implementation.md#functional-regression-requirements
+    //= type=test
+    //# `RING-IMPL-REGRESSION-034` Map write/delete operations MUST remove deleted keys while preserving non-deleted entries for generated workloads.
     #[test]
-    fn test_write_delete(entries in k_v_vec(5), delete in 0usize..5) {
+    fn requirement_test_write_delete(entries in k_v_vec(5), delete in 0usize..5) {
         const BUFFER_SIZE: usize = 2048;
         let mut buffer = vec![0u8; BUFFER_SIZE];
         let id = CollectionId(1);

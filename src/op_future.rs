@@ -7,9 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::startup::StartupOpenPlan;
 use crate::storage::WalHeadReclaimPlan;
-use crate::{
-    FlashIo, LsmMap, MapStorageError, Storage, StorageRuntimeError, StorageWorkspace,
-};
+use crate::{FlashIo, LsmMap, MapStorageError, Storage, StorageRuntimeError, StorageWorkspace};
 
 /// Minimal future wrapper that executes a closure exactly once when first polled.
 pub struct RunOnce<F> {
@@ -196,15 +194,14 @@ where
             }
             2 => {
                 this.phase = 3;
-                Poll::Ready(this.storage.flush_map::<
-                    REGION_SIZE,
-                    REGION_COUNT,
-                    IO,
-                    K,
-                    V,
-                    MAX_INDEXES,
-                    MAX_RUNS,
-                >(this.flash, this.workspace, this.map))
+                Poll::Ready(
+                    this.storage
+                        .flush_map::<REGION_SIZE, REGION_COUNT, IO, K, V, MAX_INDEXES, MAX_RUNS>(
+                            this.flash,
+                            this.workspace,
+                            this.map,
+                        ),
+                )
             }
             _ => Poll::Pending,
         }

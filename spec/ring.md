@@ -436,8 +436,8 @@ locations that get repeatedly rewritten or those regions of the flash
 will fail before the rest of the device. This leads to two main
 conclusions:
 
- 1. We should always attempt to free the oldest regions first.
- 2. All data structures should be log structured/append only.
+1. We should always attempt to free the oldest regions first.
+2. All data structures should be log structured/append only.
 
 Freeing the oldest first must be performed on a per-collection basis,
 as each collection is responsible for its own data and is
@@ -447,9 +447,9 @@ The requirement that data structures be append only affects not
 just the implementation of collection types but also the management
 of:
 
- 1. The current heads of each collection instance.
- 2. The tracking of free regions.
- 3. The tracking of the WAL head.
+1. The current heads of each collection instance.
+2. The tracking of free regions.
+3. The tracking of the WAL head.
 
 Each of these is solved by tracking this information in the WAL.
 The WAL is collection 0. At startup we scan regions to find the WAL
@@ -658,13 +658,14 @@ replay order, and `free_list_head_after` must be the successor that was
 observed from that head's free-pointer chain at allocation time.
 `alloc_begin(region_index, free_list_head_after)` has two replay-visible
 effects:
-1. It advances the durable free-list head to `free_list_head_after`.
-2. It reserves `region_index` as `ready_region` until a matching durable
-`head(..., region_index)` or `link(... next_region_index = region_index ...)`
-consumes it. This reservation exists only to preserve crash-safe
-allocator state until consumption so the allocated region cannot leak.
 
-5. `RING-WAL-PAYLOAD-005` `head`
+- It advances the durable free-list head to `free_list_head_after`.
+- It reserves `region_index` as `ready_region` until a matching durable
+  `head(..., region_index)` or `link(... next_region_index = region_index ...)`
+  consumes it. This reservation exists only to preserve crash-safe
+  allocator state until consumption so the allocated region cannot leak.
+
+7. `RING-WAL-PAYLOAD-005` `head`
 Commits a collection to a durable region head. Payload contains
 the target `region_index`. The record also carries the collection type for
 that durable region basis. When `collection_id = 0`, this record
@@ -682,7 +683,7 @@ interpretation. Replay does not revalidate that not-free append-time
 invariant; this is an intentional application of the checksum trust
 model defined below.
 
-6. `RING-WAL-PAYLOAD-006` `drop_collection`
+8. `RING-WAL-PAYLOAD-006` `drop_collection`
 Payload is empty. Durably tombstones a user collection. The record
 detaches that collection's current durable basis from the live
 namespace, discards any pending WAL updates for that collection, and
@@ -693,12 +694,12 @@ references to them. Any region associated with that dropped collection
 may be added to the free list through normal reclaim processing if it
 is not already reachable from the free-list chain.
 
-7. `RING-WAL-PAYLOAD-007` `link`
+9. `RING-WAL-PAYLOAD-007` `link`
 Points from a full WAL region to the next WAL region. Payload contains
 `next_region_index` and `expected_sequence` for the next WAL region
 header.
 
-8. `RING-WAL-PAYLOAD-008` `free_list_head`
+10. `RING-WAL-PAYLOAD-008` `free_list_head`
 Commits a new durable free-list head. Payload contains the new
 `region_index` or `none` if the free list is empty. This record is used
 when reclaim or crash recovery changes the durable allocator head
@@ -709,24 +710,24 @@ uninitialized tail slot in at most `region_count` visited regions. If
 the payload is `none`, the record asserts that the durable free list is
 empty.
 
-9. `RING-WAL-PAYLOAD-009` `reclaim_begin`
+11. `RING-WAL-PAYLOAD-009` `reclaim_begin`
 Marks the start of reclaim for `region_index`. The payload contains the
 region being freed. This record does not itself make the region free;
 it only makes the reclaim intent durable before any live references to
 that region are removed.
 
-10. `RING-WAL-PAYLOAD-010` `reclaim_end`
+12. `RING-WAL-PAYLOAD-010` `reclaim_end`
 Marks successful completion of reclaim for `region_index`. The payload
 contains the same `region_index` as the matching `reclaim_begin`.
 
-11. `RING-WAL-PAYLOAD-011` `wal_recovery`
+13. `RING-WAL-PAYLOAD-011` `wal_recovery`
 Payload is empty. Marks that replay or a prior open detected and
 intentionally skipped one or more corrupt/torn aligned WAL slots before
 resuming WAL appends. `wal_recovery` has no direct collection or
 allocator effect; it only makes that recovery boundary explicit and
 durable.
 
-12. `RING-WAL-PAYLOAD-012` `stage_region`
+14. `RING-WAL-PAYLOAD-012` `stage_region`
 Detaches the current `ready_region` from the single allocator slot
 without committing a collection head. The payload contains the staged
 `region_index`. Replay keeps the region allocated and unavailable for
@@ -1230,7 +1231,7 @@ set `ready_region = region_index`.
 if `ready_region != region_index`, return an error.
 otherwise append `region_index` to staged regions and clear
 `ready_region`.
-12. `RING-STARTUP-012` On `head(collection_id, collection_type, region_index)`:
+13. `RING-STARTUP-012` On `head(collection_id, collection_type, region_index)`:
 if `collection_id = 0`, this is a WAL-head control record. Its replay
 effect was already consumed in step 4 while determining the WAL-head
 candidate from the tail region. If `collection_type != wal`, return an
@@ -1259,7 +1260,7 @@ refers to a region whose historical `alloc_begin` was already consumed
 and later reclaimed.
 If `region_index` is in staged regions, remove it from staged regions
 because the head directly makes that region live.
-13. `RING-STARTUP-013` On `link(next_region_index, expected_sequence)`:
+14. `RING-STARTUP-013` On `link(next_region_index, expected_sequence)`:
 if `ready_region = next_region_index`, clear `ready_region`.
 otherwise leave `ready_region` unchanged because this `link` may refer
 to a WAL-region allocation whose historical `alloc_begin` was already
@@ -1267,7 +1268,7 @@ consumed and later reclaimed.
 If `next_region_index` is in staged regions, remove it from staged
 regions because the link directly makes that region part of the WAL
 chain.
-14. `RING-STARTUP-014` On `drop_collection(collection_id)`:
+15. `RING-STARTUP-014` On `drop_collection(collection_id)`:
 if `collection_id` is not tracked, create replay state for that
 collection because older retained basis records may already have been
 reclaimed; record this collection as durably `Dropped`, with no
@@ -1278,18 +1279,18 @@ return an error.
 otherwise set durable `last_head` to `Dropped`, set `basis_pos` to this
 record's WAL position, and clear all pending updates for that
 collection.
-15. `RING-STARTUP-015` On `free_list_head(region_index_or_none)`:
+16. `RING-STARTUP-015` On `free_list_head(region_index_or_none)`:
 set tentative durable `last_free_list_head` to `region_index_or_none`.
-16. `RING-STARTUP-016` On `reclaim_begin(region_index)`:
+17. `RING-STARTUP-016` On `reclaim_begin(region_index)`:
 append `region_index` to pending reclaims unless a later matching
 `reclaim_end` removes it. If `region_index` is in staged regions,
 remove it from staged regions because reclaim now owns the cleanup.
-17. `RING-STARTUP-017` On `reclaim_end(region_index)`:
+18. `RING-STARTUP-017` On `reclaim_end(region_index)`:
 mark the matching pending reclaim as finished.
-18. `RING-STARTUP-018` On `wal_recovery()`:
+19. `RING-STARTUP-018` On `wal_recovery()`:
 if `pending_wal_recovery_boundary` is clear, return an error.
 otherwise clear `pending_wal_recovery_boundary`.
-19. `RING-STARTUP-019` After replay, for each collection:
+20. `RING-STARTUP-019` After replay, for each collection:
 reconstruct its durable basis from `last_head`. If `last_head` is
 `empty`, the basis is the empty collection declared by
 `new_collection`; if that collection has post-basis updates,
@@ -1304,8 +1305,8 @@ mutation, but it must be loaded into RAM before accepting that
 mutation. If `last_head` is `Dropped`, do not reconstruct mutable
 state for that collection and do not accept further mutations for that
 collection id.
-20. `RING-STARTUP-020` Initialize allocator state from `last_free_list_head`.
-21. `RING-STARTUP-021` Reconstruct runtime `free_list_tail` by following free-pointer
+21. `RING-STARTUP-020` Initialize allocator state from `last_free_list_head`.
+22. `RING-STARTUP-021` Reconstruct runtime `free_list_tail` by following free-pointer
 links starting at `last_free_list_head` until reaching a free region
 whose free-pointer slot is uninitialized.
 If this walk encounters a checksum-invalid or malformed free-pointer
@@ -1315,13 +1316,13 @@ visited regions before reaching an uninitialized tail slot, return an
 error because the
 durable free-list head does not name a valid free-list chain.
 If `last_free_list_head = none`, then `free_list_tail = none`.
-22. `RING-STARTUP-022` If `ready_region` is set, hold it in memory as the next region to
+23. `RING-STARTUP-022` If `ready_region` is set, hold it in memory as the next region to
 use before consuming another free-list entry.
-23. `RING-STARTUP-023` Keep `max_seen_sequence` as the runtime source of the next region
+24. `RING-STARTUP-023` Keep `max_seen_sequence` as the runtime source of the next region
 sequence. The next newly allocated region must use
 `max_seen_sequence + 1` as its header `sequence`, then update
 `max_seen_sequence` in memory to that new value.
-24. `RING-STARTUP-024` For each pending reclaim in WAL order:
+25. `RING-STARTUP-024` For each pending reclaim in WAL order:
 if the target region is still reachable from any live collection head
 or the WAL chain, leave it allocated because the reclaim did not reach
 the detach point durably.
@@ -1330,7 +1331,7 @@ free-list chain, complete the free-list append using the Region
 Reclaim procedure.
 If the target region is already reachable from the free-list chain,
 finish the reclaim transaction by appending `reclaim_end(region_index)`.
-25. `RING-STARTUP-025` If replay encountered a torn or checksum-invalid tail record,
+26. `RING-STARTUP-025` If replay encountered a torn or checksum-invalid tail record,
 retain all state recovered from earlier complete records. The WAL head
 is unchanged. Replay may still recover and apply later valid tail
 records that begin after the torn bytes, but the first such later valid
@@ -1339,11 +1340,13 @@ aligned slot whose first byte is `erased_byte` after the last valid
 replayed tail record, so later WAL appends may resume there while the
 ignored corrupt span before that point remains uninterpreted until that
 region is reclaimed or erased for reuse.
-26. `RING-STARTUP-026` If replay yields a live collection whose
+27. `RING-STARTUP-026` If replay yields a live collection whose
 `collection_type` is unsupported by the implementation, startup MUST
 fail.
-27. `RING-STARTUP-027` If replay yields a live collection with unsupported or invalid retained collection data under that collection's normative specification, startup MUST fail before open succeeds.
-28. `RING-STARTUP-028` A dropped tombstone whose old
+28. `RING-STARTUP-027` If replay yields a live collection with unsupported or invalid retained
+    collection data under that collection's normative specification, startup MUST fail before open
+    succeeds.
+29. `RING-STARTUP-028` A dropped tombstone whose old
 `collection_type` is unsupported MAY remain as inert metadata and does
 not by itself require startup failure.
 
@@ -1400,7 +1403,6 @@ tail selection.
 Under the monotonic-sequence rule, stale free-list WAL headers may be
 visible during scan, but they cannot outrank the live WAL tail and so
 cannot redirect startup onto the wrong WAL chain.
-
 
 ## no_std Tracker Types (Rust)
 
@@ -1628,22 +1630,26 @@ staged-region safety state outside the candidate WAL region.
 WAL-region reclaim preconditions:
 
 1. `RING-WAL-RECLAIM-PRE-001` The candidate region MUST be the head of the WAL.
-2. `RING-WAL-RECLAIM-PRE-002` For every live record in the candidate, an equivalent live state MUST be
+2. `RING-WAL-RECLAIM-PRE-002` For every live record in the candidate, an equivalent live state MUST
+   be
 already represented durably outside the candidate (typically by newer
 `snapshot`, `drop_collection`, or by
 `head(collection_id, collection_type, region_index)` plus newer
 updates). A live `stage_region` record must either be preserved by an
 equivalent retained record or block WAL-head reclaim until
 manifest-aware reachability can replace it safely.
-3. `RING-WAL-RECLAIM-PRE-003` After planned metadata updates, startup replay MUST still be able to walk a
+3. `RING-WAL-RECLAIM-PRE-003` After planned metadata updates, startup replay MUST still be able to
+   walk a
 valid WAL chain from head to tail.
 
 WAL-region reclaim postconditions:
 
-1. `RING-WAL-RECLAIM-POST-001` No collection's `H(c)`, `B(c)`, or live post-basis updates MUST NOT depend on
+1. `RING-WAL-RECLAIM-POST-001` No collection's `H(c)`, `B(c)`, or live post-basis updates MUST NOT
+   depend on
 bytes in the reclaimed region.
 2. `RING-WAL-RECLAIM-POST-002` The recovered free-list head MUST match pre-reclaim allocator state.
-3. `RING-WAL-RECLAIM-POST-003` The recovered `ready_region`, if any, MUST match pre-reclaim allocator
+3. `RING-WAL-RECLAIM-POST-003` The recovered `ready_region`, if any, MUST match pre-reclaim
+   allocator
 state.
 4. `RING-WAL-RECLAIM-POST-004` The ordered staged regions and the ordered set of incomplete reclaim
 transactions that replay would continue match pre-reclaim
@@ -1708,11 +1714,19 @@ Required write and sync ordering:
 3. `RING-ORDER-003` `drop_collection` transition:
 `W(drop_collection(collection_id)) -> S(drop_collection)`.
 4. `RING-ORDER-004` `region` head transition:
-`W(alloc_begin(region_index, free_list_head_after)) -> S(alloc_begin) -> erase/init reserved region if needed -> W(region header+data) -> S(region) -> W(head(collection_id, collection_type, ref=region_index)) -> S(head)`.
+`W(alloc_begin(region_index, free_list_head_after)) -> S(alloc_begin) ->`
+`erase/init reserved region if needed -> W(region header+data) -> S(region) ->`
+`W(head(collection_id, collection_type, ref=region_index)) -> S(head)`.
 5. `RING-ORDER-005` WAL rotation:
-`W(alloc_begin(next_region_index, free_list_head_after)) -> S(alloc_begin) -> W(link(next_region_index, expected_sequence)) -> S(link) -> W(new_wal_region_init(sequence=expected_sequence, wal_head_region_index=current_wal_head)) -> S(new_wal_region_init)`.
+`W(alloc_begin(next_region_index, free_list_head_after)) -> S(alloc_begin) ->`
+`W(link(next_region_index, expected_sequence)) -> S(link) ->`
+`W(new_wal_region_init(sequence=expected_sequence, wal_head_region_index=current_wal_head)) ->`
+`S(new_wal_region_init)`.
 6. `RING-ORDER-006` Reclaim:
-`W(reclaim_begin(region_index)) -> S(reclaim_begin) -> W(replacement_live_state_and_new_links) -> S(replacement_state) -> append old region to free list (write+sync) -> W(reclaim_end(region_index)) -> S(reclaim_end)`.
+`W(reclaim_begin(region_index)) -> S(reclaim_begin) ->`
+`W(replacement_live_state_and_new_links) -> S(replacement_state) ->`
+`append old region to free list (write+sync) -> W(reclaim_end(region_index)) ->`
+`S(reclaim_end)`.
 7. `RING-ORDER-007` Resuming WAL appends after a recovered torn/corrupt tail record:
 `W(wal_recovery()) -> S(wal_recovery) -> W(next_normal_wal_record) -> S(next_normal_wal_record)`.
 
@@ -1970,7 +1984,8 @@ startup replay without special recovery paths.
 
 Preconditions:
 
-1. `RING-FORMAT-STORAGE-PRE-001` Backing storage MUST be writable and erasable at region granularity.
+1. `RING-FORMAT-STORAGE-PRE-001` Backing storage MUST be writable and erasable at region
+   granularity.
 2. `RING-FORMAT-STORAGE-PRE-002` `region_count >= 1`.
 3. `RING-FORMAT-STORAGE-PRE-003` Region `0` MUST be reserved as the initial WAL region.
 4. `RING-FORMAT-STORAGE-PRE-004` `wal_write_granule >= 1`.
@@ -2015,7 +2030,8 @@ Postconditions:
 1. `RING-FORMAT-STORAGE-POST-001` WAL head and WAL tail MUST both be region `0`.
 2. `RING-FORMAT-STORAGE-POST-002` A user collection durable head MUST
 NOT exist after formatting.
-3. `RING-FORMAT-STORAGE-POST-003` The free list MUST contain every non-WAL region in ascending region-index
+3. `RING-FORMAT-STORAGE-POST-003` The free list MUST contain every non-WAL region in ascending
+   region-index
 order.
 4. `RING-FORMAT-STORAGE-POST-004` Because region `0` is reserved as the WAL, the initial durable
 free-list head is region `1` iff `region_count >= 2`; otherwise the
@@ -2089,7 +2105,8 @@ modeled as a WAL-tracked transaction.
 
 Normative append semantics:
 
-1. `RING-REGION-RECLAIM-SEM-001` Let `t_prev` be the value of `free_list_tail` before reclaim starts.
+1. `RING-REGION-RECLAIM-SEM-001` Let `t_prev` be the value of `free_list_tail` before reclaim
+   starts.
 2. `RING-REGION-RECLAIM-SEM-002` If `t_prev != none`, reclaim MUST durably write
 `t_prev.free_pointer.next_tail = r` when freeing region `r`.
 3. `RING-REGION-RECLAIM-SEM-003` If `t_prev = none`, reclaim MUST NOT write any predecessor link and
@@ -2102,11 +2119,13 @@ free list.
 
 Preconditions:
 
-1. `RING-REGION-RECLAIM-PRE-001` `reclaim_begin(r)` MUST be durable in the WAL before any live metadata is
+1. `RING-REGION-RECLAIM-PRE-001` `reclaim_begin(r)` MUST be durable in the WAL before any live
+   metadata is
 updated to stop referencing `r`.
 2. `RING-REGION-RECLAIM-PRE-002` After the detach step, the reclaimed region `r` MUST no longer be
 reachable from any live collection head or live WAL state.
-3. `RING-REGION-RECLAIM-PRE-003` `r` MUST NOT already be reachable from the free-list chain, unless this
+3. `RING-REGION-RECLAIM-PRE-003` `r` MUST NOT already be reachable from the free-list chain, unless
+   this
 procedure is being re-entered during crash recovery.
 4. `RING-REGION-RECLAIM-PRE-004` If a current free-list tail exists, call it `t_prev`.
 
@@ -2140,9 +2159,11 @@ Postconditions:
 
 1. `RING-REGION-RECLAIM-POST-001` The free-list chain MUST remain acyclic and FIFO-ordered.
 2. `RING-REGION-RECLAIM-POST-002` Exactly one new region (`r`) MUST be appended to the tail.
-3. `RING-REGION-RECLAIM-POST-003` If a prior tail existed, its `next_tail` pointer MUST now reference
+3. `RING-REGION-RECLAIM-POST-003` If a prior tail existed, its `next_tail` pointer MUST now
+   reference
 `r`.
-4. `RING-REGION-RECLAIM-POST-004` `r.free_pointer.next_tail` MUST remain uninitialized after reclaim.
+4. `RING-REGION-RECLAIM-POST-004` `r.free_pointer.next_tail` MUST remain uninitialized after
+   reclaim.
 5. `RING-REGION-RECLAIM-POST-005` If a prior tail existed, replay of free pointers MUST follow
 `... -> t_prev -> r`, and `r` is recognized as the tail because its
 free-pointer slot is uninitialized.
@@ -2180,13 +2201,16 @@ Crash-safety ordering requirement:
 
 1. `RING-REGION-RECLAIM-ORDER-001` `reclaim_begin(r)` MUST be durable before any live metadata stops
 referencing `r`.
-2. `RING-REGION-RECLAIM-ORDER-002` Before any durable write makes `r` reachable from `t_prev.next_tail`,
+2. `RING-REGION-RECLAIM-ORDER-002` Before any durable write makes `r` reachable from
+   `t_prev.next_tail`,
 the implementation MUST ensure that `r` already has the correct
 free-list-tail footer state, namely an uninitialized
 `r.free_pointer.next_tail`.
 3. `RING-REGION-RECLAIM-ORDER-003` If `t_prev = none`, `free_list_head(r)` MUST be durable before
 `reclaim_end(r)` is acknowledged.
-4. `RING-REGION-RECLAIM-ORDER-004` If `t_prev` exists, the `t_prev.next_tail = r` write MUST be synced before
+4. `RING-REGION-RECLAIM-ORDER-004` If `t_prev` exists, the `t_prev.next_tail = r` write MUST be
+   synced before
 `reclaim_end(r)` is acknowledged.
-5. `RING-REGION-RECLAIM-ORDER-005` The reclaim procedure MUST be idempotent across crashes between any
+5. `RING-REGION-RECLAIM-ORDER-005` The reclaim procedure MUST be idempotent across crashes between
+   any
 two steps above.

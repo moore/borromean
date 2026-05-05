@@ -5,8 +5,7 @@
 //!
 //! - [`Storage`] owns logical storage state and durability invariants.
 //! - [`FlashIo`] is implemented by the caller's flash or transport layer.
-//! - [`StorageWorkspace`] provides bounded scratch buffers for replay,
-//!   encoding, and decode.
+//! - [`StorageWorkspace`] provides bounded scratch buffers for replay, encoding, and decode.
 //!
 //! Tier 1 supported APIs are [`Storage`], [`FlashIo`],
 //! [`StorageWorkspace`], [`CollectionId`], [`CollectionType`],

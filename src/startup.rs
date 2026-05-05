@@ -513,11 +513,7 @@ pub(crate) fn replay_open_wal_chain<
                     &mut plan.pending_reclaims,
                 )?;
                 if let Some((collection_id, head_region)) = map_head {
-                    remove_map_manifest_staged_regions::<
-                        REGION_SIZE,
-                        IO,
-                        MAX_PENDING_RECLAIMS,
-                    >(
+                    remove_map_manifest_staged_regions::<REGION_SIZE, IO, MAX_PENDING_RECLAIMS>(
                         flash,
                         plan.metadata,
                         collection_id,

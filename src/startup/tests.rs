@@ -291,7 +291,9 @@ fn open_formatted_store_from_fresh_format() -> (StorageMetadata, StartupState<8,
 
 //= spec/ring.md#startup-replay-algorithm
 //= type=test
-//# RING-STARTUP-001 Read `StorageMetadata`, validate `metadata_checksum`, and validate static geometry (`region_size`, `region_count`, `min_free_regions`, `erased_byte`, `wal_write_granule`, `wal_record_magic`, and storage version support).
+//# RING-STARTUP-001 Read `StorageMetadata`, validate `metadata_checksum`, and validate static
+//# geometry (`region_size`, `region_count`, `min_free_regions`, `erased_byte`, `wal_write_granule`,
+//# `wal_record_magic`, and storage version support).
 #[test]
 fn requirement_open_formatted_store_requires_metadata() {
     let mut flash = MockFlash::<64, 4, 32>::new(0xff);
@@ -301,7 +303,9 @@ fn requirement_open_formatted_store_requires_metadata() {
 
 //= spec/ring.md#startup-replay-algorithm
 //= type=test
-//# RING-STARTUP-003 Select WAL tail as the unique candidate WAL region with the largest valid sequence. If no candidate WAL region exists, or if multiple candidate WAL regions share that largest valid sequence, return an error.
+//# RING-STARTUP-003 Select WAL tail as the unique candidate WAL region with the largest valid
+//# sequence. If no candidate WAL region exists, or if multiple candidate WAL regions share that
+//# largest valid sequence, return an error.
 #[test]
 fn requirement_open_formatted_store_rejects_duplicate_max_sequence_wal_candidates() {
     let mut flash = MockFlash::<64, 4, 32>::new(0xff);
@@ -320,8 +324,13 @@ fn requirement_open_formatted_store_rejects_duplicate_max_sequence_wal_candidate
     assert_eq!(error, StartupError::DuplicateWalTailSequence(0));
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-046` Startup tail selection MUST ignore regions with nonzero collection_id
+//# even when their format is wal_v1 while still tracking max seen sequence.
 #[test]
-fn open_formatted_store_ignores_nonzero_collection_with_wal_format_when_selecting_tail() {
+fn requirement_open_formatted_store_ignores_nonzero_collection_with_wal_format_when_selecting_tail()
+{
     let mut flash = MockFlash::<128, 4, 64>::new(0xff);
     flash.format_empty_store(1, 8, 0xa5).unwrap();
     init_user_region_header(&mut flash, 1, 9, CollectionId(7), WAL_V1_FORMAT);
@@ -366,7 +375,8 @@ fn requirement_open_formatted_store_requires_wal_recovery_before_accepting_later
 
 //= spec/ring.md#startup-replay-algorithm
 //= type=test
-//# RING-STARTUP-021 Reconstruct runtime `free_list_tail` by following free-pointer links starting at `last_free_list_head` until reaching a free region whose free-pointer slot is uninitialized.
+//# RING-STARTUP-021 Reconstruct runtime `free_list_tail` by following free-pointer links starting
+//# at `last_free_list_head` until reaching a free region whose free-pointer slot is uninitialized.
 #[test]
 fn requirement_open_formatted_store_rejects_invalid_free_list_chain() {
     let mut flash = MockFlash::<64, 4, 32>::new(0xff);
@@ -390,7 +400,12 @@ fn requirement_open_formatted_store_rejects_invalid_free_list_chain() {
 
 //= spec/ring.md#startup-replay-algorithm
 //= type=test
-//# RING-STARTUP-011 On `alloc_begin(region_index, free_list_head_after)`: if `ready_region` is already set, return an error because replay found two unmatched allocation reservations. if `last_free_list_head = none`, return an error because allocation cannot consume an empty durable free list. if `last_free_list_head != region_index`, return an error because `alloc_begin` did not consume the current durable free-list head. set durable `last_free_list_head` to `free_list_head_after`. set `ready_region = region_index`.
+//# RING-STARTUP-011 On `alloc_begin(region_index, free_list_head_after)`: if `ready_region` is
+//# already set, return an error because replay found two unmatched allocation reservations. if
+//# `last_free_list_head = none`, return an error because allocation cannot consume an empty durable
+//# free list. if `last_free_list_head != region_index`, return an error because `alloc_begin` did
+//# not consume the current durable free-list head. set durable `last_free_list_head` to
+//# `free_list_head_after`. set `ready_region = region_index`.
 #[test]
 fn requirement_open_formatted_store_replays_alloc_begin_into_allocator_runtime_state() {
     let (_next_offset, state) = open_formatted_store_after_replayed_alloc_begin();
@@ -410,7 +425,8 @@ fn requirement_open_formatted_store_initializes_allocator_state_after_alloc_begi
 
 //= spec/ring.md#startup-replay-algorithm
 //= type=test
-//# RING-STARTUP-022 If `ready_region` is set, hold it in memory as the next region to use before consuming another free-list entry.
+//# RING-STARTUP-022 If `ready_region` is set, hold it in memory as the next region to use before
+//# consuming another free-list entry.
 #[test]
 fn requirement_open_formatted_store_keeps_replayed_ready_region_reserved_in_memory() {
     let (_next_offset, state) = open_formatted_store_after_replayed_alloc_begin();
@@ -441,8 +457,12 @@ fn requirement_open_formatted_store_replays_stage_region_into_staged_state() {
     assert_eq!(state.last_free_list_head(), Some(2));
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-047` Startup replay MUST preserve staged regions when a WAL head-control
+//# record is replayed.
 #[test]
-fn open_formatted_store_keeps_staged_regions_when_wal_head_control_is_replayed() {
+fn requirement_open_formatted_store_keeps_staged_regions_when_wal_head_control_is_replayed() {
     let mut flash = MockFlash::<256, 4, 128>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
     let wal_offset = metadata.wal_record_area_offset().unwrap();
@@ -479,8 +499,12 @@ fn open_formatted_store_keeps_staged_regions_when_wal_head_control_is_replayed()
     assert_eq!(state.staged_regions(), &[1]);
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-048` Startup replay MUST preserve staged regions when non-map collection
+//# head and drop records are replayed.
 #[test]
-fn open_formatted_store_keeps_staged_regions_when_non_map_head_is_replayed() {
+fn requirement_open_formatted_store_keeps_staged_regions_when_non_map_head_is_replayed() {
     let mut flash = MockFlash::<256, 4, 128>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
     let wal_offset = metadata.wal_record_area_offset().unwrap();
@@ -639,8 +663,11 @@ fn requirement_open_formatted_store_tracks_live_collection_snapshot_basis() {
     assert!(state.pending_reclaims().is_empty());
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-049` Startup replay MUST count multiple live collections independently.
 #[test]
-fn open_formatted_store_counts_multiple_live_collections() {
+fn requirement_open_formatted_store_counts_multiple_live_collections() {
     let mut flash = MockFlash::<128, 4, 128>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
     let wal_offset = metadata.wal_record_area_offset().unwrap();
@@ -717,8 +744,12 @@ fn requirement_open_formatted_store_rejects_later_type_bearing_records_with_mism
     );
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-050` Startup replay MUST accept a committed-region head basis and recover
+//# the collection basis, collection type, and max seen sequence from that region.
 #[test]
-fn open_formatted_store_accepts_committed_region_head_basis() {
+fn requirement_open_formatted_store_accepts_committed_region_head_basis() {
     let mut flash = MockFlash::<128, 4, 96>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
     init_user_region_header(&mut flash, 2, 4, CollectionId(7), 1);
@@ -752,8 +783,12 @@ fn open_formatted_store_accepts_committed_region_head_basis() {
     assert_eq!(state.max_seen_sequence(), 4);
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-051` Startup replay MUST accept a reclaimed historical head after
+//# replacement and recover the live replacement head with no pending reclaim.
 #[test]
-fn open_formatted_store_accepts_reclaimed_historical_head_after_replacement() {
+fn requirement_open_formatted_store_accepts_reclaimed_historical_head_after_replacement() {
     let mut flash = MockFlash::<256, 5, 128>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
     init_user_region_header(&mut flash, 1, 4, CollectionId(7), 1);
@@ -815,8 +850,12 @@ fn open_formatted_store_accepts_reclaimed_historical_head_after_replacement() {
     assert_eq!(state.free_list_tail(), Some(1));
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-052` Startup replay MUST track pending updates on an empty collection
+//# basis and preserve their count.
 #[test]
-fn open_formatted_store_tracks_pending_updates_on_empty_collection_basis() {
+fn requirement_open_formatted_store_tracks_pending_updates_on_empty_collection_basis() {
     let mut flash = MockFlash::<128, 4, 96>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
     let wal_offset = metadata.wal_record_area_offset().unwrap();
@@ -863,8 +902,12 @@ fn open_formatted_store_tracks_pending_updates_on_empty_collection_basis() {
     assert_eq!(state.collections()[0].pending_update_count(), 2);
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-053` Startup replay MUST reject update records that appear after a
+//# collection drop tombstone for the same collection.
 #[test]
-fn open_formatted_store_rejects_update_after_drop_collection() {
+fn requirement_open_formatted_store_rejects_update_after_drop_collection() {
     let mut flash = MockFlash::<128, 4, 96>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
     let wal_offset = metadata.wal_record_area_offset().unwrap();
@@ -931,7 +974,8 @@ fn requirement_open_formatted_store_tracks_pending_reclaims_in_order() {
 
 //= spec/ring.md#collection-head-state-machine
 //= type=test
-//# `RING-FORMAT-015` An implementation MUST NOT open a database successfully if replay yields a live collection whose `collection_type` is unsupported by that implementation.
+//# `RING-FORMAT-015` An implementation MUST NOT open a database successfully if replay yields a
+//# live collection whose `collection_type` is unsupported by that implementation.
 #[test]
 fn requirement_open_formatted_store_rejects_unsupported_live_collection_type() {
     let mut flash = MockFlash::<128, 4, 96>::new(0xff);
@@ -996,8 +1040,12 @@ fn requirement_validate_live_collection_types_ignores_unsupported_dropped_tombst
     assert_eq!(validate_live_collection_types(&collections), Ok(()));
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-054` Strict WAL-region reads MUST reject regions whose collection_id is
+//# nonzero even if collection_format is wal_v1.
 #[test]
-fn read_strict_wal_region_rejects_nonzero_collection_id_even_with_wal_format() {
+fn requirement_read_strict_wal_region_rejects_nonzero_collection_id_even_with_wal_format() {
     let mut flash = MockFlash::<128, 4, 64>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
     init_wal_region(&mut flash, 1, 1, 0, metadata.region_count);
@@ -1009,8 +1057,12 @@ fn read_strict_wal_region_rejects_nonzero_collection_id_even_with_wal_format() {
     );
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-055` WAL target validation MUST require both collection_id 0 and
+//# collection_format wal_v1.
 #[test]
-fn has_valid_wal_target_requires_both_wal_collection_id_and_format() {
+fn requirement_has_valid_wal_target_requires_both_wal_collection_id_and_format() {
     let mut flash = MockFlash::<128, 4, 64>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
     init_wal_region(&mut flash, 1, 1, 0, metadata.region_count);
@@ -1034,8 +1086,12 @@ fn has_valid_wal_target_requires_both_wal_collection_id_and_format() {
     );
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-056` Live committed-region basis validation MUST reject a region whose
+//# header belongs to a different collection.
 #[test]
-fn validate_live_region_bases_rejects_committed_region_for_different_collection() {
+fn requirement_validate_live_region_bases_rejects_committed_region_for_different_collection() {
     let mut flash = MockFlash::<128, 4, 64>::new(0xff);
     flash.format_empty_store(1, 8, 0xa5).unwrap();
     init_user_region_header(
@@ -1061,8 +1117,12 @@ fn validate_live_region_bases_rejects_committed_region_for_different_collection(
     );
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-057` Region index validation MUST reject a region_index equal to
+//# region_count.
 #[test]
-fn ensure_region_index_in_range_rejects_region_count_boundary() {
+fn requirement_ensure_region_index_in_range_rejects_region_count_boundary() {
     assert_eq!(
         ensure_region_index_in_range(4, 4),
         Err(StartupError::InvalidRegionReference(4))
@@ -1071,7 +1131,8 @@ fn ensure_region_index_in_range_rejects_region_count_boundary() {
 
 //= spec/ring.md#startup-replay-algorithm
 //= type=test
-//# RING-STARTUP-005 Walk the WAL region chain from the resulting WAL head to tail using `link` records.
+//# RING-STARTUP-005 Walk the WAL region chain from the resulting WAL head to tail using `link`
+//# records.
 #[test]
 fn requirement_open_formatted_store_follows_completed_link_to_the_next_wal_tail() {
     let state = open_formatted_store_after_completed_wal_rotation();
@@ -1081,15 +1142,21 @@ fn requirement_open_formatted_store_follows_completed_link_to_the_next_wal_tail(
 
 //= spec/ring.md#startup-replay-algorithm
 //= type=test
-//# RING-STARTUP-013 On `link(next_region_index, expected_sequence)`: if `ready_region = next_region_index`, clear `ready_region`.
+//# RING-STARTUP-013 On `link(next_region_index, expected_sequence)`: if `ready_region =
+//# next_region_index`, clear `ready_region`.
 #[test]
 fn requirement_open_formatted_store_clears_ready_region_when_link_matches_it() {
     let state = open_formatted_store_after_completed_wal_rotation();
     assert_eq!(state.ready_region(), None);
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-058` Startup replay MUST recover a WAL rotation after a durable link by
+//# selecting the linked tail, resetting tail append offset, updating allocator state, and advancing
+//# max sequence.
 #[test]
-fn open_formatted_store_recovers_rotation_after_link() {
+fn requirement_open_formatted_store_recovers_rotation_after_link() {
     let mut flash = MockFlash::<128, 4, 96>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
     let wal_offset = metadata.wal_record_area_offset().unwrap();
@@ -1128,8 +1195,12 @@ fn open_formatted_store_recovers_rotation_after_link() {
     assert_eq!(state.max_seen_sequence(), 1);
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-059` Startup replay MUST recover a WAL rotation when alloc_begin is
+//# durable but link is absent and only rotation reserve remains.
 #[test]
-fn open_formatted_store_recovers_rotation_before_link() {
+fn requirement_open_formatted_store_recovers_rotation_before_link() {
     let mut flash = MockFlash::<160, 4, 128>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
     let wal_offset = metadata.wal_record_area_offset().unwrap();
@@ -1186,8 +1257,13 @@ fn open_formatted_store_recovers_rotation_before_link() {
     assert_eq!(state.max_seen_sequence(), 1);
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-060` Startup replay MUST recover a WAL rotation when only the link record
+//# fits after alloc_begin at the tail boundary.
 #[test]
-fn open_formatted_store_recovers_rotation_when_only_the_link_record_fits_after_alloc_begin() {
+fn requirement_open_formatted_store_recovers_rotation_when_only_the_link_record_fits_after_alloc_begin(
+) {
     const REGION_SIZE: usize = 256;
 
     let mut flash = MockFlash::<REGION_SIZE, 4, 128>::new(0xff);
@@ -1246,8 +1322,12 @@ fn open_formatted_store_recovers_rotation_when_only_the_link_record_fits_after_a
     assert_eq!(state.max_seen_sequence(), 1);
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-061` Startup replay MUST reject an unrecovered corrupt boundary in a
+//# non-tail WAL region as a broken WAL chain.
 #[test]
-fn open_formatted_store_rejects_unrecovered_boundary_in_non_tail_wal_region() {
+fn requirement_open_formatted_store_rejects_unrecovered_boundary_in_non_tail_wal_region() {
     let mut flash = MockFlash::<128, 4, 96>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
     let wal_offset = metadata.wal_record_area_offset().unwrap();
@@ -1273,7 +1353,8 @@ fn open_formatted_store_rejects_unrecovered_boundary_in_non_tail_wal_region() {
 
 //= spec/ring.md#startup-replay-algorithm
 //= type=test
-//# RING-STARTUP-018 On `wal_recovery()`: if `pending_wal_recovery_boundary` is clear, return an error. otherwise clear `pending_wal_recovery_boundary`.
+//# RING-STARTUP-018 On `wal_recovery()`: if `pending_wal_recovery_boundary` is clear, return an
+//# error. otherwise clear `pending_wal_recovery_boundary`.
 #[test]
 fn requirement_open_formatted_store_clears_pending_recovery_boundary_when_wal_recovery_is_replayed()
 {
@@ -1285,7 +1366,9 @@ fn requirement_open_formatted_store_clears_pending_recovery_boundary_when_wal_re
 
 //= spec/ring.md#startup-replay-algorithm
 //= type=test
-//# RING-STARTUP-002 Scan all regions, collect candidate WAL regions (`collection_id == 0` plus `collection_format = wal_v1`) with valid headers, and track `max_seen_sequence` as the largest `sequence` value seen in any valid region header.
+//# RING-STARTUP-002 Scan all regions, collect candidate WAL regions (`collection_id == 0` plus
+//# `collection_format = wal_v1`) with valid headers, and track `max_seen_sequence` as the largest
+//# `sequence` value seen in any valid region header.
 #[test]
 fn requirement_open_formatted_store_scans_fresh_store_geometry_for_wal_candidates() {
     let (metadata, state) = open_formatted_store_from_fresh_format();
@@ -1296,7 +1379,8 @@ fn requirement_open_formatted_store_scans_fresh_store_geometry_for_wal_candidate
 
 //= spec/ring.md#startup-replay-algorithm
 //= type=test
-//# RING-STARTUP-004 Read and validate the `WalRegionPrologue` stored at the start of the tail region's user-data area, and use its `wal_head_region_index` as the initial WAL-head candidate.
+//# RING-STARTUP-004 Read and validate the `WalRegionPrologue` stored at the start of the tail
+//# region's user-data area, and use its `wal_head_region_index` as the initial WAL-head candidate.
 #[test]
 fn requirement_open_formatted_store_uses_the_tail_prologue_as_the_initial_wal_head_candidate() {
     let (_metadata, state) = open_formatted_store_from_fresh_format();
@@ -1304,8 +1388,12 @@ fn requirement_open_formatted_store_uses_the_tail_prologue_as_the_initial_wal_he
     assert_eq!(state.wal_tail(), 0);
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-062` Opening a freshly formatted store MUST initialize allocator free-list
+//# head and tail from the formatted free-list chain.
 #[test]
-fn open_formatted_store_initializes_allocator_state_for_a_fresh_store() {
+fn requirement_open_formatted_store_initializes_allocator_state_for_a_fresh_store() {
     let (_metadata, state) = open_formatted_store_from_fresh_format();
     assert_eq!(state.last_free_list_head(), Some(1));
     assert_eq!(state.free_list_tail(), Some(3));
@@ -1322,7 +1410,9 @@ fn requirement_open_formatted_store_keeps_max_seen_sequence_for_the_next_region_
 
 //= spec/ring.md#startup-replay-algorithm
 //= type=test
-//# `RING-STARTUP-027` If replay yields a live collection with unsupported or invalid retained collection data under that collection's normative specification, startup MUST fail before open succeeds.
+//# `RING-STARTUP-027` If replay yields a live collection with unsupported or invalid retained
+//# collection data under that collection's normative specification, startup MUST fail before open
+//# succeeds.
 #[test]
 fn requirement_storage_open_path_rejects_invalid_retained_map_region_snapshot_and_update_payloads()
 {

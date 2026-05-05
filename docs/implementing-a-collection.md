@@ -2,7 +2,13 @@
 
 This guide is for contributors adding a new durably integrated collection type to Borromean.
 
-Today the map collection in [`src/collections/map/mod.rs`](../src/collections/map/mod.rs) is the only complete implemented example. It uses the manifest-backed whole-run LSM design described in [`spec/map.md`](../spec/map.md): a collection head points to a manifest, the manifest lists immutable sorted run regions, and reads resolve the in-memory frontier plus durable runs newest-to-oldest. The experimental channel module in [`src/collections/channel/mod.rs`](../src/collections/channel/mod.rs) is useful as a public-API example, but it is not wired into startup, WAL replay, reclaim, or committed-region handling.
+Today the map collection in [`src/collections/map/mod.rs`](../src/collections/map/mod.rs) is the
+only complete implemented example. It uses the manifest-backed whole-run LSM design described in
+[`spec/map.md`](../spec/map.md): a collection head points to a manifest, the manifest lists
+immutable sorted run regions, and reads resolve the in-memory frontier plus durable runs
+newest-to-oldest. The experimental channel module in
+[`src/collections/channel/mod.rs`](../src/collections/channel/mod.rs) is useful as a public-API
+example, but it is not wired into startup, WAL replay, reclaim, or committed-region handling.
 
 The goal is to add a collection that:
 
@@ -14,7 +20,8 @@ The goal is to add a collection that:
 
 ## 1. Start With A Collection-Local Module
 
-Create a new module under `src/collections/<name>/mod.rs` and export it from [`src/collections.rs`](../src/collections.rs).
+Create a new module under `src/collections/<name>/mod.rs` and export it from
+[`src/collections.rs`](../src/collections.rs).
 
 Follow the same split that the map module uses:
 
@@ -33,7 +40,8 @@ At minimum, a durable collection usually needs:
 - an `open_from_storage` helper that reconstructs the frontier from replay state
 - one or more helpers that turn typed operations into raw WAL payload bytes
 
-Keep the payload logic pure and buffer-based. The shared runtime should not need to know your collection's internal encoding rules.
+Keep the payload logic pure and buffer-based. The shared runtime should not need to know your
+collection's internal encoding rules.
 
 ## 2. Reserve A Stable Collection Type Code
 
@@ -43,13 +51,16 @@ Add the new kind to [`src/lib.rs`](../src/lib.rs):
 - add a stable `*_CODE` constant
 - extend `CollectionType::stable_code()`
 
-Treat the numeric code as an on-disk contract. Once it is used in WAL records or committed region headers, do not recycle or renumber it.
+Treat the numeric code as an on-disk contract. Once it is used in WAL records or committed region
+headers, do not recycle or renumber it.
 
-If the collection is part of the public surface, also re-export its public types through [`src/collections.rs`](../src/collections.rs) and the crate root in [`src/lib.rs`](../src/lib.rs).
+If the collection is part of the public surface, also re-export its public types through
+[`src/collections.rs`](../src/collections.rs) and the crate root in [`src/lib.rs`](../src/lib.rs).
 
 ## 3. Keep Durability In The Shared Runtime
 
-Do not invent a collection-specific device protocol. New collections should build on the existing helpers in [`src/storage.rs`](../src/storage.rs):
+Do not invent a collection-specific device protocol. New collections should build on the existing
+helpers in [`src/storage.rs`](../src/storage.rs):
 
 - `append_new_collection`
 - `append_update`
@@ -108,26 +119,32 @@ That keeps WAL ordering, region allocation, reclaim, and crash recovery in one p
 
 ## 4. Update Runtime Type Gates
 
-The shared runtime currently whitelists supported durable user collections. You must extend those gates in [`src/storage.rs`](../src/storage.rs):
+The shared runtime currently whitelists supported durable user collections. You must extend those
+gates in [`src/storage.rs`](../src/storage.rs):
 
 - `StorageRuntime::validate_supported_user_collection_type`
 - any `match`es that currently special-case `CollectionType::MAP_CODE`
 
-One engine assumption is easy to miss: WAL-head reclaim rewrites an empty-basis collection into a retained snapshot. That means a new durable collection needs an explicit empty snapshot representation, and [`src/storage.rs`](../src/storage.rs) must learn how to emit it from:
+One engine assumption is easy to miss: WAL-head reclaim rewrites an empty-basis collection into a
+retained snapshot. That means a new durable collection needs an explicit empty snapshot
+representation, and [`src/storage.rs`](../src/storage.rs) must learn how to emit it from:
 
 - `append_empty_basis_snapshot_with_rotation`
 - `classify_wal_head_record_for_reclaim`
 
-If your collection cannot express an empty basis as a snapshot payload, you will need to generalize that reclaim path before the collection can be durably supported.
+If your collection cannot express an empty basis as a snapshot payload, you will need to generalize
+that reclaim path before the collection can be durably supported.
 
 ## 5. Update Startup And Open Validation
 
-Replay first reconstructs generic collection state, then `Storage::open` rejects live collection types that the build does not support. Extend both layers:
+Replay first reconstructs generic collection state, then `Storage::open` rejects live collection
+types that the build does not support. Extend both layers:
 
 - [`src/startup.rs`](../src/startup.rs): `validate_live_collection_types`
 - [`src/lib.rs`](../src/lib.rs): `Storage::validate_live_collections`
 
-Your collection-local `open_from_storage` helper should then rebuild its frontier or descriptor state from `StartupCollectionBasis`:
+Your collection-local `open_from_storage` helper should then rebuild its frontier or descriptor
+state from `StartupCollectionBasis`:
 
 - `Empty`: start from the collection's empty in-memory state
 - `WalSnapshot`: load the retained snapshot payload, then replay later updates
@@ -135,11 +152,15 @@ Your collection-local `open_from_storage` helper should then rebuild its frontie
   manifest whose payload names additional live regions, then replay later updates
 - `Dropped`: reject the open
 
-The map implementation in [`src/collections/map/mod.rs`](../src/collections/map/mod.rs) is the reference pattern. It scans retained WAL records with `visit_wal_records`, loads the selected basis when it appears, parses manifest-listed run descriptors without materializing the runs, and applies later updates into the in-memory frontier in order.
+The map implementation in [`src/collections/map/mod.rs`](../src/collections/map/mod.rs) is the
+reference pattern. It scans retained WAL records with `visit_wal_records`, loads the selected basis
+when it appears, parses manifest-listed run descriptors without materializing the runs, and applies
+later updates into the in-memory frontier in order.
 
 ## 6. Add Storage Facade Methods
 
-Once the runtime and collection module exist, add the user-facing `Storage` helpers in [`src/lib.rs`](../src/lib.rs). The map API is the current template:
+Once the runtime and collection module exist, add the user-facing `Storage` helpers in
+[`src/lib.rs`](../src/lib.rs). The map API is the current template:
 
 - `create_map` and `create_map_future`
 - `open_map`
@@ -156,11 +177,14 @@ For a new collection, keep the same ownership model:
 - caller-owned frontier buffers
 - explicit payload staging buffers when encoding may need scratch
 
-If the collection has operations that mutate in-memory state before the durable append finishes, add checkpoint and rollback helpers like the map's `checkpoint_into` and `restore_from_checkpoint` so failures do not leave the caller frontier half-applied.
+If the collection has operations that mutate in-memory state before the durable append finishes, add
+checkpoint and rollback helpers like the map's `checkpoint_into` and `restore_from_checkpoint` so
+failures do not leave the caller frontier half-applied.
 
 ## 7. Worked Example: An Append-Only Log Collection
 
-A log collection is a useful tutorial example because it looks simple at the API level but immediately exercises the storage architecture in a different way than the map does.
+A log collection is a useful tutorial example because it looks simple at the API level but
+immediately exercises the storage architecture in a different way than the map does.
 
 The target behavior is:
 
@@ -169,7 +193,9 @@ The target behavior is:
 - truncate exactly at a record boundary
 - retain any number of records over time
 
-For a text-oriented API, treat each record as one UTF-8 log line without a trailing newline. On disk, it is still better to store records as length-delimited bytes rather than relying on newline parsing.
+For a text-oriented API, treat each record as one UTF-8 log line without a trailing newline. On
+disk, it is still better to store records as length-delimited bytes rather than relying on newline
+parsing.
 
 ### Public API Sketch
 
@@ -239,7 +265,9 @@ impl<'a> DurableLog<'a> {
 }
 ```
 
-If you want a stricter line-oriented API, make `append_log_entry` validate UTF-8 and reject embedded newlines. If you want a generic binary record log, keep the API byte-oriented and let higher layers interpret the payload.
+If you want a stricter line-oriented API, make `append_log_entry` validate UTF-8 and reject embedded
+newlines. If you want a generic binary record log, keep the API byte-oriented and let higher layers
+interpret the payload.
 
 ### Update Model
 
@@ -250,30 +278,41 @@ The WAL updates for a log collection are naturally:
 
 Those are collection-local payload semantics encoded above `append_update`.
 
-`TruncateAfter { last_kept: None }` means "truncate to empty." Using a record id instead of a byte offset is important because it makes truncation land on a record boundary by construction.
+`TruncateAfter { last_kept: None }` means "truncate to empty." Using a record id instead of a byte
+offset is important because it makes truncation land on a record boundary by construction.
 
 ### Read Model
 
-Do not make callers reconstruct the whole log from raw payload bytes. The opened frontier should provide:
+Do not make callers reconstruct the whole log from raw payload bytes. The opened frontier should
+provide:
 
 - direct access to counts and first or last ids
 - random read by `LogRecordId` when the record is still indexed in memory
 - sequential scan from a chosen record id
 
-For large logs, the most practical API is usually sequential reading from a cursor or record id. Random reads are fine as a convenience if the frontier keeps enough index state, but a streaming iterator is the core read path.
+For large logs, the most practical API is usually sequential reading from a cursor or record id.
+Random reads are fine as a convenience if the frontier keeps enough index state, but a streaming
+iterator is the core read path.
 
 ### Why A Log Collection Pushes The Current Runtime
 
-The engine stores one retained collection head through `StartupCollectionBasis::Region(u32)`. For the map, that head is now a manifest region whose payload keeps multiple immutable run regions live. A log collection can use the same pattern: one head region describes the current live segment set, and collection-specific reachability keeps those segments allocated.
+The engine stores one retained collection head through `StartupCollectionBasis::Region(u32)`. For
+the map, that head is now a manifest region whose payload keeps multiple immutable run regions live.
+A log collection can use the same pattern: one head region describes the current live segment set,
+and collection-specific reachability keeps those segments allocated.
 
-An unbounded log is different from a map in its payload semantics, but it no longer needs a fundamentally new "many heads" runtime model. It needs a collection-specific manifest or segment-list format plus shared-runtime reachability support for that format:
+An unbounded log is different from a map in its payload semantics, but it no longer needs a
+fundamentally new "many heads" runtime model. It needs a collection-specific manifest or
+segment-list format plus shared-runtime reachability support for that format:
 
 - replay state must retain the committed manifest head
 - live-state reachability must understand that all manifest-listed log segments are still live
 - reclaim must only detach segments that are no longer reachable after append or truncate
 - open must recover the retained segment set from the manifest before replaying later WAL updates
 
-The important design rule does not change: make this visible to shared storage reachability, not a log-only side protocol. A log collection should not quietly manage extra live regions behind the runtime's back.
+The important design rule does not change: make this visible to shared storage reachability, not a
+log-only side protocol. A log collection should not quietly manage extra live regions behind the
+runtime's back.
 
 ### Segment Layout
 
@@ -284,13 +323,16 @@ A reasonable committed-region design is "one immutable log segment per region":
 - entry-offset index
 - packed entry bytes
 
-Each segment contains only complete records. Appends go to the in-memory frontier and WAL first. Flush compacts a bounded range of records into a new immutable segment. The retained durable basis then becomes an ordered list of segments plus any later WAL updates.
+Each segment contains only complete records. Appends go to the in-memory frontier and WAL first.
+Flush compacts a bounded range of records into a new immutable segment. The retained durable basis
+then becomes an ordered list of segments plus any later WAL updates.
 
 With that model:
 
 - append adds records after the current last id
 - truncate detaches whole tail segments when possible
-- if truncation lands inside the newest retained segment, rewrite just that surviving prefix into a fresh segment and reclaim the old one
+- if truncation lands inside the newest retained segment, rewrite just that surviving prefix into a
+  fresh segment and reclaim the old one
 
 ### Recovery Model
 
@@ -300,7 +342,9 @@ After `open`, the collection should rebuild state in this order:
 2. Rebuild the in-memory record index from those retained segments.
 3. Replay later `Append` and `TruncateAfter` updates in WAL order.
 
-The same record id should never be reused after a truncate. Keep ids monotonic and let truncation change visibility, not identity assignment. That makes recovery and iterator resume logic much simpler.
+The same record id should never be reused after a truncate. Keep ids monotonic and let truncation
+change visibility, not identity assignment. That makes recovery and iterator resume logic much
+simpler.
 
 ### Test Matrix
 
@@ -327,7 +371,8 @@ Use the current map work as the template:
 
 - normative storage-independent payload rules live in [`spec/map.md`](../spec/map.md)
 - shared architecture rules live in [`spec/implementation.md`](../spec/implementation.md)
-- traceability tests tie requirements back to code under [`src/tests/traceability/`](../src/tests/traceability/)
+- traceability tests tie requirements back to code under
+  [`src/tests/traceability/`](../src/tests/traceability/)
 
 At a minimum, test these paths:
 
@@ -346,7 +391,8 @@ After the code lands, update the high-level docs so readers can find the new col
 - [`docs/architecture-and-api.md`](./architecture-and-api.md) module guide or collection overview
 - rustdoc on the new public types and methods
 
-If the collection is still experimental, say that explicitly. The channel module is the precedent for "public but not durably integrated yet."
+If the collection is still experimental, say that explicitly. The channel module is the precedent
+for "public but not durably integrated yet."
 
 ## Checklist
 
@@ -357,6 +403,7 @@ If the collection is still experimental, say that explicitly. The channel module
 - Extended runtime support in `src/storage.rs`
 - Extended startup and `Storage::open` type validation
 - Added `Storage` facade methods and future-returning variants where needed
-- If the collection is unbounded, extended the shared runtime to retain multi-region collection bases
+- If the collection is unbounded, extended the shared runtime to retain multi-region collection
+  bases
 - Added a collection spec and traceability coverage
 - Updated README and narrative docs

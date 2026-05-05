@@ -207,7 +207,8 @@ fn requirement_storage_metadata_decode_rejects_bad_checksum() {
 
 //= spec/ring.md#storage-metadata
 //= type=test
-//# `RING-META-005` Any bytes in the metadata region after the encoded `StorageMetadata` are reserved, MUST be left erased by formatting, and MUST be ignored on read.
+//# `RING-META-005` Any bytes in the metadata region after the encoded `StorageMetadata` are
+//# reserved, MUST be left erased by formatting, and MUST be ignored on read.
 #[test]
 fn requirement_storage_metadata_decode_ignores_reserved_trailing_bytes() {
     let metadata = StorageMetadata::new(4096, 32, 3, 8, 0xff, 0xa5).unwrap();
@@ -218,8 +219,12 @@ fn requirement_storage_metadata_decode_ignores_reserved_trailing_bytes() {
     assert_eq!(StorageMetadata::decode(&buffer).unwrap(), metadata);
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-035` Disk byte helpers MUST advance offsets on reads and writes and return
+//# BufferTooSmall with needed and available sizes for short buffers.
 #[test]
-fn byte_helpers_advance_offsets_and_reject_short_buffers() {
+fn requirement_byte_helpers_advance_offsets_and_reject_short_buffers() {
     let mut buffer = [0u8; 2];
 
     let next = write_u8(&mut buffer, 1, 0x5a).unwrap();
@@ -387,7 +392,8 @@ fn requirement_free_pointer_footer_uses_crc32c_for_non_erased_value() {
 
 //= spec/ring.md#free-pointer-footer
 //= type=test
-//# RING-FREE-002 If all eight footer bytes equal `erased_byte`, the footer is uninitialized and represents `next_tail = none`.
+//# RING-FREE-002 If all eight footer bytes equal `erased_byte`, the footer is uninitialized and
+//# represents `next_tail = none`.
 #[test]
 fn requirement_free_pointer_footer_none_uses_erased_bytes() {
     let footer = FreePointerFooter { next_tail: None };
@@ -420,8 +426,12 @@ fn requirement_free_pointer_footer_rejects_region_index_at_or_above_region_count
     );
 }
 
+//= spec/implementation.md#functional-regression-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-036` The WAL record area offset MUST be aligned to the configured WAL
+//# write granule and follow the region header and prologue area.
 #[test]
-fn wal_record_area_offset_is_granule_aligned() {
+fn requirement_wal_record_area_offset_is_granule_aligned() {
     let metadata = StorageMetadata::new(4096, 32, 3, 16, 0xff, 0xa5).unwrap();
     let offset = metadata.wal_record_area_offset().unwrap();
     assert_eq!(offset % 16, 0);

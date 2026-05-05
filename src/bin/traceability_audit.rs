@@ -83,6 +83,10 @@ fn check_requirements(repo_root: &Path) -> Result<Summary, Vec<String>> {
         failures.push(format!("RING-IMPL-TEST-005: {message}"));
     }
 
+    if let Some(message) = functional_untraced_test_offenders(repo_root) {
+        failures.push(format!("RING-IMPL-TEST-006: {message}"));
+    }
+
     if let Some(message) = multi_requirement_harness_offenders(repo_root) {
         failures.push(format!("RING-IMPL-TEST-004: {message}"));
     }
@@ -96,6 +100,8 @@ fn check_requirements(repo_root: &Path) -> Result<Summary, Vec<String>> {
 
 fn check_annotation_shape(repo_root: &Path, errors: &mut Vec<String>) -> Summary {
     let mut seen_requirements: HashMap<(String, String, String), (PathBuf, usize, String)> =
+        HashMap::new();
+    let mut spec_requirements: HashMap<String, Result<Option<HashSet<String>>, String>> =
         HashMap::new();
     let mut summary = Summary {
         requirement_tests: 0,
@@ -182,6 +188,16 @@ fn check_annotation_shape(repo_root: &Path, errors: &mut Vec<String>) -> Summary
 
             let spec = &parsed.spec_refs[0];
             let quote = &parsed.quote_blocks[0];
+            let normalized_quote = normalize_requirement_whitespace(quote);
+            if contains_test_name_placeholder_requirement(quote) {
+                errors.push(format!(
+                    "{}:{}: {fn_name} traces a test-name placeholder instead of functional behavior",
+                    relative_display(repo_root, &path),
+                    index + 1
+                ));
+                continue;
+            }
+
             let ids = extract_requirement_ids(quote);
             if ids.len() > 1 {
                 errors.push(format!(
@@ -191,11 +207,37 @@ fn check_annotation_shape(repo_root: &Path, errors: &mut Vec<String>) -> Summary
                 ));
                 continue;
             }
+            if !ids.is_empty() {
+                if !spec_requirements.contains_key(&spec.spec_doc) {
+                    spec_requirements.insert(
+                        spec.spec_doc.clone(),
+                        load_spec_requirement_ids(repo_root, &spec.spec_doc),
+                    );
+                }
+                match spec_requirements.get(&spec.spec_doc) {
+                    Some(Ok(Some(requirements)))
+                        if !ids.iter().all(|id| requirements.contains(id)) =>
+                    {
+                        errors.push(format!(
+                            "{}:{}: {fn_name} quotes an identifier that does not exist in {}: {ids:?}",
+                            relative_display(repo_root, &path),
+                            index + 1,
+                            spec.spec_doc
+                        ));
+                        continue;
+                    }
+                    Some(Err(error)) => {
+                        errors.push(error.clone());
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
 
             let key = (
                 spec.spec_doc.clone(),
                 spec.spec_anchor.clone(),
-                quote.clone(),
+                normalized_quote,
             );
             if let Some((prev_path, prev_line, prev_fn)) = seen_requirements.get(&key) {
                 errors.push(format!(
@@ -230,6 +272,26 @@ fn check_annotation_shape(repo_root: &Path, errors: &mut Vec<String>) -> Summary
     summary
 }
 
+fn normalize_requirement_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn load_spec_requirement_ids(
+    repo_root: &Path,
+    relative_spec_path: &str,
+) -> Result<Option<HashSet<String>>, String> {
+    let spec_path = repo_root.join(relative_spec_path);
+    if !spec_path.exists() {
+        return Ok(None);
+    }
+
+    Ok(Some(
+        extract_all_requirement_ids(&read_text(&spec_path)?)
+            .into_iter()
+            .collect(),
+    ))
+}
+
 fn spec_requirement_format_offenders(
     repo_root: &Path,
     relative_spec_path: &str,
@@ -255,6 +317,11 @@ fn spec_requirement_format_offenders(
         if !contains_normative_language(&item) {
             offenders.push(format!(
                 "requirement item does not contain explicit normative language: {item}"
+            ));
+        }
+        if contains_test_name_placeholder_requirement(&item) {
+            offenders.push(format!(
+                "requirement item describes a test-name placeholder instead of functional behavior: {item}"
             ));
         }
     }
@@ -334,6 +401,10 @@ fn contains_normative_language(text: &str) -> bool {
         || text.contains(" MAY ")
 }
 
+fn contains_test_name_placeholder_requirement(text: &str) -> bool {
+    text.contains("functional behavior exercised by")
+}
+
 fn inline_test_module_offenders(repo_root: &Path) -> Option<String> {
     let src_root = repo_root.join("src");
     let mut offenders = Vec::new();
@@ -364,6 +435,63 @@ fn contains_inline_test_body(source: &str) -> bool {
         let trimmed = line.trim();
         trimmed == "#[test]" || trimmed.starts_with("mod tests {")
     })
+}
+
+fn functional_untraced_test_offenders(repo_root: &Path) -> Option<String> {
+    let src_root = repo_root.join("src");
+    let mut offenders = Vec::new();
+
+    for path in rust_files(&src_root) {
+        if !is_functional_test_file(repo_root, &path) {
+            continue;
+        }
+
+        let Ok(source) = read_text(&path) else {
+            continue;
+        };
+        let lines: Vec<&str> = source.lines().collect();
+        for index in 0..lines.len() {
+            let Some(fn_name) = function_name(lines[index]) else {
+                continue;
+            };
+            let parsed = parse_annotation_block(&collect_annotation_block(&lines, index));
+            if parsed.test_attrs > 0 && parsed.is_empty() {
+                offenders.push(format!(
+                    "{}:{} ({fn_name})",
+                    relative_display(repo_root, &path),
+                    index + 1
+                ));
+            }
+        }
+    }
+
+    if offenders.is_empty() {
+        None
+    } else {
+        Some(format!(
+            "functional test entry points without Duvet traces: {offenders:?}"
+        ))
+    }
+}
+
+fn is_functional_test_file(repo_root: &Path, path: &Path) -> bool {
+    if !is_dedicated_test_file(path) {
+        return false;
+    }
+
+    let relative = path.strip_prefix(repo_root).unwrap_or(path);
+    let mut components = relative.components();
+    if components
+        .next()
+        .is_some_and(|component| component.as_os_str() == "src")
+        && components
+            .next()
+            .is_some_and(|component| component.as_os_str() == "bin")
+    {
+        return false;
+    }
+
+    true
 }
 
 fn multi_requirement_harness_offenders(repo_root: &Path) -> Option<String> {
@@ -558,6 +686,32 @@ fn extract_requirement_ids(text: &str) -> Vec<String> {
             }
             if end > prefix.len() {
                 push_unique(&mut ids, trimmed[..end].to_string());
+            }
+        }
+    }
+    ids
+}
+
+fn extract_all_requirement_ids(text: &str) -> Vec<String> {
+    let mut ids = Vec::new();
+    for line in text.lines() {
+        for prefix in ["RING-", "MAP-"] {
+            let mut search_start = 0;
+            while let Some(relative_start) = line[search_start..].find(prefix) {
+                let start = search_start + relative_start;
+                let rest = &line[start + prefix.len()..];
+                let mut end = start + prefix.len();
+                for byte in rest.as_bytes() {
+                    if byte.is_ascii_uppercase() || byte.is_ascii_digit() || *byte == b'-' {
+                        end += 1;
+                    } else {
+                        break;
+                    }
+                }
+                if end > start + prefix.len() {
+                    push_unique(&mut ids, line[start..end].to_string());
+                }
+                search_start = end.max(start + prefix.len());
             }
         }
     }
