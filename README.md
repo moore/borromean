@@ -41,7 +41,6 @@ In both styles the ownership model stays the same:
 - Narrative architecture and API guide: [docs/architecture-and-api.md](docs/architecture-and-api.md)
 - Contributor tutorial for adding a durable collection:
   [docs/implementing-a-collection.md](docs/implementing-a-collection.md)
-- Documentation work tracker: [docs/implementation-docs-plan.md](docs/implementation-docs-plan.md)
 
 ## Requirement Traceability
 
