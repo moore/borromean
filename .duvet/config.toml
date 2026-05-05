@@ -16,6 +16,14 @@ source = "spec/map.md"
 format = "markdown"
 
 [[specification]]
+source = "spec/channel.md"
+format = "markdown"
+
+[[specification]]
+source = "spec/mock.md"
+format = "markdown"
+
+[[specification]]
 source = "spec/implementation-policy.md"
 format = "markdown"
 

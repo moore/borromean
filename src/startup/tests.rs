@@ -324,7 +324,7 @@ fn requirement_open_formatted_store_rejects_duplicate_max_sequence_wal_candidate
     assert_eq!(error, StartupError::DuplicateWalTailSequence(0));
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#startup-replay-implementation-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-046` Startup tail selection MUST ignore regions with nonzero collection_id
 //# even when their format is wal_v1 while still tracking max seen sequence.
@@ -457,7 +457,7 @@ fn requirement_open_formatted_store_replays_stage_region_into_staged_state() {
     assert_eq!(state.last_free_list_head(), Some(2));
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#startup-replay-implementation-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-047` Startup replay MUST preserve staged regions when a WAL head-control
 //# record is replayed.
@@ -499,7 +499,7 @@ fn requirement_open_formatted_store_keeps_staged_regions_when_wal_head_control_i
     assert_eq!(state.staged_regions(), &[1]);
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#startup-replay-implementation-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-048` Startup replay MUST preserve staged regions when non-map collection
 //# head and drop records are replayed.
@@ -663,7 +663,7 @@ fn requirement_open_formatted_store_tracks_live_collection_snapshot_basis() {
     assert!(state.pending_reclaims().is_empty());
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#startup-replay-implementation-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-049` Startup replay MUST count multiple live collections independently.
 #[test]
@@ -744,7 +744,7 @@ fn requirement_open_formatted_store_rejects_later_type_bearing_records_with_mism
     );
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#startup-replay-implementation-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-050` Startup replay MUST accept a committed-region head basis and recover
 //# the collection basis, collection type, and max seen sequence from that region.
@@ -783,7 +783,7 @@ fn requirement_open_formatted_store_accepts_committed_region_head_basis() {
     assert_eq!(state.max_seen_sequence(), 4);
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#startup-replay-implementation-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-051` Startup replay MUST accept a reclaimed historical head after
 //# replacement and recover the live replacement head with no pending reclaim.
@@ -850,7 +850,7 @@ fn requirement_open_formatted_store_accepts_reclaimed_historical_head_after_repl
     assert_eq!(state.free_list_tail(), Some(1));
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#startup-replay-implementation-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-052` Startup replay MUST track pending updates on an empty collection
 //# basis and preserve their count.
@@ -902,7 +902,7 @@ fn requirement_open_formatted_store_tracks_pending_updates_on_empty_collection_b
     assert_eq!(state.collections()[0].pending_update_count(), 2);
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#startup-replay-implementation-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-053` Startup replay MUST reject update records that appear after a
 //# collection drop tombstone for the same collection.
@@ -1040,7 +1040,7 @@ fn requirement_validate_live_collection_types_ignores_unsupported_dropped_tombst
     assert_eq!(validate_live_collection_types(&collections), Ok(()));
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#startup-replay-implementation-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-054` Strict WAL-region reads MUST reject regions whose collection_id is
 //# nonzero even if collection_format is wal_v1.
@@ -1057,7 +1057,7 @@ fn requirement_read_strict_wal_region_rejects_nonzero_collection_id_even_with_wa
     );
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#startup-replay-implementation-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-055` WAL target validation MUST require both collection_id 0 and
 //# collection_format wal_v1.
@@ -1086,7 +1086,7 @@ fn requirement_has_valid_wal_target_requires_both_wal_collection_id_and_format()
     );
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#startup-replay-implementation-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-056` Live committed-region basis validation MUST reject a region whose
 //# header belongs to a different collection.
@@ -1117,7 +1117,7 @@ fn requirement_validate_live_region_bases_rejects_committed_region_for_different
     );
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#startup-replay-implementation-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-057` Region index validation MUST reject a region_index equal to
 //# region_count.
@@ -1150,7 +1150,7 @@ fn requirement_open_formatted_store_clears_ready_region_when_link_matches_it() {
     assert_eq!(state.ready_region(), None);
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#startup-replay-implementation-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-058` Startup replay MUST recover a WAL rotation after a durable link by
 //# selecting the linked tail, resetting tail append offset, updating allocator state, and advancing
@@ -1195,7 +1195,7 @@ fn requirement_open_formatted_store_recovers_rotation_after_link() {
     assert_eq!(state.max_seen_sequence(), 1);
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#startup-replay-implementation-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-059` Startup replay MUST recover a WAL rotation when alloc_begin is
 //# durable but link is absent and only rotation reserve remains.
@@ -1257,7 +1257,7 @@ fn requirement_open_formatted_store_recovers_rotation_before_link() {
     assert_eq!(state.max_seen_sequence(), 1);
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#startup-replay-implementation-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-060` Startup replay MUST recover a WAL rotation when only the link record
 //# fits after alloc_begin at the tail boundary.
@@ -1322,7 +1322,7 @@ fn requirement_open_formatted_store_recovers_rotation_when_only_the_link_record_
     assert_eq!(state.max_seen_sequence(), 1);
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#startup-replay-implementation-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-061` Startup replay MUST reject an unrecovered corrupt boundary in a
 //# non-tail WAL region as a broken WAL chain.
@@ -1388,7 +1388,7 @@ fn requirement_open_formatted_store_uses_the_tail_prologue_as_the_initial_wal_he
     assert_eq!(state.wal_tail(), 0);
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#startup-replay-implementation-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-062` Opening a freshly formatted store MUST initialize allocator free-list
 //# head and tail from the formatted free-list chain.

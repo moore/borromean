@@ -187,7 +187,7 @@ fn free_list_chain<
     chain
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#storage-runtime-state-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-092` CollectionId helpers MUST expose little-endian bytes and checked
 //# increment semantics, returning none on u64 overflow.
@@ -203,7 +203,7 @@ fn requirement_collection_id_helpers_preserve_little_endian_and_overflow_semanti
     assert_eq!(CollectionId::new(u64::MAX).increment(), None);
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#storage-runtime-state-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-093` Storage facade accessors MUST reflect underlying runtime state and
 //# tracked collection metadata.
@@ -237,7 +237,7 @@ fn requirement_storage_facade_accessors_reflect_runtime_state() {
     assert_eq!(storage.collections()[0].collection_id(), CollectionId(321));
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#storage-runtime-state-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-094` Storage facade raw WAL wrapper methods MUST update runtime
 //# collection, allocator, free-list, and reclaim state.
@@ -287,7 +287,7 @@ fn requirement_storage_facade_raw_wal_wrappers_update_runtime_state() {
     assert_eq!(storage.pending_reclaims(), &[]);
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#storage-runtime-state-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-095` Storage facade WAL recovery append MUST reject recovery records when
 //# no recovery boundary is pending.
@@ -304,7 +304,7 @@ fn requirement_storage_facade_rejects_unneeded_wal_recovery_record() {
     ));
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#storage-runtime-state-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-096` Storage facade recovery status MUST report pending WAL recovery
 //# boundaries and clear them after appending wal_recovery.
@@ -760,7 +760,7 @@ fn setup_storage_with_live_empty_head_map_in_wal_head() -> (
     (flash, workspace, storage, next_region)
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/implementation.md#operation-future-regression-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-097` Storage format futures MUST poll to completion and return initialized
 //# storage state.
@@ -785,7 +785,7 @@ fn requirement_storage_format_future_polls_to_completion() {
     assert_eq!(storage.free_list_tail(), Some(3));
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/implementation.md#operation-future-regression-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-098` Storage open futures MUST poll to completion and replay collection
 //# pending update state.
@@ -821,7 +821,7 @@ fn requirement_storage_open_future_polls_to_completion() {
     assert_eq!(reopened.collections()[0].pending_update_count(), 1);
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/implementation.md#operation-future-regression-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-099` Storage open futures MUST yield pending between startup phases before
 //# completing with recovered WAL head and tail.
@@ -846,7 +846,7 @@ fn requirement_storage_open_future_yields_between_startup_phases() {
     assert_eq!(reopened.wal_tail(), 0);
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/implementation.md#operation-future-regression-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-100` Dropping a partially polled storage open future MUST leave the store
 //# openable with unchanged recovered state.
@@ -869,7 +869,7 @@ fn requirement_storage_open_future_drop_before_completion_leaves_store_openable(
     assert!(reopened.collections().is_empty());
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/implementation.md#operation-future-regression-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-101` Storage WAL-head reclaim futures MUST poll to completion, update WAL
 //# head to the reclaimed successor, and append the old head to the free-list tail.
@@ -888,7 +888,7 @@ fn requirement_storage_reclaim_wal_head_future_polls_to_completion() {
     assert_eq!(storage.free_list_tail(), Some(0));
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/implementation.md#operation-future-regression-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-102` Storage WAL-head reclaim futures MUST yield between reclaim phases
 //# before completing with updated WAL head.
@@ -922,7 +922,7 @@ fn requirement_storage_reclaim_wal_head_future_yields_between_reclaim_phases() {
     assert_eq!(storage.wal_head(), next_region);
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/implementation.md#operation-future-regression-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-103` Dropping a WAL-head reclaim future after reclaim begins MUST leave
 //# the store recoverable with original WAL head and live collection basis.
@@ -1115,7 +1115,7 @@ fn requirement_storage_format_returns_logical_state_without_owning_backend() {
     assert_eq!(storage.tracked_user_collection_count(), 0);
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#storage-runtime-state-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-104` Storage append operations MUST persist new collection and update
 //# records so reopening through flash restores the collection and pending update state.
@@ -1205,7 +1205,7 @@ fn requirement_storage_rotation_api_keeps_backend_explicit() {
     assert_eq!(storage.ready_region(), None);
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#storage-runtime-state-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-105` WAL-head reclaim MUST update runtime WAL head and tail to the next
 //# region.
@@ -1400,7 +1400,7 @@ fn requirement_storage_reclaim_wal_head_copies_live_updates_after_basis_to_tail(
     assert_eq!(storage.collections()[0].pending_update_count(), 1);
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#storage-runtime-state-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-106` WAL-head reclaim MUST rewrite a live empty-head map as a WAL snapshot
 //# basis while preserving pending updates.
@@ -1580,7 +1580,7 @@ fn requirement_storage_reclaim_wal_head_reopen_has_no_broken_link_path() {
     );
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/implementation.md#i-o-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-107` Storage operations MUST work through any FlashIo backend that
 //# implements the trait, including delegating backends.
@@ -1609,7 +1609,7 @@ fn requirement_storage_works_through_flash_io_trait_backend() {
     assert_eq!(reopened.collections()[0].pending_update_count(), 1);
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/map.md#map-storage-integration-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-108` Storage map APIs MUST restore snapshot basis values and later typed
 //# updates when opening a map.
@@ -1983,7 +1983,7 @@ fn requirement_storage_map_api_appends_typed_updates() {
     assert_eq!(reopened.get_frontier(&4).unwrap(), None);
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/map.md#map-storage-integration-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-109` Storage map flush API MUST write a committed region basis, clear
 //# ready_region, and preserve flushed key/value lookups.
@@ -2036,7 +2036,7 @@ fn requirement_storage_map_api_flushes_committed_region_basis() {
     );
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/map.md#map-compaction-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-110` Targeted then greedy map compaction MUST reduce selected runs while
 //# preserving unselected runs and all visible key/value lookups.
@@ -2161,7 +2161,7 @@ fn requirement_storage_compact_map_target_then_greedy_preserves_unselected_runs(
     );
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/map.md#map-compaction-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-111` Map compaction MUST preserve tombstone masking so deleted keys remain
 //# absent and later live keys remain visible.
@@ -2266,7 +2266,7 @@ fn requirement_storage_compact_map_preserves_tombstone_masking() {
     );
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/map.md#map-compaction-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-112` Map compaction MUST stream replacements larger than frontier capacity
 //# into a single run while preserving all visible key/value lookups across repeated compaction.
@@ -2446,7 +2446,7 @@ fn requirement_storage_map_replacement_flush_records_reclaim_after_new_head() {
     assert!(saw_replacement_head);
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/map.md#map-storage-integration-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-113` Reopening after a map replacement flush MUST complete pending reclaim
 //# of the replaced region and preserve the replacement map value.
@@ -2559,7 +2559,7 @@ fn replace_map_and_reopen_empty_free_list() -> (
     )
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/map.md#map-storage-integration-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-114` Reopening after replacement with an empty free list MUST initialize
 //# free-list head from the recovered reclaimed region.
@@ -2571,7 +2571,7 @@ fn requirement_storage_reopen_after_replacement_initializes_allocator_from_recov
     assert_eq!(reopened.last_free_list_head(), Some(first_region));
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/map.md#map-storage-integration-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-115` Reopening after replacement with an empty free list MUST reconstruct
 //# free-list tail from the recovered reclaimed region.
@@ -2761,7 +2761,7 @@ fn requirement_storage_map_flush_rejects_consuming_min_free_region_reserve() {
     ));
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/map.md#map-storage-integration-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-116` Map flush MUST complete detached pending reclaims before allocating
 //# from the minimum free-region reserve.
@@ -3095,7 +3095,7 @@ fn requirement_storage_complete_pending_reclaim_syncs_the_tail_link_before_recla
     assert!(first_sync < reclaim_end_write);
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/map.md#map-storage-integration-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-117` Reopening after a premature reclaim_begin before replacement detaches
 //# the old head MUST discard the pending reclaim and preserve the old map basis and value.
@@ -3146,7 +3146,7 @@ fn requirement_storage_reopen_discards_reclaim_begin_before_replacement_detaches
     );
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/map.md#map-storage-integration-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-118` Dropping a map with committed-region basis MUST start reclaim for
 //# that region, tombstone the collection, complete reclaim on reopen, and reject reopening the
@@ -3202,7 +3202,7 @@ fn requirement_storage_drop_map_starts_reclaim_for_committed_region_basis() {
     ));
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/map.md#map-storage-integration-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-119` Reopening after a premature reclaim_begin before drop detaches the
 //# live region MUST discard the pending reclaim and preserve the live map basis and value.
@@ -3308,7 +3308,7 @@ fn requirement_storage_drop_map_records_reclaim_before_drop() {
     );
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/map.md#map-storage-integration-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-120` Dropping a map whose basis is a WAL snapshot MUST tombstone the
 //# collection without starting a region reclaim.

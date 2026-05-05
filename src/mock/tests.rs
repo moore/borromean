@@ -44,7 +44,7 @@ fn requirement_mock_flash_supports_region_granularity_write_and_erase() {
     assert_eq!(buffer, [0xff; 8]);
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/mock.md#mock-flash-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-037` Mock flash metadata read/write operations MUST persist metadata and
 //# log write/read metadata operations in order.
@@ -63,7 +63,7 @@ fn requirement_metadata_operations_are_logged() {
     );
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/mock.md#mock-flash-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-038` Mock flash storage reads MUST span metadata and data regions by
 //# absolute offset and reject out-of-bounds reads.
@@ -86,7 +86,7 @@ fn requirement_read_storage_spans_metadata_and_data_regions_with_bounds_checks()
     );
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/mock.md#mock-flash-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-039` Mock flash metadata writes MUST fail without changing metadata when
 //# the metadata region is smaller than encoded StorageMetadata.
@@ -99,7 +99,7 @@ fn requirement_write_metadata_requires_metadata_region_large_enough() {
     assert_eq!(flash.metadata(), None);
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/mock.md#mock-flash-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-040` Mock flash metadata writes MUST succeed when the metadata region
 //# exactly matches encoded StorageMetadata and persist decodable metadata.
@@ -118,7 +118,7 @@ fn requirement_write_metadata_accepts_exact_metadata_region_size() {
     );
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/mock.md#mock-flash-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-041` FlashIo metadata operations on MockFlash MUST delegate to mock
 //# metadata storage and return the persisted metadata.
@@ -136,7 +136,7 @@ fn requirement_flash_io_trait_write_metadata_delegates_to_mock_flash() {
     );
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/mock.md#mock-flash-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-042` Mock flash erase/write/read/sync operations MUST perform the
 //# operation and log each operation with region, offset, and length details.
@@ -170,7 +170,7 @@ fn requirement_erase_write_read_and_sync_are_logged() {
     );
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/mock.md#mock-flash-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-043` Erasing a mock flash region MUST restore every byte in that region to
 //# the erased byte.
@@ -201,7 +201,7 @@ fn requirement_format_empty_store_rejects_too_few_regions() {
     );
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/mock.md#mock-flash-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-044` Formatting an empty mock store MUST accept the exact minimum region
 //# count and persist matching metadata.
@@ -319,7 +319,7 @@ fn requirement_format_empty_store_writes_free_pointer_footer_in_final_eight_byte
     assert_eq!(footer.next_tail, Some(2));
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/mock.md#mock-flash-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-045` Formatting an empty mock store MUST leave reserved bytes after
 //# encoded StorageMetadata erased.

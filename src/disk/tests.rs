@@ -219,7 +219,7 @@ fn requirement_storage_metadata_decode_ignores_reserved_trailing_bytes() {
     assert_eq!(StorageMetadata::decode(&buffer).unwrap(), metadata);
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#encoding-helper-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-035` Disk byte helpers MUST advance offsets on reads and writes and return
 //# BufferTooSmall with needed and available sizes for short buffers.
@@ -426,7 +426,7 @@ fn requirement_free_pointer_footer_rejects_region_index_at_or_above_region_count
     );
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#encoding-helper-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-036` The WAL record area offset MUST be aligned to the configured WAL
 //# write granule and follow the region header and prologue area.

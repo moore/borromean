@@ -343,7 +343,7 @@ fn requirement_committed_region_write_uses_a_region_previously_reserved_by_alloc
         .unwrap();
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#storage-runtime-state-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-063` Committed region writes MUST accept a payload that exactly fills
 //# committed payload capacity and persist the full payload bytes.
@@ -458,7 +458,7 @@ fn requirement_reopen_after_alloc_begin_recovers_the_advanced_allocator_state() 
     assert_eq!(reopened.free_list_tail(), Some(4));
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#storage-runtime-state-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-064` Formatting storage MUST return fresh runtime state with metadata, WAL
 //# head/tail, allocator, collection, and reclaim fields initialized.
@@ -579,7 +579,7 @@ fn requirement_wal_collection_type_is_reserved_for_collection_id_zero() {
     );
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#storage-runtime-state-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-065` WAL record visitation MUST report snapshot and update records after a
 //# new collection in durable WAL order.
@@ -633,7 +633,7 @@ fn requirement_visit_wal_records_reports_snapshot_and_update_records() {
     );
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#storage-runtime-state-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-066` Opening storage MUST return replayed runtime state with append
 //# offset, max sequence, collection type, committed basis, and pending update count.
@@ -693,7 +693,7 @@ fn requirement_open_returns_replayed_collection_runtime_state() {
     assert_eq!(state.collections()[0].pending_update_count(), 0);
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#storage-runtime-state-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-067` Opening storage MUST complete reclaims for regions already on the
 //# free list and clear pending reclaim state.
@@ -728,7 +728,7 @@ fn requirement_open_completes_reclaims_already_on_the_free_list() {
     assert!(state.pending_reclaims().is_empty());
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#storage-runtime-state-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-068` Opening storage MUST discard pending reclaim records for regions
 //# still reachable from live collection state.
@@ -767,7 +767,7 @@ fn requirement_open_discards_pending_reclaims_for_still_live_regions() {
     assert!(state.pending_reclaims().is_empty());
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#storage-runtime-state-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-069` Appending a new collection and update MUST refresh runtime collection
 //# state and pending update count.
@@ -816,7 +816,7 @@ fn requirement_append_update_requires_a_prior_new_collection_record() {
     );
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#storage-runtime-state-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-070` Appending a snapshot MUST move the collection to WAL snapshot basis
 //# and clear prior pending updates.
@@ -854,7 +854,7 @@ fn requirement_append_snapshot_resets_pending_updates() {
     assert_eq!(state.collections()[0].pending_update_count(), 0);
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#storage-runtime-state-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-071` Appending head and drop records MUST refresh runtime basis to
 //# committed region and then dropped tombstone while reducing tracked live collection count.
@@ -975,7 +975,7 @@ fn requirement_append_alloc_and_reclaim_methods_refresh_runtime_state() {
     assert!(state.pending_reclaims().is_empty());
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#storage-runtime-state-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-072` Appending WAL recovery MUST clear pending recovery boundary and
 //# advance append offset; appending free-list-head MUST refresh allocator head and tail.
@@ -1004,7 +1004,7 @@ fn requirement_append_free_list_head_and_wal_recovery_refresh_runtime_state() {
     assert_eq!(state.free_list_tail(), Some(3));
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#storage-runtime-state-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-073` WAL rotation start/finish appends MUST reserve the next free region,
 //# advance allocator state, then move WAL tail to the new region and clear ready_region.
@@ -1051,10 +1051,10 @@ fn requirement_committed_region_allocations_advance_sequence_from_max_seen_seque
     assert_eq!(progress.max_seen_after_second, progress.second_sequence);
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#storage-runtime-state-requirements
 //= type=test
-//# `RING-IMPL-REGRESSION-074` WAL rotation MUST initialize the new WAL region at max_seen_sequence
-//# + 1 and update runtime max_seen_sequence.
+//# `RING-IMPL-REGRESSION-074` WAL rotation MUST initialize the new WAL region at
+//# `max_seen_sequence + 1` and update runtime max_seen_sequence.
 #[test]
 fn requirement_wal_rotation_initializes_the_next_wal_region_at_max_seen_sequence_plus_one() {
     let mut flash = MockFlash::<128, 4, 128>::new(0xff);
@@ -1173,7 +1173,7 @@ fn requirement_stage_ready_region_detaches_ready_region_and_allows_next_allocati
     assert_eq!(state.ready_region(), Some(second_region));
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#storage-runtime-state-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-075` Reopening with uncommitted staged regions MUST reclaim staged regions
 //# and leave no ready or staged regions live.
@@ -1204,7 +1204,7 @@ fn requirement_staged_regions_are_reclaimed_on_reopen_when_uncommitted() {
     assert!(reopened.staged_regions().is_empty());
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#storage-runtime-state-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-076` Staging a region MUST reject region indexes that do not match the
 //# current ready_region.
@@ -1381,7 +1381,7 @@ fn requirement_initialized_wal_region_erases_the_wal_region_before_reuse() {
     ));
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#storage-runtime-state-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-077` Normal WAL appends MUST reject writes that would consume rotation
 //# reserve until WAL rotation completes, after which appends may continue.
@@ -1428,7 +1428,7 @@ fn requirement_normal_append_rejects_when_it_would_consume_rotation_reserve() {
         .unwrap();
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#storage-runtime-state-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-078` WAL rotation start MUST reject calls made before the WAL tail has
 //# entered the rotation window.
@@ -1448,7 +1448,7 @@ fn requirement_append_wal_rotation_start_rejects_when_called_before_rotation_win
     ));
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#storage-runtime-state-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-079` Head append room checks MUST perform WAL rotation when the current
 //# tail lacks room for a head record.
@@ -1491,7 +1491,7 @@ fn requirement_ensure_head_append_room_with_rotation_rotates_when_tail_lacks_hea
     assert_ne!(state.wal_tail(), tail_before);
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#storage-runtime-state-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-080` Stage-region append room checks MUST reject staging when allocator
 //# state no longer matches the target region.
@@ -1521,7 +1521,7 @@ fn requirement_ensure_stage_region_append_room_with_rotation_rotates_when_tail_l
         .is_err());
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#storage-runtime-state-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-081` Encoded append reserve checks for alloc_begin MUST require a free
 //# region and return WalRotationRequired when none remains.
@@ -1539,7 +1539,7 @@ fn requirement_ensure_encoded_append_reserve_rejects_alloc_begin_when_no_free_re
     );
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#storage-runtime-state-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-082` Encoded append reserve checks MUST allow alloc_begin when the tail
 //# has exactly the rotation reserve plus encoded record length remaining.
@@ -1570,7 +1570,7 @@ fn requirement_ensure_encoded_append_reserve_accepts_alloc_begin_at_exact_rotati
     );
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#storage-runtime-state-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-083` WAL-head reclaim classification MUST copy only head records that
 //# still reference the retained live region and skip stale head records.
@@ -1641,7 +1641,7 @@ fn requirement_classify_wal_head_reclaim_copies_only_the_retained_region_head() 
     );
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#storage-runtime-state-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-084` WAL-head reclaim classification MUST copy drop tombstones only for
 //# collections that remain dropped and skip drops for live collections.
@@ -1692,7 +1692,7 @@ fn requirement_classify_wal_head_reclaim_copies_only_retained_drop_tombstones() 
     );
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#storage-runtime-state-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-085` Foreground allocation headroom checks MUST reject allocations that
 //# would consume the configured minimum free-region reserve.
@@ -1715,7 +1715,7 @@ fn requirement_ensure_foreground_allocation_headroom_rejects_using_the_minimum_f
     );
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#storage-runtime-state-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-086` WAL-head reclaim copying MUST stop cleanly when a copied tail record
 //# ends exactly at the region end.
@@ -1737,7 +1737,7 @@ fn requirement_copy_live_wal_head_reclaim_state_stops_when_a_record_ends_at_regi
         .unwrap();
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#storage-runtime-state-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-087` Live-state reachability checks MUST NOT parse non-map collection
 //# heads as maps.
@@ -1772,7 +1772,7 @@ fn requirement_region_reachable_from_live_state_does_not_parse_non_map_region_he
         .unwrap());
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#storage-runtime-state-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-088` Live-state reachability checks MUST follow live map manifest heads to
 //# referenced run regions.
@@ -1828,7 +1828,7 @@ fn requirement_region_reachable_from_live_state_follows_map_head_references_to_r
         .unwrap());
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#storage-runtime-state-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-089` Dropping a staged region in memory MUST remove only the matching
 //# staged region and preserve other staged regions.
@@ -1843,7 +1843,7 @@ fn requirement_drop_staged_region_in_memory_removes_only_the_matching_region() {
     assert_eq!(state.staged_regions(), &[2]);
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#storage-runtime-state-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-090` WAL record visitation MUST process a tail record that ends exactly at
 //# the append limit and then stop.
@@ -1873,7 +1873,7 @@ fn requirement_visit_wal_records_stops_when_a_tail_record_ends_at_the_append_lim
     assert_eq!(visited, 1);
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#storage-runtime-state-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-091` WAL-chain membership checks MUST follow durable link targets to
 //# determine whether a region belongs to the chain.

@@ -18,7 +18,7 @@ fn encode_logical(record: WalRecord<'_>) -> ([u8; 128], usize) {
     (logical, logical_len)
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#encoding-helper-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-123` WAL byte helpers MUST advance offsets for byte and byte-slice reads
 //# and writes and report BufferTooSmall with needed and available sizes on short buffers.
@@ -62,7 +62,7 @@ fn requirement_wal_byte_helpers_advance_offsets_and_reject_short_buffers() {
     ));
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#encoding-helper-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-124` Logical WAL byte encoding MUST escape erased byte, record magic, and
 //# escape byte with distinct derived escape codes.
@@ -118,7 +118,7 @@ fn requirement_logical_byte_encoding_escapes_reserved_physical_bytes() {
     );
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#encoding-helper-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-125` WAL record decoding MUST consume all encoded physical bytes and
 //# report encoded and logical lengths for decoded records.
@@ -142,7 +142,7 @@ fn requirement_decode_record_consumes_all_logical_bytes_and_reports_lengths() {
     );
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#encoding-helper-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-126` WAL record decoding MUST wait until all payload-header bytes are
 //# available before reading payload metadata.
@@ -161,7 +161,7 @@ fn requirement_decode_record_does_not_read_payload_header_before_all_header_byte
     assert_eq!(decoded.record, record);
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#encoding-helper-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-127` WAL record decoding MUST reject an empty logical scratch buffer
 //# before writing the first decoded logical byte.
@@ -278,7 +278,7 @@ fn requirement_collection_type_codes_use_reserved_global_namespace() {
     assert_eq!(crate::CollectionType::MAP_CODE, 2);
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#encoding-helper-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-128` Logical WAL record encoding MUST serialize fixed-width fields
 //# little-endian in canonical order.
@@ -351,7 +351,7 @@ fn requirement_optional_region_indexes_use_a_tag_then_little_endian_region_index
     );
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#encoding-helper-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-129` Logical WAL record checksums MUST use CRC-32C over logical prefix
 //# bytes and store the checksum little-endian.
@@ -538,7 +538,7 @@ fn requirement_consecutive_wal_record_start_offsets_stay_aligned_to_wal_write_gr
     assert_eq!((initial_offset + first_len + second_len) % 16, 0);
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#encoding-helper-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-130` Update WAL records MUST round-trip through physical escaping,
 //# padding, and decoding without changing payload bytes.
@@ -580,7 +580,7 @@ fn requirement_empty_payload_record_types_encode_zero_payload_len() {
     assert_eq!(wal_recovery_len, 9);
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#encoding-helper-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-131` Free-list-head WAL records with no region index MUST round-trip
 //# through physical encoding and decoding.
@@ -744,7 +744,7 @@ fn requirement_record_checksum_covers_logical_prefix_bytes() {
     assert_eq!(u32::from_le_bytes(checksum_bytes), expected_checksum);
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/ring.md#encoding-helper-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-132` Alloc-begin WAL records MUST round-trip free_list_head_after through
 //# physical encoding and decoding.

@@ -6,18 +6,20 @@ This specification defines repository traceability policy and
 documentation-format rules for the borromean implementation
 specifications and their verification harnesses.
 [spec/ring.md](ring.md) and
-[spec/implementation.md](implementation.md) remain the source of truth
-for storage semantics and executable implementation constraints.
+[spec/implementation.md](implementation.md) remain the source of truth for
+storage semantics and executable implementation constraints. Collection
+and support specifications own concrete functional behavior for their
+respective subsystems.
 
 ## Requirements Format
 
 This policy specification keeps normative requirements adjacent to the
 text that motivates them.
 
-1. `RING-IMPL-FORMAT-001` Each normative requirement in [spec/implementation.md](implementation.md)
-   or this specification MUST start with a stable identifier such as `RING-IMPL-CORE-001`.
-2. `RING-IMPL-FORMAT-002` Each normative requirement in [spec/implementation.md](implementation.md)
-   or this specification MUST use explicit RFC-2119 normative language.
+1. `RING-IMPL-FORMAT-001` Each normative requirement in a repository specification configured for
+   Duvet verification MUST start with a stable identifier such as `RING-IMPL-CORE-001`.
+2. `RING-IMPL-FORMAT-002` Each normative requirement in a repository specification configured for
+   Duvet verification MUST use explicit RFC-2119 normative language.
 
 These identifiers are intended to be Duvet traceability targets for
 implementation-architecture decisions and repository policy
@@ -42,11 +44,10 @@ module they exercise.
 
 ### Verification Requirements
 
-1. `RING-IMPL-TEST-001` Every normative requirement in
-[spec/ring.md](ring.md) or [spec/implementation.md](implementation.md)
-MUST have at least one dedicated automated test function or dedicated
-compile-time test case whose primary purpose is to verify that single
-requirement.
+1. `RING-IMPL-TEST-001` Every normative requirement in a repository
+specification configured for Duvet verification MUST have at least one
+dedicated automated test function or dedicated compile-time test case
+whose primary purpose is to verify that single requirement.
 2. `RING-IMPL-TEST-002` A top-level automated test function MUST NOT
 claim to verify multiple normative requirement identifiers.
 3. `RING-IMPL-TEST-003` Shared setup, fixtures, helper functions,

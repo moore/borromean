@@ -38,6 +38,8 @@ In both styles the ownership model stays the same:
 - Implementation architecture and API constraints: [spec/implementation.md](spec/implementation.md)
 - Durable map collection format, current validation rules, and target
   whole-run LSM design: [spec/map.md](spec/map.md)
+- Experimental channel collection behavior: [spec/channel.md](spec/channel.md)
+- Mock flash backend behavior: [spec/mock.md](spec/mock.md)
 - Narrative architecture and API guide: [docs/architecture-and-api.md](docs/architecture-and-api.md)
 - Contributor tutorial for adding a durable collection:
   [docs/implementing-a-collection.md](docs/implementing-a-collection.md)
@@ -56,5 +58,6 @@ Example Rust annotation:
 ```
 
 The implementation docs follow the same pattern. `spec/implementation.md` captures architecture and
-API constraints, while collection-specific normative behavior lives in collection specifications
-such as [spec/map.md](spec/map.md).
+API constraints, while concrete functional behavior lives in storage, collection, or support
+specifications such as [spec/ring.md](spec/ring.md), [spec/map.md](spec/map.md),
+[spec/channel.md](spec/channel.md), and [spec/mock.md](spec/mock.md).

@@ -899,6 +899,35 @@ instead of being returned to the free list. If replay sees a matching
 remains allocated until collection-specific reachability or reclaim
 handles it.
 
+### Encoding Helper Requirements
+
+These requirements cover implemented byte-level helpers for canonical disk and WAL encoding.
+
+1. `RING-IMPL-REGRESSION-035` Disk byte helpers MUST advance offsets on reads and writes and return
+   BufferTooSmall with needed and available sizes for short buffers.
+2. `RING-IMPL-REGRESSION-036` The WAL record area offset MUST be aligned to the configured WAL
+   write granule and follow the region header and prologue area.
+3. `RING-IMPL-REGRESSION-123` WAL byte helpers MUST advance offsets for byte and byte-slice reads
+   and writes and report BufferTooSmall with needed and available sizes on short buffers.
+4. `RING-IMPL-REGRESSION-124` Logical WAL byte encoding MUST escape erased byte, record magic, and
+   escape byte with distinct derived escape codes.
+5. `RING-IMPL-REGRESSION-125` WAL record decoding MUST consume all encoded physical bytes and
+   report encoded and logical lengths for decoded records.
+6. `RING-IMPL-REGRESSION-126` WAL record decoding MUST wait until all payload-header bytes are
+   available before reading payload metadata.
+7. `RING-IMPL-REGRESSION-127` WAL record decoding MUST reject an empty logical scratch buffer before
+   writing the first decoded logical byte.
+8. `RING-IMPL-REGRESSION-128` Logical WAL record encoding MUST serialize fixed-width fields
+   little-endian in canonical order.
+9. `RING-IMPL-REGRESSION-129` Logical WAL record checksums MUST use CRC-32C over logical prefix
+   bytes and store the checksum little-endian.
+10. `RING-IMPL-REGRESSION-130` Update WAL records MUST round-trip through physical escaping,
+    padding, and decoding without changing payload bytes.
+11. `RING-IMPL-REGRESSION-131` Free-list-head WAL records with no region index MUST round-trip
+    through physical encoding and decoding.
+12. `RING-IMPL-REGRESSION-132` Alloc-begin WAL records MUST round-trip free_list_head_after through
+    physical encoding and decoding.
+
 ## Collection Head State Machine
 
 Each tracked user collection is either durably dropped or has exactly
@@ -1350,6 +1379,45 @@ fail.
 `collection_type` is unsupported MAY remain as inert metadata and does
 not by itself require startup failure.
 
+### Startup Replay Implementation Requirements
+
+These requirements cover implemented startup replay edge cases and validation helpers.
+
+1. `RING-IMPL-REGRESSION-046` Startup tail selection MUST ignore regions with nonzero collection_id
+   even when their format is wal_v1 while still tracking max seen sequence.
+2. `RING-IMPL-REGRESSION-047` Startup replay MUST preserve staged regions when a WAL head-control
+   record is replayed.
+3. `RING-IMPL-REGRESSION-048` Startup replay MUST preserve staged regions when non-map collection
+   head and drop records are replayed.
+4. `RING-IMPL-REGRESSION-049` Startup replay MUST count multiple live collections independently.
+5. `RING-IMPL-REGRESSION-050` Startup replay MUST accept a committed-region head basis and recover
+   the collection basis, collection type, and max seen sequence from that region.
+6. `RING-IMPL-REGRESSION-051` Startup replay MUST accept a reclaimed historical head after
+   replacement and recover the live replacement head with no pending reclaim.
+7. `RING-IMPL-REGRESSION-052` Startup replay MUST track pending updates on an empty collection
+   basis and preserve their count.
+8. `RING-IMPL-REGRESSION-053` Startup replay MUST reject update records that appear after a
+   collection drop tombstone for the same collection.
+9. `RING-IMPL-REGRESSION-054` Strict WAL-region reads MUST reject regions whose collection_id is
+   nonzero even if collection_format is wal_v1.
+10. `RING-IMPL-REGRESSION-055` WAL target validation MUST require both collection_id 0 and
+    collection_format wal_v1.
+11. `RING-IMPL-REGRESSION-056` Live committed-region basis validation MUST reject a region whose
+    header belongs to a different collection.
+12. `RING-IMPL-REGRESSION-057` Region index validation MUST reject a region_index equal to
+    region_count.
+13. `RING-IMPL-REGRESSION-058` Startup replay MUST recover a WAL rotation after a durable link by
+    selecting the linked tail, resetting tail append offset, updating allocator state, and advancing
+    max sequence.
+14. `RING-IMPL-REGRESSION-059` Startup replay MUST recover a WAL rotation when alloc_begin is
+    durable but link is absent and only rotation reserve remains.
+15. `RING-IMPL-REGRESSION-060` Startup replay MUST recover a WAL rotation when only the link record
+    fits after alloc_begin at the tail boundary.
+16. `RING-IMPL-REGRESSION-061` Startup replay MUST reject an unrecovered corrupt boundary in a
+    non-tail WAL region as a broken WAL chain.
+17. `RING-IMPL-REGRESSION-062` Opening a freshly formatted store MUST initialize allocator
+    free-list head and tail from the formatted free-list chain.
+
 ```mermaid
 %%{init: {"flowchart": {"wrappingWidth": 180}} }%%
 flowchart TD
@@ -1534,6 +1602,86 @@ region `sequence` value observed during startup region scan, and may be
 advanced further if startup recovery initializes an incomplete WAL
 rotation. Each newly allocated region uses the next value
 (`max_seen_sequence + 1`), then updates this runtime field.
+
+### Storage Runtime State Requirements
+
+These requirements cover implemented runtime state updates for formatting, opening, appending,
+rotation, reclaim, and WAL/state facade helpers.
+
+1. `RING-IMPL-REGRESSION-063` Committed region writes MUST accept a payload that exactly fills
+   committed payload capacity and persist the full payload bytes.
+2. `RING-IMPL-REGRESSION-064` Formatting storage MUST return fresh runtime state with metadata, WAL
+   head/tail, allocator, collection, and reclaim fields initialized.
+3. `RING-IMPL-REGRESSION-065` WAL record visitation MUST report snapshot and update records after a
+   new collection in durable WAL order.
+4. `RING-IMPL-REGRESSION-066` Opening storage MUST return replayed runtime state with append
+   offset, max sequence, collection type, committed basis, and pending update count.
+5. `RING-IMPL-REGRESSION-067` Opening storage MUST complete reclaims for regions already on the
+   free list and clear pending reclaim state.
+6. `RING-IMPL-REGRESSION-068` Opening storage MUST discard pending reclaim records for regions
+   still reachable from live collection state.
+7. `RING-IMPL-REGRESSION-069` Appending a new collection and update MUST refresh runtime collection
+   state and pending update count.
+8. `RING-IMPL-REGRESSION-070` Appending a snapshot MUST move the collection to WAL snapshot basis
+   and clear prior pending updates.
+9. `RING-IMPL-REGRESSION-071` Appending head and drop records MUST refresh runtime basis to
+   committed region and then dropped tombstone while reducing tracked live collection count.
+10. `RING-IMPL-REGRESSION-072` Appending WAL recovery MUST clear pending recovery boundary and
+    advance append offset; appending free-list-head MUST refresh allocator head and tail.
+11. `RING-IMPL-REGRESSION-073` WAL rotation start/finish appends MUST reserve the next free region,
+    advance allocator state, then move WAL tail to the new region and clear ready_region.
+12. `RING-IMPL-REGRESSION-074` WAL rotation MUST initialize the new WAL region at
+    `max_seen_sequence + 1` and update runtime max_seen_sequence.
+13. `RING-IMPL-REGRESSION-075` Reopening with uncommitted staged regions MUST reclaim staged
+    regions and leave no ready or staged regions live.
+14. `RING-IMPL-REGRESSION-076` Staging a region MUST reject region indexes that do not match the
+    current ready_region.
+15. `RING-IMPL-REGRESSION-077` Normal WAL appends MUST reject writes that would consume rotation
+    reserve until WAL rotation completes, after which appends may continue.
+16. `RING-IMPL-REGRESSION-078` WAL rotation start MUST reject calls made before the WAL tail has
+    entered the rotation window.
+17. `RING-IMPL-REGRESSION-079` Head append room checks MUST perform WAL rotation when the current
+    tail lacks room for a head record.
+18. `RING-IMPL-REGRESSION-080` Stage-region append room checks MUST reject staging when allocator
+    state no longer matches the target region.
+19. `RING-IMPL-REGRESSION-081` Encoded append reserve checks for alloc_begin MUST require a free
+    region and return WalRotationRequired when none remains.
+20. `RING-IMPL-REGRESSION-082` Encoded append reserve checks MUST allow alloc_begin when the tail
+    has exactly the rotation reserve plus encoded record length remaining.
+21. `RING-IMPL-REGRESSION-083` WAL-head reclaim classification MUST copy only head records that
+    still reference the retained live region and skip stale head records.
+22. `RING-IMPL-REGRESSION-084` WAL-head reclaim classification MUST copy drop tombstones only for
+    collections that remain dropped and skip drops for live collections.
+23. `RING-IMPL-REGRESSION-085` Foreground allocation headroom checks MUST reject allocations that
+    would consume the configured minimum free-region reserve.
+24. `RING-IMPL-REGRESSION-086` WAL-head reclaim copying MUST stop cleanly when a copied tail record
+    ends exactly at the region end.
+25. `RING-IMPL-REGRESSION-087` Live-state reachability checks MUST NOT parse non-map collection
+    heads as maps.
+26. `RING-IMPL-REGRESSION-088` Live-state reachability checks MUST follow live map manifest heads to
+    referenced run regions.
+27. `RING-IMPL-REGRESSION-089` Dropping a staged region in memory MUST remove only the matching
+    staged region and preserve other staged regions.
+28. `RING-IMPL-REGRESSION-090` WAL record visitation MUST process a tail record that ends exactly at
+    the append limit and then stop.
+29. `RING-IMPL-REGRESSION-091` WAL-chain membership checks MUST follow durable link targets to
+    determine whether a region belongs to the chain.
+30. `RING-IMPL-REGRESSION-092` CollectionId helpers MUST expose little-endian bytes and checked
+    increment semantics, returning none on u64 overflow.
+31. `RING-IMPL-REGRESSION-093` Storage facade accessors MUST reflect underlying runtime state and
+    tracked collection metadata.
+32. `RING-IMPL-REGRESSION-094` Storage facade raw WAL wrapper methods MUST update runtime
+    collection, allocator, free-list, and reclaim state.
+33. `RING-IMPL-REGRESSION-095` Storage facade WAL recovery append MUST reject recovery records when
+    no recovery boundary is pending.
+34. `RING-IMPL-REGRESSION-096` Storage facade recovery status MUST report pending WAL recovery
+    boundaries and clear them after appending wal_recovery.
+35. `RING-IMPL-REGRESSION-104` Storage append operations MUST persist new collection and update
+    records so reopening through flash restores the collection and pending update state.
+36. `RING-IMPL-REGRESSION-105` WAL-head reclaim MUST update runtime WAL head and tail to the next
+    region.
+37. `RING-IMPL-REGRESSION-106` WAL-head reclaim MUST rewrite a live empty-head map as a WAL snapshot
+    basis while preserving pending updates.
 
 ## WAL Reclaim Eligibility
 

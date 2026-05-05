@@ -62,13 +62,15 @@ fn main() -> ExitCode {
 fn check_requirements(repo_root: &Path) -> Result<Summary, Vec<String>> {
     let mut failures = Vec::new();
 
-    for (spec_path, prefix) in [
-        ("spec/implementation.md", "RING-IMPL-"),
-        ("spec/implementation-policy.md", "RING-IMPL-"),
-        ("spec/ring.md", "RING-"),
-        ("spec/map.md", "MAP-"),
+    for (spec_path, prefixes) in [
+        ("spec/implementation.md", &["RING-IMPL-"][..]),
+        ("spec/implementation-policy.md", &["RING-IMPL-"][..]),
+        ("spec/ring.md", &["RING-"][..]),
+        ("spec/map.md", &["MAP-", "RING-IMPL-REGRESSION-"][..]),
+        ("spec/channel.md", &["RING-IMPL-REGRESSION-"][..]),
+        ("spec/mock.md", &["RING-IMPL-REGRESSION-"][..]),
     ] {
-        match spec_requirement_format_offenders(repo_root, spec_path, prefix) {
+        match spec_requirement_format_offenders(repo_root, spec_path, prefixes) {
             Ok(Some(message)) => {
                 failures.push(format!("{spec_path}#requirements-format: {message}"));
             }
@@ -295,7 +297,7 @@ fn load_spec_requirement_ids(
 fn spec_requirement_format_offenders(
     repo_root: &Path,
     relative_spec_path: &str,
-    expected_prefix: &str,
+    expected_prefixes: &[&str],
 ) -> Result<Option<String>, String> {
     let spec_path = repo_root.join(relative_spec_path);
     let items = collect_normative_requirement_items(&spec_path)?;
@@ -307,7 +309,10 @@ fn spec_requirement_format_offenders(
 
     let mut offenders = Vec::new();
     for item in items {
-        if !item.starts_with(&format!("`{expected_prefix}")) {
+        if !expected_prefixes
+            .iter()
+            .any(|expected_prefix| item.starts_with(&format!("`{expected_prefix}")))
+        {
             offenders.push(format!(
                 "requirement item does not start with a stable identifier: {item}"
             ));

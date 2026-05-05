@@ -69,8 +69,8 @@ fn parsed_block_empty_requires_all_trace_vectors_to_be_empty() {
 
 //= spec/implementation-policy.md#requirements-format
 //= type=test
-//# `RING-IMPL-FORMAT-001` Each normative requirement in [spec/implementation.md](implementation.md)
-//# or this specification MUST start with a stable identifier such as `RING-IMPL-CORE-001`.
+//# `RING-IMPL-FORMAT-001` Each normative requirement in a repository specification configured for
+//# Duvet verification MUST start with a stable identifier such as `RING-IMPL-CORE-001`.
 #[test]
 fn requirement_ring_impl_format_001_rejects_missing_stable_ids() {
     let workspace = TempWorkspace::new("");
@@ -79,7 +79,7 @@ fn requirement_ring_impl_format_001_rejects_missing_stable_ids() {
         "1. The implementation MUST do the thing.\n",
     );
 
-    let error = spec_requirement_format_offenders(&workspace.root, "spec/example.md", "RING-")
+    let error = spec_requirement_format_offenders(&workspace.root, "spec/example.md", &["RING-"])
         .unwrap()
         .unwrap();
 
@@ -88,8 +88,8 @@ fn requirement_ring_impl_format_001_rejects_missing_stable_ids() {
 
 //= spec/implementation-policy.md#requirements-format
 //= type=test
-//# `RING-IMPL-FORMAT-002` Each normative requirement in [spec/implementation.md](implementation.md)
-//# or this specification MUST use explicit RFC-2119 normative language.
+//# `RING-IMPL-FORMAT-002` Each normative requirement in a repository specification configured for
+//# Duvet verification MUST use explicit RFC-2119 normative language.
 #[test]
 fn requirement_ring_impl_format_002_rejects_missing_normative_language() {
     let workspace = TempWorkspace::new("");
@@ -98,7 +98,7 @@ fn requirement_ring_impl_format_002_rejects_missing_normative_language() {
         "1. `RING-EXAMPLE-001` The implementation keeps this behavior stable.\n",
     );
 
-    let error = spec_requirement_format_offenders(&workspace.root, "spec/example.md", "RING-")
+    let error = spec_requirement_format_offenders(&workspace.root, "spec/example.md", &["RING-"])
         .unwrap()
         .unwrap();
 
@@ -113,7 +113,7 @@ fn requirement_format_rejects_test_name_placeholder_requirements() {
         "1. `RING-EXAMPLE-001` The implementation MUST preserve the functional behavior exercised by the requirement_example regression test.\n",
     );
 
-    let error = spec_requirement_format_offenders(&workspace.root, "spec/example.md", "RING-")
+    let error = spec_requirement_format_offenders(&workspace.root, "spec/example.md", &["RING-"])
         .unwrap()
         .unwrap();
 
@@ -122,10 +122,9 @@ fn requirement_format_rejects_test_name_placeholder_requirements() {
 
 //= spec/implementation-policy.md#verification-requirements
 //= type=test
-//# `RING-IMPL-TEST-001` Every normative requirement in [spec/ring.md](ring.md) or
-//# [spec/implementation.md](implementation.md) MUST have at least one dedicated automated test
-//# function or dedicated compile-time test case whose primary purpose is to verify that single
-//# requirement.
+//# `RING-IMPL-TEST-001` Every normative requirement in a repository specification configured for
+//# Duvet verification MUST have at least one dedicated automated test function or dedicated
+//# compile-time test case whose primary purpose is to verify that single requirement.
 #[test]
 fn requirement_ring_impl_test_001_accepts_single_requirement_and_todo_tests() {
     let source = format!(

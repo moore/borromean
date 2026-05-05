@@ -12,7 +12,7 @@ constraints remain defined by
 This document has two layers:
 
 - the current Duvet-backed requirements for the implemented durable map
-  format
+  format, helper behavior, storage integration, and compaction behavior
 - the intended whole-run LSM map design that the durable map is expected to grow
   toward
 
@@ -104,6 +104,116 @@ reject retained committed-region bases whose `collection_format` is not
 4. `MAP-VALIDATE-004` Opening a live map collection MUST reject
 retained committed-region payloads, snapshot payloads, or update
 payloads that fail map-specific validation.
+
+## Snapshot Frontier And Logical Map Requirements
+
+These requirements cover implemented map snapshot helpers, in-memory frontier behavior, and logical
+read/write semantics.
+
+1. `RING-IMPL-REGRESSION-010` Snapshot helpers MUST validate snapshot layout, preserve
+   set/delete/not-found lookup semantics, encode exact subranges, and reject out-of-bounds or
+   undersized buffers.
+2. `RING-IMPL-REGRESSION-011` Snapshot and frontier search helpers MUST find even-window keys and
+   return the correct insertion position for missing keys.
+3. `RING-IMPL-REGRESSION-012` Loading a snapshot MUST use entry reference offsets rather than
+   physical entry byte order so reversed adjacent entry storage still loads sorted keys.
+4. `RING-IMPL-REGRESSION-013` Snapshot encoding MUST accept exact empty snapshot capacity and
+   snapshot decoding MUST reject invalid entry references.
+5. `RING-IMPL-REGRESSION-015` Entry reference and entry count helpers MUST preserve exact
+   serialized offsets and counts, and map checkpoints MUST restore prior frontier state while
+   rejecting undersized buffers.
+6. `RING-IMPL-REGRESSION-018` Loading an empty snapshot MUST fit in a frontier buffer containing
+   only the entry-count header and MUST leave lookups empty.
+7. `RING-IMPL-REGRESSION-020` Frontier range, region encoding, and checkpoint helpers MUST accept
+   exact-size buffers, preserve lookup state, and reject undersized or malformed inputs.
+8. `RING-IMPL-REGRESSION-031` Entry reference serialization MUST preserve independent start and end
+   offsets for distinct record indexes.
+9. `RING-IMPL-REGRESSION-033` Map read/write operations MUST return the latest inserted values for
+   generated key/value workloads.
+10. `RING-IMPL-REGRESSION-034` Map write/delete operations MUST remove deleted keys while preserving
+    non-deleted entries for generated workloads.
+
+## Run Manifest And Committed Map Region Requirements
+
+These requirements cover implemented helper behavior for map run descriptors, run segment payloads,
+manifest descriptors, and committed map regions.
+
+1. `RING-IMPL-REGRESSION-009` Map run descriptors MUST use inclusive lower and upper key bounds for
+   may_contain, integer helpers MUST advance offsets and reject short buffers, and manifest capacity
+   checks MUST reject excess runs.
+2. `RING-IMPL-REGRESSION-014` Run cursors MUST advance segment positions correctly for ascending
+   and descending run chains, and compaction writers MUST report segment-fit and state-count
+   overflow errors.
+3. `RING-IMPL-REGRESSION-016` Run segment payloads MUST round-trip generation, next-region link,
+   key bounds, and snapshot lookup semantics, and reject undersized or truncated payloads.
+4. `RING-IMPL-REGRESSION-017` Committed-region helpers MUST accept boundary-sized payload regions
+   and legacy snapshot helpers MUST decode exact empty-snapshot payloads.
+5. `RING-IMPL-REGRESSION-019` Map run selection and generation helpers MUST count only run-chain
+   regions for live region totals, compaction selection, and next generation calculations.
+6. `RING-IMPL-REGRESSION-021` Manifest descriptor loading MUST preserve run metadata and reject too
+   many runs, zero-length run chains, and truncated descriptor payloads.
+7. `RING-IMPL-REGRESSION-022` Snapshot run segment helpers MUST plan at least one region and encode
+   requested snapshot subranges with generation, next-region link, bounds, and lookup semantics.
+8. `RING-IMPL-REGRESSION-023` Snapshot run planning and storage writes MUST split snapshots that
+   exceed one committed run payload across multiple run regions, return a descriptor with the exact
+   state count and lower and upper keys, and return no descriptor for an empty snapshot.
+9. `RING-IMPL-REGRESSION-024` Frontier run planning MUST count every committed run payload segment
+   required for frontier contents that exceed one run-region payload.
+10. `RING-IMPL-REGRESSION-025` Reclaiming map run regions MUST move all tracked run-chain regions to
+    the storage free-list tail.
+11. `RING-IMPL-REGRESSION-026` Committing a map manifest MUST reclaim the previous manifest region
+    and retain only run-chain descriptors in the manifest state.
+12. `RING-IMPL-REGRESSION-027` Flushing a map to storage MUST convert valid legacy region bases into
+    run-chain descriptors and reject flushes that exceed configured run capacity.
+13. `RING-IMPL-REGRESSION-028` Committed run storage helpers MUST read run segment bounds and next
+    links only from matching map-run regions and reject non-run region headers.
+14. `RING-IMPL-REGRESSION-029` Map lookup helpers MUST read both legacy region snapshots and
+    manifest run chains, and head-reference checks MUST report manifest and run regions as
+    reachable.
+
+## Map Storage Integration Requirements
+
+These requirements cover the map collection's integration with shared storage replay, flush, drop,
+and reopen behavior.
+
+1. `RING-IMPL-REGRESSION-030` Opening a map from storage MUST replay only WAL records for the
+   requested collection and ignore updates and drop records for other collections.
+2. `RING-IMPL-REGRESSION-032` Storage WAL record visitation for maps MUST expose typed
+   new-collection and snapshot records for map collections in durable order.
+3. `RING-IMPL-REGRESSION-108` Storage map APIs MUST restore snapshot basis values and later typed
+   updates when opening a map.
+4. `RING-IMPL-REGRESSION-109` Storage map flush API MUST write a committed region basis, clear
+   ready_region, and preserve flushed key/value lookups.
+5. `RING-IMPL-REGRESSION-113` Reopening after a map replacement flush MUST complete pending
+   reclaim of the replaced region and preserve the replacement map value.
+6. `RING-IMPL-REGRESSION-114` Reopening after replacement with an empty free list MUST initialize
+   free-list head from the recovered reclaimed region.
+7. `RING-IMPL-REGRESSION-115` Reopening after replacement with an empty free list MUST reconstruct
+   free-list tail from the recovered reclaimed region.
+8. `RING-IMPL-REGRESSION-116` Map flush MUST complete detached pending reclaims before allocating
+   from the minimum free-region reserve.
+9. `RING-IMPL-REGRESSION-117` Reopening after a premature reclaim_begin before replacement
+   detaches the old head MUST discard the pending reclaim and preserve the old map basis and
+   value.
+10. `RING-IMPL-REGRESSION-118` Dropping a map with committed-region basis MUST start reclaim for
+    that region, tombstone the collection, complete reclaim on reopen, and reject reopening the
+    dropped map.
+11. `RING-IMPL-REGRESSION-119` Reopening after a premature reclaim_begin before drop detaches the
+    live region MUST discard the pending reclaim and preserve the live map basis and value.
+12. `RING-IMPL-REGRESSION-120` Dropping a map whose basis is a WAL snapshot MUST tombstone the
+    collection without starting a region reclaim.
+
+## Map Compaction Requirements
+
+These requirements cover implemented whole-run compaction behavior.
+
+1. `RING-IMPL-REGRESSION-110` Targeted then greedy map compaction MUST reduce selected runs while
+   preserving unselected runs and all visible key/value lookups.
+2. `RING-IMPL-REGRESSION-111` Map compaction MUST preserve tombstone masking so deleted keys remain
+   absent and later live keys remain visible.
+3. `RING-IMPL-REGRESSION-112` Map compaction MUST stream replacements larger than frontier
+   capacity into a single run while preserving all visible key/value lookups across repeated
+   compaction.
 
 ## Target Whole-Run LSM Model
 

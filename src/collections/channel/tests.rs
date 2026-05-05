@@ -2,7 +2,7 @@ use super::*;
 
 use crate::vec_like::VecLikeSlice;
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/channel.md#channel-state-and-member-sequences
 //= type=test
 //# `RING-IMPL-REGRESSION-001` Channel construction MUST initialize a channel with the requested
 //# collection id, first member, next sequence 0, and first member last sequence 0.
@@ -45,7 +45,7 @@ fn requirement_test_new_channel() {
     );
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/channel.md#channel-state-and-member-sequences
 //= type=test
 //# `RING-IMPL-REGRESSION-002` Adding a new channel member MUST succeed when member storage has
 //# capacity and MUST retain both existing and added members.
@@ -91,7 +91,7 @@ fn requirement_test_add_member() {
     assert!(channel.members.iter().any(|m| m.member == new_member));
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/channel.md#channel-state-and-member-sequences
 //= type=test
 //# `RING-IMPL-REGRESSION-003` Adding a channel member beyond configured member capacity MUST fail
 //# with UserLimitReached after filling available slots.
@@ -137,7 +137,7 @@ fn requirement_test_add_member_limit() {
     assert!(matches!(result, Err(ChannelError::UserLimitReached)));
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/channel.md#channel-state-and-member-sequences
 //= type=test
 //# `RING-IMPL-REGRESSION-004` Channel last-sequence lookup MUST return the stored sequence for an
 //# existing member and MemberNotFound for an unknown member.
@@ -185,7 +185,7 @@ fn requirement_test_get_last_sequence() {
     assert!(matches!(seq, Err(ChannelError::MemberNotFound(_))));
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/channel.md#channel-state-and-member-sequences
 //= type=test
 //# `RING-IMPL-REGRESSION-005` Channel next-sequence allocation MUST return the current sequence and
 //# increment subsequent next_sequence monotonically.
@@ -231,7 +231,7 @@ fn requirement_test_get_next_sequence() {
     assert_eq!(channel.next_sequence, ChannelSequence(2));
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/channel.md#channel-state-and-member-sequences
 //= type=test
 //# `RING-IMPL-REGRESSION-006` Adding an already-present channel member MUST be idempotent and MUST
 //# NOT create duplicate member entries.
@@ -270,7 +270,7 @@ fn requirement_test_duplicate_member_add() {
     assert_eq!(channel.members.get(0).unwrap().member, member);
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/channel.md#channel-state-and-member-sequences
 //= type=test
 //# `RING-IMPL-REGRESSION-007` Checkpoint channel commands MUST retain the previous checkpoint
 //# address, exact command count, and member sequence snapshot.
@@ -298,7 +298,7 @@ fn requirement_checkpoint_command_reports_exact_command_count() {
     assert_eq!(checkpoint.sequences(), sequences.as_slice());
 }
 
-//= spec/implementation.md#functional-regression-requirements
+//= spec/channel.md#channel-state-and-member-sequences
 //= type=test
 //# `RING-IMPL-REGRESSION-008` Recording a used channel sequence MUST update the member last
 //# sequence, track that member only once for checkpoint pressure, and reject unknown members.
