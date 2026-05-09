@@ -571,7 +571,7 @@ fn requirement_run_segment_payload_round_trip_preserves_header_bounds_and_snapsh
 //= spec/map.md#run-manifest-and-committed-map-region-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-017` Committed-region helpers MUST accept boundary-sized payload regions
-//# and legacy snapshot helpers MUST decode exact empty-snapshot payloads.
+//# and snapshot helpers MUST decode exact empty-snapshot payloads.
 #[test]
 fn requirement_committed_region_and_legacy_snapshot_helpers_accept_exact_boundaries() {
     const REGION_SIZE: usize = Header::ENCODED_LEN + FreePointerFooter::ENCODED_LEN;
@@ -1081,8 +1081,8 @@ fn requirement_commit_manifest_reclaims_previous_manifest_and_retains_only_run_c
 
 //= spec/map.md#run-manifest-and-committed-map-region-requirements
 //= type=test
-//# `RING-IMPL-REGRESSION-027` Flushing a map to storage MUST convert valid legacy region bases into
-//# run-chain descriptors and reject flushes that exceed configured run capacity.
+//# `RING-IMPL-REGRESSION-027` Flushing a map to storage MUST commit a manifest-backed run-chain
+//# basis and reject flushes that exceed configured run capacity.
 #[test]
 fn requirement_flush_to_storage_converts_valid_legacy_regions_and_enforces_run_capacity() {
     const REGION_SIZE: usize = 256;
@@ -1250,9 +1250,8 @@ fn requirement_committed_run_storage_helpers_validate_headers_and_next_links() {
 
 //= spec/map.md#run-manifest-and-committed-map-region-requirements
 //= type=test
-//# `RING-IMPL-REGRESSION-029` Map lookup helpers MUST read both legacy region snapshots and
-//# manifest run chains, and head-reference checks MUST report manifest and run regions as
-//# reachable.
+//# `RING-IMPL-REGRESSION-029` Map lookup helpers MUST read manifest run chains, and
+//# head-reference checks MUST report manifest and run regions as reachable.
 #[test]
 fn requirement_lookup_and_head_reference_helpers_follow_legacy_regions_and_manifest_runs() {
     const REGION_SIZE: usize = 256;
@@ -1602,8 +1601,8 @@ fn requirement_update_payload_round_trip_applies_frontier_change() {
 
 //= spec/map.md#empty-logical-state
 //= type=test
-//# `MAP-STATE-001` After a durable
-//# `new_collection(collection_id, MAP_CODE)` basis, opening the collection
+//# `MAP-STATE-001` After successful durable creation of a map
+//# collection, opening that collection
 //# MUST yield an empty logical map.
 #[test]
 fn requirement_empty_map_open_matches_new_map_state() {
@@ -1824,11 +1823,11 @@ fn requirement_map_collection_format_covers_empty_state_snapshot_update_region_a
     ));
 }
 
-//= spec/map.md#committed-region-format
+//= spec/map.md#committed-head-format
 //= type=test
-//# `MAP-REGION-001` A committed map region with
-//# `collection_format = MAP_REGION_V1_FORMAT` MUST encode its payload as
-//# `[snapshot_len:u32 little-endian][snapshot_payload]`.
+//# `MAP-REGION-001` A committed map head with
+//# `collection_format = MAP_MANIFEST_V1_FORMAT` MUST encode a manifest that
+//# describes the live immutable map run set.
 #[test]
 fn requirement_region_round_trip_restores_logical_state() {
     const BUFFER_SIZE: usize = 512;
@@ -1872,21 +1871,19 @@ fn requirement_non_wal_collection_format_pair_identifies_map_region_payloads() {
     requirement_region_round_trip_restores_logical_state();
 }
 
-//= spec/map.md#committed-region-format
+//= spec/map.md#committed-head-format
 //= type=test
-//# `MAP-REGION-002` The `snapshot_len` prefix MUST equal the exact byte
-//# length of the embedded snapshot payload used as the region's durable
-//# basis.
+//# `MAP-REGION-002` A live map collection MUST NOT use the retired
+//# single-region snapshot format as its committed durable basis.
 #[test]
 fn requirement_region_payload_prefix_matches_embedded_snapshot_len() {
     requirement_region_round_trip_restores_logical_state();
 }
 
-//= spec/map.md#committed-region-format
+//= spec/map.md#committed-head-format
 //= type=test
-//# `MAP-REGION-003` Loading a valid committed region payload MUST
-//# reconstruct the same logical state as loading its embedded snapshot
-//# payload.
+//# `MAP-REGION-003` Loading a valid committed manifest head MUST recover
+//# the same logical state as reading the manifest-described run chains.
 #[test]
 fn requirement_region_loading_matches_embedded_snapshot_loading() {
     requirement_region_round_trip_restores_logical_state();
@@ -2221,7 +2218,7 @@ fn requirement_map_frontier_takes_precedence_over_older_durable_basis_values() {
 //= type=test
 //# `MAP-VALIDATE-003` Opening or loading a live map collection MUST
 //# reject retained committed-region bases whose `collection_format` is not
-//# `MAP_REGION_V1_FORMAT`.
+//# a supported map head format.
 #[test]
 fn requirement_open_from_storage_rejects_unsupported_committed_region_format() {
     let mut flash = MockFlash::<512, 4, 256>::new(0xff);
