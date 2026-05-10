@@ -147,7 +147,7 @@ fn requirement_mock_flash_sync_can_complete_immediately() {
 //= spec/implementation.md#i-o-requirements
 //= type=test
 //# `RING-IMPL-IO-005` Borromean MUST treat wakeups, DMA completion, or
-//# interrupt delivery as an external concern of the caller-provided I/O
+//# interrupt delivery as an external concern of the caller-provided backing
 //# implementation rather than as an internal runtime service.
 #[test]
 fn requirement_flash_io_runtime_hook_policy_is_enforced_by_clippy_verification() {

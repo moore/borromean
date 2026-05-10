@@ -91,47 +91,12 @@ fn requirement_startup_open_paths_complete_without_heap_allocation() {
 }
 
 //= spec/implementation.md#startup-requirements
-//= type=test
+//= type=todo
 //# `RING-IMPL-STARTUP-003` If startup needs temporary decode storage,
-//# that storage MUST come from a caller-provided workspace or other
-//# bounded static storage.
+//# that storage MUST come from the `Storage` context or bounded storage
+//# supplied when that context is constructed.
 #[test]
-fn requirement_startup_can_reuse_the_same_caller_workspace_across_repeated_opens() {
-    let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
-    let mut workspace = StorageWorkspace::<512>::new();
-    let mut storage =
-        Storage::<8, 4>::format::<512, 5, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
-
-    storage
-        .create_map::<512, 5, _>(&mut flash, &mut workspace, CollectionId(85))
-        .unwrap();
-    storage
-        .append_update::<512, 5, _>(&mut flash, &mut workspace, CollectionId(85), &[9, 9, 9])
-        .unwrap();
-    drop(storage);
-
-    {
-        let (region_bytes, logical_scratch) = workspace.scan_buffers();
-        region_bytes.fill(0x11);
-        logical_scratch.fill(0x22);
-    }
-    let reopened_once = Storage::<8, 4>::open::<512, 5, _>(&mut flash, &mut workspace).unwrap();
-
-    {
-        let (physical_scratch, logical_scratch) = workspace.encode_buffers();
-        physical_scratch.fill(0x33);
-        logical_scratch.fill(0x44);
-    }
-    let reopened_twice = Storage::<8, 4>::open::<512, 5, _>(&mut flash, &mut workspace).unwrap();
-
-    assert_eq!(reopened_twice.collections(), reopened_once.collections());
-    assert_eq!(reopened_twice.wal_head(), reopened_once.wal_head());
-    assert_eq!(reopened_twice.wal_tail(), reopened_once.wal_tail());
-    assert_eq!(
-        reopened_twice.pending_reclaims(),
-        reopened_once.pending_reclaims()
-    );
-}
+fn todo_startup_uses_storage_context_decode_scratch() {}
 
 //= spec/implementation.md#startup-requirements
 //= type=test

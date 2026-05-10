@@ -74,54 +74,12 @@ fn requirement_explicit_collection_and_reclaim_capacities_fail_when_exhausted() 
 }
 
 //= spec/implementation.md#memory-requirements
-//= type=test
+//= type=todo
 //# `RING-IMPL-MEM-002` Any operation that needs scratch space for
-//# encoding, decoding, or staging MUST accept caller-provided buffers or
-//# borrow dedicated storage from a caller-provided workspace object.
+//# encoding, decoding, or staging MUST use bounded storage owned by the
+//# `Storage` context or supplied when that context is constructed.
 #[test]
-fn requirement_scratch_space_boundaries_are_enforced_on_caller_buffers() {
-    let mut map_buffer = [0u8; 128];
-    let mut map = LsmMap::<u16, u16, 8>::new(CollectionId(4), &mut map_buffer).unwrap();
-    map.set(1, 10).unwrap();
-
-    let mut tiny_snapshot = [0u8; 4];
-    assert!(matches!(
-        map.encode_snapshot_into(&mut tiny_snapshot),
-        Err(MapError::BufferTooSmall)
-    ));
-
-    let mut tiny_region = [0u8; 8];
-    assert!(matches!(
-        map.encode_region_into(&mut tiny_region),
-        Err(MapError::BufferTooSmall)
-    ));
-
-    let mut tiny_scratch = [0u8; 8];
-    assert!(matches!(
-        map.checkpoint_into(&mut tiny_scratch),
-        Err(MapError::BufferTooSmall)
-    ));
-
-    let mut flash = MockFlash::<256, 5, 1024>::new(0xff);
-    let mut workspace = StorageWorkspace::<256>::new();
-    let mut storage =
-        Storage::<8, 4>::format::<256, 5, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
-    storage
-        .create_map::<256, 5, _>(&mut flash, &mut workspace, CollectionId(5))
-        .unwrap();
-
-    let mut tiny_payload = [0u8; 1];
-    assert!(matches!(
-        storage.append_map_update::<256, 5, _, u16, u16, 8>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(5),
-            &MapUpdate::Set { key: 7, value: 70 },
-            &mut tiny_payload,
-        ),
-        Err(MapStorageError::Map(MapError::BufferTooSmall))
-    ));
-}
+fn todo_scratch_space_is_owned_by_storage_context() {}
 
 //= spec/implementation.md#memory-requirements
 //= type=test
@@ -217,52 +175,9 @@ fn requirement_map_in_memory_state_runs_inside_a_borrowed_buffer_without_allocat
 }
 
 //= spec/implementation.md#api-requirements
-//= type=test
-//# `RING-IMPL-API-004` The implementation SHOULD keep collection
-//# operation APIs close to the prototype's explicit buffer-passing style
-//# where that style avoids hidden allocation.
+//= type=todo
+//# `RING-IMPL-API-004` Normal public collection operation APIs SHOULD
+//# avoid repeated caller-provided frontier, payload, or workspace buffers
+//# and instead use bounded memory owned by the `Storage` context.
 #[test]
-fn requirement_map_updates_require_and_reuse_a_caller_provided_payload_buffer() {
-    let mut flash = MockFlash::<256, 5, 1024>::new(0xff);
-    let mut workspace = StorageWorkspace::<256>::new();
-    let mut storage =
-        Storage::<8, 4>::format::<256, 5, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
-    storage
-        .create_map::<256, 5, _>(&mut flash, &mut workspace, CollectionId(9))
-        .unwrap();
-
-    let mut payload_buffer = [0u8; 64];
-    assert_no_alloc("append_map_update buffer reuse", || {
-        storage
-            .append_map_update::<256, 5, _, u16, u16, 8>(
-                &mut flash,
-                &mut workspace,
-                CollectionId(9),
-                &MapUpdate::Set { key: 1, value: 10 },
-                &mut payload_buffer,
-            )
-            .unwrap();
-        storage
-            .append_map_update::<256, 5, _, u16, u16, 8>(
-                &mut flash,
-                &mut workspace,
-                CollectionId(9),
-                &MapUpdate::Set { key: 2, value: 20 },
-                &mut payload_buffer,
-            )
-            .unwrap();
-    });
-
-    let reopened = Storage::<8, 4>::open::<256, 5, _>(&mut flash, &mut workspace).unwrap();
-    let mut map_buffer = [0u8; 256];
-    let map = reopened
-        .open_map::<256, 5, _, u16, u16, 8, 8>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(9),
-            &mut map_buffer,
-        )
-        .unwrap();
-    assert_eq!(map.get_frontier(&1).unwrap(), Some(10));
-    assert_eq!(map.get_frontier(&2).unwrap(), Some(20));
-}
+fn todo_collection_api_uses_storage_owned_operation_buffers() {}

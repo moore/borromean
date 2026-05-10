@@ -255,6 +255,237 @@ further updates for that collection.
 for that collection MUST accumulate in a fresh in-memory frontier
 layered over the newly committed collection head.
 
+### Storage API Model
+
+The public storage API should make the durable ownership model match
+the logical ownership model. `Storage` is the database context: it owns
+the replayed runtime state, configuration, dirty-frontier accounting,
+and bounded reusable memory needed to perform storage and collection
+operations. It also owns exclusive access to the backing object for the
+life of the opened database. That backing object is the abstraction over
+the caller's device, transport, emulator, or synchronized sharing
+adapter.
+
+At the design level, formatting and opening create a storage context
+by binding caller-provided backing media into `Storage`:
+
+```rust
+Storage::format(backing, config) -> Result<Storage, StorageError>;
+Storage::open(backing, config) -> Result<Storage, StorageError>;
+```
+
+The `backing` argument in these examples may be owned by `Storage` or
+borrowed mutably by `Storage` for its lifetime. Normal storage
+operations then use the backing through `Storage`:
+
+```rust
+storage.operation(...);
+```
+
+Collection operations use the same storage context:
+
+```rust
+collection.operation(&mut storage, ...);
+```
+
+Normal collection APIs should not require callers to provide separate
+frontier buffers, payload serialization buffers, or a `StorageWorkspace`
+for each operation. Those bounded buffers may still exist as internal
+implementation types, storage fields, or constructor-provided storage,
+but once a `Storage` value exists they are part of the storage context
+rather than a repeated collection-operation argument. This keeps open
+collection handles small while keeping operation scratch bounded and
+explicit.
+
+If a platform must share the physical device with other code, that
+sharing policy belongs inside the backing implementation. For example,
+the backing object may contain a mutex, critical-section guard, or
+platform-specific synchronization primitive around a lower-level driver.
+Borromean still receives one backing abstraction and one mutable
+`Storage`, so core storage code does not choose a mutex type, executor,
+interrupt policy, or sharing discipline.
+
+### Storage API Requirements
+
+1. `RING-API-001` `Storage` MUST be the public database context that
+owns logical runtime state, replay state, configuration,
+dirty-frontier tracking, and bounded reusable scratch memory needed by
+normal storage and collection operations.
+2. `RING-API-002` `Storage` MUST own exclusive access to the backing
+object for the lifetime of an opened database, either by owning the
+backing value or by holding a mutable reference to it.
+3. `RING-API-003` Public operations that may touch backing media MUST
+use the backing object through `Storage` rather than requiring a
+separate backing argument on each operation.
+4. `RING-API-004` Public normal collection operations MUST NOT require
+callers to provide collection frontier buffers, payload serialization
+buffers, or a `StorageWorkspace`; that bounded memory MUST be supplied
+by the `Storage` context or storage-owned configuration.
+5. `RING-API-005` Any shared-device synchronization required by a
+platform MUST be encapsulated by the backing implementation rather than
+by Borromean core requiring a specific mutex, executor, interrupt
+policy, or sharing primitive.
+
+### Core Ring State Machine
+
+The ring is a hierarchical state machine. The long-lived runtime state
+is the replayed database vector, while the active mode records the
+single operation currently advancing that vector. This keeps durable
+state, operation progress, replay, and recovery described with the
+same vocabulary.
+
+The stable runtime vector contains:
+
+- `metadata`, including immutable geometry and WAL encoding
+  parameters.
+- WAL position: current `wal_head`, `wal_tail`, and next
+  `wal_append_offset` in the tail.
+- Allocator position: durable `last_free_list_head`, runtime
+  `free_list_tail`, and optional reserved `ready_region`.
+- `max_seen_sequence`, used to assign the next initialized region
+  sequence.
+- The replayed collection table, including each collection id,
+  collection type, durable basis, dropped state, and retained
+  post-basis update count or references.
+- Ordered `staged_regions` that left `ready_region` but are not yet
+  known to be live or free.
+- Ordered `pending_reclaims` that have a durable `reclaim_begin` but
+  no durable matching `reclaim_end`.
+- Dirty-frontier accounting for collection state that has in-memory
+  updates layered over its durable basis.
+- The `pending_wal_recovery_boundary` flag used when valid tail
+  records were found after a torn or corrupt tail span.
+
+Operation-specific progress is not part of that stable vector. It
+belongs to the active mode: planned regions, encoded record lengths,
+current scan offsets, saved reclaim plans, pending copy actions,
+or any other state that exists only while one operation is in flight.
+
+At the design level the storage mode is:
+
+```rust
+enum StorageMode {
+  Idle,
+  Formatting(FormatMode),
+  Opening(OpenMode),
+  AppendingWal(WalAppendMode),
+  AllocatingRegion(AllocationMode),
+  WritingCommittedRegion(CommittedRegionWriteMode),
+  RotatingWal(WalRotationMode),
+  ReclaimingRegion(RegionReclaimMode),
+  ReclaimingWalHead(WalHeadReclaimMode),
+}
+```
+
+`Idle` is the only steady-state mode. Public operations that mutate the
+store enter from `Idle`, transition through one operation mode, and
+return to `Idle` after reaching a terminal result. While a mode is
+active, its sub-state owns the operation's interstitial data and the
+stable runtime vector remains the replayable state that a reset would
+recover from durable media.
+
+`Opening(OpenMode)` has these phases:
+
+- `ReadMetadataAndScanRegions`: validate metadata, scan region
+  headers, choose the WAL tail, and collect `max_seen_sequence`.
+- `RecoverIncompleteRotation`: finish a tail rotation that had a
+  durable rotation-start record or durable link but no initialized
+  target WAL region.
+- `DiscoverWalChain`: walk `link` records from the effective WAL head
+  to the selected tail.
+- `ReplayWalRecords`: scan reachable WAL records in order and apply
+  each durable record through `ApplyWalRecord`.
+- `BuildRuntimeState`: construct the stable runtime vector from the
+  replay tracker and reconstructed free-list tail.
+- `RecoverPendingReclaims`: complete or discard ordered pending
+  reclaims according to live reachability and free-list membership.
+- `RecoverStagedRegions`: reclaim abandoned staged regions that are
+  not reachable from live state.
+- `ValidateLiveCollections`: let supported collection implementations
+  validate retained live bases and payloads.
+- `Finish`: expose a `Storage` context whose mode is `Idle`.
+
+`ApplyWalRecord` is the shared transition table for durable WAL record
+effects. It is used when startup replays records, when a foreground
+operation appends and syncs a record, when recovery decides whether a
+record still carries live state, and when WAL-head reclaim preserves
+or rewrites live records. The table describes the replay-visible
+effect after a record is durable:
+
+| WAL record | `ApplyWalRecord` effect |
+| --- | --- |
+| `new_collection(collection_id, collection_type)` | Create a collection entry and move its collection-head submachine from `NoCollection` to `EmptyHead`. |
+| `update(collection_id, payload)` | Require an existing non-dropped collection and retain the update after that collection's current durable basis. |
+| `snapshot(collection_id, collection_type, payload)` | Create or validate the collection type, move its durable basis to `WALSnapshotHead`, and discard older pending updates for that collection. |
+| `alloc_begin(region_index, free_list_head_after)` | Advance `last_free_list_head` to `free_list_head_after` and set `ready_region = region_index`. |
+| `stage_region(region_index)` | Require `ready_region = region_index`, append the region to `staged_regions`, and clear `ready_region`. |
+| `head(collection_id, collection_type, region_index)` for a user collection | Create or validate the collection type, move its durable basis to `RegionHead`, discard older pending updates for that collection, and consume matching `ready_region` or staged state. |
+| `head(collection_id = 0, collection_type = wal, region_index)` | As a WAL-head control record, preserve the effective WAL head chosen from the current tail; during the main user-collection replay pass it has no collection-head effect. |
+| `link(next_region_index, expected_sequence)` | Preserve WAL-chain reachability and consume matching `ready_region` or staged state for the linked WAL region. |
+| `drop_collection(collection_id)` | Move the collection-head submachine to `Dropped`, clear retained pending updates, and leave the collection id reserved. |
+| `free_list_head(region_index_or_none)` | Set the replayed durable free-list head. |
+| `reclaim_begin(region_index)` | Add an ordered pending reclaim and remove the region from `staged_regions` if present. |
+| `reclaim_end(region_index)` | Remove the matching ordered pending reclaim. |
+| `wal_recovery()` | Clear the WAL recovery boundary opened by a prior torn or corrupt tail span. |
+
+The main operation modes are transition sequences over the same table:
+
+- `AppendingWal(WalAppendMode)` validates the source state, ensures the
+  tail has room or asks `RotatingWal` to make room, writes and syncs one
+  WAL record, then applies `ApplyWalRecord` to the stable runtime
+  vector.
+- `AllocatingRegion(AllocationMode)` completes safe foreground reclaim
+  if needed, preserves the minimum free-region reserve, writes and
+  syncs `alloc_begin`, then leaves the selected region in
+  `ready_region` until a later `head`, `link`, or `stage_region`
+  consumes it.
+- `WritingCommittedRegion(CommittedRegionWriteMode)` reserves a region,
+  erases and writes a committed-region header plus payload, syncs the
+  region, appends and syncs the user `head` record, then applies that
+  head transition.
+- `RotatingWal(WalRotationMode)` writes and syncs the rotation
+  `alloc_begin` in the reserved tail window, writes and syncs `link`,
+  initializes and syncs the new WAL region, then makes the linked region
+  the append tail.
+- `ReclaimingRegion(RegionReclaimMode)` ensures `reclaim_begin` is
+  durable, detaches the target from live collection or WAL state,
+  appends the target to the free-list tail or records a new free-list
+  head, and then appends `reclaim_end`.
+- `ReclaimingWalHead(WalHeadReclaimMode)` plans the old and new WAL
+  heads, begins reclaim for the old head, preserves allocator state,
+  copies or rewrites live records from the old head, commits the new
+  WAL head, and completes region reclaim for the old head.
+
+Formatting is modeled as `Formatting(FormatMode)` until the freshly
+initialized metadata, initial WAL region, and initial free-list chain
+are durable. Opening is modeled as `Opening(OpenMode)` until replay and
+post-replay recovery produce the stable runtime vector. After format or
+open succeeds, the storage context is in `Idle`.
+
+#### Ring State Machine Requirements
+
+1. `RING-MACHINE-001` Storage runtime MUST expose a single active
+storage mode so that at most one formatting, opening, append,
+allocation, region-write, rotation, region-reclaim, or WAL-head-reclaim
+operation is active for a storage context.
+2. `RING-MACHINE-002` Stable replayed runtime state MUST be kept
+separate from operation-specific progress state owned by the active
+mode.
+3. `RING-MACHINE-003` Public steady-state operations MUST validate
+that the storage context is in a valid source mode, normally `Idle`,
+before beginning their transition sequence.
+4. `RING-MACHINE-004` Every durable write that changes replay-visible
+state MUST be represented as a named transition edge with defined
+preconditions, durable effect, runtime effect, replay effect, and
+crash-cut result.
+5. `RING-MACHINE-005` Normal foreground operation, startup replay, and
+crash recovery MUST use the same `ApplyWalRecord` semantics for every
+retained durable WAL record.
+6. `RING-MACHINE-006` Startup and recovery modes MUST compose the same
+collection, allocator, WAL-chain, and reclaim submachine transitions
+used by normal operation rather than defining separate incompatible
+transition rules.
+
 ### Storage Structure
 
 Storage starts with a static metadata region that describes the
@@ -928,10 +1159,14 @@ These requirements cover implemented byte-level helpers for canonical disk and W
 12. `RING-IMPL-REGRESSION-132` Alloc-begin WAL records MUST round-trip free_list_head_after through
     physical encoding and decoding.
 
-## Collection Head State Machine
+## Collection Head Submachine
 
 Each tracked user collection is either durably dropped or has exactly
-one logical current head after replay.
+one logical current head after replay. This is a submachine of the
+stable runtime vector. Its durable transitions are driven by
+`ApplyWalRecord`; foreground collection operations choose which WAL
+record or committed region write to perform, but the replay-visible
+collection effect is the same transition table used during startup.
 
 States:
 
@@ -961,7 +1196,7 @@ older durable bytes are reclaimable once physically detached. Any
 region associated with the dropped collection may be appended to the
 free list if it is not already present there.
 
-Transitions:
+Collection transitions:
 
 1. `NoCollection -> EmptyHead`
 Write `new_collection(collection_id, collection_type)`.
@@ -1119,6 +1354,13 @@ appended, but reclaim may later remove it so replay reconstructs from
 the earliest retained basis record instead.
 
 ## Startup Replay Algorithm
+
+Startup recovery is the concrete `Opening(OpenMode)` procedure. It
+reconstructs the stable runtime vector by scanning durable media,
+walking the WAL chain, and applying each retained WAL record through
+`ApplyWalRecord`. The detailed steps below define validation,
+discovery, and recovery behavior that surrounds those shared
+per-record transitions.
 
 Startup recovery reconstructs eight things:
 
@@ -1685,10 +1927,12 @@ rotation, reclaim, and WAL/state facade helpers.
 
 ## WAL Reclaim Eligibility
 
-Reclaim operates on WAL regions but correctness is defined per record.
-A record is reclaimable only when replay no longer needs it to rebuild
-the same `last_head`, `pending_updates`, `last_free_list_head`,
-reserved `ready_region`, and ordered incomplete reclaim state.
+WAL-head reclaim is the `ReclaimingWalHead(WalHeadReclaimMode)`
+operation. It operates on WAL regions, but correctness is defined per
+record. A record is reclaimable only when replay no longer needs it to
+rebuild the same `last_head`, `pending_updates`,
+`last_free_list_head`, reserved `ready_region`, staged regions, and
+ordered incomplete reclaim state produced by `ApplyWalRecord`.
 
 Per-collection cutoff:
 
@@ -2244,7 +2488,8 @@ flowchart LR
 
 ### Region Reclaim
 
-Region reclaim appends a newly freed region to the tail of the free
+Region reclaim is the `ReclaimingRegion(RegionReclaimMode)`
+operation. It appends a newly freed region to the tail of the free
 list. If the free list was non-empty, reclaim must update the previous
 tail region's `next_tail` pointer so the chain now ends at the newly
 reclaimed region. Because reclaim removes a region from live metadata

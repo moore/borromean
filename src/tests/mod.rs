@@ -1095,25 +1095,12 @@ fn requirement_storage_flush_map_future_drop_after_region_write_remains_recovera
 }
 
 //= spec/implementation.md#architecture-requirements
-//= type=test
-//# `RING-IMPL-ARCH-001` `Storage` MUST own logical storage state and configuration, but MUST NOT
-//# require long-lived ownership of the backing I/O object.
+//= type=todo
+//# `RING-IMPL-ARCH-001` `Storage` MUST own logical storage state, configuration, bounded operation
+//# scratch, and exclusive access to the backing object by value or mutable reference for the
+//# lifetime of the opened database.
 #[test]
-fn requirement_storage_format_returns_logical_state_without_owning_backend() {
-    let mut flash = MockFlash::<256, 4, 128>::new(0xff);
-    let mut workspace = StorageWorkspace::<256>::new();
-
-    let storage =
-        Storage::<8, 4>::format::<256, 4, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
-
-    assert_eq!(storage.metadata().region_size, 256);
-    assert_eq!(storage.metadata().region_count, 4);
-    assert_eq!(storage.wal_head(), 0);
-    assert_eq!(storage.wal_tail(), 0);
-    assert_eq!(storage.last_free_list_head(), Some(1));
-    assert_eq!(storage.free_list_tail(), Some(3));
-    assert_eq!(storage.tracked_user_collection_count(), 0);
-}
+fn todo_storage_format_binds_backing_and_scratch() {}
 
 //= spec/ring.md#storage-runtime-state-requirements
 //= type=test
@@ -1183,27 +1170,12 @@ fn requirement_storage_append_new_collection_rejects_unsupported_channel_collect
 }
 
 //= spec/implementation.md#api-requirements
-//= type=test
-//# `RING-IMPL-API-001` Public entry points for format, open, replay, and mutating collection
-//# operations MUST make their workspace and I/O dependencies explicit in the function signature.
+//= type=todo
+//# `RING-IMPL-API-001` Public format and open entry points MUST bind a backing implementation and
+//# bounded operation scratch into the returned `Storage` context, and normal replay or mutating
+//# operations MUST use those dependencies through `Storage`.
 #[test]
-fn requirement_storage_rotation_api_keeps_backend_explicit() {
-    let mut flash = MockFlash::<128, 4, 256>::new(0xff);
-    let mut workspace = StorageWorkspace::<128>::new();
-    let mut storage =
-        Storage::<8, 4>::format::<128, 4, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
-
-    let next_region_index = storage
-        .append_wal_rotation_start::<128, 4, _>(&mut flash, &mut workspace)
-        .unwrap();
-    storage
-        .append_wal_rotation_finish::<128, 4, _>(&mut flash, &mut workspace, next_region_index)
-        .unwrap();
-
-    assert_eq!(storage.wal_head(), 0);
-    assert_eq!(storage.wal_tail(), next_region_index);
-    assert_eq!(storage.ready_region(), None);
-}
+fn todo_storage_api_binds_backing_and_scratch() {}
 
 //= spec/ring.md#storage-runtime-state-requirements
 //= type=test
@@ -1582,8 +1554,8 @@ fn requirement_storage_reclaim_wal_head_reopen_has_no_broken_link_path() {
 
 //= spec/implementation.md#i-o-requirements
 //= type=test
-//# `RING-IMPL-REGRESSION-107` Storage operations MUST work through any FlashIo backend that
-//# implements the trait, including delegating backends.
+//# `RING-IMPL-REGRESSION-107` Storage operations MUST work through any backing implementation that
+//# implements the trait, including delegating or synchronized backings.
 #[test]
 fn requirement_storage_works_through_flash_io_trait_backend() {
     let mut flash = DelegatingFlash::<256, 4, 256>::new(0xff);

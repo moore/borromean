@@ -1,59 +1,13 @@
 use super::*;
 
 //= spec/implementation.md#architecture-requirements
-//= type=test
-//# `RING-IMPL-ARCH-002` The backing I/O object MUST instead be passed
-//# into operation entry points or operation builders so the same
-//# `Storage` value can participate in externally driven async execution.
+//= type=todo
+//# `RING-IMPL-ARCH-002` The backing abstraction MUST be bound to
+//# `Storage` during format or open, and normal public operations MUST use
+//# that backing through `Storage` rather than accepting a separate backing
+//# argument.
 #[test]
-fn requirement_caller_owned_storage_can_mix_future_and_blocking_entry_points() {
-    const REGION_SIZE: usize = 256;
-    const REGION_COUNT: usize = 5;
-
-    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 2048>::new(0xff);
-    let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
-    let mut storage = Storage::<8, 4>::format::<REGION_SIZE, REGION_COUNT, _>(
-        &mut flash,
-        &mut workspace,
-        1,
-        8,
-        0xa5,
-    )
-    .unwrap();
-
-    assert_no_alloc("create_map_future", || {
-        super::super::poll_ready(storage.create_map_future::<REGION_SIZE, REGION_COUNT, _>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(61),
-        ))
-        .unwrap();
-    });
-
-    let mut payload_buffer = [0u8; 64];
-    assert_no_alloc("append_map_update", || {
-        storage
-            .append_map_update::<REGION_SIZE, REGION_COUNT, _, u16, u16, 8>(
-                &mut flash,
-                &mut workspace,
-                CollectionId(61),
-                &MapUpdate::Set { key: 7, value: 70 },
-                &mut payload_buffer,
-            )
-            .unwrap();
-    });
-
-    let mut map_buffer = [0u8; REGION_SIZE];
-    let map = storage
-        .open_map::<REGION_SIZE, REGION_COUNT, _, u16, u16, 8, 8>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(61),
-            &mut map_buffer,
-        )
-        .unwrap();
-    assert_eq!(map.get_frontier(&7).unwrap(), Some(70));
-}
+fn todo_storage_operations_use_bound_backing() {}
 
 //= spec/implementation.md#api-requirements
 //= type=test
@@ -205,3 +159,86 @@ fn requirement_core_api_remains_usable_without_executor_or_framework_helpers() {
     assert_eq!(reopened.metadata().region_size, 256);
     assert_eq!(reopened.collections()[0].collection_id(), CollectionId(85));
 }
+
+//= spec/ring.md#storage-api-requirements
+//= type=todo
+//# `RING-API-001` `Storage` MUST be the public database context that owns logical runtime state,
+//# replay state, configuration, dirty-frontier tracking, and bounded reusable scratch memory needed
+//# by normal storage and collection operations.
+#[test]
+fn todo_storage_context_owns_operation_scratch() {}
+
+//= spec/ring.md#storage-api-requirements
+//= type=todo
+//# `RING-API-002` `Storage` MUST own exclusive access to the backing object for the lifetime of an
+//# opened database, either by owning the backing value or by holding a mutable reference to it.
+#[test]
+fn todo_storage_owns_backing_access() {}
+
+//= spec/ring.md#storage-api-requirements
+//= type=todo
+//# `RING-API-003` Public operations that may touch backing media MUST use the backing object
+//# through `Storage` rather than requiring a separate backing argument on each operation.
+#[test]
+fn todo_operations_use_storage_backing() {}
+
+//= spec/ring.md#storage-api-requirements
+//= type=todo
+//# `RING-API-004` Public normal collection operations MUST NOT require callers to provide
+//# collection frontier buffers, payload serialization buffers, or a `StorageWorkspace`; that
+//# bounded memory MUST be supplied by the `Storage` context or storage-owned configuration.
+#[test]
+fn todo_collection_operations_use_storage_owned_buffers() {}
+
+//= spec/ring.md#storage-api-requirements
+//= type=todo
+//# `RING-API-005` Any shared-device synchronization required by a platform MUST be encapsulated by
+//# the backing implementation rather than by Borromean core requiring a specific mutex, executor,
+//# interrupt policy, or sharing primitive.
+#[test]
+fn todo_shared_backing_synchronization_stays_behind_backing_trait() {}
+
+//= spec/ring.md#ring-state-machine-requirements
+//= type=todo
+//# `RING-MACHINE-001` Storage runtime MUST expose a single active storage mode so that at most
+//# one formatting, opening, append, allocation, region-write, rotation, region-reclaim, or
+//# WAL-head-reclaim operation is active for a storage context.
+#[test]
+fn todo_storage_runtime_exposes_single_active_mode() {}
+
+//= spec/ring.md#ring-state-machine-requirements
+//= type=todo
+//# `RING-MACHINE-002` Stable replayed runtime state MUST be kept separate from
+//# operation-specific progress state owned by the active mode.
+#[test]
+fn todo_runtime_state_is_separate_from_operation_progress() {}
+
+//= spec/ring.md#ring-state-machine-requirements
+//= type=todo
+//# `RING-MACHINE-003` Public steady-state operations MUST validate that the storage context is
+//# in a valid source mode, normally `Idle`, before beginning their transition sequence.
+#[test]
+fn todo_public_operations_validate_source_mode() {}
+
+//= spec/ring.md#ring-state-machine-requirements
+//= type=todo
+//# `RING-MACHINE-004` Every durable write that changes replay-visible state MUST be represented
+//# as a named transition edge with defined preconditions, durable effect, runtime effect, replay
+//# effect, and crash-cut result.
+#[test]
+fn todo_durable_writes_are_named_transition_edges() {}
+
+//= spec/ring.md#ring-state-machine-requirements
+//= type=todo
+//# `RING-MACHINE-005` Normal foreground operation, startup replay, and crash recovery MUST use
+//# the same `ApplyWalRecord` semantics for every retained durable WAL record.
+#[test]
+fn todo_foreground_replay_and_recovery_share_wal_record_semantics() {}
+
+//= spec/ring.md#ring-state-machine-requirements
+//= type=todo
+//# `RING-MACHINE-006` Startup and recovery modes MUST compose the same collection, allocator,
+//# WAL-chain, and reclaim submachine transitions used by normal operation rather than defining
+//# separate incompatible transition rules.
+#[test]
+fn todo_startup_and_recovery_compose_normal_submachines() {}

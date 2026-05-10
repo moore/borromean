@@ -205,57 +205,9 @@ fn requirement_flush_future_keeps_collection_basis_on_previous_state_until_head_
 }
 
 //= spec/implementation.md#operation-requirements
-//= type=test
-//# `RING-IMPL-OP-005` Public operations SHOULD minimize the duration of
-//# mutable borrows of large caller workspaces so embedded callers can
-//# reuse buffers across sequential operations.
+//= type=todo
+//# `RING-IMPL-OP-005` Public operations SHOULD keep borrows of
+//# storage-owned scratch internal to the operation so embedded callers can
+//# reuse one `Storage` context across sequential operations.
 #[test]
-fn requirement_one_workspace_is_reusable_across_sequential_future_driven_operations() {
-    let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
-    let mut workspace = StorageWorkspace::<512>::new();
-    let mut storage =
-        Storage::<8, 4>::format::<512, 5, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
-
-    super::super::poll_ready(storage.create_map_future::<512, 5, _>(
-        &mut flash,
-        &mut workspace,
-        CollectionId(83),
-    ))
-    .unwrap();
-    {
-        let (region_bytes, logical_scratch) = workspace.scan_buffers();
-        region_bytes.fill(0x11);
-        logical_scratch.fill(0x22);
-    }
-
-    let mut payload_buffer = [0u8; 64];
-    super::super::poll_ready(storage.append_map_update_future::<512, 5, _, u16, u16, 8>(
-        &mut flash,
-        &mut workspace,
-        CollectionId(83),
-        &MapUpdate::Set { key: 7, value: 70 },
-        &mut payload_buffer,
-    ))
-    .unwrap();
-    {
-        let (physical_scratch, logical_scratch) = workspace.encode_buffers();
-        physical_scratch.fill(0x33);
-        logical_scratch.fill(0x44);
-    }
-
-    let reopened = super::super::poll_until_ready(
-        Storage::<8, 4>::open_future::<512, 5, _>(&mut flash, &mut workspace),
-        8,
-    )
-    .unwrap();
-    let mut map_buffer = [0u8; 512];
-    let map = reopened
-        .open_map::<512, 5, _, u16, u16, 8, 8>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(83),
-            &mut map_buffer,
-        )
-        .unwrap();
-    assert_eq!(map.get_frontier(&7).unwrap(), Some(70));
-}
+fn todo_storage_owned_scratch_is_reusable_across_operations() {}
