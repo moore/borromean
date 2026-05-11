@@ -201,8 +201,8 @@ fn todo_shared_backing_synchronization_stays_behind_backing_trait() {}
 //= spec/ring.md#ring-state-machine-requirements
 //= type=todo
 //# `RING-MACHINE-001` Storage runtime MUST expose a single active storage mode so that at most
-//# one formatting, opening, append, allocation, region-write, rotation, region-reclaim, or
-//# WAL-head-reclaim operation is active for a storage context.
+//# one read, collection, WAL, allocation, region-write, rotation, reclaim, formatting, or opening
+//# operation is active for a storage context.
 #[test]
 fn todo_storage_runtime_exposes_single_active_mode() {}
 

@@ -1374,8 +1374,9 @@ fn requirement_storage_reclaim_wal_head_copies_live_updates_after_basis_to_tail(
 
 //= spec/ring.md#storage-runtime-state-requirements
 //= type=test
-//# `RING-IMPL-REGRESSION-106` WAL-head reclaim MUST rewrite a live empty-head map as a WAL snapshot
-//# basis while preserving pending updates.
+//# `RING-IMPL-REGRESSION-106` WAL-head reclaim MUST rewrite a live
+//# `EmptyClean` map as a WAL snapshot basis while preserving pending
+//# updates.
 #[test]
 fn requirement_storage_reclaim_wal_head_rewrites_empty_head_map_as_snapshot_basis() {
     let (mut flash, mut workspace, mut storage, next_region) =
@@ -1450,8 +1451,8 @@ fn requirement_storage_reclaim_wal_head_reopen_keeps_the_wal_chain_walkable() {
 //= spec/ring.md#wal-reclaim-eligibility
 //= type=test
 //# `RING-WAL-RECLAIM-SAFE-001` Reclaim MUST NOT change replay result:
-//# the recovered `last_head` and `pending_updates` for every
-//# collection, the recovered `last_free_list_head`, reserved
+//# the recovered collection submachine state and pending updates for
+//# every collection, the recovered `last_free_list_head`, reserved
 //# `ready_region`, ordered staged regions, ordered incomplete reclaim
 //# state, and reconstructed `free_list_tail`, after reclaim must match
 //# the pre-reclaim logical state.
@@ -2557,10 +2558,11 @@ fn requirement_storage_reopen_after_replacement_reconstructs_free_list_tail() {
 //= spec/ring.md#startup-replay-algorithm
 //= type=test
 //# RING-STARTUP-007 Maintain replay state: per collection optional live
-//# `collection_type`, `last_head`, `basis_pos`, and `pending_updates`,
-//# plus global `last_free_list_head`, optional reserved `ready_region`,
-//# ordered staged regions, ordered pending region reclaims, and the
-//# replay-local `pending_wal_recovery_boundary`.
+//# `collection_type`, explicit collection state, `basis_pos`, and
+//# `pending_updates`, plus global `last_free_list_head`, optional
+//# reserved `ready_region`, ordered staged regions, ordered pending
+//# region reclaims, and the replay-local
+//# `pending_wal_recovery_boundary`.
 #[test]
 fn requirement_storage_reopen_after_replacement_recovers_collection_and_reclaim_state() {
     let (mut flash, mut workspace, _, reopened, _, second_region) =

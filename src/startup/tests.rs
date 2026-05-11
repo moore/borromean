@@ -626,8 +626,8 @@ fn requirement_open_formatted_store_reports_an_error_for_intentionally_corrupted
 
 //= spec/ring.md#collection-head-state-machine
 //= type=test
-//# `RING-FORMAT-006` A `WALSnapshotHead` MUST be loadable into RAM before
-//# that collection accepts further mutations.
+//# `RING-FORMAT-006` A `WALSnapshotClean` basis MUST be loadable into RAM
+//# before that collection accepts further mutations.
 #[test]
 fn requirement_open_formatted_store_tracks_live_collection_snapshot_basis() {
     let mut flash = MockFlash::<128, 4, 96>::new(0xff);

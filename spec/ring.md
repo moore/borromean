@@ -374,21 +374,40 @@ enum StorageMode {
   Idle,
   Formatting(FormatMode),
   Opening(OpenMode),
+  ReadingStorage(ReadMode),
+  LoadingCollection(CollectionLoadMode),
+  CreatingCollection(CollectionCreateMode),
+  UpdatingCollection(CollectionUpdateMode),
   AppendingWal(WalAppendMode),
   AllocatingRegion(AllocationMode),
   WritingCommittedRegion(CommittedRegionWriteMode),
   RotatingWal(WalRotationMode),
   ReclaimingRegion(RegionReclaimMode),
   ReclaimingWalHead(WalHeadReclaimMode),
+  SnapshottingCollection(CollectionSnapshotMode),
+  FlushingCollection(CollectionFlushMode),
+  CompactingCollection(CollectionCompactionMode),
+  DroppingCollection(CollectionDropMode),
 }
 ```
 
-`Idle` is the only steady-state mode. Public operations that mutate the
-store enter from `Idle`, transition through one operation mode, and
-return to `Idle` after reaching a terminal result. While a mode is
+`Idle` is the only steady-state mode. Public operations enter from
+`Idle`, transition through one operation mode, and return to `Idle`
+after reaching a terminal result. Mutating operations may change the
+stable runtime vector through named durable transition edges. Read-only
+operations may scan WAL or committed regions and materialize volatile
+views, but they do not write durable transition edges. While a mode is
 active, its sub-state owns the operation's interstitial data and the
 stable runtime vector remains the replayable state that a reset would
 recover from durable media.
+
+Some low-level APIs expose individual transition edges rather than a
+whole collection operation. For example, an allocation-start call may
+return successfully after `ReserveRegion`, leaving `ready_region` in
+the stable runtime vector, and a reclaim-start call may return
+successfully after `BeginReclaim`, leaving an ordered pending reclaim.
+Those are not lingering active modes; they are replayable stable-vector
+states that later public calls may consume from `Idle`.
 
 `Opening(OpenMode)` has these phases:
 
@@ -421,15 +440,15 @@ effect after a record is durable:
 
 | WAL record | `ApplyWalRecord` effect |
 | --- | --- |
-| `new_collection(collection_id, collection_type)` | Create a collection entry and move its durable-basis submachine from `NoCollection` to `EmptyHead`. |
-| `update(collection_id, payload)` | Require an existing non-dropped collection, retain the update after that collection's current durable basis, and make the collection's volatile frontier dirty when that frontier is materialized. |
-| `snapshot(collection_id, collection_type, payload)` | Create or validate the collection type, move its durable basis to `WALSnapshotHead`, and discard older pending updates for that collection. |
+| `new_collection(collection_id, collection_type)` | Create a collection entry and move its collection submachine from `NoCollection` to `EmptyClean`. |
+| `update(collection_id, payload)` | Require an existing non-dropped collection, retain the update after that collection's current durable basis, and move `EmptyClean` to `EmptyDirty`, `WALSnapshotClean` to `WALSnapshotDirty`, or `RegionClean` to `RegionDirty`; an already dirty collection remains in the matching dirty state. |
+| `snapshot(collection_id, collection_type, payload)` | Create or validate the collection type, move the collection submachine to `WALSnapshotClean`, and discard older pending updates for that collection. |
 | `alloc_begin(region_index, free_list_head_after)` | Advance `last_free_list_head` to `free_list_head_after` and set `ready_region = region_index`. |
 | `stage_region(region_index)` | Require `ready_region = region_index`, append the region to `staged_regions`, and clear `ready_region`. |
-| `head(collection_id, collection_type, region_index)` for a user collection | Create or validate the collection type, move its durable basis to `RegionHead`, discard older pending updates for that collection, and consume matching `ready_region` or staged state. |
+| `head(collection_id, collection_type, region_index)` for a user collection | Create or validate the collection type, move the collection submachine to `RegionClean`, discard older pending updates for that collection, and consume matching `ready_region` or staged state. |
 | `head(collection_id = 0, collection_type = wal, region_index)` | As a WAL-chain control record, update the effective WAL head in foreground operation. During startup, the last valid tail-local control record selects the effective WAL head before main replay; during the main user-collection replay pass it has no collection-basis effect. |
 | `link(next_region_index, expected_sequence)` | Preserve WAL-chain reachability and consume matching `ready_region` or staged state for the linked WAL region. |
-| `drop_collection(collection_id)` | Move the durable-basis submachine to `Dropped`, clear retained pending updates and volatile frontier state, and leave the collection id reserved. |
+| `drop_collection(collection_id)` | Move the collection submachine to `Dropped`, clear retained pending updates and volatile frontier state, and leave the collection id reserved. |
 | `free_list_head(region_index_or_none)` | Set the replayed durable free-list head. |
 | `reclaim_begin(region_index)` | Add an ordered pending reclaim and remove the region from `staged_regions` if present. |
 | `reclaim_end(region_index)` | Remove the matching ordered pending reclaim. |
@@ -437,6 +456,21 @@ effect after a record is durable:
 
 The main operation modes are transition sequences over the same table:
 
+- `ReadingStorage(ReadMode)` visits WAL records, collection bases, or
+  committed regions without changing durable state. It may use bounded
+  scratch and may materialize volatile read views, then returns to
+  `Idle`.
+- `LoadingCollection(CollectionLoadMode)` validates an existing live
+  collection, loads its retained basis and post-basis update records,
+  and constructs the collection-specific handle or frontier without
+  appending records.
+- `CreatingCollection(CollectionCreateMode)` reserves a new collection
+  id, appends and syncs `new_collection`, applies the `EmptyClean`
+  transition, and returns a collection handle for the new empty basis.
+- `UpdatingCollection(CollectionUpdateMode)` validates a live
+  collection, encodes and appends a collection-defined `update`, applies
+  that update to the volatile frontier, and leaves the collection in
+  the matching dirty state.
 - `AppendingWal(WalAppendMode)` validates the source state, ensures the
   tail has room or asks `RotatingWal` to make room, writes and syncs one
   WAL record, then applies `ApplyWalRecord` to the stable runtime
@@ -462,6 +496,21 @@ The main operation modes are transition sequences over the same table:
   heads, begins reclaim for the old head, preserves allocator state,
   copies or rewrites live records from the old head, commits the new
   WAL head, and completes region reclaim for the old head.
+- `SnapshottingCollection(CollectionSnapshotMode)` serializes the
+  collection's current logical state into a WAL `snapshot`, appends and
+  syncs that record, clears superseded post-basis updates, and returns
+  the collection to a clean WAL-snapshot basis.
+- `FlushingCollection(CollectionFlushMode)` writes collection-defined
+  committed state into one or more allocated regions, appends and syncs
+  the user `head`, clears superseded post-basis updates, and records any
+  region-basis reclaim work needed for the old basis.
+- `CompactingCollection(CollectionCompactionMode)` reads the current
+  committed layout, writes replacement committed layout, commits a new
+  user `head`, and records reclaim work for committed regions made stale
+  by the compaction. The logical collection state remains clean.
+- `DroppingCollection(CollectionDropMode)` optionally begins reclaim for
+  a live committed basis, appends and syncs `drop_collection`, clears
+  volatile collection state, and leaves the id reserved as `Dropped`.
 
 Named transition edges for replay-visible durable writes:
 
@@ -470,20 +519,25 @@ Named transition edges for replay-visible durable writes:
 | `FormatMetadata` | Write and sync `StorageMetadata`. | `Format Storage`, `Storage Metadata` |
 | `FormatInitialWalRegion` | Initialize and sync region `0` as the first WAL region. | `Format Storage`, `Header`, `WAL Region Prologue` |
 | `FormatInitialFreeList` | Initialize and sync the formatted free-list chain. | `Format Storage`, `Free-Pointer Footer` |
+| `CreateCollection` | Write and sync `new_collection`. | `ApplyWalRecord`, `Collection Head Submachine` |
 | `AppendUpdate` | Write and sync `update`. | `ApplyWalRecord`, `RING-ORDER-001`, `RING-CRASH-011` |
 | `CommitSnapshotHead` | Write and sync `snapshot`. | `ApplyWalRecord`, `RING-ORDER-002`, `RING-CRASH-001` through `RING-CRASH-002` |
 | `ReserveRegion` | Write and sync `alloc_begin`. | `ApplyWalRecord`, `RING-ALLOC-*`, `RING-CRASH-005` through `RING-CRASH-008` |
+| `StartWalRotation` | Write and sync the rotation-window `alloc_begin` that only a matching `link` may follow in that tail. | `ApplyWalRecord`, `RING-WAL-ENC-014`, `RING-CRASH-008` |
 | `StageRegion` | Write and sync `stage_region`. | `ApplyWalRecord`, startup replay staged-region rules, WAL reclaim liveness rules |
 | `WriteCommittedRegion` | Erase, write, and sync a committed-region header and payload. | `RING-ORDER-004`, `Header`, collection-format requirements |
 | `CommitRegionHead` | Write and sync a user-collection `head`. | `ApplyWalRecord`, `RING-ORDER-004`, `RING-CRASH-006` through `RING-CRASH-007` |
 | `RotateWalLink` | Write and sync WAL `link`. | `ApplyWalRecord`, `RING-ORDER-005`, `RING-CRASH-008` through `RING-CRASH-010` |
 | `InitializeRotatedWalRegion` | Erase, initialize, and sync the linked WAL region. | `RING-ORDER-005`, `WAL Region Prologue`, startup rotation recovery |
 | `CommitWalHeadControl` | Write and sync `head(collection_id = 0, collection_type = wal, ...)`. | `ApplyWalRecord`, WAL reclaim postconditions, startup WAL-head discovery |
+| `CopyRetainedWalRecord` | Copy and sync a retained WAL record into the new WAL head during WAL-head reclaim. | `ApplyWalRecord`, WAL reclaim liveness rules |
+| `RewriteRetainedEmptyBasis` | Write and sync a retained `snapshot` basis that represents an empty live collection whose original `new_collection` record would otherwise be reclaimed. | `ApplyWalRecord`, WAL reclaim liveness rules |
 | `CommitFreeListHead` | Write and sync `free_list_head`. | `ApplyWalRecord`, `Region Reclaim` |
 | `BeginReclaim` | Write and sync `reclaim_begin`. | `ApplyWalRecord`, `RING-ORDER-006`, `Region Reclaim` |
 | `LinkFreeTail` | Write and sync the previous free-list tail footer. | `Region Reclaim`, `Free-Pointer Footer` |
 | `EndReclaim` | Write and sync `reclaim_end`. | `ApplyWalRecord`, `RING-ORDER-006`, `Region Reclaim` |
 | `CommitWalRecoveryBoundary` | Write and sync `wal_recovery`. | `ApplyWalRecord`, `RING-ORDER-007`, `RING-CRASH-011` |
+| `CommitDropCollection` | Write and sync `drop_collection`. | `ApplyWalRecord`, `Collection Head Submachine` |
 
 Formatting is modeled as `Formatting(FormatMode)` until the freshly
 initialized metadata, initial WAL region, and initial free-list chain
@@ -494,9 +548,9 @@ open succeeds, the storage context is in `Idle`.
 #### Ring State Machine Requirements
 
 1. `RING-MACHINE-001` Storage runtime MUST expose a single active
-storage mode so that at most one formatting, opening, append,
-allocation, region-write, rotation, region-reclaim, or WAL-head-reclaim
-operation is active for a storage context.
+storage mode so that at most one read, collection, WAL, allocation,
+region-write, rotation, reclaim, formatting, or opening operation is
+active for a storage context.
 2. `RING-MACHINE-002` Stable replayed runtime state MUST be kept
 separate from operation-specific progress state owned by the active
 mode.
@@ -1243,48 +1297,66 @@ if it is not already present there.
 Collection transitions:
 
 1. `NoCollection -> EmptyClean`
-Write `new_collection(collection_id, collection_type)`.
+Foreground creation writes `new_collection(collection_id,
+collection_type)`.
 Durable after the `new_collection` record is durable. The collection
 starts with tracked `collection_type`, no region basis, no snapshot
 basis, no pending updates, and no dirty volatile frontier.
 
-2. `EmptyClean -> EmptyDirty`
+2. `NoCollection -> WALSnapshotClean`
+Retained replay basis only. WAL-head reclaim may remove the historical
+`new_collection` record while preserving a later `snapshot` record, so
+startup replay must be able to reconstruct a live collection directly
+from the retained snapshot basis.
+
+3. `NoCollection -> RegionClean`
+Retained replay basis only. WAL-head reclaim may remove the historical
+`new_collection` record while preserving a later user `head` record, so
+startup replay must be able to reconstruct a live collection directly
+from the retained committed-region basis.
+
+4. `NoCollection -> Dropped`
+Retained replay basis only. WAL-head reclaim may remove all earlier
+type-bearing records for a collection whose retained basis is only a
+`drop_collection` tombstone, so startup replay must be able to preserve
+that id as dropped without reconstructing a live collection type.
+
+5. `EmptyClean -> EmptyDirty`
 Create a mutable frontier over the empty basis, append an `update`
 record to the WAL, and apply that update to RAM.
 
-3. `WALSnapshotClean -> WALSnapshotDirty`
+6. `WALSnapshotClean -> WALSnapshotDirty`
 Load the snapshot as the mutable frontier, append an `update` record to
 the WAL, and apply that update to RAM.
 
-4. `RegionClean -> RegionDirty`
+7. `RegionClean -> RegionDirty`
 Open a mutable frontier over the committed region basis, append an
 `update` record to the WAL, and apply that update to RAM.
 
-5. `EmptyDirty -> EmptyDirty`, `WALSnapshotDirty -> WALSnapshotDirty`,
+8. `EmptyDirty -> EmptyDirty`, `WALSnapshotDirty -> WALSnapshotDirty`,
 or `RegionDirty -> RegionDirty`
 Append another `update` record to the WAL and apply that update to the
 existing RAM frontier.
 
-6. `EmptyDirty | WALSnapshotDirty | RegionDirty -> WALSnapshotClean`
+9. `EmptyClean | EmptyDirty | WALSnapshotClean | WALSnapshotDirty | RegionClean | RegionDirty -> WALSnapshotClean`
 Write `snapshot`.
 Durable after the `snapshot` record is durable. The snapshot becomes the
-new durable basis, older post-basis updates are superseded, and the
-dirty frontier is clear.
+new durable basis, older post-basis updates are superseded, and any
+dirty frontier is clear. Clean-source snapshotting is allowed because a
+collection operation may choose to rewrite its clean basis into a
+different retained WAL snapshot without changing logical content.
 
-7. `EmptyDirty | WALSnapshotDirty | RegionDirty -> RegionClean`
+10. `EmptyClean | EmptyDirty | WALSnapshotClean | WALSnapshotDirty | RegionClean | RegionDirty -> RegionClean`
 Write `alloc_begin(region_index, free_list_head_after)`, write
 collection region, then write
 `head(collection_id, collection_type, region_index)`.
 Durable after the `head` record is durable. The committed region becomes
 the new durable basis, older post-basis updates are superseded, and the
-dirty frontier is clear.
+dirty frontier is clear. Clean-source committed writes are allowed for
+snapshot materialization, manifest rewrite, or compaction where the
+logical state is unchanged but the retained committed layout changes.
 
-8. `WALSnapshotClean -> RegionClean`
-Materialize the snapshot into a new committed region without accepting
-additional updates, then write
-`head(collection_id, collection_type, region_index)`.
-
-9. `EmptyClean | EmptyDirty | WALSnapshotClean | WALSnapshotDirty | RegionClean | RegionDirty -> Dropped`
+11. `EmptyClean | EmptyDirty | WALSnapshotClean | WALSnapshotDirty | RegionClean | RegionDirty -> Dropped`
 Write `drop_collection(collection_id)`.
 Durable after the `drop_collection` record is durable. Any pending WAL
 updates and volatile frontier state for that collection are discarded
@@ -1311,19 +1383,27 @@ frontier over region basis`"]
 durable tombstone`"])
 
     NoCollection -->|write new_collection record| EmptyClean
+    NoCollection -.->|retained snapshot basis| SnapshotClean
+    NoCollection -.->|retained region basis| RegionClean
+    NoCollection -.->|retained drop tombstone| Dropped
     EmptyClean -->|append update| EmptyDirty
     SnapshotClean -->|load snapshot and append update| SnapshotDirty
     RegionClean -->|open frontier and append update| RegionDirty
     EmptyDirty -->|append update| EmptyDirty
     SnapshotDirty -->|append update| SnapshotDirty
     RegionDirty -->|append update| RegionDirty
+    EmptyClean -->|write snapshot| SnapshotClean
     EmptyDirty -->|write snapshot| SnapshotClean
+    SnapshotClean -->|write snapshot| SnapshotClean
     SnapshotDirty -->|write snapshot| SnapshotClean
+    RegionClean -->|write snapshot| SnapshotClean
     RegionDirty -->|write snapshot| SnapshotClean
+    EmptyClean -->|write committed region| RegionClean
     EmptyDirty -->|flush to committed region| RegionClean
-    SnapshotDirty -->|flush to committed region| RegionClean
-    RegionDirty -->|flush to committed region| RegionClean
     SnapshotClean -->|materialize snapshot into region| RegionClean
+    SnapshotDirty -->|flush to committed region| RegionClean
+    RegionClean -->|rewrite or compact committed layout| RegionClean
+    RegionDirty -->|flush to committed region| RegionClean
 
     EmptyClean -->|write drop record| Dropped
     SnapshotClean -->|write drop record| Dropped
@@ -1342,7 +1422,7 @@ region header but does not assign it global meaning.
 with the in-memory frontier.
 3. `RING-FORMAT-003` The frontier MUST take precedence over older values in the durable
 basis.
-4. `RING-FORMAT-004` Flush to `RegionHead` materializes the logical state produced by
+4. `RING-FORMAT-004` Flush to `RegionClean` materializes the logical state produced by
 that merge, either directly in the head region or through
 collection-defined manifest state referenced by the head region.
 5. `RING-FORMAT-005` Every user collection MUST remain log-structured:
@@ -1350,7 +1430,7 @@ flushing mutable state writes new immutable committed region state
 instead of rewriting existing live region state in place. An LSM-style
 layout with manifest-described immutable runs is one valid way to
 satisfy this requirement.
-6. `RING-FORMAT-006` A `WALSnapshotHead` MUST be loadable into RAM before that
+6. `RING-FORMAT-006` A `WALSnapshotClean` basis MUST be loadable into RAM before that
 collection accepts further mutations.
 7. `RING-FORMAT-007` For live user collections, the replay-tracked collection type is
 fixed by the earliest retained type-bearing record for that collection
@@ -1526,8 +1606,8 @@ After scanning the tail region, recover the append point as the first
 aligned slot whose first byte is `erased_byte` after the last valid
 replayed tail record. If no such slot exists, the tail region is full.
 7. `RING-STARTUP-007` Maintain replay state:
-per collection optional live `collection_type`, `last_head`,
-`basis_pos`, and
+per collection optional live `collection_type`, explicit collection
+state, `basis_pos`, and
 `pending_updates`, plus global `last_free_list_head`, optional
 reserved `ready_region`, ordered staged regions, ordered pending region reclaims, and the
 replay-local `pending_wal_recovery_boundary`.
@@ -1538,21 +1618,21 @@ records override this baseline in replay order.
 8. `RING-STARTUP-008` On `new_collection(collection_id, collection_type)`:
 if `collection_id` is already tracked, return an error.
 otherwise create replay state for that collection with durable basis
-`EmptyHead`, set tracked `collection_type` from the record, set
+`EmptyClean`, set tracked `collection_type` from the record, set
 `basis_pos` to this record's WAL position, and start with no pending
 updates.
 9. `RING-STARTUP-009` On `update(collection_id)`:
 if `collection_id` is not tracked, return an error.
-if that collection's durable `last_head` is `Dropped`, return an error.
+if that collection's collection state is `Dropped`, return an error.
 append to `pending_updates` for that collection.
 10. `RING-STARTUP-010` On `snapshot(collection_id, collection_type)`:
 if `collection_id` is not tracked, create replay state for that
 collection because an earlier `new_collection` may have been reclaimed,
 and set tracked `collection_type` from this record.
-if that collection's durable `last_head` is `Dropped`, return an error.
+if that collection's collection state is `Dropped`, return an error.
 if this record's `collection_type` does not match the tracked
 `collection_type`, return an error.
-set durable `last_head` to this snapshot, set `basis_pos` to this
+set collection state to `WALSnapshotClean`, set `basis_pos` to this
 record's WAL position, and clear older pending updates for that
 collection at WAL positions up to and including this snapshot.
 11. `RING-STARTUP-011` On `alloc_begin(region_index, free_list_head_after)`:
@@ -1577,7 +1657,7 @@ pass.
 otherwise, if `collection_id` is not tracked, create replay state for
 that collection because an earlier `new_collection` may have been
 reclaimed, and set tracked `collection_type` from this record.
-if that collection's durable `last_head` is `Dropped`, return an
+if that collection's collection state is `Dropped`, return an
 error.
 if this record's `collection_type` does not match the tracked
 `collection_type`, return an error.
@@ -1587,7 +1667,7 @@ Core replay does not impose any further global `collection_format`
 check for user collections; if that region is later loaded as a
 committed basis, its collection implementation validates that the
 stored `collection_format` is one it understands.
-set durable `last_head` to that region, set `basis_pos` to this
+set collection state to `RegionClean`, set `basis_pos` to this
 record's WAL position, and clear WAL updates/snapshots older than this
 basis decision.
 if `ready_region = region_index`, clear `ready_region`;
@@ -1611,9 +1691,9 @@ collection because older retained basis records may already have been
 reclaimed; record this collection as durably `Dropped`, with no
 retained live `collection_type`, set `basis_pos` to this record's WAL
 position, and leave no pending updates.
-otherwise if that collection's durable `last_head` is `Dropped`,
+otherwise if that collection's collection state is `Dropped`,
 return an error.
-otherwise set durable `last_head` to `Dropped`, set `basis_pos` to this
+otherwise set collection state to `Dropped`, set `basis_pos` to this
 record's WAL position, and clear all pending updates for that
 collection.
 16. `RING-STARTUP-015` On `free_list_head(region_index_or_none)`:
@@ -1628,20 +1708,21 @@ mark the matching pending reclaim as finished.
 if `pending_wal_recovery_boundary` is clear, return an error.
 otherwise clear `pending_wal_recovery_boundary`.
 20. `RING-STARTUP-019` After replay, for each collection:
-reconstruct its durable basis from `last_head`. If `last_head` is
-`empty`, the basis is the empty collection declared by
-`new_collection`; if that collection has post-basis updates,
-initialize empty mutable state in RAM and apply those
-`pending_updates` in WAL order. If `last_head` is `region`, the basis
-may remain in-place in flash. If `last_head` is `wal_snapshot` and the
-collection has post-basis updates, load that snapshot into RAM and
-apply the remaining `pending_updates` in WAL order to reconstruct
-mutable working state. If `last_head` is `wal_snapshot` and there are
-no post-basis updates, the snapshot may remain dormant until the next
-mutation, but it must be loaded into RAM before accepting that
-mutation. If `last_head` is `Dropped`, do not reconstruct mutable
-state for that collection and do not accept further mutations for that
-collection id.
+reconstruct its durable basis from the collection state. If the state
+is `EmptyClean` or `EmptyDirty`, the basis is the empty collection
+declared by `new_collection`; if that collection has post-basis
+updates, initialize empty mutable state in RAM and apply those
+`pending_updates` in WAL order. If the state is `RegionClean` or
+`RegionDirty`, the basis may remain in-place in flash until a read or
+mutation needs to materialize it. If the state is `WALSnapshotClean`
+or `WALSnapshotDirty` and the collection has post-basis updates, load
+that snapshot into RAM and apply the remaining `pending_updates` in
+WAL order to reconstruct mutable working state. If the state is
+`WALSnapshotClean` and there are no post-basis updates, the snapshot
+may remain dormant until the next mutation, but it must be loaded into
+RAM before accepting that mutation. If the state is `Dropped`, do not
+reconstruct mutable state for that collection and do not accept
+further mutations for that collection id.
 21. `RING-STARTUP-020` Initialize allocator state from `last_free_list_head`.
 22. `RING-STARTUP-021` Reconstruct runtime `free_list_tail` by following free-pointer
 links starting at `last_free_list_head` until reaching a free region
@@ -1821,10 +1902,13 @@ pub struct WalPosition {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DurableHead {
-  Empty,
-  Region { region_index: RegionIndex },
-  WalSnapshot { wal_pos: WalPosition },
+pub enum CollectionMachineState {
+  EmptyClean,
+  EmptyDirty,
+  RegionClean { region_index: RegionIndex },
+  RegionDirty { region_index: RegionIndex },
+  WALSnapshotClean { wal_pos: WalPosition },
+  WALSnapshotDirty { wal_pos: WalPosition },
   Dropped,
 }
 
@@ -1834,9 +1918,10 @@ pub struct CollectionReplayState {
   // `None` is used only for a retained drop-only tombstone whose older
   // type-bearing records were reclaimed.
   pub collection_type: Option<CollectionType>,
-  pub last_head: DurableHead,
+  pub state: CollectionMachineState,
   // WAL position of the durable basis decision record that established
-  // `last_head` (`new_collection`, `snapshot`, `drop_collection`, or `head`).
+  // the current durable basis (`new_collection`, `snapshot`,
+  // `drop_collection`, or `head`).
   pub basis_pos: WalPosition,
 }
 
@@ -1890,12 +1975,14 @@ heapless = { version = "0.8", default-features = false }
 
 Field mapping to this spec:
 
-1. `CollectionReplayState.last_head` maps to replay `last_head`,
-including the durable `Dropped` tombstone state.
+1. `CollectionReplayState.state` maps to the explicit collection
+submachine state for a tracked collection. `NoCollection` is represented
+by the absence of a tracker entry for that collection id.
 2. `WalPosition` identifies a WAL record by WAL region index plus
 byte offset within that region.
 3. `CollectionReplayState.basis_pos` is `B(c)`, the WAL position of
-the durable basis decision record for that collection.
+the durable basis decision record for that collection's current clean
+or dirty basis.
 4. `CollectionReplayState.collection_type` is the replay-tracked
 collection type established by the earliest retained valid
 type-bearing record for that collection and validated by later
@@ -1995,7 +2082,7 @@ rotation, reclaim, and WAL/state facade helpers.
     records so reopening through flash restores the collection and pending update state.
 36. `RING-IMPL-REGRESSION-105` WAL-head reclaim MUST update runtime WAL head and tail to the next
     region.
-37. `RING-IMPL-REGRESSION-106` WAL-head reclaim MUST rewrite a live empty-head map as a WAL snapshot
+37. `RING-IMPL-REGRESSION-106` WAL-head reclaim MUST rewrite a live `EmptyClean` map as a WAL snapshot
     basis while preserving pending updates.
 
 ## WAL Reclaim Eligibility
@@ -2003,7 +2090,7 @@ rotation, reclaim, and WAL/state facade helpers.
 WAL-head reclaim is the `ReclaimingWalHead(WalHeadReclaimMode)`
 operation. It operates on WAL regions, but correctness is defined per
 record. A record is reclaimable only when replay no longer needs it to
-rebuild the same `last_head`, `pending_updates`,
+rebuild the same collection submachine state, pending updates,
 `last_free_list_head`, reserved `ready_region`, staged regions, and
 ordered incomplete reclaim state produced by `ApplyWalRecord`.
 
@@ -2014,8 +2101,8 @@ These cutoff terms apply only to user collections (`collection_id !=
 separately below because startup step 4 reconstructs them only from the
 current WAL tail region.
 
-1. Let `H(c)` be the current durable logical head for collection `c`
-(`EmptyHead`, `WalSnapshot`, `RegionHead`, or `Dropped`).
+1. Let `H(c)` be the current clean durable-basis state for collection
+`c` (`EmptyClean`, `WALSnapshotClean`, `RegionClean`, or `Dropped`).
 2. Let `D(c)` be the WAL position of the last durable basis decision
 record for collection `c` (`new_collection`, `snapshot`,
 `drop_collection`, or
@@ -2026,7 +2113,7 @@ Per-record liveness rules:
 
 1. `RING-WAL-RECLAIM-001` `new_collection(collection_id, collection_type)` record:
 live only if it is the basis decision at `D(c)` for a collection whose
-logical head `H(c)` is `EmptyHead`; otherwise reclaimable.
+logical head `H(c)` is `EmptyClean`; otherwise reclaimable.
 2. `RING-WAL-RECLAIM-002` `head(collection_id = 0, collection_type = wal, region_index)`
 record:
 live only if startup step 4 would currently use it as the effective
@@ -2039,11 +2126,11 @@ a later tail-local control record or by the current tail region's
 3. `RING-WAL-RECLAIM-003` `head(collection_id, collection_type, region_index)` record for a
 user collection:
 live only if it is the decision record at `D(c)` for a collection
-whose logical head `H(c)` is a `RegionHead`; older `head(...)` records
+whose logical head `H(c)` is `RegionClean`; older `head(...)` records
 are reclaimable.
 4. `RING-WAL-RECLAIM-004` `snapshot` record:
 live only if it is the decision record at `D(c)` for a collection
-whose logical head `H(c)` is a `WalSnapshot`; otherwise reclaimable.
+whose logical head `H(c)` is `WALSnapshotClean`; otherwise reclaimable.
 5. `RING-WAL-RECLAIM-005` `drop_collection(collection_id)` record:
 live only if it is the decision record at `D(c)` for a collection
 whose logical head `H(c)` is `Dropped`; older `drop_collection(...)`
@@ -2132,8 +2219,8 @@ position.
 
 Safety invariant:
 
-1. `RING-WAL-RECLAIM-SAFE-001` Reclaim MUST NOT change replay result: the recovered `last_head` and
-`pending_updates` for every collection, the recovered
+1. `RING-WAL-RECLAIM-SAFE-001` Reclaim MUST NOT change replay result: the recovered collection
+submachine state and pending updates for every collection, the recovered
 `last_free_list_head`, reserved `ready_region`, ordered staged regions,
 ordered incomplete reclaim state, and reconstructed `free_list_tail`,
 after reclaim must match the pre-reclaim logical state.
@@ -2202,7 +2289,7 @@ flowchart TD
     Update["`Write update then sync update`"]
     Snapshot["`Write snapshot then sync snapshot`"]
     Drop["`Write drop record then sync drop record`"]
-    RegionHead["`Write alloc begin then sync then write region then sync then write head then sync`"]
+    RegionCommit["`Write alloc begin then sync then write region then sync then write head then sync`"]
     Rotation["`Write alloc begin then sync then write link then sync then init new WAL region then sync`"]
     Reclaim["`Write reclaim begin then sync then write replacement state then sync then append old region to free list then write and sync reclaim end`"]
     Recovery["`Write wal recovery then sync then write next normal WAL record then sync`"]
@@ -2212,7 +2299,7 @@ flowchart TD
     Kind -->|update| Update --> Durable
     Kind -->|snapshot| Snapshot --> Durable
     Kind -->|drop| Drop --> Durable
-    Kind -->|region head| RegionHead --> Durable
+    Kind -->|commit region basis| RegionCommit --> Durable
     Kind -->|wal rotation| Rotation --> Durable
     Kind -->|reclaim| Reclaim --> Durable
     Kind -->|wal recovery| Recovery --> Durable
