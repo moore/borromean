@@ -98,6 +98,15 @@ fn requirement_startup_open_paths_complete_without_heap_allocation() {
 #[test]
 fn todo_startup_uses_storage_context_decode_scratch() {}
 
+//= spec/ring.md#startup-replay-algorithm
+//= type=todo
+//# `RING-STARTUP-024` After live collection type and retained data validation
+//# has succeeded, process each pending reclaim in WAL order. If an ordered
+//# staged region is not reachable from validated live collection state or the
+//# WAL chain, recover it through the same WAL-tracked reclaim procedure.
+#[test]
+fn todo_startup_validates_live_collections_before_reachability_reclaim() {}
+
 //= spec/implementation.md#startup-requirements
 //= type=test
 //# `RING-IMPL-STARTUP-004` Recovery of incomplete WAL rotation,

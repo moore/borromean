@@ -1323,7 +1323,7 @@ fn requirement_storage_reclaim_wal_head_copies_live_snapshot_basis_to_tail() {
 
 //= spec/ring.md#wal-reclaim-eligibility
 //= type=test
-//# `RING-WAL-RECLAIM-POST-001` No collection's `H(c)`, `B(c)`, or live
+//# `RING-WAL-RECLAIM-POST-001` A collection's `H(c)`, `B(c)`, and live
 //# post-basis updates MUST NOT depend on bytes in the reclaimed region.
 #[test]
 fn requirement_storage_reclaim_wal_head_copies_live_updates_after_basis_to_tail() {
