@@ -512,7 +512,35 @@ The main operation modes are transition sequences over the same table:
   a live committed basis, appends and syncs `drop_collection`, clears
   volatile collection state, and leaves the id reserved as `Dropped`.
 
-Named transition edges for replay-visible durable writes:
+State-machine operations are named transition labels. Diagrams and
+transition rules use the operation identifier, with arguments omitted
+when the surrounding source and target states make them clear. A named
+operation may contain no durable writes, one durable edge, or an ordered
+sequence of durable edges.
+
+| Operation | Active mode | Source | Durable edge sequence | Target or effect |
+| --- | --- | --- | --- | --- |
+| `FormatStorage` | `Formatting(FormatMode)` | unformatted or caller-erased media | `FormatMetadata`, `FormatInitialWalRegion`, `FormatInitialFreeList` | initialized storage in `Idle` |
+| `OpenStorage` | `Opening(OpenMode)` | formatted media | none unless recovery sub-operations are needed | recovered storage in `Idle` |
+| `ReadStorage` | `ReadingStorage(ReadMode)` | `Idle` | none | no durable state change |
+| `LoadCollection` | `LoadingCollection(CollectionLoadMode)` | any live collection state | none | materialized collection handle or frontier |
+| `CreateCollection` | `CreatingCollection(CollectionCreateMode)` | `NoCollection` | `CreateCollection` | `EmptyClean` |
+| `ApplyCollectionUpdate` | `UpdatingCollection(CollectionUpdateMode)` | any live clean or dirty collection state | `AppendUpdate` | matching dirty collection state |
+| `CommitCollectionSnapshot` | `SnapshottingCollection(CollectionSnapshotMode)` | any live collection state | `CommitSnapshotHead` | `WALSnapshotClean` |
+| `CommitCollectionRegion` | `FlushingCollection(CollectionFlushMode)`, `CompactingCollection(CollectionCompactionMode)`, or `WritingCommittedRegion(CommittedRegionWriteMode)` | any live collection state | optional `ReserveRegion`, optional `StageRegion`, `WriteCommittedRegion`, `CommitRegionHead` | `RegionClean` |
+| `DropCollection` | `DroppingCollection(CollectionDropMode)` | any live collection state | optional `BeginReclaim`, `CommitDropCollection` | `Dropped` |
+| `ReplayRetainedSnapshotBasis` | `Opening(OpenMode)` or `ReclaimingWalHead(WalHeadReclaimMode)` | `NoCollection` | none during replay; `CopyRetainedWalRecord` when preserving the record into a new WAL head | `WALSnapshotClean` |
+| `ReplayRetainedRegionBasis` | `Opening(OpenMode)` or `ReclaimingWalHead(WalHeadReclaimMode)` | `NoCollection` | none during replay; `CopyRetainedWalRecord` when preserving the record into a new WAL head | `RegionClean` |
+| `ReplayRetainedDropTombstone` | `Opening(OpenMode)` or `ReclaimingWalHead(WalHeadReclaimMode)` | `NoCollection` | none during replay; `CopyRetainedWalRecord` when preserving the record into a new WAL head | `Dropped` |
+| `ReserveRegionForUse` | `AllocatingRegion(AllocationMode)` | `Idle` with free-list capacity above reserve | `ReserveRegion` | stable `ready_region` set |
+| `StageReadyRegion` | `AppendingWal(WalAppendMode)` | stable `ready_region` matching the staged target | `StageRegion` | target moved to `staged_regions` |
+| `RotateWalTail` | `RotatingWal(WalRotationMode)` | current WAL tail in rotation window | `StartWalRotation`, `RotateWalLink`, `InitializeRotatedWalRegion` | WAL tail moves to linked region |
+| `ReclaimRegion` | `ReclaimingRegion(RegionReclaimMode)` | detached or safely detachable region | `BeginReclaim`, optional replacement-state edges, `LinkFreeTail` or `CommitFreeListHead`, `EndReclaim` | region enters durable free-list chain |
+| `ReclaimWalHead` | `ReclaimingWalHead(WalHeadReclaimMode)` | reclaimable WAL head | `BeginReclaim`, preservation edges, `CommitWalHeadControl`, free-list edge, `EndReclaim` | WAL head moves and old head enters free-list chain |
+| `CommitWalRecovery` | `AppendingWal(WalAppendMode)` | pending WAL recovery boundary | `CommitWalRecoveryBoundary` | boundary cleared so normal append may resume |
+| `AppendRawWalRecord` | `AppendingWal(WalAppendMode)` | valid record-specific source state | one record-specific durable edge from the table below | `ApplyWalRecord` effect for that record |
+
+Named durable edges for replay-visible durable writes:
 
 | Edge | Durable action | Detailed source |
 | --- | --- | --- |
@@ -568,6 +596,10 @@ retained durable WAL record.
 collection, allocator, WAL-chain, and reclaim submachine transitions
 used by normal operation rather than defining separate incompatible
 transition rules.
+7. `RING-MACHINE-007` State-machine transition rules MUST use named
+operation identifiers, and each named operation MUST define its source
+state, active mode, durable edge sequence, and target state or runtime
+effect.
 
 ### Storage Structure
 
@@ -1296,68 +1328,79 @@ if it is not already present there.
 
 Collection transitions:
 
-1. `NoCollection -> EmptyClean`
-Foreground creation writes `new_collection(collection_id,
-collection_type)`.
+1. `NoCollection --CreateCollection--> EmptyClean`
+`CreateCollection(collection_id, collection_type)` appends the
+`new_collection` record through its named durable edge.
 Durable after the `new_collection` record is durable. The collection
 starts with tracked `collection_type`, no region basis, no snapshot
 basis, no pending updates, and no dirty volatile frontier.
 
-2. `NoCollection -> WALSnapshotClean`
-Retained replay basis only. WAL-head reclaim may remove the historical
-`new_collection` record while preserving a later `snapshot` record, so
-startup replay must be able to reconstruct a live collection directly
-from the retained snapshot basis.
+2. `NoCollection --ReplayRetainedSnapshotBasis--> WALSnapshotClean`
+Retained replay basis only. `ReplayRetainedSnapshotBasis` applies a
+retained `snapshot` record after WAL-head reclaim has removed the
+historical `new_collection` record, so startup replay can reconstruct a
+live collection directly from that retained snapshot basis.
 
-3. `NoCollection -> RegionClean`
-Retained replay basis only. WAL-head reclaim may remove the historical
-`new_collection` record while preserving a later user `head` record, so
-startup replay must be able to reconstruct a live collection directly
-from the retained committed-region basis.
+3. `NoCollection --ReplayRetainedRegionBasis--> RegionClean`
+Retained replay basis only. `ReplayRetainedRegionBasis` applies a
+retained user `head` record after WAL-head reclaim has removed the
+historical `new_collection` record, so startup replay can reconstruct a
+live collection directly from that retained committed-region basis.
 
-4. `NoCollection -> Dropped`
-Retained replay basis only. WAL-head reclaim may remove all earlier
-type-bearing records for a collection whose retained basis is only a
-`drop_collection` tombstone, so startup replay must be able to preserve
-that id as dropped without reconstructing a live collection type.
+4. `NoCollection --ReplayRetainedDropTombstone--> Dropped`
+Retained replay basis only. `ReplayRetainedDropTombstone` applies a
+retained `drop_collection` tombstone after WAL-head reclaim has removed
+all earlier type-bearing records for that id, so startup replay can
+preserve that id as dropped without reconstructing a live collection
+type.
 
-5. `EmptyClean -> EmptyDirty`
-Create a mutable frontier over the empty basis, append an `update`
-record to the WAL, and apply that update to RAM.
+5. `EmptyClean --ApplyCollectionUpdate--> EmptyDirty`
+`ApplyCollectionUpdate(collection_id, payload)` creates a mutable
+frontier over the empty basis, appends an `update` record through
+`AppendUpdate`, and applies that update to RAM.
 
-6. `WALSnapshotClean -> WALSnapshotDirty`
-Load the snapshot as the mutable frontier, append an `update` record to
-the WAL, and apply that update to RAM.
+6. `WALSnapshotClean --ApplyCollectionUpdate--> WALSnapshotDirty`
+`ApplyCollectionUpdate(collection_id, payload)` loads the snapshot as
+the mutable frontier, appends an `update` record through
+`AppendUpdate`, and applies that update to RAM.
 
-7. `RegionClean -> RegionDirty`
-Open a mutable frontier over the committed region basis, append an
-`update` record to the WAL, and apply that update to RAM.
+7. `RegionClean --ApplyCollectionUpdate--> RegionDirty`
+`ApplyCollectionUpdate(collection_id, payload)` opens a mutable
+frontier over the committed region basis, appends an `update` record
+through `AppendUpdate`, and applies that update to RAM.
 
-8. `EmptyDirty -> EmptyDirty`, `WALSnapshotDirty -> WALSnapshotDirty`,
-or `RegionDirty -> RegionDirty`
-Append another `update` record to the WAL and apply that update to the
+8. `EmptyDirty --ApplyCollectionUpdate--> EmptyDirty`,
+`WALSnapshotDirty --ApplyCollectionUpdate--> WALSnapshotDirty`, or
+`RegionDirty --ApplyCollectionUpdate--> RegionDirty`
+`ApplyCollectionUpdate(collection_id, payload)` appends another
+`update` record through `AppendUpdate` and applies that update to the
 existing RAM frontier.
 
-9. `EmptyClean | EmptyDirty | WALSnapshotClean | WALSnapshotDirty | RegionClean | RegionDirty -> WALSnapshotClean`
-Write `snapshot`.
+9. `EmptyClean | EmptyDirty | WALSnapshotClean | WALSnapshotDirty | RegionClean | RegionDirty --CommitCollectionSnapshot--> WALSnapshotClean`
+`CommitCollectionSnapshot(collection_id, payload)` appends a
+`snapshot` record through `CommitSnapshotHead`.
 Durable after the `snapshot` record is durable. The snapshot becomes the
 new durable basis, older post-basis updates are superseded, and any
 dirty frontier is clear. Clean-source snapshotting is allowed because a
 collection operation may choose to rewrite its clean basis into a
 different retained WAL snapshot without changing logical content.
 
-10. `EmptyClean | EmptyDirty | WALSnapshotClean | WALSnapshotDirty | RegionClean | RegionDirty -> RegionClean`
-Write `alloc_begin(region_index, free_list_head_after)`, write
-collection region, then write
-`head(collection_id, collection_type, region_index)`.
+10. `EmptyClean | EmptyDirty | WALSnapshotClean | WALSnapshotDirty | RegionClean | RegionDirty --CommitCollectionRegion--> RegionClean`
+`CommitCollectionRegion(collection_id, region_index, payload)` runs the
+region-commit operation: reserve or stage a target region as needed,
+write the committed collection region, then append the user
+`head(collection_id, collection_type, region_index)` through
+`CommitRegionHead`.
 Durable after the `head` record is durable. The committed region becomes
 the new durable basis, older post-basis updates are superseded, and the
 dirty frontier is clear. Clean-source committed writes are allowed for
 snapshot materialization, manifest rewrite, or compaction where the
 logical state is unchanged but the retained committed layout changes.
 
-11. `EmptyClean | EmptyDirty | WALSnapshotClean | WALSnapshotDirty | RegionClean | RegionDirty -> Dropped`
-Write `drop_collection(collection_id)`.
+11. `EmptyClean | EmptyDirty | WALSnapshotClean | WALSnapshotDirty | RegionClean | RegionDirty --DropCollection--> Dropped`
+`DropCollection(collection_id)` appends `drop_collection(collection_id)`
+through `CommitDropCollection`, after any required detachment or reclaim
+setup represented by the operation's edge sequence.
 Durable after the `drop_collection` record is durable. Any pending WAL
 updates and volatile frontier state for that collection are discarded
 from the durable basis, the collection leaves the live namespace, and no
@@ -1382,35 +1425,35 @@ frontier over region basis`"]
     Dropped(["`Dropped
 durable tombstone`"])
 
-    NoCollection -->|write new_collection record| EmptyClean
-    NoCollection -.->|retained snapshot basis| SnapshotClean
-    NoCollection -.->|retained region basis| RegionClean
-    NoCollection -.->|retained drop tombstone| Dropped
-    EmptyClean -->|append update| EmptyDirty
-    SnapshotClean -->|load snapshot and append update| SnapshotDirty
-    RegionClean -->|open frontier and append update| RegionDirty
-    EmptyDirty -->|append update| EmptyDirty
-    SnapshotDirty -->|append update| SnapshotDirty
-    RegionDirty -->|append update| RegionDirty
-    EmptyClean -->|write snapshot| SnapshotClean
-    EmptyDirty -->|write snapshot| SnapshotClean
-    SnapshotClean -->|write snapshot| SnapshotClean
-    SnapshotDirty -->|write snapshot| SnapshotClean
-    RegionClean -->|write snapshot| SnapshotClean
-    RegionDirty -->|write snapshot| SnapshotClean
-    EmptyClean -->|write committed region| RegionClean
-    EmptyDirty -->|flush to committed region| RegionClean
-    SnapshotClean -->|materialize snapshot into region| RegionClean
-    SnapshotDirty -->|flush to committed region| RegionClean
-    RegionClean -->|rewrite or compact committed layout| RegionClean
-    RegionDirty -->|flush to committed region| RegionClean
+    NoCollection -->|CreateCollection| EmptyClean
+    NoCollection -.->|ReplayRetainedSnapshotBasis| SnapshotClean
+    NoCollection -.->|ReplayRetainedRegionBasis| RegionClean
+    NoCollection -.->|ReplayRetainedDropTombstone| Dropped
+    EmptyClean -->|ApplyCollectionUpdate| EmptyDirty
+    SnapshotClean -->|ApplyCollectionUpdate| SnapshotDirty
+    RegionClean -->|ApplyCollectionUpdate| RegionDirty
+    EmptyDirty -->|ApplyCollectionUpdate| EmptyDirty
+    SnapshotDirty -->|ApplyCollectionUpdate| SnapshotDirty
+    RegionDirty -->|ApplyCollectionUpdate| RegionDirty
+    EmptyClean -->|CommitCollectionSnapshot| SnapshotClean
+    EmptyDirty -->|CommitCollectionSnapshot| SnapshotClean
+    SnapshotClean -->|CommitCollectionSnapshot| SnapshotClean
+    SnapshotDirty -->|CommitCollectionSnapshot| SnapshotClean
+    RegionClean -->|CommitCollectionSnapshot| SnapshotClean
+    RegionDirty -->|CommitCollectionSnapshot| SnapshotClean
+    EmptyClean -->|CommitCollectionRegion| RegionClean
+    EmptyDirty -->|CommitCollectionRegion| RegionClean
+    SnapshotClean -->|CommitCollectionRegion| RegionClean
+    SnapshotDirty -->|CommitCollectionRegion| RegionClean
+    RegionClean -->|CommitCollectionRegion| RegionClean
+    RegionDirty -->|CommitCollectionRegion| RegionClean
 
-    EmptyClean -->|write drop record| Dropped
-    SnapshotClean -->|write drop record| Dropped
-    RegionClean -->|write drop record| Dropped
-    EmptyDirty -->|write drop record| Dropped
-    SnapshotDirty -->|write drop record| Dropped
-    RegionDirty -->|write drop record| Dropped
+    EmptyClean -->|DropCollection| Dropped
+    SnapshotClean -->|DropCollection| Dropped
+    RegionClean -->|DropCollection| Dropped
+    EmptyDirty -->|DropCollection| Dropped
+    SnapshotDirty -->|DropCollection| Dropped
+    RegionDirty -->|DropCollection| Dropped
 ```
 
 Collection format responsibility:
@@ -2258,51 +2301,61 @@ Notation:
 
 Required write and sync ordering:
 
-1. `RING-ORDER-001` `update` durability:
+1. `RING-ORDER-001` `ApplyCollectionUpdate` durability:
 `W(update_record) -> S(update_record) -> acknowledge update durable`.
-2. `RING-ORDER-002` `snapshot` head transition:
+2. `RING-ORDER-002` `CommitCollectionSnapshot` transition:
 `W(snapshot(collection_id, collection_type, payload)) -> S(snapshot)`.
-3. `RING-ORDER-003` `drop_collection` transition:
+3. `RING-ORDER-003` `DropCollection` transition:
 `W(drop_collection(collection_id)) -> S(drop_collection)`.
-4. `RING-ORDER-004` `region` head transition:
-`W(alloc_begin(region_index, free_list_head_after)) -> S(alloc_begin) ->`
+4. `RING-ORDER-004` `CommitCollectionRegion` transition:
+if the target is not already reserved or staged by an earlier stable
+operation,
+`W(alloc_begin(region_index, free_list_head_after)) -> S(alloc_begin) ->`;
+in all cases,
 `erase/init reserved region if needed -> W(region header+data) -> S(region) ->`
 `W(head(collection_id, collection_type, ref=region_index)) -> S(head)`.
-5. `RING-ORDER-005` WAL rotation:
+5. `RING-ORDER-005` `RotateWalTail` transition:
 `W(alloc_begin(next_region_index, free_list_head_after)) -> S(alloc_begin) ->`
 `W(link(next_region_index, expected_sequence)) -> S(link) ->`
 `W(new_wal_region_init(sequence=expected_sequence, wal_head_region_index=current_wal_head)) ->`
 `S(new_wal_region_init)`.
-6. `RING-ORDER-006` Reclaim:
+6. `RING-ORDER-006` `ReclaimRegion` or `ReclaimWalHead` transition:
 `W(reclaim_begin(region_index)) -> S(reclaim_begin) ->`
 `W(replacement_live_state_and_new_links) -> S(replacement_state) ->`
 `append old region to free list (write+sync) -> W(reclaim_end(region_index)) ->`
 `S(reclaim_end)`.
-7. `RING-ORDER-007` Resuming WAL appends after a recovered torn/corrupt tail record:
+7. `RING-ORDER-007` `CommitWalRecovery` transition:
 `W(wal_recovery()) -> S(wal_recovery) -> W(next_normal_wal_record) -> S(next_normal_wal_record)`.
 
 ```mermaid
 %%{init: {"flowchart": {"wrappingWidth": 180}} }%%
 flowchart TD
     Request([Operation starts])
-    Kind{"`Operation kind`"}
-    Update["`Write update then sync update`"]
-    Snapshot["`Write snapshot then sync snapshot`"]
-    Drop["`Write drop record then sync drop record`"]
-    RegionCommit["`Write alloc begin then sync then write region then sync then write head then sync`"]
-    Rotation["`Write alloc begin then sync then write link then sync then init new WAL region then sync`"]
-    Reclaim["`Write reclaim begin then sync then write replacement state then sync then append old region to free list then write and sync reclaim end`"]
-    Recovery["`Write wal recovery then sync then write next normal WAL record then sync`"]
+    Kind{"`Named operation`"}
+    Update["`ApplyCollectionUpdate
+AppendUpdate`"]
+    Snapshot["`CommitCollectionSnapshot
+CommitSnapshotHead`"]
+    Drop["`DropCollection
+CommitDropCollection`"]
+    RegionCommit["`CommitCollectionRegion
+ReserveRegion -> WriteCommittedRegion -> CommitRegionHead`"]
+    Rotation["`RotateWalTail
+StartWalRotation -> RotateWalLink -> InitializeRotatedWalRegion`"]
+    Reclaim["`ReclaimRegion / ReclaimWalHead
+BeginReclaim -> replacement edges -> free-list edge -> EndReclaim`"]
+    Recovery["`CommitWalRecovery
+CommitWalRecoveryBoundary -> next AppendRawWalRecord`"]
     Durable([Durable boundary reached])
 
     Request --> Kind
-    Kind -->|update| Update --> Durable
-    Kind -->|snapshot| Snapshot --> Durable
-    Kind -->|drop| Drop --> Durable
-    Kind -->|commit region basis| RegionCommit --> Durable
-    Kind -->|wal rotation| Rotation --> Durable
-    Kind -->|reclaim| Reclaim --> Durable
-    Kind -->|wal recovery| Recovery --> Durable
+    Kind -->|ApplyCollectionUpdate| Update --> Durable
+    Kind -->|CommitCollectionSnapshot| Snapshot --> Durable
+    Kind -->|DropCollection| Drop --> Durable
+    Kind -->|CommitCollectionRegion| RegionCommit --> Durable
+    Kind -->|RotateWalTail| Rotation --> Durable
+    Kind -->|ReclaimRegion / ReclaimWalHead| Reclaim --> Durable
+    Kind -->|CommitWalRecovery| Recovery --> Durable
 ```
 
 General region-allocation rule:

@@ -242,3 +242,11 @@ fn todo_foreground_replay_and_recovery_share_wal_record_semantics() {}
 //# separate incompatible transition rules.
 #[test]
 fn todo_startup_and_recovery_compose_normal_submachines() {}
+
+//= spec/ring.md#ring-state-machine-requirements
+//= type=todo
+//# `RING-MACHINE-007` State-machine transition rules MUST use named operation identifiers, and
+//# each named operation MUST define its source state, active mode, durable edge sequence, and
+//# target state or runtime effect.
+#[test]
+fn todo_state_machine_transitions_use_named_operations() {}
