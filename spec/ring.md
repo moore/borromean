@@ -1,6 +1,39 @@
 # Low Level Storage
 
-## Motivation
+## Table Of Contents
+
+This document is organized from the conceptual model toward the concrete mechanisms that make the model durable and recoverable.
+
+- [Requirements Format](#requirements-format)
+- [Chapter 1: Theory Of Operation](#chapter-1-theory-of-operation)
+- [Chapter 2: Storage Context And State Machines](#chapter-2-storage-context-and-state-machines)
+- [Chapter 3: Collection Lifecycle](#chapter-3-collection-lifecycle)
+- [Chapter 4: WAL Model And Records](#chapter-4-wal-model-and-records)
+- [Chapter 5: Region And Disk Format](#chapter-5-region-and-disk-format)
+- [Chapter 6: Startup And Replay](#chapter-6-startup-and-replay)
+- [Chapter 7: Reclaim And Freeing](#chapter-7-reclaim-and-freeing)
+- [Chapter 8: Durability, Crash Cuts, And Formatting](#chapter-8-durability-crash-cuts-and-formatting)
+- [Chapter 9: Implementation Regression Requirements](#chapter-9-implementation-regression-requirements)
+
+## Requirements Format
+
+This specification keeps normative requirements adjacent to the text
+that motivates them. Stable identifier and RFC-2119 language
+conventions for borromean specifications are defined by
+[spec/implementation-policy.md](implementation-policy.md).
+
+These identifiers are intended to be the primary Duvet traceability
+targets. The surrounding narrative is informative unless it also
+includes a requirement identifier.
+
+## Chapter 1: Theory Of Operation
+
+This chapter describes the design problem and the core borromean model:
+regions provide erase granularity, bounded memory holds mutable
+frontiers, and the WAL records every durable state transition needed to
+recover after reset.
+
+### Motivation
 
 When using built-in flash storage on small microcontrollers, some
 kind of database or file system is needed. This allows management of
@@ -22,18 +55,7 @@ If we used an RTOS this might be achievable with a file system, but
 finder is planned for an embassy/bare-metal approach without that
 option.
 
-## Requirements Format
-
-This specification keeps normative requirements adjacent to the text
-that motivates them. Stable identifier and RFC-2119 language
-conventions for borromean specifications are defined by
-[spec/implementation-policy.md](implementation-policy.md).
-
-These identifiers are intended to be the primary Duvet traceability
-targets. The surrounding narrative is informative unless it also
-includes a requirement identifier.
-
-## Overview
+### Overview
 
 To solve these challenges, borromean divides flash into equal-size
 regions. Region starts and sizes must be aligned to the backing
@@ -200,6 +222,38 @@ writes. At that point, more drastic action such as dropping or
 truncating collections, or migrating/reformatting onto a larger backing
 store, is required before additional ordinary writes may be accepted.
 
+### Challenges
+
+The core design constraint is that we cannot have any stable
+locations that get repeatedly rewritten or those regions of the flash
+will fail before the rest of the device. This leads to two main
+conclusions:
+
+1. We should always attempt to free the oldest regions first.
+2. All data structures should be log structured/append only.
+
+Freeing the oldest first must be performed on a per-collection basis,
+as each collection is responsible for its own data and is
+opaque to borromean at a high level.
+
+The requirement that data structures be append only affects not
+just the implementation of collection types but also the management
+of:
+
+1. The current heads of each collection instance.
+2. The tracking of free regions.
+3. The tracking of the WAL head.
+
+Each of these is solved by tracking this information in the WAL.
+The WAL is collection 0. At startup we scan regions to find the WAL
+region with the largest sequence number (the current WAL tail). The
+start of each WAL region records the WAL head at the time that region
+was created. We must also scan the tail region for any changes to the
+head caused by reclaiming the WAL head region; those changes are
+represented by ordinary `head` records with `collection_id = 0`.
+Startup uses this metadata plus WAL replay to reconstruct uncommitted
+state in memory and the current free-list head.
+
 ### Core Requirements
 
 1. `RING-CORE-001` Region starts and region sizes MUST be aligned to
@@ -254,6 +308,12 @@ further updates for that collection.
 17. `RING-CORE-017` After such a frontier-capacity flush, later updates
 for that collection MUST accumulate in a fresh in-memory frontier
 layered over the newly committed collection head.
+
+## Chapter 2: Storage Context And State Machines
+
+This chapter defines the public storage context, the stable runtime
+vector, the active operation mode, and the named operation and durable
+edge vocabulary used by later chapters.
 
 ### Storage API Model
 
@@ -601,213 +661,288 @@ operation identifiers, and each named operation MUST define its source
 state, active mode, durable edge sequence, and target state or runtime
 effect.
 
-### Storage Structure
+## Chapter 3: Collection Lifecycle
 
-Storage starts with a static metadata region that describes the
-version and configuration parameters that cannot change after
-initialization.
+This chapter explains how a user collection moves between empty,
+WAL-snapshot, committed-region, dirty-frontier, and dropped states.
+Collection-specific formats own the payload interpretation, while the
+ring owns the durable transition ordering.
 
-The rest of the database is made up of regions. Each region has a
-header, user data, and a free pointer. The header describes the
-region's sequence number, collection id, collection format, and a
-checksum over the header itself.
+### Collection Head Submachine
 
-The sequence number is a monotonically increasing value assigned each
-time a new region is written. This lets startup identify the newest WAL
-region and order physical region writes. Logical collection heads are
-recovered from WAL `head(...)` records rather than by choosing the
-newest region for a collection. During startup region scanning,
-borromean records `max_seen_sequence`, the largest `sequence` value
-found in any valid region header. Each newly allocated region, whether
-for a user collection or for a newly initialized WAL region, must use
-`sequence = max_seen_sequence + 1`, after which that new value becomes
-the new `max_seen_sequence` in memory. Crashes or abandoned allocations
-may leave gaps in the observed sequence values, but the values used by
-successful later region writes must remain strictly monotonic.
+Each tracked user collection is in one explicit collection state. The
+state name includes both the durable basis and whether a volatile
+frontier exists over that basis, so transitions never rely on modifier
+shorthand. Durable basis changes are driven by
+`ApplyWalRecord`; foreground collection operations choose which WAL
+record or committed region write to perform, but the replay-visible
+collection effect is the same transition table used during startup.
 
-The collection format defines how user data is encoded in the user
-data section. For user collections, the meaning of non-WAL
-`collection_format` values is owned by the corresponding
-`collection_type` implementation rather than by borromean core. This
-spec reserves exactly one canonical core-defined format identifier,
-`wal_v1`, for WAL regions; no user collection may use that identifier.
-Storing the format in each region still allows per-collection format
-evolution over time.
+Collection states:
 
-The free pointer stores the location of the next free region for
-regions that have been freed, so the region in question is in the free
-list. This field is written not when the region is freed, but when the
-next region is freed. This is the mechanism used to make the free list
-a FIFO. A free region whose free-pointer slot is still uninitialized
-(for example, left in the erased state) is the current free-list tail.
-A free region is defined by membership in the durable free-list chain,
-not by a distinct on-disk header encoding. Free regions may still
-contain stale header and payload bytes from their prior use; those
-bytes are ignored while the region is free. The free-pointer footer of
-a region must not be written while that region is allocated for live
-use. Allocation first erases the region, then writes the region header
-and collection payload, leaving the free-pointer area untouched. When a
-region is later added to the durable free-list chain, that is when its
-free-pointer footer becomes meaningful. For a newly appended free-list
-tail, `free_pointer.next_tail` remains uninitialized, typically because
-the erased state left from allocation already represents "no
-successor". After a region is durably reachable from the free-list
-chain, it must not be erased until it is allocated for reuse, because
-the free-pointer chain is stored inside the free regions themselves.
+1. `NoCollection`
+No retained durable record establishes this collection id.
 
-Deployment sizing guideline: choose `region_size` so the fixed
-per-region header plus free-pointer footer consume less than 10% of the
-region. WAL regions also carry `WalRegionPrologue`, so practical WAL
-deployments normally need additional slack beyond that rule of thumb.
-This is guidance only, not a validity rule.
+2. `EmptyClean`
+Latest durable basis is the empty collection created by a
+`new_collection(collection_id, collection_type)` record. The collection
+has a tracked collection type, no durable region head, no durable WAL
+snapshot, and no volatile frontier newer than that basis.
 
-A WAL region is a region whose valid header has `collection_id = 0`
-and `collection_format = wal_v1`.
+3. `EmptyDirty`
+The durable basis is `EmptyClean`, plus a collection-defined volatile
+frontier and retained post-basis `update` records newer than that empty
+basis.
 
-### Storage Requirements
+4. `WALSnapshotClean`
+Latest durable basis points to a WAL `snapshot` record, with no volatile
+frontier newer than that snapshot.
 
-1. `RING-STORAGE-001` Storage MUST begin with a static metadata region
-that records version and configuration parameters that do not change
-after initialization.
-2. `RING-STORAGE-002` Every region header MUST record the region
-`sequence`, `collection_id`, `collection_format`, and a checksum over
-the header itself.
-3. `RING-STORAGE-003` Each newly allocated region, whether for a user
-collection or a newly initialized WAL region, MUST use
-`sequence = max_seen_sequence + 1`, after which that value becomes the
-new in-memory `max_seen_sequence`.
-4. `RING-STORAGE-004` Successful later region writes MUST preserve a
-strictly monotonic `sequence` ordering even if crashes or abandoned
-allocations leave gaps.
-5. `RING-STORAGE-005` Borromean core MUST reserve the canonical
-`collection_format` value `wal_v1` for WAL regions, and user
-collections MUST NOT use that identifier.
-6. `RING-STORAGE-006` A free region MUST be defined by membership in
-the durable free-list chain rather than by a distinct on-disk header
-encoding.
-7. `RING-STORAGE-007` The free-pointer footer of a region MUST NOT be
-written while that region is allocated for live use.
-8. `RING-STORAGE-008` After a region is durably reachable from the
-free-list chain, that region MUST NOT be erased until it is allocated
-for reuse.
-9. `RING-STORAGE-009` A WAL region MUST have `collection_id = 0` and
-`collection_format = wal_v1`.
-10. `RING-STORAGE-010` The metadata region MUST occupy exactly one
-`region_size` span at storage offset `0`, MUST NOT be counted in
-`region_count`, and data region `0` MUST begin immediately after that
-metadata region.
+5. `WALSnapshotDirty`
+The durable basis is `WALSnapshotClean`, plus a collection-defined
+volatile frontier and retained post-basis `update` records newer than
+that snapshot.
 
-### Canonical On-Disk Encoding
+6. `RegionClean`
+Latest durable basis points to a committed collection region, with no
+volatile frontier newer than that region basis.
 
-Borromean defines one canonical byte-level encoding so independently
-written implementations can interoperate on the same media image.
+7. `RegionDirty`
+The durable basis is `RegionClean`, plus a collection-defined volatile
+frontier and retained post-basis `update` records newer than that
+committed region basis.
 
-1. `RING-DISK-001` All fixed-width integer fields in `StorageMetadata`,
-`Header`, `WalRegionPrologue`, free-pointer footers, and logical WAL
-records MUST be encoded little-endian.
-2. `RING-DISK-002` The canonical scalar widths are:
-`region_index: u32`, `region_size: u32`, `region_count: u32`,
-`min_free_regions: u32`, `wal_write_granule: u32`,
-`collection_id: u64`, `sequence: u64`, `payload_len: u32`,
-`collection_type: u16`, `collection_format: u16`,
-`erased_byte: u8`, and `wal_record_magic: u8`.
-3. `RING-DISK-003` `collection_type` is a stable global `u16`
-namespace recorded durably in WAL records. Borromean core reserves
-`0x0000` for `wal`, `0x0001` for `channel`, `0x0002` for `map`,
-`0x0003..0x00ff` for future core-defined collection types,
-`0x0100..0x7fff` for public extension collection types, and
-`0x8000..0xffff` for private deployment-local collection types that are
-not required to interoperate across deployments.
-4. `RING-DISK-004` `collection_format` is a stable per-region `u16`
-namespace recorded durably in region headers. The pair
-`(collection_type, collection_format)` identifies a concrete committed
-region payload encoding. Borromean core reserves `collection_format =
-0x0000` globally for `wal_v1`; every non-WAL collection format MUST be
-nonzero. For any non-WAL collection type, `0x0001..0x7fff` are stable
-public format identifiers and `0x8000..0xffff` are private
-deployment-local format identifiers.
-5. `RING-DISK-005` Optional region indexes carried inside logical WAL
-records MUST be encoded as `OptRegionIndex`, a one-byte tag followed,
-when the tag is `1`, by a `u32 region_index`. Tag `0` means `none`;
-any other tag value is corruption.
-6. `RING-DISK-006` `metadata_checksum`, `header_checksum`,
-`prologue_checksum`, `footer_checksum`, and `record_checksum` MUST all use the standard
-CRC-32C (Castagnoli) parameters (`poly = 0x1edc6f41`,
-`init = 0xffffffff`, `refin = true`, `refout = true`,
-`xorout = 0xffffffff`) and MUST be stored little-endian.
-7. `RING-DISK-007` Unless a structure explicitly says otherwise, the
-checksum for that structure MUST cover the exact logical bytes of every
-earlier field in that structure, in on-disk order, and MUST exclude the
-checksum field itself and any later padding.
-8. `RING-DISK-008` Struct-like layouts in this specification are exact
-byte sequences with no implicit padding; the field order shown is the
-on-disk order.
+8. `Dropped`
+Latest durable basis is a `drop_collection(collection_id)` tombstone.
+The collection id remains reserved and tracked, but the collection no
+longer has a live durable basis, accepts no further mutations, and its
+older durable bytes are reclaimable once physically detached. Any region
+associated with the dropped collection may be appended to the free list
+if it is not already present there.
 
-For WAL regions, the user-data area begins with a fixed
-`WalRegionPrologue`. That prologue records the WAL head that was
-current when the WAL region was initialized. WAL records do not begin
-immediately after the region `Header`; they begin at the first
-`wal_write_granule`-aligned byte after the end of the
-`WalRegionPrologue`.
+Collection transitions:
+
+1. `NoCollection --CreateCollection--> EmptyClean`
+`CreateCollection(collection_id, collection_type)` appends the
+`new_collection` record through its named durable edge.
+Durable after the `new_collection` record is durable. The collection
+starts with tracked `collection_type`, no region basis, no snapshot
+basis, no pending updates, and no dirty volatile frontier.
+
+2. `NoCollection --ReplayRetainedSnapshotBasis--> WALSnapshotClean`
+Retained replay basis only. `ReplayRetainedSnapshotBasis` applies a
+retained `snapshot` record after WAL-head reclaim has removed the
+historical `new_collection` record, so startup replay can reconstruct a
+live collection directly from that retained snapshot basis.
+
+3. `NoCollection --ReplayRetainedRegionBasis--> RegionClean`
+Retained replay basis only. `ReplayRetainedRegionBasis` applies a
+retained user `head` record after WAL-head reclaim has removed the
+historical `new_collection` record, so startup replay can reconstruct a
+live collection directly from that retained committed-region basis.
+
+4. `NoCollection --ReplayRetainedDropTombstone--> Dropped`
+Retained replay basis only. `ReplayRetainedDropTombstone` applies a
+retained `drop_collection` tombstone after WAL-head reclaim has removed
+all earlier type-bearing records for that id, so startup replay can
+preserve that id as dropped without reconstructing a live collection
+type.
+
+5. `EmptyClean --ApplyCollectionUpdate--> EmptyDirty`
+`ApplyCollectionUpdate(collection_id, payload)` creates a mutable
+frontier over the empty basis, appends an `update` record through
+`AppendUpdate`, and applies that update to RAM.
+
+6. `WALSnapshotClean --ApplyCollectionUpdate--> WALSnapshotDirty`
+`ApplyCollectionUpdate(collection_id, payload)` loads the snapshot as
+the mutable frontier, appends an `update` record through
+`AppendUpdate`, and applies that update to RAM.
+
+7. `RegionClean --ApplyCollectionUpdate--> RegionDirty`
+`ApplyCollectionUpdate(collection_id, payload)` opens a mutable
+frontier over the committed region basis, appends an `update` record
+through `AppendUpdate`, and applies that update to RAM.
+
+8. `EmptyDirty --ApplyCollectionUpdate--> EmptyDirty`,
+`WALSnapshotDirty --ApplyCollectionUpdate--> WALSnapshotDirty`, or
+`RegionDirty --ApplyCollectionUpdate--> RegionDirty`
+`ApplyCollectionUpdate(collection_id, payload)` appends another
+`update` record through `AppendUpdate` and applies that update to the
+existing RAM frontier.
+
+9. `EmptyClean | EmptyDirty | WALSnapshotClean | WALSnapshotDirty | RegionClean | RegionDirty --CommitCollectionSnapshot--> WALSnapshotClean`
+`CommitCollectionSnapshot(collection_id, payload)` appends a
+`snapshot` record through `CommitSnapshotHead`.
+Durable after the `snapshot` record is durable. The snapshot becomes the
+new durable basis, older post-basis updates are superseded, and any
+dirty frontier is clear. Clean-source snapshotting is allowed because a
+collection operation may choose to rewrite its clean basis into a
+different retained WAL snapshot without changing logical content.
+
+10. `EmptyClean | EmptyDirty | WALSnapshotClean | WALSnapshotDirty | RegionClean | RegionDirty --CommitCollectionRegion--> RegionClean`
+`CommitCollectionRegion(collection_id, region_index, payload)` runs the
+region-commit operation: reserve or stage a target region as needed,
+write the committed collection region, then append the user
+`head(collection_id, collection_type, region_index)` through
+`CommitRegionHead`.
+Durable after the `head` record is durable. The committed region becomes
+the new durable basis, older post-basis updates are superseded, and the
+dirty frontier is clear. Clean-source committed writes are allowed for
+snapshot materialization, manifest rewrite, or compaction where the
+logical state is unchanged but the retained committed layout changes.
+
+11. `EmptyClean | EmptyDirty | WALSnapshotClean | WALSnapshotDirty | RegionClean | RegionDirty --DropCollection--> Dropped`
+`DropCollection(collection_id)` appends `drop_collection(collection_id)`
+through `CommitDropCollection`, after any required detachment or reclaim
+setup represented by the operation's edge sequence.
+Durable after the `drop_collection` record is durable. Any pending WAL
+updates and volatile frontier state for that collection are discarded
+from the durable basis, the collection leaves the live namespace, and no
+later WAL record for that collection id is valid.
 
 ```mermaid
-block-beta
- columns 4
- Storage["Allocated Storage"]:4
- Meta["Storage Metadata"]
- R1["First Region"]
- e1["..."]
- R2["Last Region"]
- space:4
- block:exp:4
-  h1["Header"]
-  d1["User Data"]
-  a1["Free Pointer"]
- end
- space:4
- block:header:4
-  s1["Sequence Number"]
-  cid["Collection Id"]
-  type["Collection Format"]
-  check["Header Checksum"]
- end
- R1 --> exp
- h1 --> header
+%%{init: {"flowchart": {"wrappingWidth": 180}} }%%
+flowchart LR
+    NoCollection([NoCollection])
+    EmptyClean["`EmptyClean
+durable basis: new_collection`"]
+    EmptyDirty["`EmptyDirty
+frontier over empty basis`"]
+    SnapshotClean["`WALSnapshotClean
+durable basis: snapshot`"]
+    SnapshotDirty["`WALSnapshotDirty
+frontier over snapshot basis`"]
+    RegionClean["`RegionClean
+durable basis: committed region`"]
+    RegionDirty["`RegionDirty
+frontier over region basis`"]
+    Dropped(["`Dropped
+durable tombstone`"])
+
+    NoCollection -->|CreateCollection| EmptyClean
+    NoCollection -.->|ReplayRetainedSnapshotBasis| SnapshotClean
+    NoCollection -.->|ReplayRetainedRegionBasis| RegionClean
+    NoCollection -.->|ReplayRetainedDropTombstone| Dropped
+    EmptyClean -->|ApplyCollectionUpdate| EmptyDirty
+    SnapshotClean -->|ApplyCollectionUpdate| SnapshotDirty
+    RegionClean -->|ApplyCollectionUpdate| RegionDirty
+    EmptyDirty -->|ApplyCollectionUpdate| EmptyDirty
+    SnapshotDirty -->|ApplyCollectionUpdate| SnapshotDirty
+    RegionDirty -->|ApplyCollectionUpdate| RegionDirty
+    EmptyClean -->|CommitCollectionSnapshot| SnapshotClean
+    EmptyDirty -->|CommitCollectionSnapshot| SnapshotClean
+    SnapshotClean -->|CommitCollectionSnapshot| SnapshotClean
+    SnapshotDirty -->|CommitCollectionSnapshot| SnapshotClean
+    RegionClean -->|CommitCollectionSnapshot| SnapshotClean
+    RegionDirty -->|CommitCollectionSnapshot| SnapshotClean
+    EmptyClean -->|CommitCollectionRegion| RegionClean
+    EmptyDirty -->|CommitCollectionRegion| RegionClean
+    SnapshotClean -->|CommitCollectionRegion| RegionClean
+    SnapshotDirty -->|CommitCollectionRegion| RegionClean
+    RegionClean -->|CommitCollectionRegion| RegionClean
+    RegionDirty -->|CommitCollectionRegion| RegionClean
+
+    EmptyClean -->|DropCollection| Dropped
+    SnapshotClean -->|DropCollection| Dropped
+    RegionClean -->|DropCollection| Dropped
+    EmptyDirty -->|DropCollection| Dropped
+    SnapshotDirty -->|DropCollection| Dropped
+    RegionDirty -->|DropCollection| Dropped
 ```
 
-### Challenges
+Collection format responsibility:
 
-The core design constraint is that we cannot have any stable
-locations that get repeatedly rewritten or those regions of the flash
-will fail before the rest of the device. This leads to two main
-conclusions:
+1. `RING-FORMAT-001` Each non-WAL `collection_format` value is defined by the user
+collection type that writes it; borromean core stores that value in the
+region header but does not assign it global meaning.
+2. `RING-FORMAT-002` Each user collection format defines how reads merge the durable basis
+with the in-memory frontier.
+3. `RING-FORMAT-003` The frontier MUST take precedence over older values in the durable
+basis.
+4. `RING-FORMAT-004` Flush to `RegionClean` materializes the logical state produced by
+that merge, either directly in the head region or through
+collection-defined manifest state referenced by the head region.
+5. `RING-FORMAT-005` Every user collection MUST remain log-structured:
+flushing mutable state writes new immutable committed region state
+instead of rewriting existing live region state in place. An LSM-style
+layout with manifest-described immutable runs is one valid way to
+satisfy this requirement.
+6. `RING-FORMAT-006` A `WALSnapshotClean` basis MUST be loadable into RAM before that
+collection accepts further mutations.
+7. `RING-FORMAT-007` For live user collections, the replay-tracked collection type is
+fixed by the earliest retained type-bearing record for that collection
+(`new_collection`, `snapshot`, or `head`). Historically this begins at
+`new_collection`, but WAL reclaim may later remove that record.
+8. `RING-FORMAT-008` Every later retained type-bearing record for that collection MUST
+carry the same `collection_type`, otherwise replay must treat the
+mismatch as corruption.
+9. `RING-FORMAT-009` When a user collection implementation loads a committed region
+basis, it validates that region's `collection_format` according to its
+own rules.
+10. `RING-FORMAT-010` Borromean core reserves exactly one canonical
+`collection_format`, `wal_v1`, for WAL regions. Every WAL region uses
+`wal_v1`, and that identifier is not user-definable.
+11. `RING-FORMAT-011` Per-region format evolution remains allowed because region headers
+carry `collection_format` independently of the collection's stable
+type.
+12. `RING-FORMAT-012` Every non-WAL `collection_type` that may appear
+durably on disk MUST have a corresponding normative collection
+specification.
+13. `RING-FORMAT-013` That collection specification MUST define, at
+minimum: the empty logical state established by `new_collection`; the
+exact bytes and interpretation of every supported committed-region
+`collection_format`; the exact bytes and interpretation of `snapshot`
+payloads; the exact bytes and interpretation of `update` payloads; the
+rules for applying updates and merging a durable basis with the
+in-memory frontier; and the collection-specific validation rules used
+when loading a basis or replaying WAL payloads.
+14. `RING-FORMAT-014` For non-WAL collections, the pair
+`(collection_type, collection_format)` MUST identify a unique committed
+region payload format.
+15. `RING-FORMAT-015` An implementation MUST NOT open a database
+successfully if replay yields a live collection whose
+`collection_type` is unsupported by that implementation.
+16. `RING-FORMAT-016` An implementation MUST NOT open a database
+successfully if replay yields a live collection whose retained
+committed-region basis, retained `snapshot` payload, or retained
+post-basis `update` payloads are unsupported or invalid under that
+collection's normative specification.
+17. `RING-FORMAT-017` A dropped tombstone for an unsupported
+collection type may remain as inert replay state. Support for that old
+collection type is not required unless a live basis or retained
+post-basis updates still exist for it.
 
-1. We should always attempt to free the oldest regions first.
-2. All data structures should be log structured/append only.
+Invariants:
 
-Freeing the oldest first must be performed on a per-collection basis,
-as each collection is responsible for its own data and is
-opaque to borromean at a high level.
+1. `RING-INVARIANT-001` The active durable basis for a collection is the last valid basis
+decision in replay order, where a basis decision is
+`new_collection`, `snapshot`,
+`drop_collection`, or
+`head(collection_id, collection_type, region_index)`.
+2. `RING-INVARIANT-002` `new_collection`, `snapshot`,
+`drop_collection`, and
+`head(collection_id, collection_type, region_index)` records totally
+order durable basis decisions per collection.
+3. `RING-INVARIANT-003` Any `new_collection`, `update`, `snapshot`, or `head` older than the
+active basis for that collection is reclaimable.
+4. `RING-INVARIANT-004` If the active basis for a collection is `drop_collection`, then that
+collection is logically absent from the live namespace and any older
+durable basis or update bytes for that collection are reclaimable once
+they are no longer physically reachable. Any region associated with
+that dropped collection may then be added to the free list if it is
+not already in the free-list chain.
+5. `RING-INVARIANT-005` Historical append validity and retained replay basis are distinct:
+`new_collection` is required before later user-collection records are
+appended, but reclaim may later remove it so replay reconstructs from
+the earliest retained basis record instead.
 
-The requirement that data structures be append only affects not
-just the implementation of collection types but also the management
-of:
+## Chapter 4: WAL Model And Records
 
-1. The current heads of each collection instance.
-2. The tracking of free regions.
-3. The tracking of the WAL head.
+This chapter defines the append-only WAL record stream, its physical
+encoding, and the validation rules that make `ApplyWalRecord` safe to
+use during foreground operation, WAL-head reclaim, and startup replay.
 
-Each of these is solved by tracking this information in the WAL.
-The WAL is collection 0. At startup we scan regions to find the WAL
-region with the largest sequence number (the current WAL tail). The
-start of each WAL region records the WAL head at the time that region
-was created. We must also scan the tail region for any changes to the
-head caused by reclaiming the WAL head region; those changes are
-represented by ordinary `head` records with `collection_id = 0`.
-Startup uses this metadata plus WAL replay to reconstruct uncommitted
-state in memory and the current free-list head.
-
-## WAL Record Types
+### WAL Record Types
 
 All WAL records are append-only and ordered by physical write order
 within the WAL region chain.
@@ -1274,275 +1409,333 @@ These requirements cover implemented byte-level helpers for canonical disk and W
 12. `RING-IMPL-REGRESSION-132` Alloc-begin WAL records MUST round-trip free_list_head_after through
     physical encoding and decoding.
 
-## Collection Head Submachine
+## Chapter 5: Region And Disk Format
 
-Each tracked user collection is in one explicit collection state. The
-state name includes both the durable basis and whether a volatile
-frontier exists over that basis, so transitions never rely on modifier
-shorthand. Durable basis changes are driven by
-`ApplyWalRecord`; foreground collection operations choose which WAL
-record or committed region write to perform, but the replay-visible
-collection effect is the same transition table used during startup.
+This chapter defines the physical storage layout after the logical model
+is established: static metadata, region headers, committed payload
+areas, free-pointer footers, and WAL-region prologues.
 
-Collection states:
+### Storage Structure
 
-1. `NoCollection`
-No retained durable record establishes this collection id.
+Storage starts with a static metadata region that describes the
+version and configuration parameters that cannot change after
+initialization.
 
-2. `EmptyClean`
-Latest durable basis is the empty collection created by a
-`new_collection(collection_id, collection_type)` record. The collection
-has a tracked collection type, no durable region head, no durable WAL
-snapshot, and no volatile frontier newer than that basis.
+The rest of the database is made up of regions. Each region has a
+header, user data, and a free pointer. The header describes the
+region's sequence number, collection id, collection format, and a
+checksum over the header itself.
 
-3. `EmptyDirty`
-The durable basis is `EmptyClean`, plus a collection-defined volatile
-frontier and retained post-basis `update` records newer than that empty
-basis.
+The sequence number is a monotonically increasing value assigned each
+time a new region is written. This lets startup identify the newest WAL
+region and order physical region writes. Logical collection heads are
+recovered from WAL `head(...)` records rather than by choosing the
+newest region for a collection. During startup region scanning,
+borromean records `max_seen_sequence`, the largest `sequence` value
+found in any valid region header. Each newly allocated region, whether
+for a user collection or for a newly initialized WAL region, must use
+`sequence = max_seen_sequence + 1`, after which that new value becomes
+the new `max_seen_sequence` in memory. Crashes or abandoned allocations
+may leave gaps in the observed sequence values, but the values used by
+successful later region writes must remain strictly monotonic.
 
-4. `WALSnapshotClean`
-Latest durable basis points to a WAL `snapshot` record, with no volatile
-frontier newer than that snapshot.
+The collection format defines how user data is encoded in the user
+data section. For user collections, the meaning of non-WAL
+`collection_format` values is owned by the corresponding
+`collection_type` implementation rather than by borromean core. This
+spec reserves exactly one canonical core-defined format identifier,
+`wal_v1`, for WAL regions; no user collection may use that identifier.
+Storing the format in each region still allows per-collection format
+evolution over time.
 
-5. `WALSnapshotDirty`
-The durable basis is `WALSnapshotClean`, plus a collection-defined
-volatile frontier and retained post-basis `update` records newer than
-that snapshot.
+The free pointer stores the location of the next free region for
+regions that have been freed, so the region in question is in the free
+list. This field is written not when the region is freed, but when the
+next region is freed. This is the mechanism used to make the free list
+a FIFO. A free region whose free-pointer slot is still uninitialized
+(for example, left in the erased state) is the current free-list tail.
+A free region is defined by membership in the durable free-list chain,
+not by a distinct on-disk header encoding. Free regions may still
+contain stale header and payload bytes from their prior use; those
+bytes are ignored while the region is free. The free-pointer footer of
+a region must not be written while that region is allocated for live
+use. Allocation first erases the region, then writes the region header
+and collection payload, leaving the free-pointer area untouched. When a
+region is later added to the durable free-list chain, that is when its
+free-pointer footer becomes meaningful. For a newly appended free-list
+tail, `free_pointer.next_tail` remains uninitialized, typically because
+the erased state left from allocation already represents "no
+successor". After a region is durably reachable from the free-list
+chain, it must not be erased until it is allocated for reuse, because
+the free-pointer chain is stored inside the free regions themselves.
 
-6. `RegionClean`
-Latest durable basis points to a committed collection region, with no
-volatile frontier newer than that region basis.
+Deployment sizing guideline: choose `region_size` so the fixed
+per-region header plus free-pointer footer consume less than 10% of the
+region. WAL regions also carry `WalRegionPrologue`, so practical WAL
+deployments normally need additional slack beyond that rule of thumb.
+This is guidance only, not a validity rule.
 
-7. `RegionDirty`
-The durable basis is `RegionClean`, plus a collection-defined volatile
-frontier and retained post-basis `update` records newer than that
-committed region basis.
+A WAL region is a region whose valid header has `collection_id = 0`
+and `collection_format = wal_v1`.
 
-8. `Dropped`
-Latest durable basis is a `drop_collection(collection_id)` tombstone.
-The collection id remains reserved and tracked, but the collection no
-longer has a live durable basis, accepts no further mutations, and its
-older durable bytes are reclaimable once physically detached. Any region
-associated with the dropped collection may be appended to the free list
-if it is not already present there.
+### Storage Requirements
 
-Collection transitions:
+1. `RING-STORAGE-001` Storage MUST begin with a static metadata region
+that records version and configuration parameters that do not change
+after initialization.
+2. `RING-STORAGE-002` Every region header MUST record the region
+`sequence`, `collection_id`, `collection_format`, and a checksum over
+the header itself.
+3. `RING-STORAGE-003` Each newly allocated region, whether for a user
+collection or a newly initialized WAL region, MUST use
+`sequence = max_seen_sequence + 1`, after which that value becomes the
+new in-memory `max_seen_sequence`.
+4. `RING-STORAGE-004` Successful later region writes MUST preserve a
+strictly monotonic `sequence` ordering even if crashes or abandoned
+allocations leave gaps.
+5. `RING-STORAGE-005` Borromean core MUST reserve the canonical
+`collection_format` value `wal_v1` for WAL regions, and user
+collections MUST NOT use that identifier.
+6. `RING-STORAGE-006` A free region MUST be defined by membership in
+the durable free-list chain rather than by a distinct on-disk header
+encoding.
+7. `RING-STORAGE-007` The free-pointer footer of a region MUST NOT be
+written while that region is allocated for live use.
+8. `RING-STORAGE-008` After a region is durably reachable from the
+free-list chain, that region MUST NOT be erased until it is allocated
+for reuse.
+9. `RING-STORAGE-009` A WAL region MUST have `collection_id = 0` and
+`collection_format = wal_v1`.
+10. `RING-STORAGE-010` The metadata region MUST occupy exactly one
+`region_size` span at storage offset `0`, MUST NOT be counted in
+`region_count`, and data region `0` MUST begin immediately after that
+metadata region.
 
-1. `NoCollection --CreateCollection--> EmptyClean`
-`CreateCollection(collection_id, collection_type)` appends the
-`new_collection` record through its named durable edge.
-Durable after the `new_collection` record is durable. The collection
-starts with tracked `collection_type`, no region basis, no snapshot
-basis, no pending updates, and no dirty volatile frontier.
+### Canonical On-Disk Encoding
 
-2. `NoCollection --ReplayRetainedSnapshotBasis--> WALSnapshotClean`
-Retained replay basis only. `ReplayRetainedSnapshotBasis` applies a
-retained `snapshot` record after WAL-head reclaim has removed the
-historical `new_collection` record, so startup replay can reconstruct a
-live collection directly from that retained snapshot basis.
+Borromean defines one canonical byte-level encoding so independently
+written implementations can interoperate on the same media image.
 
-3. `NoCollection --ReplayRetainedRegionBasis--> RegionClean`
-Retained replay basis only. `ReplayRetainedRegionBasis` applies a
-retained user `head` record after WAL-head reclaim has removed the
-historical `new_collection` record, so startup replay can reconstruct a
-live collection directly from that retained committed-region basis.
+1. `RING-DISK-001` All fixed-width integer fields in `StorageMetadata`,
+`Header`, `WalRegionPrologue`, free-pointer footers, and logical WAL
+records MUST be encoded little-endian.
+2. `RING-DISK-002` The canonical scalar widths are:
+`region_index: u32`, `region_size: u32`, `region_count: u32`,
+`min_free_regions: u32`, `wal_write_granule: u32`,
+`collection_id: u64`, `sequence: u64`, `payload_len: u32`,
+`collection_type: u16`, `collection_format: u16`,
+`erased_byte: u8`, and `wal_record_magic: u8`.
+3. `RING-DISK-003` `collection_type` is a stable global `u16`
+namespace recorded durably in WAL records. Borromean core reserves
+`0x0000` for `wal`, `0x0001` for `channel`, `0x0002` for `map`,
+`0x0003..0x00ff` for future core-defined collection types,
+`0x0100..0x7fff` for public extension collection types, and
+`0x8000..0xffff` for private deployment-local collection types that are
+not required to interoperate across deployments.
+4. `RING-DISK-004` `collection_format` is a stable per-region `u16`
+namespace recorded durably in region headers. The pair
+`(collection_type, collection_format)` identifies a concrete committed
+region payload encoding. Borromean core reserves `collection_format =
+0x0000` globally for `wal_v1`; every non-WAL collection format MUST be
+nonzero. For any non-WAL collection type, `0x0001..0x7fff` are stable
+public format identifiers and `0x8000..0xffff` are private
+deployment-local format identifiers.
+5. `RING-DISK-005` Optional region indexes carried inside logical WAL
+records MUST be encoded as `OptRegionIndex`, a one-byte tag followed,
+when the tag is `1`, by a `u32 region_index`. Tag `0` means `none`;
+any other tag value is corruption.
+6. `RING-DISK-006` `metadata_checksum`, `header_checksum`,
+`prologue_checksum`, `footer_checksum`, and `record_checksum` MUST all use the standard
+CRC-32C (Castagnoli) parameters (`poly = 0x1edc6f41`,
+`init = 0xffffffff`, `refin = true`, `refout = true`,
+`xorout = 0xffffffff`) and MUST be stored little-endian.
+7. `RING-DISK-007` Unless a structure explicitly says otherwise, the
+checksum for that structure MUST cover the exact logical bytes of every
+earlier field in that structure, in on-disk order, and MUST exclude the
+checksum field itself and any later padding.
+8. `RING-DISK-008` Struct-like layouts in this specification are exact
+byte sequences with no implicit padding; the field order shown is the
+on-disk order.
 
-4. `NoCollection --ReplayRetainedDropTombstone--> Dropped`
-Retained replay basis only. `ReplayRetainedDropTombstone` applies a
-retained `drop_collection` tombstone after WAL-head reclaim has removed
-all earlier type-bearing records for that id, so startup replay can
-preserve that id as dropped without reconstructing a live collection
-type.
-
-5. `EmptyClean --ApplyCollectionUpdate--> EmptyDirty`
-`ApplyCollectionUpdate(collection_id, payload)` creates a mutable
-frontier over the empty basis, appends an `update` record through
-`AppendUpdate`, and applies that update to RAM.
-
-6. `WALSnapshotClean --ApplyCollectionUpdate--> WALSnapshotDirty`
-`ApplyCollectionUpdate(collection_id, payload)` loads the snapshot as
-the mutable frontier, appends an `update` record through
-`AppendUpdate`, and applies that update to RAM.
-
-7. `RegionClean --ApplyCollectionUpdate--> RegionDirty`
-`ApplyCollectionUpdate(collection_id, payload)` opens a mutable
-frontier over the committed region basis, appends an `update` record
-through `AppendUpdate`, and applies that update to RAM.
-
-8. `EmptyDirty --ApplyCollectionUpdate--> EmptyDirty`,
-`WALSnapshotDirty --ApplyCollectionUpdate--> WALSnapshotDirty`, or
-`RegionDirty --ApplyCollectionUpdate--> RegionDirty`
-`ApplyCollectionUpdate(collection_id, payload)` appends another
-`update` record through `AppendUpdate` and applies that update to the
-existing RAM frontier.
-
-9. `EmptyClean | EmptyDirty | WALSnapshotClean | WALSnapshotDirty | RegionClean | RegionDirty --CommitCollectionSnapshot--> WALSnapshotClean`
-`CommitCollectionSnapshot(collection_id, payload)` appends a
-`snapshot` record through `CommitSnapshotHead`.
-Durable after the `snapshot` record is durable. The snapshot becomes the
-new durable basis, older post-basis updates are superseded, and any
-dirty frontier is clear. Clean-source snapshotting is allowed because a
-collection operation may choose to rewrite its clean basis into a
-different retained WAL snapshot without changing logical content.
-
-10. `EmptyClean | EmptyDirty | WALSnapshotClean | WALSnapshotDirty | RegionClean | RegionDirty --CommitCollectionRegion--> RegionClean`
-`CommitCollectionRegion(collection_id, region_index, payload)` runs the
-region-commit operation: reserve or stage a target region as needed,
-write the committed collection region, then append the user
-`head(collection_id, collection_type, region_index)` through
-`CommitRegionHead`.
-Durable after the `head` record is durable. The committed region becomes
-the new durable basis, older post-basis updates are superseded, and the
-dirty frontier is clear. Clean-source committed writes are allowed for
-snapshot materialization, manifest rewrite, or compaction where the
-logical state is unchanged but the retained committed layout changes.
-
-11. `EmptyClean | EmptyDirty | WALSnapshotClean | WALSnapshotDirty | RegionClean | RegionDirty --DropCollection--> Dropped`
-`DropCollection(collection_id)` appends `drop_collection(collection_id)`
-through `CommitDropCollection`, after any required detachment or reclaim
-setup represented by the operation's edge sequence.
-Durable after the `drop_collection` record is durable. Any pending WAL
-updates and volatile frontier state for that collection are discarded
-from the durable basis, the collection leaves the live namespace, and no
-later WAL record for that collection id is valid.
+For WAL regions, the user-data area begins with a fixed
+`WalRegionPrologue`. That prologue records the WAL head that was
+current when the WAL region was initialized. WAL records do not begin
+immediately after the region `Header`; they begin at the first
+`wal_write_granule`-aligned byte after the end of the
+`WalRegionPrologue`.
 
 ```mermaid
-%%{init: {"flowchart": {"wrappingWidth": 180}} }%%
-flowchart LR
-    NoCollection([NoCollection])
-    EmptyClean["`EmptyClean
-durable basis: new_collection`"]
-    EmptyDirty["`EmptyDirty
-frontier over empty basis`"]
-    SnapshotClean["`WALSnapshotClean
-durable basis: snapshot`"]
-    SnapshotDirty["`WALSnapshotDirty
-frontier over snapshot basis`"]
-    RegionClean["`RegionClean
-durable basis: committed region`"]
-    RegionDirty["`RegionDirty
-frontier over region basis`"]
-    Dropped(["`Dropped
-durable tombstone`"])
-
-    NoCollection -->|CreateCollection| EmptyClean
-    NoCollection -.->|ReplayRetainedSnapshotBasis| SnapshotClean
-    NoCollection -.->|ReplayRetainedRegionBasis| RegionClean
-    NoCollection -.->|ReplayRetainedDropTombstone| Dropped
-    EmptyClean -->|ApplyCollectionUpdate| EmptyDirty
-    SnapshotClean -->|ApplyCollectionUpdate| SnapshotDirty
-    RegionClean -->|ApplyCollectionUpdate| RegionDirty
-    EmptyDirty -->|ApplyCollectionUpdate| EmptyDirty
-    SnapshotDirty -->|ApplyCollectionUpdate| SnapshotDirty
-    RegionDirty -->|ApplyCollectionUpdate| RegionDirty
-    EmptyClean -->|CommitCollectionSnapshot| SnapshotClean
-    EmptyDirty -->|CommitCollectionSnapshot| SnapshotClean
-    SnapshotClean -->|CommitCollectionSnapshot| SnapshotClean
-    SnapshotDirty -->|CommitCollectionSnapshot| SnapshotClean
-    RegionClean -->|CommitCollectionSnapshot| SnapshotClean
-    RegionDirty -->|CommitCollectionSnapshot| SnapshotClean
-    EmptyClean -->|CommitCollectionRegion| RegionClean
-    EmptyDirty -->|CommitCollectionRegion| RegionClean
-    SnapshotClean -->|CommitCollectionRegion| RegionClean
-    SnapshotDirty -->|CommitCollectionRegion| RegionClean
-    RegionClean -->|CommitCollectionRegion| RegionClean
-    RegionDirty -->|CommitCollectionRegion| RegionClean
-
-    EmptyClean -->|DropCollection| Dropped
-    SnapshotClean -->|DropCollection| Dropped
-    RegionClean -->|DropCollection| Dropped
-    EmptyDirty -->|DropCollection| Dropped
-    SnapshotDirty -->|DropCollection| Dropped
-    RegionDirty -->|DropCollection| Dropped
+block-beta
+ columns 4
+ Storage["Allocated Storage"]:4
+ Meta["Storage Metadata"]
+ R1["First Region"]
+ e1["..."]
+ R2["Last Region"]
+ space:4
+ block:exp:4
+  h1["Header"]
+  d1["User Data"]
+  a1["Free Pointer"]
+ end
+ space:4
+ block:header:4
+  s1["Sequence Number"]
+  cid["Collection Id"]
+  type["Collection Format"]
+  check["Header Checksum"]
+ end
+ R1 --> exp
+ h1 --> header
 ```
 
-Collection format responsibility:
+### Storage Metadata
 
-1. `RING-FORMAT-001` Each non-WAL `collection_format` value is defined by the user
-collection type that writes it; borromean core stores that value in the
-region header but does not assign it global meaning.
-2. `RING-FORMAT-002` Each user collection format defines how reads merge the durable basis
-with the in-memory frontier.
-3. `RING-FORMAT-003` The frontier MUST take precedence over older values in the durable
-basis.
-4. `RING-FORMAT-004` Flush to `RegionClean` materializes the logical state produced by
-that merge, either directly in the head region or through
-collection-defined manifest state referenced by the head region.
-5. `RING-FORMAT-005` Every user collection MUST remain log-structured:
-flushing mutable state writes new immutable committed region state
-instead of rewriting existing live region state in place. An LSM-style
-layout with manifest-described immutable runs is one valid way to
-satisfy this requirement.
-6. `RING-FORMAT-006` A `WALSnapshotClean` basis MUST be loadable into RAM before that
-collection accepts further mutations.
-7. `RING-FORMAT-007` For live user collections, the replay-tracked collection type is
-fixed by the earliest retained type-bearing record for that collection
-(`new_collection`, `snapshot`, or `head`). Historically this begins at
-`new_collection`, but WAL reclaim may later remove that record.
-8. `RING-FORMAT-008` Every later retained type-bearing record for that collection MUST
-carry the same `collection_type`, otherwise replay must treat the
-mismatch as corruption.
-9. `RING-FORMAT-009` When a user collection implementation loads a committed region
-basis, it validates that region's `collection_format` according to its
-own rules.
-10. `RING-FORMAT-010` Borromean core reserves exactly one canonical
-`collection_format`, `wal_v1`, for WAL regions. Every WAL region uses
-`wal_v1`, and that identifier is not user-definable.
-11. `RING-FORMAT-011` Per-region format evolution remains allowed because region headers
-carry `collection_format` independently of the collection's stable
-type.
-12. `RING-FORMAT-012` Every non-WAL `collection_type` that may appear
-durably on disk MUST have a corresponding normative collection
-specification.
-13. `RING-FORMAT-013` That collection specification MUST define, at
-minimum: the empty logical state established by `new_collection`; the
-exact bytes and interpretation of every supported committed-region
-`collection_format`; the exact bytes and interpretation of `snapshot`
-payloads; the exact bytes and interpretation of `update` payloads; the
-rules for applying updates and merging a durable basis with the
-in-memory frontier; and the collection-specific validation rules used
-when loading a basis or replaying WAL payloads.
-14. `RING-FORMAT-014` For non-WAL collections, the pair
-`(collection_type, collection_format)` MUST identify a unique committed
-region payload format.
-15. `RING-FORMAT-015` An implementation MUST NOT open a database
-successfully if replay yields a live collection whose
-`collection_type` is unsupported by that implementation.
-16. `RING-FORMAT-016` An implementation MUST NOT open a database
-successfully if replay yields a live collection whose retained
-committed-region basis, retained `snapshot` payload, or retained
-post-basis `update` payloads are unsupported or invalid under that
-collection's normative specification.
-17. `RING-FORMAT-017` A dropped tombstone for an unsupported
-collection type may remain as inert replay state. Support for that old
-collection type is not required unless a live basis or retained
-post-basis updates still exist for it.
+```rust
+struct StorageMetadata {
+  storage_version: u32,
+  region_size: u32,
+  region_count: u32,
+  min_free_regions: u32,
+  wal_write_granule: u32,
+  erased_byte: u8,
+  wal_record_magic: u8,
+  metadata_checksum: u32,
+}
+```
 
-Invariants:
+The `StorageMetadata` struct describes the version of the storage as
+well as the size of each region in bytes, the number of regions in the
+database, the configured `min_free_regions` reserve, the erased-flash
+byte value, the minimum writable granule used to align WAL records, and
+the WAL record magic byte. The stored `wal_record_magic` must differ
+from `erased_byte`.
 
-1. `RING-INVARIANT-001` The active durable basis for a collection is the last valid basis
-decision in replay order, where a basis decision is
-`new_collection`, `snapshot`,
-`drop_collection`, or
-`head(collection_id, collection_type, region_index)`.
-2. `RING-INVARIANT-002` `new_collection`, `snapshot`,
-`drop_collection`, and
-`head(collection_id, collection_type, region_index)` records totally
-order durable basis decisions per collection.
-3. `RING-INVARIANT-003` Any `new_collection`, `update`, `snapshot`, or `head` older than the
-active basis for that collection is reclaimable.
-4. `RING-INVARIANT-004` If the active basis for a collection is `drop_collection`, then that
-collection is logically absent from the live namespace and any older
-durable basis or update bytes for that collection are reclaimable once
-they are no longer physically reachable. Any region associated with
-that dropped collection may then be added to the free list if it is
-not already in the free-list chain.
-5. `RING-INVARIANT-005` Historical append validity and retained replay basis are distinct:
-`new_collection` is required before later user-collection records are
-appended, but reclaim may later remove it so replay reconstructs from
-the earliest retained basis record instead.
+1. `RING-META-001` The canonical on-disk `storage_version` defined by
+this specification MUST be `1`.
+2. `RING-META-002` `StorageMetadata` MUST be encoded as the exact byte
+sequence of the fields shown above, in that order, with no implicit
+padding.
+3. `RING-META-003` `metadata_checksum` MUST be CRC-32C over every
+earlier `StorageMetadata` field in on-disk order.
+4. `RING-META-004` Startup MUST reject the store if
+`metadata_checksum` is invalid or if `storage_version` is unsupported.
+5. `RING-META-005` Any bytes in the metadata region after the encoded
+`StorageMetadata` are reserved, MUST be left erased by formatting, and
+MUST be ignored on read.
 
-## Startup Replay Algorithm
+### Header
+
+```rust
+struct Header {
+  sequence: u64,
+  collection_id: u64,
+  collection_format: u16,
+  header_checksum: u32,
+}
+```
+
+The `Header` is the first data in the region.
+
+The `sequence` field is a monotonic value that is used to find the
+newest header when the database is opened.
+
+The `collection_id` defines which collection this region belongs to,
+and is a stable 64-bit nonce, not a small reusable counter. The
+`collection_format` defines the per-region encoding format for replay
+and read semantics. For user collections, non-WAL
+`collection_format` values are defined by the corresponding
+`collection_type` implementation rather than by borromean core, and may
+evolve across regions over time without changing the collection's
+stable `collection_type`. Borromean core reserves one canonical format
+identifier, `wal_v1`, for WAL regions.
+
+The `header_checksum` validates header integrity.
+
+1. `RING-HEADER-001` `Header` MUST be encoded as the exact byte
+sequence of the fields shown above, in that order, with no implicit
+padding.
+2. `RING-HEADER-002` `header_checksum` MUST be CRC-32C over `sequence`,
+`collection_id`, and `collection_format` in on-disk order.
+
+### Free-Pointer Footer
+
+```rust
+struct FreePointerFooter {
+  next_tail: u32,
+  footer_checksum: u32,
+}
+```
+
+The free-pointer footer occupies the final eight bytes of every data
+region. It is interpreted only when the region is durably reachable
+from the free-list chain.
+
+1. `RING-FREE-001` The free-pointer footer MUST occupy the final eight
+bytes of the region.
+2. `RING-FREE-002` If all eight footer bytes equal `erased_byte`, the
+footer is uninitialized and represents `next_tail = none`.
+3. `RING-FREE-003` Otherwise the footer MUST decode as
+`next_tail:u32, footer_checksum:u32`, both little-endian, with
+`footer_checksum` equal to CRC-32C over `next_tail`.
+4. `RING-FREE-004` A checksum-valid non-erased footer MUST decode to a
+`u32 region_index` strictly less than `region_count`; any other value is
+malformed.
+5. `RING-FREE-005` Wherever this specification says
+`r.free_pointer.next_tail = x`, it means writing a complete
+`FreePointerFooter` with `next_tail = x` and a matching
+`footer_checksum`.
+6. `RING-FREE-006` While a region is allocated for live use, the bytes
+in its free-pointer footer are uninterpreted stale data and MUST NOT be
+used to infer free-list membership.
+
+### WAL Region Prologue
+
+```rust
+struct WalRegionPrologue {
+  wal_head_region_index: u32,
+  prologue_checksum: u32,
+}
+```
+
+`WalRegionPrologue` is present only in WAL regions (regions whose valid
+header has `collection_id = 0` and `collection_format = wal_v1`) and
+occupies the first bytes of the region user-data area immediately after
+the region `Header`.
+
+`wal_head_region_index` is the durable WAL head that was current when
+that WAL region was initialized. It must name a region index strictly
+less than `region_count`. If startup finishes an incomplete WAL
+rotation by initializing a missing/corrupt target region, it must write
+the same already-determined WAL head into this field rather than
+choosing a new value during recovery.
+
+`prologue_checksum` validates the logical prologue contents. It covers
+`wal_head_region_index` in the same byte order used on disk.
+
+1. `RING-PROLOGUE-001` `WalRegionPrologue` MUST be encoded as the exact
+byte sequence of the fields shown above, in that order, with no
+implicit padding.
+2. `RING-PROLOGUE-002` `prologue_checksum` MUST be CRC-32C over
+`wal_head_region_index`.
+3. `RING-PROLOGUE-003` `wal_head_region_index` MUST be strictly less
+than `region_count`.
+
+Let `wal_record_area_offset` be the first offset within a WAL region
+that is both greater than or equal to the end of `Header` plus
+`WalRegionPrologue`, and aligned to `wal_write_granule`.
+Replay scans candidate WAL record starts only at aligned offsets
+greater than or equal to `wal_record_area_offset`, and new WAL appends
+must begin at such offsets as well.
+
+## Chapter 6: Startup And Replay
+
+This chapter describes `Opening(OpenMode)`: scan media, recover any
+incomplete WAL rotation, replay retained WAL records through the shared
+state-machine rules, validate live collection data, and finish pending
+recovery work.
+
+### Startup Replay Algorithm
 
 Startup recovery is the concrete `Opening(OpenMode)` procedure. It
 reconstructs the stable runtime vector by scanning durable media,
@@ -1911,7 +2104,7 @@ Under the monotonic-sequence rule, stale free-list WAL headers may be
 visible during scan, but they cannot outrank the live WAL tail and so
 cannot redirect startup onto the wrong WAL chain.
 
-## no_std Tracker Types (Rust)
+### no_std Tracker Types (Rust)
 
 The replay and allocator terms above map to the following explicit
 `no_std` tracker state. These structs are runtime state, not on-disk
@@ -2048,87 +2241,13 @@ advanced further if startup recovery initializes an incomplete WAL
 rotation. Each newly allocated region uses the next value
 (`max_seen_sequence + 1`), then updates this runtime field.
 
-### Storage Runtime State Requirements
+## Chapter 7: Reclaim And Freeing
 
-These requirements cover implemented runtime state updates for formatting, opening, appending,
-rotation, reclaim, and WAL/state facade helpers.
+This chapter groups the rules that make space reusable without losing
+replayability: WAL-head reclaim decides which records remain live, and
+region reclaim appends detached regions to the FIFO free-list chain.
 
-1. `RING-IMPL-REGRESSION-063` Committed region writes MUST accept a payload that exactly fills
-   committed payload capacity and persist the full payload bytes.
-2. `RING-IMPL-REGRESSION-064` Formatting storage MUST return fresh runtime state with metadata, WAL
-   head/tail, allocator, collection, and reclaim fields initialized.
-3. `RING-IMPL-REGRESSION-065` WAL record visitation MUST report snapshot and update records after a
-   new collection in durable WAL order.
-4. `RING-IMPL-REGRESSION-066` Opening storage MUST return replayed runtime state with append
-   offset, max sequence, collection type, committed basis, and pending update count.
-5. `RING-IMPL-REGRESSION-067` Opening storage MUST complete reclaims for regions already on the
-   free list and clear pending reclaim state.
-6. `RING-IMPL-REGRESSION-068` Opening storage MUST discard pending reclaim records for regions
-   still reachable from live collection state.
-7. `RING-IMPL-REGRESSION-069` Appending a new collection and update MUST refresh runtime collection
-   state and pending update count.
-8. `RING-IMPL-REGRESSION-070` Appending a snapshot MUST move the collection to WAL snapshot basis
-   and clear prior pending updates.
-9. `RING-IMPL-REGRESSION-071` Appending head and drop records MUST refresh runtime basis to
-   committed region and then dropped tombstone while reducing tracked live collection count.
-10. `RING-IMPL-REGRESSION-072` Appending WAL recovery MUST clear pending recovery boundary and
-    advance append offset; appending free-list-head MUST refresh allocator head and tail.
-11. `RING-IMPL-REGRESSION-073` WAL rotation start/finish appends MUST reserve the next free region,
-    advance allocator state, then move WAL tail to the new region and clear ready_region.
-12. `RING-IMPL-REGRESSION-074` WAL rotation MUST initialize the new WAL region at
-    `max_seen_sequence + 1` and update runtime max_seen_sequence.
-13. `RING-IMPL-REGRESSION-075` Reopening with uncommitted staged regions MUST reclaim staged
-    regions and leave no ready or staged regions live.
-14. `RING-IMPL-REGRESSION-076` Staging a region MUST reject region indexes that do not match the
-    current ready_region.
-15. `RING-IMPL-REGRESSION-077` Normal WAL appends MUST reject writes that would consume rotation
-    reserve until WAL rotation completes, after which appends may continue.
-16. `RING-IMPL-REGRESSION-078` WAL rotation start MUST reject calls made before the WAL tail has
-    entered the rotation window.
-17. `RING-IMPL-REGRESSION-079` Head append room checks MUST perform WAL rotation when the current
-    tail lacks room for a head record.
-18. `RING-IMPL-REGRESSION-080` Stage-region append room checks MUST reject staging when allocator
-    state no longer matches the target region.
-19. `RING-IMPL-REGRESSION-081` Encoded append reserve checks for alloc_begin MUST require a free
-    region and return WalRotationRequired when none remains.
-20. `RING-IMPL-REGRESSION-082` Encoded append reserve checks MUST allow alloc_begin when the tail
-    has exactly the rotation reserve plus encoded record length remaining.
-21. `RING-IMPL-REGRESSION-083` WAL-head reclaim classification MUST copy only head records that
-    still reference the retained live region and skip stale head records.
-22. `RING-IMPL-REGRESSION-084` WAL-head reclaim classification MUST copy drop tombstones only for
-    collections that remain dropped and skip drops for live collections.
-23. `RING-IMPL-REGRESSION-085` Foreground allocation headroom checks MUST reject allocations that
-    would consume the configured minimum free-region reserve.
-24. `RING-IMPL-REGRESSION-086` WAL-head reclaim copying MUST stop cleanly when a copied tail record
-    ends exactly at the region end.
-25. `RING-IMPL-REGRESSION-087` Live-state reachability checks MUST NOT parse non-map collection
-    heads as maps.
-26. `RING-IMPL-REGRESSION-088` Live-state reachability checks MUST follow live map manifest heads to
-    referenced run regions.
-27. `RING-IMPL-REGRESSION-089` Dropping a staged region in memory MUST remove only the matching
-    staged region and preserve other staged regions.
-28. `RING-IMPL-REGRESSION-090` WAL record visitation MUST process a tail record that ends exactly at
-    the append limit and then stop.
-29. `RING-IMPL-REGRESSION-091` WAL-chain membership checks MUST follow durable link targets to
-    determine whether a region belongs to the chain.
-30. `RING-IMPL-REGRESSION-092` CollectionId helpers MUST expose little-endian bytes and checked
-    increment semantics, returning none on u64 overflow.
-31. `RING-IMPL-REGRESSION-093` Storage facade accessors MUST reflect underlying runtime state and
-    tracked collection metadata.
-32. `RING-IMPL-REGRESSION-094` Storage facade raw WAL wrapper methods MUST update runtime
-    collection, allocator, free-list, and reclaim state.
-33. `RING-IMPL-REGRESSION-095` Storage facade WAL recovery append MUST reject recovery records when
-    no recovery boundary is pending.
-34. `RING-IMPL-REGRESSION-096` Storage facade recovery status MUST report pending WAL recovery
-    boundaries and clear them after appending wal_recovery.
-35. `RING-IMPL-REGRESSION-104` Storage append operations MUST persist new collection and update
-    records so reopening through flash restores the collection and pending update state.
-36. `RING-IMPL-REGRESSION-105` WAL-head reclaim MUST update runtime WAL head and tail to the next
-    region.
-37. `RING-IMPL-REGRESSION-106` WAL-head reclaim MUST rewrite a live `EmptyClean` map as a WAL snapshot
-    basis while preserving pending updates.
-
-## WAL Reclaim Eligibility
+### WAL Reclaim Eligibility
 
 WAL-head reclaim is the `ReclaimingWalHead(WalHeadReclaimMode)`
 operation. It operates on WAL regions, but correctness is defined per
@@ -2282,7 +2401,134 @@ Now `s1` and `u3` are reclaimable because
 `head(collection_id = 7, collection_type = T, region_index = r44)` becomes
 the new basis.
 
-## Durability and Crash Semantics
+### Region Reclaim
+
+Region reclaim is the `ReclaimingRegion(RegionReclaimMode)`
+operation. It appends a newly freed region to the tail of the free
+list. If the free list was non-empty, reclaim must update the previous
+tail region's `next_tail` pointer so the chain now ends at the newly
+reclaimed region. Because reclaim removes a region from live metadata
+before making it reachable from the free-list chain, it is always
+modeled as a WAL-tracked transaction.
+
+Normative append semantics:
+
+1. `RING-REGION-RECLAIM-SEM-001` Let `t_prev` be the value of `free_list_tail` before reclaim
+   starts.
+2. `RING-REGION-RECLAIM-SEM-002` If `t_prev != none`, reclaim MUST durably write
+`t_prev.free_pointer.next_tail = r` when freeing region `r`.
+3. `RING-REGION-RECLAIM-SEM-003` If `t_prev = none`, reclaim MUST NOT write any predecessor link and
+MUST durably append `free_list_head(r)` and set `free_list_head = r`
+and `free_list_tail = r`.
+4. `RING-REGION-RECLAIM-SEM-004` Reclaim is not complete until the predecessor-link write (when
+required), or the `free_list_head(r)` record (when the free list was
+empty), is durable; otherwise `r` is not yet a durable member of the
+free list.
+
+Preconditions:
+
+1. `RING-REGION-RECLAIM-PRE-001` `reclaim_begin(r)` MUST be durable in the WAL before any live
+   metadata is
+updated to stop referencing `r`.
+2. `RING-REGION-RECLAIM-PRE-002` After the detach step, the reclaimed region `r` MUST no longer be
+reachable from any live collection head or live WAL state.
+3. `RING-REGION-RECLAIM-PRE-003` `r` MUST NOT already be reachable from the free-list chain, unless
+   this
+procedure is being re-entered during crash recovery.
+4. `RING-REGION-RECLAIM-PRE-004` If a current free-list tail exists, call it `t_prev`.
+
+Procedure:
+
+1. `RING-REGION-RECLAIM-001` Ensure `reclaim_begin(r)` is durable. On the initial reclaim
+attempt this means append and sync `reclaim_begin(r)`. On recovery
+re-entry the existing durable record satisfies this step.
+2. `RING-REGION-RECLAIM-002` Durably perform any collection-head or WAL-head updates needed so
+that `r` has no remaining live references.
+3. `RING-REGION-RECLAIM-003` If recovery finds that `r` is already reachable from the free-list
+chain, skip to step 8.
+4. `RING-REGION-RECLAIM-004` Establish `r` as a free region without erasing it. In particular,
+`r.free_pointer.next_tail` MUST still be uninitialized when `r` is
+about to become the new free-list tail. If the region still has the
+erased footer state from when it was allocated, no additional write to
+`r` is required for this step.
+5. `RING-REGION-RECLAIM-005` If `t_prev` exists, write `t_prev.free_pointer.next_tail = r`.
+This is the operation that links the previous free tail to the new
+tail.
+6. `RING-REGION-RECLAIM-006` If `t_prev` exists, sync `t_prev` after writing `next_tail`.
+7. `RING-REGION-RECLAIM-007` If `t_prev` exists, update in-memory `free_list_tail = r`.
+If no tail existed before step 5, append and sync `free_list_head(r)`,
+then set both in-memory `free_list_head = r` and `free_list_tail = r`.
+8. `RING-REGION-RECLAIM-008` If recovery found `r` already reachable from the free-list chain,
+update in-memory free-list state so it reflects `r` as the current
+tail when needed.
+9. `RING-REGION-RECLAIM-009` Append and sync `reclaim_end(r)`.
+
+Postconditions:
+
+1. `RING-REGION-RECLAIM-POST-001` The free-list chain MUST remain acyclic and FIFO-ordered.
+2. `RING-REGION-RECLAIM-POST-002` Exactly one new region (`r`) MUST be appended to the tail.
+3. `RING-REGION-RECLAIM-POST-003` If a prior tail existed, its `next_tail` pointer MUST now
+   reference
+`r`.
+4. `RING-REGION-RECLAIM-POST-004` `r.free_pointer.next_tail` MUST remain uninitialized after
+   reclaim.
+5. `RING-REGION-RECLAIM-POST-005` If a prior tail existed, replay of free pointers MUST follow
+`... -> t_prev -> r`, and `r` is recognized as the tail because its
+free-pointer slot is uninitialized.
+6. `RING-REGION-RECLAIM-POST-006` If a prior tail existed, the only new durable predecessor link for
+`r` is `t_prev.next_tail = r`, where `t_prev` is the free-list tail
+from before reclaim.
+7. `RING-REGION-RECLAIM-POST-007` Replay either finds a matching `reclaim_end(r)` or can safely
+re-enter the procedure and derive the same result without duplicating
+`r` in the free-list chain.
+
+```mermaid
+%%{init: {"flowchart": {"wrappingWidth": 180}} }%%
+flowchart TD
+    NeedFree([Need to reclaim region r])
+    Begin["`Ensure reclaim begin record is durable`"]
+    Detach["`Detach region r from live collection and WAL state`"]
+    AlreadyFree{"`Region r already in free list?`"}
+    Prep["`Keep region r as free tail candidate`"]
+    PriorTail{"`Prior free list tail exists?`"}
+    LinkPrev["`Write and sync previous tail next pointer`"]
+    NewHead["`Append and sync free list head record`"]
+    UpdateMem["`Update in memory free list head and tail`"]
+    End["`Append and sync reclaim end record`"]
+    Done([Reclaim complete])
+
+    NeedFree --> Begin --> Detach --> AlreadyFree
+    AlreadyFree -->|yes| UpdateMem
+    AlreadyFree -->|no| Prep --> PriorTail
+    PriorTail -->|yes| LinkPrev --> UpdateMem
+    PriorTail -->|no| NewHead --> UpdateMem
+    UpdateMem --> End --> Done
+```
+
+Crash-safety ordering requirement:
+
+1. `RING-REGION-RECLAIM-ORDER-001` `reclaim_begin(r)` MUST be durable before any live metadata stops
+referencing `r`.
+2. `RING-REGION-RECLAIM-ORDER-002` Before any durable write makes `r` reachable from
+   `t_prev.next_tail`,
+the implementation MUST ensure that `r` already has the correct
+free-list-tail footer state, namely an uninitialized
+`r.free_pointer.next_tail`.
+3. `RING-REGION-RECLAIM-ORDER-003` If `t_prev = none`, `free_list_head(r)` MUST be durable before
+`reclaim_end(r)` is acknowledged.
+4. `RING-REGION-RECLAIM-ORDER-004` If `t_prev` exists, the `t_prev.next_tail = r` write MUST be
+   synced before
+`reclaim_end(r)` is acknowledged.
+5. `RING-REGION-RECLAIM-ORDER-005` The reclaim procedure MUST be idempotent across crashes between
+   any
+two steps above.
+## Chapter 8: Durability, Crash Cuts, And Formatting
+
+This chapter defines the write/sync cuts that make transitions durable,
+the crash outcomes at those cuts, and the formatting/opening operations
+that create or bootstrap a valid store.
+
+### Durability and Crash Semantics
 
 Durability boundary:
 
@@ -2434,154 +2680,15 @@ must not be freed.
 startup sees an incomplete reclaim and must complete the free-list
 append idempotently if the region is not already free.
 
-## Storage Metadata
+### Operations
 
-```rust
-struct StorageMetadata {
-  storage_version: u32,
-  region_size: u32,
-  region_count: u32,
-  min_free_regions: u32,
-  wal_write_granule: u32,
-  erased_byte: u8,
-  wal_record_magic: u8,
-  metadata_checksum: u32,
-}
-```
-
-The `StorageMetadata` struct describes the version of the storage as
-well as the size of each region in bytes, the number of regions in the
-database, the configured `min_free_regions` reserve, the erased-flash
-byte value, the minimum writable granule used to align WAL records, and
-the WAL record magic byte. The stored `wal_record_magic` must differ
-from `erased_byte`.
-
-1. `RING-META-001` The canonical on-disk `storage_version` defined by
-this specification MUST be `1`.
-2. `RING-META-002` `StorageMetadata` MUST be encoded as the exact byte
-sequence of the fields shown above, in that order, with no implicit
-padding.
-3. `RING-META-003` `metadata_checksum` MUST be CRC-32C over every
-earlier `StorageMetadata` field in on-disk order.
-4. `RING-META-004` Startup MUST reject the store if
-`metadata_checksum` is invalid or if `storage_version` is unsupported.
-5. `RING-META-005` Any bytes in the metadata region after the encoded
-`StorageMetadata` are reserved, MUST be left erased by formatting, and
-MUST be ignored on read.
-
-## Header
-
-```rust
-struct Header {
-  sequence: u64,
-  collection_id: u64,
-  collection_format: u16,
-  header_checksum: u32,
-}
-```
-
-The `Header` is the first data in the region.
-
-The `sequence` field is a monotonic value that is used to find the
-newest header when the database is opened.
-
-The `collection_id` defines which collection this region belongs to,
-and is a stable 64-bit nonce, not a small reusable counter. The
-`collection_format` defines the per-region encoding format for replay
-and read semantics. For user collections, non-WAL
-`collection_format` values are defined by the corresponding
-`collection_type` implementation rather than by borromean core, and may
-evolve across regions over time without changing the collection's
-stable `collection_type`. Borromean core reserves one canonical format
-identifier, `wal_v1`, for WAL regions.
-
-The `header_checksum` validates header integrity.
-
-1. `RING-HEADER-001` `Header` MUST be encoded as the exact byte
-sequence of the fields shown above, in that order, with no implicit
-padding.
-2. `RING-HEADER-002` `header_checksum` MUST be CRC-32C over `sequence`,
-`collection_id`, and `collection_format` in on-disk order.
-
-## Free-Pointer Footer
-
-```rust
-struct FreePointerFooter {
-  next_tail: u32,
-  footer_checksum: u32,
-}
-```
-
-The free-pointer footer occupies the final eight bytes of every data
-region. It is interpreted only when the region is durably reachable
-from the free-list chain.
-
-1. `RING-FREE-001` The free-pointer footer MUST occupy the final eight
-bytes of the region.
-2. `RING-FREE-002` If all eight footer bytes equal `erased_byte`, the
-footer is uninitialized and represents `next_tail = none`.
-3. `RING-FREE-003` Otherwise the footer MUST decode as
-`next_tail:u32, footer_checksum:u32`, both little-endian, with
-`footer_checksum` equal to CRC-32C over `next_tail`.
-4. `RING-FREE-004` A checksum-valid non-erased footer MUST decode to a
-`u32 region_index` strictly less than `region_count`; any other value is
-malformed.
-5. `RING-FREE-005` Wherever this specification says
-`r.free_pointer.next_tail = x`, it means writing a complete
-`FreePointerFooter` with `next_tail = x` and a matching
-`footer_checksum`.
-6. `RING-FREE-006` While a region is allocated for live use, the bytes
-in its free-pointer footer are uninterpreted stale data and MUST NOT be
-used to infer free-list membership.
-
-## WAL Region Prologue
-
-```rust
-struct WalRegionPrologue {
-  wal_head_region_index: u32,
-  prologue_checksum: u32,
-}
-```
-
-`WalRegionPrologue` is present only in WAL regions (regions whose valid
-header has `collection_id = 0` and `collection_format = wal_v1`) and
-occupies the first bytes of the region user-data area immediately after
-the region `Header`.
-
-`wal_head_region_index` is the durable WAL head that was current when
-that WAL region was initialized. It must name a region index strictly
-less than `region_count`. If startup finishes an incomplete WAL
-rotation by initializing a missing/corrupt target region, it must write
-the same already-determined WAL head into this field rather than
-choosing a new value during recovery.
-
-`prologue_checksum` validates the logical prologue contents. It covers
-`wal_head_region_index` in the same byte order used on disk.
-
-1. `RING-PROLOGUE-001` `WalRegionPrologue` MUST be encoded as the exact
-byte sequence of the fields shown above, in that order, with no
-implicit padding.
-2. `RING-PROLOGUE-002` `prologue_checksum` MUST be CRC-32C over
-`wal_head_region_index`.
-3. `RING-PROLOGUE-003` `wal_head_region_index` MUST be strictly less
-than `region_count`.
-
-Let `wal_record_area_offset` be the first offset within a WAL region
-that is both greater than or equal to the end of `Header` plus
-`WalRegionPrologue`, and aligned to `wal_write_granule`.
-Replay scans candidate WAL record starts only at aligned offsets
-greater than or equal to `wal_record_area_offset`, and new WAL appends
-must begin at such offsets as well.
-
-## Operations
-
-### Init
+#### Init
 
 Initialization is defined normatively by
 `Format Storage (On-Disk Initialization)`. This section is informative
 only.
 
-### Format Storage (On-Disk Initialization)
+#### Format Storage (On-Disk Initialization)
 
 Formatting creates a valid empty store that can be opened by normal
 startup replay without special recovery paths.
@@ -2654,7 +2761,7 @@ flowchart LR
     Start --> Erase --> WriteMeta --> InitWal --> InitFree --> Fresh
 ```
 
-### First Open After Fresh Format
+#### First Open After Fresh Format
 
 Opening a freshly formatted store uses the same startup replay
 algorithm as any other open.
@@ -2698,124 +2805,89 @@ flowchart LR
     Fresh --> FindTail --> NoWal --> DurableHead --> Runtime --> OpenReady
 ```
 
-### Region Reclaim
+## Chapter 9: Implementation Regression Requirements
 
-Region reclaim is the `ReclaimingRegion(RegionReclaimMode)`
-operation. It appends a newly freed region to the tail of the free
-list. If the free list was non-empty, reclaim must update the previous
-tail region's `next_tail` pointer so the chain now ends at the newly
-reclaimed region. Because reclaim removes a region from live metadata
-before making it reachable from the free-list chain, it is always
-modeled as a WAL-tracked transaction.
+This appendix records requirements that trace the current implementation
+surface and regression tests. They remain in this ring spec for this
+reorganization pass, but they may later move to the implementation spec
+once the state-machine refactor has a stable Rust shape.
 
-Normative append semantics:
+### Storage Runtime State Requirements
 
-1. `RING-REGION-RECLAIM-SEM-001` Let `t_prev` be the value of `free_list_tail` before reclaim
-   starts.
-2. `RING-REGION-RECLAIM-SEM-002` If `t_prev != none`, reclaim MUST durably write
-`t_prev.free_pointer.next_tail = r` when freeing region `r`.
-3. `RING-REGION-RECLAIM-SEM-003` If `t_prev = none`, reclaim MUST NOT write any predecessor link and
-MUST durably append `free_list_head(r)` and set `free_list_head = r`
-and `free_list_tail = r`.
-4. `RING-REGION-RECLAIM-SEM-004` Reclaim is not complete until the predecessor-link write (when
-required), or the `free_list_head(r)` record (when the free list was
-empty), is durable; otherwise `r` is not yet a durable member of the
-free list.
+These requirements cover implemented runtime state updates for formatting, opening, appending,
+rotation, reclaim, and WAL/state facade helpers.
 
-Preconditions:
-
-1. `RING-REGION-RECLAIM-PRE-001` `reclaim_begin(r)` MUST be durable in the WAL before any live
-   metadata is
-updated to stop referencing `r`.
-2. `RING-REGION-RECLAIM-PRE-002` After the detach step, the reclaimed region `r` MUST no longer be
-reachable from any live collection head or live WAL state.
-3. `RING-REGION-RECLAIM-PRE-003` `r` MUST NOT already be reachable from the free-list chain, unless
-   this
-procedure is being re-entered during crash recovery.
-4. `RING-REGION-RECLAIM-PRE-004` If a current free-list tail exists, call it `t_prev`.
-
-Procedure:
-
-1. `RING-REGION-RECLAIM-001` Ensure `reclaim_begin(r)` is durable. On the initial reclaim
-attempt this means append and sync `reclaim_begin(r)`. On recovery
-re-entry the existing durable record satisfies this step.
-2. `RING-REGION-RECLAIM-002` Durably perform any collection-head or WAL-head updates needed so
-that `r` has no remaining live references.
-3. `RING-REGION-RECLAIM-003` If recovery finds that `r` is already reachable from the free-list
-chain, skip to step 8.
-4. `RING-REGION-RECLAIM-004` Establish `r` as a free region without erasing it. In particular,
-`r.free_pointer.next_tail` MUST still be uninitialized when `r` is
-about to become the new free-list tail. If the region still has the
-erased footer state from when it was allocated, no additional write to
-`r` is required for this step.
-5. `RING-REGION-RECLAIM-005` If `t_prev` exists, write `t_prev.free_pointer.next_tail = r`.
-This is the operation that links the previous free tail to the new
-tail.
-6. `RING-REGION-RECLAIM-006` If `t_prev` exists, sync `t_prev` after writing `next_tail`.
-7. `RING-REGION-RECLAIM-007` If `t_prev` exists, update in-memory `free_list_tail = r`.
-If no tail existed before step 5, append and sync `free_list_head(r)`,
-then set both in-memory `free_list_head = r` and `free_list_tail = r`.
-8. `RING-REGION-RECLAIM-008` If recovery found `r` already reachable from the free-list chain,
-update in-memory free-list state so it reflects `r` as the current
-tail when needed.
-9. `RING-REGION-RECLAIM-009` Append and sync `reclaim_end(r)`.
-
-Postconditions:
-
-1. `RING-REGION-RECLAIM-POST-001` The free-list chain MUST remain acyclic and FIFO-ordered.
-2. `RING-REGION-RECLAIM-POST-002` Exactly one new region (`r`) MUST be appended to the tail.
-3. `RING-REGION-RECLAIM-POST-003` If a prior tail existed, its `next_tail` pointer MUST now
-   reference
-`r`.
-4. `RING-REGION-RECLAIM-POST-004` `r.free_pointer.next_tail` MUST remain uninitialized after
-   reclaim.
-5. `RING-REGION-RECLAIM-POST-005` If a prior tail existed, replay of free pointers MUST follow
-`... -> t_prev -> r`, and `r` is recognized as the tail because its
-free-pointer slot is uninitialized.
-6. `RING-REGION-RECLAIM-POST-006` If a prior tail existed, the only new durable predecessor link for
-`r` is `t_prev.next_tail = r`, where `t_prev` is the free-list tail
-from before reclaim.
-7. `RING-REGION-RECLAIM-POST-007` Replay either finds a matching `reclaim_end(r)` or can safely
-re-enter the procedure and derive the same result without duplicating
-`r` in the free-list chain.
-
-```mermaid
-%%{init: {"flowchart": {"wrappingWidth": 180}} }%%
-flowchart TD
-    NeedFree([Need to reclaim region r])
-    Begin["`Ensure reclaim begin record is durable`"]
-    Detach["`Detach region r from live collection and WAL state`"]
-    AlreadyFree{"`Region r already in free list?`"}
-    Prep["`Keep region r as free tail candidate`"]
-    PriorTail{"`Prior free list tail exists?`"}
-    LinkPrev["`Write and sync previous tail next pointer`"]
-    NewHead["`Append and sync free list head record`"]
-    UpdateMem["`Update in memory free list head and tail`"]
-    End["`Append and sync reclaim end record`"]
-    Done([Reclaim complete])
-
-    NeedFree --> Begin --> Detach --> AlreadyFree
-    AlreadyFree -->|yes| UpdateMem
-    AlreadyFree -->|no| Prep --> PriorTail
-    PriorTail -->|yes| LinkPrev --> UpdateMem
-    PriorTail -->|no| NewHead --> UpdateMem
-    UpdateMem --> End --> Done
-```
-
-Crash-safety ordering requirement:
-
-1. `RING-REGION-RECLAIM-ORDER-001` `reclaim_begin(r)` MUST be durable before any live metadata stops
-referencing `r`.
-2. `RING-REGION-RECLAIM-ORDER-002` Before any durable write makes `r` reachable from
-   `t_prev.next_tail`,
-the implementation MUST ensure that `r` already has the correct
-free-list-tail footer state, namely an uninitialized
-`r.free_pointer.next_tail`.
-3. `RING-REGION-RECLAIM-ORDER-003` If `t_prev = none`, `free_list_head(r)` MUST be durable before
-`reclaim_end(r)` is acknowledged.
-4. `RING-REGION-RECLAIM-ORDER-004` If `t_prev` exists, the `t_prev.next_tail = r` write MUST be
-   synced before
-`reclaim_end(r)` is acknowledged.
-5. `RING-REGION-RECLAIM-ORDER-005` The reclaim procedure MUST be idempotent across crashes between
-   any
-two steps above.
+1. `RING-IMPL-REGRESSION-063` Committed region writes MUST accept a payload that exactly fills
+   committed payload capacity and persist the full payload bytes.
+2. `RING-IMPL-REGRESSION-064` Formatting storage MUST return fresh runtime state with metadata, WAL
+   head/tail, allocator, collection, and reclaim fields initialized.
+3. `RING-IMPL-REGRESSION-065` WAL record visitation MUST report snapshot and update records after a
+   new collection in durable WAL order.
+4. `RING-IMPL-REGRESSION-066` Opening storage MUST return replayed runtime state with append
+   offset, max sequence, collection type, committed basis, and pending update count.
+5. `RING-IMPL-REGRESSION-067` Opening storage MUST complete reclaims for regions already on the
+   free list and clear pending reclaim state.
+6. `RING-IMPL-REGRESSION-068` Opening storage MUST discard pending reclaim records for regions
+   still reachable from live collection state.
+7. `RING-IMPL-REGRESSION-069` Appending a new collection and update MUST refresh runtime collection
+   state and pending update count.
+8. `RING-IMPL-REGRESSION-070` Appending a snapshot MUST move the collection to WAL snapshot basis
+   and clear prior pending updates.
+9. `RING-IMPL-REGRESSION-071` Appending head and drop records MUST refresh runtime basis to
+   committed region and then dropped tombstone while reducing tracked live collection count.
+10. `RING-IMPL-REGRESSION-072` Appending WAL recovery MUST clear pending recovery boundary and
+    advance append offset; appending free-list-head MUST refresh allocator head and tail.
+11. `RING-IMPL-REGRESSION-073` WAL rotation start/finish appends MUST reserve the next free region,
+    advance allocator state, then move WAL tail to the new region and clear ready_region.
+12. `RING-IMPL-REGRESSION-074` WAL rotation MUST initialize the new WAL region at
+    `max_seen_sequence + 1` and update runtime max_seen_sequence.
+13. `RING-IMPL-REGRESSION-075` Reopening with uncommitted staged regions MUST reclaim staged
+    regions and leave no ready or staged regions live.
+14. `RING-IMPL-REGRESSION-076` Staging a region MUST reject region indexes that do not match the
+    current ready_region.
+15. `RING-IMPL-REGRESSION-077` Normal WAL appends MUST reject writes that would consume rotation
+    reserve until WAL rotation completes, after which appends may continue.
+16. `RING-IMPL-REGRESSION-078` WAL rotation start MUST reject calls made before the WAL tail has
+    entered the rotation window.
+17. `RING-IMPL-REGRESSION-079` Head append room checks MUST perform WAL rotation when the current
+    tail lacks room for a head record.
+18. `RING-IMPL-REGRESSION-080` Stage-region append room checks MUST reject staging when allocator
+    state no longer matches the target region.
+19. `RING-IMPL-REGRESSION-081` Encoded append reserve checks for alloc_begin MUST require a free
+    region and return WalRotationRequired when none remains.
+20. `RING-IMPL-REGRESSION-082` Encoded append reserve checks MUST allow alloc_begin when the tail
+    has exactly the rotation reserve plus encoded record length remaining.
+21. `RING-IMPL-REGRESSION-083` WAL-head reclaim classification MUST copy only head records that
+    still reference the retained live region and skip stale head records.
+22. `RING-IMPL-REGRESSION-084` WAL-head reclaim classification MUST copy drop tombstones only for
+    collections that remain dropped and skip drops for live collections.
+23. `RING-IMPL-REGRESSION-085` Foreground allocation headroom checks MUST reject allocations that
+    would consume the configured minimum free-region reserve.
+24. `RING-IMPL-REGRESSION-086` WAL-head reclaim copying MUST stop cleanly when a copied tail record
+    ends exactly at the region end.
+25. `RING-IMPL-REGRESSION-087` Live-state reachability checks MUST NOT parse non-map collection
+    heads as maps.
+26. `RING-IMPL-REGRESSION-088` Live-state reachability checks MUST follow live map manifest heads to
+    referenced run regions.
+27. `RING-IMPL-REGRESSION-089` Dropping a staged region in memory MUST remove only the matching
+    staged region and preserve other staged regions.
+28. `RING-IMPL-REGRESSION-090` WAL record visitation MUST process a tail record that ends exactly at
+    the append limit and then stop.
+29. `RING-IMPL-REGRESSION-091` WAL-chain membership checks MUST follow durable link targets to
+    determine whether a region belongs to the chain.
+30. `RING-IMPL-REGRESSION-092` CollectionId helpers MUST expose little-endian bytes and checked
+    increment semantics, returning none on u64 overflow.
+31. `RING-IMPL-REGRESSION-093` Storage facade accessors MUST reflect underlying runtime state and
+    tracked collection metadata.
+32. `RING-IMPL-REGRESSION-094` Storage facade raw WAL wrapper methods MUST update runtime
+    collection, allocator, free-list, and reclaim state.
+33. `RING-IMPL-REGRESSION-095` Storage facade WAL recovery append MUST reject recovery records when
+    no recovery boundary is pending.
+34. `RING-IMPL-REGRESSION-096` Storage facade recovery status MUST report pending WAL recovery
+    boundaries and clear them after appending wal_recovery.
+35. `RING-IMPL-REGRESSION-104` Storage append operations MUST persist new collection and update
+    records so reopening through flash restores the collection and pending update state.
+36. `RING-IMPL-REGRESSION-105` WAL-head reclaim MUST update runtime WAL head and tail to the next
+    region.
+37. `RING-IMPL-REGRESSION-106` WAL-head reclaim MUST rewrite a live `EmptyClean` map as a WAL snapshot
+    basis while preserving pending updates.
