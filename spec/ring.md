@@ -5,6 +5,7 @@
 This document is organized from the conceptual model toward the concrete mechanisms that make the model durable and recoverable.
 
 - [Requirements Format](#requirements-format)
+- [Reader Model](#reader-model)
 - [Chapter 1: Theory Of Operation](#chapter-1-theory-of-operation)
 - [Chapter 2: Storage Context And State Machines](#chapter-2-storage-context-and-state-machines)
 - [Chapter 3: Collection Lifecycle](#chapter-3-collection-lifecycle)
@@ -13,7 +14,7 @@ This document is organized from the conceptual model toward the concrete mechani
 - [Chapter 6: Startup And Replay](#chapter-6-startup-and-replay)
 - [Chapter 7: Reclaim And Freeing](#chapter-7-reclaim-and-freeing)
 - [Chapter 8: Durability, Crash Cuts, And Formatting](#chapter-8-durability-crash-cuts-and-formatting)
-- [Chapter 9: Implementation Regression Requirements](#chapter-9-implementation-regression-requirements)
+- [Chapter 9: Current Implementation Coverage](#chapter-9-current-implementation-coverage)
 
 ## Requirements Format
 
@@ -26,12 +27,81 @@ These identifiers are intended to be the primary Duvet traceability
 targets. The surrounding narrative is informative unless it also
 includes a requirement identifier.
 
+## Reader Model
+
+Read this specification as an operation-first storage model. The
+system is defined by stable state, named operations that may change
+that state, durable edges inside those operations, and replay rules
+that reconstruct the same state after reset.
+
+Glossary:
+
+- **Region**: the fixed-size, erase-aligned unit of storage. User data,
+  WAL data, and free-list links all live in regions.
+- **WAL head / WAL tail**: the WAL head is the oldest live WAL region in
+  the reachable chain. The WAL tail is the region where new records are
+  appended.
+- **Durable basis**: the latest replay-visible basis decision for a
+  collection: empty creation, WAL snapshot, committed region head, or
+  drop tombstone.
+- **Retained basis**: the earliest basis record still retained after
+  WAL reclaim. It may be newer than the historical `new_collection`
+  record because reclaim can remove superseded records.
+- **Frontier**: bounded in-memory collection state containing mutations
+  newer than the durable basis.
+- **Clean / dirty collection state**: clean means the durable basis is
+  sufficient to reconstruct the collection. Dirty means retained
+  post-basis updates and possibly a materialized frontier are also
+  needed.
+- **Ready region**: a region removed from the free-list head by
+  `alloc_begin` but not yet consumed by `head`, `link`, or
+  `stage_region`.
+- **Staged region**: a ready region durably moved out of the ready slot
+  but not yet proven live or free.
+- **Pending reclaim**: a region with durable `reclaim_begin` and no
+  matching durable `reclaim_end`.
+- **Crash cut**: a point in a multi-step operation where reset may leave
+  only the durable prefix of that operation visible to replay.
+
+Mechanism chapters use the same review pattern:
+
+- **Purpose**: why the mechanism exists.
+- **State**: stable state and operation-local state the mechanism reads
+  or writes.
+- **Named operations**: the operation identifiers used in state-machine
+  transitions and diagrams.
+- **Durable edge sequence**: the ordered records, region writes, and
+  syncs that make the operation durable.
+- **Replay effect**: how startup reconstructs equivalent state from the
+  retained durable facts.
+- **Crash cuts**: which partially completed prefixes are valid and how
+  recovery handles them.
+- **Requirements**: normative rules with stable identifiers.
+
 ## Chapter 1: Theory Of Operation
 
 This chapter describes the design problem and the core borromean model:
 regions provide erase granularity, bounded memory holds mutable
 frontiers, and the WAL records every durable state transition needed to
 recover after reset.
+
+### Design Proof Outline
+
+Borromean is built from a small set of mutually reinforcing choices:
+
+- Region alignment makes every durable object reclaimable without
+  rewriting neighboring data.
+- Append-only collection state avoids hot stable locations and gives
+  reclaim a clear oldest-first direction.
+- The WAL serializes collection, allocator, reclaim, and WAL-chain
+  decisions into one replay order.
+- Bounded frontiers let many collections stay open while still forcing
+  large or old frontiers into snapshots or committed regions.
+- Every region allocation is made durable before use, so a reset cannot
+  lose a removed free-list head.
+- Every region free is bracketed by reclaim records, so a reset can
+  complete or discard incomplete free-list work without duplicating a
+  region.
 
 ### Motivation
 
@@ -222,37 +292,28 @@ writes. At that point, more drastic action such as dropping or
 truncating collections, or migrating/reformatting onto a larger backing
 store, is required before additional ordinary writes may be accepted.
 
-### Challenges
+### Design Constraints
 
-The core design constraint is that we cannot have any stable
-locations that get repeatedly rewritten or those regions of the flash
-will fail before the rest of the device. This leads to two main
-conclusions:
+The flash constraint driving the design is that repeatedly rewriting a
+small set of stable locations would wear those regions out before the
+rest of the backing media. Borromean therefore treats stable state as
+log-structured state: collection heads, allocator decisions, WAL-chain
+movement, and reclaim bookkeeping are all represented by append-only
+facts.
 
-1. We should always attempt to free the oldest regions first.
-2. All data structures should be log structured/append only.
+Oldest-first freeing is necessary for wear leveling, but borromean
+cannot reclaim old bytes merely because they are old. A region remains
+live while a collection basis, manifest, WAL-chain link, ready-region
+reservation, staged-region entry, pending reclaim, or free-list link can
+still require it during replay. The rest of this specification defines
+the operations that make those reachability decisions explicit.
 
-Freeing the oldest first must be performed on a per-collection basis,
-as each collection is responsible for its own data and is
-opaque to borromean at a high level.
-
-The requirement that data structures be append only affects not
-just the implementation of collection types but also the management
-of:
-
-1. The current heads of each collection instance.
-2. The tracking of free regions.
-3. The tracking of the WAL head.
-
-Each of these is solved by tracking this information in the WAL.
-The WAL is collection 0. At startup we scan regions to find the WAL
-region with the largest sequence number (the current WAL tail). The
-start of each WAL region records the WAL head at the time that region
-was created. We must also scan the tail region for any changes to the
-head caused by reclaiming the WAL head region; those changes are
-represented by ordinary `head` records with `collection_id = 0`.
-Startup uses this metadata plus WAL replay to reconstruct uncommitted
-state in memory and the current free-list head.
+This is why the WAL is collection `0`: it is the single replay order for
+state that would otherwise need stable mutable roots. Startup finds the
+WAL tail by sequence number, derives the effective WAL head from the
+tail prologue and tail-local WAL-head control records, then replays
+retained records to rebuild collection state, allocator state, staged
+regions, pending reclaims, and recovery boundaries.
 
 ### Core Requirements
 
@@ -314,6 +375,27 @@ layered over the newly committed collection head.
 This chapter defines the public storage context, the stable runtime
 vector, the active operation mode, and the named operation and durable
 edge vocabulary used by later chapters.
+
+### How To Read The State Machine
+
+The storage model has three layers:
+
+- **Stable vector**: replayed facts such as WAL head/tail, allocator
+  head/tail, collection states, staged regions, and pending reclaims.
+- **Active mode**: the single in-flight operation and its local progress
+  state.
+- **Durable edge**: one replay-visible write/sync boundary inside a
+  named operation.
+
+Public operations enter from `Idle`, move through one active mode, and
+return to `Idle` after their durable edge sequence reaches a terminal
+state. Some low-level operations intentionally expose a stable
+intermediate vector, such as a reserved `ready_region`; that vector is
+not an in-flight mode and is replayable after reset.
+
+The named operation table is the index for later chapters. Collection,
+WAL, allocator, reclaim, format, and open chapters should use those
+operation names rather than ad hoc prose labels.
 
 ### Storage API Model
 
@@ -576,7 +658,10 @@ State-machine operations are named transition labels. Diagrams and
 transition rules use the operation identifier, with arguments omitted
 when the surrounding source and target states make them clear. A named
 operation may contain no durable writes, one durable edge, or an ordered
-sequence of durable edges.
+sequence of durable edges. When a single-record operation and its
+single durable edge have the same name, the operation is the
+state-machine transition and the durable edge is the write/sync boundary
+inside that transition.
 
 | Operation | Active mode | Source | Durable edge sequence | Target or effect |
 | --- | --- | --- | --- | --- |
@@ -667,6 +752,22 @@ This chapter explains how a user collection moves between empty,
 WAL-snapshot, committed-region, dirty-frontier, and dropped states.
 Collection-specific formats own the payload interpretation, while the
 ring owns the durable transition ordering.
+
+Mechanism review:
+
+- **Purpose**: keep user collections log-structured while allowing
+  bounded in-memory frontiers and multiple durable basis forms.
+- **State**: one collection submachine state per tracked collection,
+  plus retained post-basis update references for dirty states.
+- **Named operations**: `CreateCollection`, `ApplyCollectionUpdate`,
+  `CommitCollectionSnapshot`, `CommitCollectionRegion`,
+  `DropCollection`, and the retained-basis replay operations.
+- **Durable edge sequence**: each foreground operation ends in the WAL
+  record or committed-region head that establishes the target state.
+- **Replay effect**: `ApplyWalRecord` reconstructs the same collection
+  state from retained basis and update records.
+- **Crash cuts**: a collection remains on the prior basis until the
+  target basis record is durable.
 
 ### Collection Head Submachine
 
@@ -941,6 +1042,24 @@ the earliest retained basis record instead.
 This chapter defines the append-only WAL record stream, its physical
 encoding, and the validation rules that make `ApplyWalRecord` safe to
 use during foreground operation, WAL-head reclaim, and startup replay.
+
+Mechanism review:
+
+- **Purpose**: make every replay-visible decision append-only and
+  ordered while distinguishing valid records, unwritten space, and torn
+  or corrupt spans.
+- **State**: WAL head/tail, tail append offset, encoded record
+  alignment, and the pending WAL-recovery boundary.
+- **Named operations**: `AppendRawWalRecord`, `RotateWalTail`,
+  `CommitWalRecovery`, and the WAL-record-preservation edges used by
+  `ReclaimWalHead`.
+- **Durable edge sequence**: each record is written at an aligned WAL
+  slot and becomes visible only after its sync boundary.
+- **Replay effect**: every valid retained record is interpreted through
+  `ApplyWalRecord`; invalid complete records are corruption rather than
+  optional skips.
+- **Crash cuts**: torn records are ignored by scanning rules, but later
+  valid records after a torn span require `wal_recovery`.
 
 ### WAL Record Types
 
@@ -1415,6 +1534,24 @@ This chapter defines the physical storage layout after the logical model
 is established: static metadata, region headers, committed payload
 areas, free-pointer footers, and WAL-region prologues.
 
+Mechanism review:
+
+- **Purpose**: define the bytes that survive reset and make independent
+  implementations agree on the same media image.
+- **State**: storage metadata, region header sequence and ownership,
+  user payload area, free-pointer footer, and WAL-region prologue.
+- **Named operations**: `FormatStorage`, `CommitCollectionRegion`,
+  `RotateWalTail`, `ReclaimRegion`, and `OpenStorage` all depend on
+  these physical layouts.
+- **Durable edge sequence**: physical structures are written and synced
+  by the durable edges named in the state-machine chapter.
+- **Replay effect**: startup trusts locally valid checksums at the layer
+  defined by this spec and reconstructs higher-level state from WAL
+  records and region metadata.
+- **Crash cuts**: incomplete physical writes are detected by checksum or
+  erased-state rules and are interpreted only through the corresponding
+  recovery procedure.
+
 ### Storage Structure
 
 Storage starts with a static metadata region that describes the
@@ -1734,6 +1871,25 @@ This chapter describes `Opening(OpenMode)`: scan media, recover any
 incomplete WAL rotation, replay retained WAL records through the shared
 state-machine rules, validate live collection data, and finish pending
 recovery work.
+
+Mechanism review:
+
+- **Purpose**: turn durable media into the stable runtime vector without
+  inventing recovery-specific collection or allocator semantics.
+- **State**: scanned region headers, WAL chain, replay tracker,
+  pending WAL-recovery boundary, staged regions, pending reclaims, and
+  live collection validation state.
+- **Named operations**: `OpenStorage` orchestrates replay and may invoke
+  recovery sub-operations such as `RotateWalTail` completion and
+  `ReclaimRegion`.
+- **Durable edge sequence**: normal replay is read-only; recovery writes
+  only the edges required to finish an incomplete rotation, close a WAL
+  recovery boundary, or complete safe reclaim work.
+- **Replay effect**: retained WAL records are applied by the same
+  `ApplyWalRecord` table used by foreground operation.
+- **Crash cuts**: opening can be retried after reset because every
+  recovery write either preserves the previous replay result or moves to
+  another replayable prefix.
 
 ### Startup Replay Algorithm
 
@@ -2247,6 +2403,26 @@ This chapter groups the rules that make space reusable without losing
 replayability: WAL-head reclaim decides which records remain live, and
 region reclaim appends detached regions to the FIFO free-list chain.
 
+Mechanism review:
+
+- **Purpose**: reclaim obsolete WAL and data regions while preserving
+  the exact replay result and FIFO free-list ordering.
+- **State**: per-record WAL liveness, `ready_region`,
+  `staged_regions`, pending reclaim records, free-list head/tail, and
+  live collection/WAL reachability.
+- **Named operations**: `ReclaimWalHead`, `ReclaimRegion`,
+  `ReserveRegionForUse`, `StageReadyRegion`, and retained-basis replay
+  operations.
+- **Durable edge sequence**: reclaim begins with `BeginReclaim`,
+  performs any replacement live-state edges, links the region into the
+  free list, and ends with `EndReclaim`.
+- **Replay effect**: replay either sees the same live state as before
+  reclaim, or sees an incomplete reclaim that can be completed or
+  discarded according to reachability.
+- **Crash cuts**: every prefix between `BeginReclaim` and `EndReclaim`
+  leaves either the old region live, the new representation live, or an
+  idempotent free-list completion task.
+
 ### WAL Reclaim Eligibility
 
 WAL-head reclaim is the `ReclaimingWalHead(WalHeadReclaimMode)`
@@ -2528,6 +2704,25 @@ This chapter defines the write/sync cuts that make transitions durable,
 the crash outcomes at those cuts, and the formatting/opening operations
 that create or bootstrap a valid store.
 
+Mechanism review:
+
+- **Purpose**: state exactly when an operation becomes durable and what
+  replay must do for each crash prefix.
+- **State**: the operation-local write/sync sequence plus the stable
+  vector prefix that has become replay-visible.
+- **Named operations**: `ApplyCollectionUpdate`,
+  `CommitCollectionSnapshot`, `CommitCollectionRegion`,
+  `DropCollection`, `RotateWalTail`, `ReclaimRegion`,
+  `ReclaimWalHead`, `CommitWalRecovery`, `FormatStorage`, and
+  `OpenStorage`.
+- **Durable edge sequence**: each operation is expressed as ordered
+  writes and syncs; write order alone is not a durability guarantee.
+- **Replay effect**: replay observes only synced durable edges and
+  reconstructs the state described by the operation's target or
+  recovery prefix.
+- **Crash cuts**: every crash rule names the last durable edge that may
+  be visible and the state that startup must recover from it.
+
 ### Durability and Crash Semantics
 
 Durability boundary:
@@ -2805,12 +3000,17 @@ flowchart LR
     Fresh --> FindTail --> NoWal --> DurableHead --> Runtime --> OpenReady
 ```
 
-## Chapter 9: Implementation Regression Requirements
+## Chapter 9: Current Implementation Coverage
 
 This appendix records requirements that trace the current implementation
 surface and regression tests. They remain in this ring spec for this
 reorganization pass, but they may later move to the implementation spec
 once the state-machine refactor has a stable Rust shape.
+
+The requirements in this chapter are not the conceptual source of the
+ring design. They describe implementation behavior that is currently
+covered by tests and kept here so traceability remains continuous while
+the specification is being refactored toward the operation-first model.
 
 ### Storage Runtime State Requirements
 
