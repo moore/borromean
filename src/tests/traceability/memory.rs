@@ -11,34 +11,23 @@ use std::mem::size_of;
 #[test]
 fn requirement_normal_operation_uses_caller_owned_buffers_without_heap_allocation() {
     let mut flash = MockFlash::<256, 5, 1024>::new(0xff);
-    let mut workspace = StorageWorkspace::<256>::new();
-    let mut payload_buffer = [0u8; 64];
     let mut map_buffer = [0u8; 256];
 
     assert_no_alloc("format/create/update/open", || {
         let mut storage =
-            Storage::<8, 4>::format::<256, 5, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+            Storage::<_, 256, 5, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
+                .unwrap();
+        storage.create_map(CollectionId(90)).unwrap();
         storage
-            .create_map::<256, 5, _>(&mut flash, &mut workspace, CollectionId(90))
-            .unwrap();
-        storage
-            .append_map_update::<256, 5, _, u16, u16, 8>(
-                &mut flash,
-                &mut workspace,
+            .append_map_update::<u16, u16, 8>(
                 CollectionId(90),
                 &MapUpdate::Set { key: 7, value: 70 },
-                &mut payload_buffer,
             )
             .unwrap();
 
-        let reopened = Storage::<8, 4>::open::<256, 5, _>(&mut flash, &mut workspace).unwrap();
+        let mut reopened = Storage::<_, 256, 5, 8, 4>::open(&mut flash).unwrap();
         let map = reopened
-            .open_map::<256, 5, _, u16, u16, 8, 8>(
-                &mut flash,
-                &mut workspace,
-                CollectionId(90),
-                &mut map_buffer,
-            )
+            .open_map::<u16, u16, 8, 8>(CollectionId(90), &mut map_buffer)
             .unwrap();
         assert_eq!(map.get_frontier(&7).unwrap(), Some(70));
     });
@@ -52,15 +41,13 @@ fn requirement_normal_operation_uses_caller_owned_buffers_without_heap_allocatio
 #[test]
 fn requirement_explicit_collection_and_reclaim_capacities_fail_when_exhausted() {
     let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
-    let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =
-        Storage::<1, 1>::format::<512, 5, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+        Storage::<_, 512, 5, 1, 1>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
+            .unwrap();
 
-    storage
-        .create_map::<512, 5, _>(&mut flash, &mut workspace, CollectionId(1))
-        .unwrap();
+    storage.create_map(CollectionId(1)).unwrap();
     assert!(matches!(
-        storage.create_map::<512, 5, _>(&mut flash, &mut workspace, CollectionId(2)),
+        storage.create_map(CollectionId(2)),
         Err(StorageRuntimeError::TooManyTrackedCollections)
             | Err(StorageRuntimeError::Startup(
                 StartupError::TooManyTrackedCollections
@@ -74,12 +61,31 @@ fn requirement_explicit_collection_and_reclaim_capacities_fail_when_exhausted() 
 }
 
 //= spec/implementation.md#memory-requirements
-//= type=todo
+//= type=test
 //# `RING-IMPL-MEM-002` Any operation that needs scratch space for
 //# encoding, decoding, or staging MUST use bounded storage owned by the
 //# `Storage` context or supplied when that context is constructed.
 #[test]
-fn todo_scratch_space_is_owned_by_storage_context() {}
+fn requirement_scratch_space_is_owned_by_storage_context() {
+    let mut flash = MockFlash::<256, 6, 1024>::new(0xff);
+    let mut storage =
+        Storage::<_, 256, 6, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
+            .unwrap();
+
+    storage.create_map(CollectionId(91)).unwrap();
+    for key in 0..2 {
+        storage
+            .append_map_update::<u16, u16, 8>(
+                CollectionId(91),
+                &MapUpdate::Set {
+                    key,
+                    value: key + 100,
+                },
+            )
+            .unwrap();
+    }
+    assert_eq!(storage.mode(), StorageMode::Idle);
+}
 
 //= spec/implementation.md#memory-requirements
 //= type=test
@@ -175,9 +181,23 @@ fn requirement_map_in_memory_state_runs_inside_a_borrowed_buffer_without_allocat
 }
 
 //= spec/implementation.md#api-requirements
-//= type=todo
+//= type=test
 //# `RING-IMPL-API-004` Normal public collection operation APIs SHOULD
 //# avoid repeated caller-provided frontier, payload, or workspace buffers
 //# and instead use bounded memory owned by the `Storage` context.
 #[test]
-fn todo_collection_api_uses_storage_owned_operation_buffers() {}
+fn requirement_collection_api_uses_storage_owned_operation_buffers() {
+    let mut flash = MockFlash::<256, 6, 1024>::new(0xff);
+    let mut storage =
+        Storage::<_, 256, 6, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
+            .unwrap();
+
+    storage.create_map(CollectionId(92)).unwrap();
+    storage
+        .append_map_update::<u16, u16, 8>(CollectionId(92), &MapUpdate::Set { key: 9, value: 90 })
+        .unwrap();
+    let mut map_buffer = [0u8; 256];
+    let mut map = LsmMap::<u16, u16, 8>::new(CollectionId(92), &mut map_buffer).unwrap();
+    map.set(9, 90).unwrap();
+    storage.snapshot_map(&map).unwrap();
+}

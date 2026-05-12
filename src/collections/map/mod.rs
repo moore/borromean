@@ -14,6 +14,7 @@ use postcard::{from_bytes, to_slice};
 use serde::{Deserialize, Serialize};
 
 #[cfg(test)]
+#[allow(unused_mut, unused_variables)]
 mod tests;
 
 // A alloc free version of this would store everything in a array of

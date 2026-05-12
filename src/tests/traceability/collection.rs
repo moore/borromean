@@ -10,11 +10,10 @@ fn requirement_map_durability_and_recovery_only_change_when_the_shared_storage_e
     let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =
-        Storage::<8, 4>::format::<512, 5, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+        Storage::<_, 512, 5, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
+            .unwrap();
 
-    storage
-        .create_map::<512, 5, _>(&mut flash, &mut workspace, CollectionId(84))
-        .unwrap();
+    storage.create_map(CollectionId(84)).unwrap();
 
     let mut source_buffer = [0u8; 512];
     let mut source = LsmMap::<u16, u16, 8>::new(CollectionId(84), &mut source_buffer).unwrap();
@@ -22,62 +21,34 @@ fn requirement_map_durability_and_recovery_only_change_when_the_shared_storage_e
 
     let mut before_snapshot_buffer = [0u8; 512];
     let before_snapshot = storage
-        .open_map::<512, 5, _, u16, u16, 8, 8>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(84),
-            &mut before_snapshot_buffer,
-        )
+        .open_map::<u16, u16, 8, 8>(CollectionId(84), &mut before_snapshot_buffer)
         .unwrap();
     assert_eq!(before_snapshot.get_frontier(&1).unwrap(), None);
 
-    storage
-        .snapshot_map::<512, 5, _, _, _, 8>(&mut flash, &mut workspace, &source)
-        .unwrap();
+    storage.snapshot_map::<_, _, 8>(&source).unwrap();
 
     let mut after_snapshot_buffer = [0u8; 512];
     let after_snapshot = storage
-        .open_map::<512, 5, _, u16, u16, 8, 8>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(84),
-            &mut after_snapshot_buffer,
-        )
+        .open_map::<u16, u16, 8, 8>(CollectionId(84), &mut after_snapshot_buffer)
         .unwrap();
     assert_eq!(after_snapshot.get_frontier(&1).unwrap(), Some(10));
 
     source.set(2, 20).unwrap();
     let mut before_update_buffer = [0u8; 512];
     let before_update = storage
-        .open_map::<512, 5, _, u16, u16, 8, 8>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(84),
-            &mut before_update_buffer,
-        )
+        .open_map::<u16, u16, 8, 8>(CollectionId(84), &mut before_update_buffer)
         .unwrap();
     assert_eq!(before_update.get_frontier(&2).unwrap(), None);
 
     let mut payload_buffer = [0u8; 64];
     storage
-        .append_map_update::<512, 5, _, u16, u16, 8>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(84),
-            &MapUpdate::Set { key: 2, value: 20 },
-            &mut payload_buffer,
-        )
+        .append_map_update::<u16, u16, 8>(CollectionId(84), &MapUpdate::Set { key: 2, value: 20 })
         .unwrap();
 
     let mut reopened_buffer = [0u8; 512];
-    let reopened = Storage::<8, 4>::open::<512, 5, _>(&mut flash, &mut workspace).unwrap();
+    let mut reopened = Storage::<_, 512, 5, 8, 4>::open(&mut flash).unwrap();
     let reopened_map = reopened
-        .open_map::<512, 5, _, u16, u16, 8, 8>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(84),
-            &mut reopened_buffer,
-        )
+        .open_map::<u16, u16, 8, 8>(CollectionId(84), &mut reopened_buffer)
         .unwrap();
     assert_eq!(reopened_map.get_frontier(&1).unwrap(), Some(10));
     assert_eq!(reopened_map.get_frontier(&2).unwrap(), Some(20));
@@ -93,48 +64,30 @@ fn requirement_collection_operations_with_io_are_drivable_as_runtime_agnostic_fu
     let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =
-        Storage::<8, 4>::format::<512, 5, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+        Storage::<_, 512, 5, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
+            .unwrap();
 
-    super::super::poll_ready(storage.create_map_future::<512, 5, _>(
-        &mut flash,
-        &mut workspace,
-        CollectionId(84),
-    ))
-    .unwrap();
+    super::super::poll_ready(storage.create_map_future(CollectionId(84))).unwrap();
 
     let mut source_buffer = [0u8; 512];
     let mut source = LsmMap::<u16, u16, 8>::new(CollectionId(84), &mut source_buffer).unwrap();
     source.set(1, 10).unwrap();
-    super::super::poll_ready(storage.snapshot_map_future::<512, 5, _, _, _, 8>(
-        &mut flash,
-        &mut workspace,
-        &source,
-    ))
-    .unwrap();
+    super::super::poll_ready(storage.snapshot_map_future::<_, _, 8>(&source)).unwrap();
 
     let mut payload_buffer = [0u8; 64];
-    super::super::poll_ready(storage.append_map_update_future::<512, 5, _, u16, u16, 8>(
-        &mut flash,
-        &mut workspace,
+    super::super::poll_ready(storage.append_map_update_future::<u16, u16, 8>(
         CollectionId(84),
         &MapUpdate::Set { key: 2, value: 20 },
-        &mut payload_buffer,
     ))
     .unwrap();
 
     source.set(3, 30).unwrap();
-    let committed_region = super::super::poll_until_ready(
-        storage.flush_map_future::<512, 5, _, _, _, 8, 8>(&mut flash, &mut workspace, &mut source),
-        4,
-    )
-    .unwrap();
+    let committed_region =
+        super::super::poll_until_ready(storage.flush_map_future::<_, _, 8, 8>(&mut source), 4)
+            .unwrap();
 
-    let reclaim_region = super::super::poll_ready(storage.drop_map_future::<512, 5, _>(
-        &mut flash,
-        &mut workspace,
-        CollectionId(84),
-    ))
-    .unwrap();
+    let reclaim_region =
+        super::super::poll_ready(storage.drop_map_future(CollectionId(84))).unwrap();
 
     assert_eq!(reclaim_region, Some(committed_region));
     assert_eq!(

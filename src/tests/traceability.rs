@@ -2,11 +2,11 @@ extern crate std;
 
 use super::assert_no_alloc;
 use crate::{
-    decode_record, encode_record_into, CollectionId, DiskError, FlashIo, FreePointerFooter, Header,
-    LsmMap, MapError, MapStorageError, MapUpdate, MockError, MockFlash, MockFormatError,
-    MockOperation, StartupCollectionBasis, StartupError, Storage, StorageMetadata,
-    StorageRuntimeError, StorageWorkspace, WalRecord, WalRegionPrologue, MAP_REGION_V1_FORMAT,
-    WAL_V1_FORMAT,
+    decode_record, encode_record_into, CollectionCreateMode, CollectionId, CollectionUpdateMode,
+    DiskError, FlashIo, FreePointerFooter, Header, LsmMap, MapError, MapStorageError, MapUpdate,
+    MockError, MockFlash, MockFormatError, MockOperation, StartupCollectionBasis, StartupError,
+    Storage, StorageFormatConfig, StorageMetadata, StorageMode, StorageRuntimeError,
+    StorageWorkspace, WalRecord, WalRegionPrologue, MAP_REGION_V1_FORMAT, WAL_V1_FORMAT,
 };
 
 struct ForwardingFlash<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize> {

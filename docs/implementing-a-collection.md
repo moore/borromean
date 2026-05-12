@@ -59,8 +59,9 @@ If the collection is part of the public surface, also re-export its public types
 
 ## 3. Keep Durability In The Shared Runtime
 
-Do not invent a collection-specific device protocol. New collections should build on the existing
-helpers in [`src/storage.rs`](../src/storage.rs):
+Do not invent a collection-specific device protocol. New public collection APIs should hang off the
+`Storage` facade and use its bound backing and storage-owned scratch. Internally, collection
+adapters can still build on the existing runtime helpers in [`src/storage.rs`](../src/storage.rs):
 
 - `append_new_collection`
 - `append_update`
@@ -75,39 +76,38 @@ helpers in [`src/storage.rs`](../src/storage.rs):
 The usual sequences look like this:
 
 ```rust
-storage.append_new_collection(..., collection_id, CollectionType::FOO_CODE)?;
+storage.append_new_collection(collection_id, CollectionType::FOO_CODE)?;
 ```
 
 ```rust
 let used = frontier.encode_update_into(payload)?;
-storage.append_update(..., collection_id, &payload[..used])?;
+storage.append_update(collection_id, &payload[..used])?;
 ```
 
 ```rust
-let region_index = storage.reserve_next_region(...)?;
+let region_index = storage.reserve_next_region()?;
 storage.write_committed_region(
-    ...,
     region_index,
     collection_id,
     FOO_REGION_V1_FORMAT,
     &region_payload[..used],
 )?;
 if let Some(previous_region) = previous_region {
-    storage.append_reclaim_begin(..., previous_region)?;
+    storage.append_reclaim_begin(previous_region)?;
 }
-storage.append_head(..., collection_id, CollectionType::FOO_CODE, region_index)?;
+storage.append_head(collection_id, CollectionType::FOO_CODE, region_index)?;
 ```
 
 For a multi-region collection, follow the map's staged-region pattern instead:
 
 ```rust
-let segment = storage.reserve_next_region(...)?;
-storage.write_committed_region(..., segment, collection_id, FOO_SEGMENT_V1_FORMAT, segment_payload)?;
-storage.stage_ready_region(..., segment)?;
+let segment = storage.reserve_next_region()?;
+storage.write_committed_region(segment, collection_id, FOO_SEGMENT_V1_FORMAT, segment_payload)?;
+storage.stage_ready_region(segment)?;
 
-let manifest = storage.reserve_next_region(...)?;
-storage.write_committed_region(..., manifest, collection_id, FOO_MANIFEST_V1_FORMAT, manifest_payload)?;
-storage.append_head(..., collection_id, CollectionType::FOO_CODE, manifest)?;
+let manifest = storage.reserve_next_region()?;
+storage.write_committed_region(manifest, collection_id, FOO_MANIFEST_V1_FORMAT, manifest_payload)?;
+storage.append_head(collection_id, CollectionType::FOO_CODE, manifest)?;
 ```
 
 Only the final `head` changes the logical collection basis. Staged segments
@@ -172,10 +172,11 @@ Once the runtime and collection module exist, add the user-facing `Storage` help
 
 For a new collection, keep the same ownership model:
 
-- caller-owned `FlashIo`
-- caller-owned `StorageWorkspace`
-- caller-owned frontier buffers
-- explicit payload staging buffers when encoding may need scratch
+- caller-provided `FlashIo` bound into `Storage`
+- storage-owned reusable operation scratch
+- caller-owned frontier buffers only for opened collection handles that need long-lived memory
+- no repeated backing, `StorageWorkspace`, or payload staging arguments on normal public collection
+  operations
 
 If the collection has operations that mutate in-memory state before the durable append finishes, add
 checkpoint and rollback helpers like the map's `checkpoint_into` and `restore_from_checkpoint` so
@@ -208,48 +209,36 @@ pub struct DurableLog<'a> {
     // caller-owned buffers plus collection-local indexing state
 }
 
-impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
-    Storage<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>
+impl<
+        'db,
+        IO: FlashIo,
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        const MAX_COLLECTIONS: usize,
+        const MAX_PENDING_RECLAIMS: usize,
+    > Storage<'db, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>
 {
-    pub fn create_log<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
+    pub fn create_log(
         &mut self,
-        flash: &mut IO,
-        workspace: &mut StorageWorkspace<REGION_SIZE>,
         collection_id: CollectionId,
     ) -> Result<(), StorageRuntimeError>;
 
-    pub fn open_log<'a, const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
+    pub fn open_log<'a>(
         &self,
-        flash: &mut IO,
-        workspace: &mut StorageWorkspace<REGION_SIZE>,
         collection_id: CollectionId,
         buffer: &'a mut [u8],
     ) -> Result<DurableLog<'a>, LogStorageError>;
 
-    pub fn append_log_entry<
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO: FlashIo,
-    >(
+    pub fn append_log_entry(
         &mut self,
-        flash: &mut IO,
-        workspace: &mut StorageWorkspace<REGION_SIZE>,
         collection_id: CollectionId,
         entry: &[u8],
-        payload_buffer: &mut [u8],
     ) -> Result<LogRecordId, LogStorageError>;
 
-    pub fn truncate_log_after<
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO: FlashIo,
-    >(
+    pub fn truncate_log_after(
         &mut self,
-        flash: &mut IO,
-        workspace: &mut StorageWorkspace<REGION_SIZE>,
         collection_id: CollectionId,
         last_kept: Option<LogRecordId>,
-        payload_buffer: &mut [u8],
     ) -> Result<(), LogStorageError>;
 }
 

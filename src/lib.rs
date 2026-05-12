@@ -1,15 +1,15 @@
 //! Borromean is a `no_std` flash storage engine built around an
-//! append-only ring, caller-owned I/O, and caller-owned scratch memory.
+//! append-only ring, caller-provided I/O, and storage-owned scratch memory.
 //!
 //! The main ownership model is:
 //!
-//! - [`Storage`] owns logical storage state and durability invariants.
-//! - [`FlashIo`] is implemented by the caller's flash or transport layer.
-//! - [`StorageWorkspace`] provides bounded scratch buffers for replay, encoding, and decode.
+//! - [`Storage`] owns logical storage state, bounded operation scratch, and durability invariants.
+//! - [`Storage`] binds exclusive mutable access to a caller-provided [`FlashIo`] backing object.
+//! - [`StorageWorkspace`] remains an advanced internal/test-support scratch type.
 //!
 //! Tier 1 supported APIs are [`Storage`], [`FlashIo`],
-//! [`StorageWorkspace`], [`CollectionId`], [`CollectionType`],
-//! [`LsmMap`], [`MapUpdate`], and [`MockFlash`] for tests and examples.
+//! [`CollectionId`], [`CollectionType`], [`LsmMap`], [`MapUpdate`],
+//! and [`MockFlash`] for tests and examples.
 //! Low-level modules such as [`disk`], [`wal_record`], [`startup`], and
 //! [`storage`] are documented as advanced reference surfaces.
 //!
@@ -17,50 +17,33 @@
 //!
 //! ```no_run
 //! use borromean::{
-//!     CollectionId, MapUpdate, MockFlash, Storage, StorageWorkspace,
+//!     CollectionId, MapUpdate, MockFlash, Storage, StorageFormatConfig,
 //! };
 //!
 //! const REGION_SIZE: usize = 512;
 //! const REGION_COUNT: usize = 4;
 //!
 //! let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 1024>::new(0xff);
-//! let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
-//! let mut storage = Storage::<8, 4>::format::<REGION_SIZE, REGION_COUNT, _>(
+//! let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT, 8, 4>::format(
 //!     &mut flash,
-//!     &mut workspace,
-//!     1,
-//!     8,
-//!     0xa5,
+//!     StorageFormatConfig::new(1, 8, 0xa5),
 //! )
 //! .unwrap();
 //!
 //! storage
-//!     .create_map::<REGION_SIZE, REGION_COUNT, _>(
-//!         &mut flash,
-//!         &mut workspace,
-//!         CollectionId::new(1),
-//!     )
+//!     .create_map(CollectionId::new(1))
 //!     .unwrap();
 //!
-//! let mut payload = [0u8; 64];
 //! storage
-//!     .append_map_update::<REGION_SIZE, REGION_COUNT, _, u16, u16, 8>(
-//!         &mut flash,
-//!         &mut workspace,
+//!     .append_map_update::<u16, u16, 8>(
 //!         CollectionId::new(1),
 //!         &MapUpdate::Set { key: 7, value: 70 },
-//!         &mut payload,
 //!     )
 //!     .unwrap();
 //!
 //! let mut map_buffer = [0u8; REGION_SIZE];
 //! let map = storage
-//!     .open_map::<REGION_SIZE, REGION_COUNT, _, u16, u16, 8, 8>(
-//!         &mut flash,
-//!         &mut workspace,
-//!         CollectionId::new(1),
-//!         &mut map_buffer,
-//!     )
+//!     .open_map::<u16, u16, 8, 8>(CollectionId::new(1), &mut map_buffer)
 //!     .unwrap();
 //! assert_eq!(map.get_frontier(&7).unwrap(), Some(70));
 //! ```
@@ -81,6 +64,7 @@
 )]
 
 #[cfg(test)]
+#[allow(unused_mut, unused_variables)]
 mod tests;
 
 /// Advanced reference types for exact metadata and region-header bytes.
@@ -98,6 +82,10 @@ pub use flash_io::*;
 /// Tier 1 workspace buffers borrowed by replay and mutation operations.
 pub mod workspace;
 pub use workspace::*;
+
+/// Explicit storage operation modes used by the public storage context.
+pub mod mode;
+pub use mode::*;
 
 /// Advanced replay and startup-state types used by open and recovery.
 pub mod startup;
@@ -193,10 +181,46 @@ pub trait Collection {
     fn collection_type(&self) -> CollectionType;
 }
 
+/// Configuration used when formatting a new store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StorageFormatConfig {
+    /// Minimum number of regions that must remain reserved for recovery.
+    pub min_free_regions: u32,
+    /// Required alignment for physical WAL record starts and lengths.
+    pub wal_write_granule: u32,
+    /// Physical byte that starts each WAL record.
+    pub wal_record_magic: u8,
+}
+
+impl StorageFormatConfig {
+    /// Creates a storage format configuration.
+    pub const fn new(min_free_regions: u32, wal_write_granule: u32, wal_record_magic: u8) -> Self {
+        Self {
+            min_free_regions,
+            wal_write_granule,
+            wal_record_magic,
+        }
+    }
+}
+
 /// Tier 1 storage facade for formatting, opening, and mutating a store.
-pub struct Storage<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize> {
-    state: StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+pub struct Storage<
+    'db,
+    IO: FlashIo,
+    const REGION_SIZE: usize,
+    const REGION_COUNT: usize,
+    const MAX_COLLECTIONS: usize,
+    const MAX_PENDING_RECLAIMS: usize,
+> {
+    pub(crate) backing: &'db mut IO,
+    pub(crate) workspace: StorageWorkspace<REGION_SIZE>,
+    pub(crate) state: StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
     dirty_frontiers: Vec<CollectionId, MAX_COLLECTIONS>,
+    pub(crate) payload_scratch: [u8; REGION_SIZE],
+    pub(crate) checkpoint_scratch: [u8; REGION_SIZE],
+    pub(crate) collection_scratch: [u8; REGION_SIZE],
+    pub(crate) open_scratch: [u8; REGION_SIZE],
+    pub(crate) mode: StorageMode,
 }
 
 /// Errors returned while opening storage through [`Storage::open`] or
@@ -229,85 +253,137 @@ impl From<MapStorageError> for StorageOpenError {
     }
 }
 
-impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
-    Storage<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>
+impl<
+        'db,
+        IO: FlashIo,
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        const MAX_COLLECTIONS: usize,
+        const MAX_PENDING_RECLAIMS: usize,
+    > Storage<'db, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>
 {
     /// Formats an empty store and returns it as a caller-driven future.
-    pub fn format_future<'a, const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
-        flash: &'a mut IO,
-        workspace: &'a mut StorageWorkspace<REGION_SIZE>,
-        min_free_regions: u32,
-        wal_write_granule: u32,
-        wal_record_magic: u8,
-    ) -> impl Future<Output = Result<Self, StorageRuntimeError>> + 'a {
-        run_once(move || {
-            Self::format::<REGION_SIZE, REGION_COUNT, IO>(
-                flash,
-                workspace,
-                min_free_regions,
-                wal_write_granule,
-                wal_record_magic,
-            )
-        })
+    pub fn format_future(
+        backing: &'db mut IO,
+        config: StorageFormatConfig,
+    ) -> FormatStorageFuture<
+        'db,
+        IO,
+        REGION_SIZE,
+        REGION_COUNT,
+        MAX_COLLECTIONS,
+        MAX_PENDING_RECLAIMS,
+    > {
+        FormatStorageFuture::new(backing, config)
     }
 
     /// Formats an empty store and returns the opened [`Storage`] state.
-    pub fn format<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
-        flash: &mut IO,
-        workspace: &mut StorageWorkspace<REGION_SIZE>,
-        min_free_regions: u32,
-        wal_write_granule: u32,
-        wal_record_magic: u8,
+    pub fn format(
+        backing: &'db mut IO,
+        config: StorageFormatConfig,
     ) -> Result<Self, StorageRuntimeError> {
-        Ok(Self {
-            state: storage::format::<
-                REGION_SIZE,
-                REGION_COUNT,
-                IO,
-                MAX_COLLECTIONS,
-                MAX_PENDING_RECLAIMS,
-            >(
-                flash,
-                workspace,
-                min_free_regions,
-                wal_write_granule,
-                wal_record_magic,
-            )?,
-            dirty_frontiers: Vec::new(),
-        })
-    }
-
-    /// Opens an already formatted store as a caller-driven future.
-    pub fn open_future<'a, const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
-        flash: &'a mut IO,
-        workspace: &'a mut StorageWorkspace<REGION_SIZE>,
-    ) -> impl Future<Output = Result<Self, StorageOpenError>> + 'a {
-        OpenStorageFuture::<
-            MAX_COLLECTIONS,
-            MAX_PENDING_RECLAIMS,
+        let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
+        let state = storage::format::<
             REGION_SIZE,
             REGION_COUNT,
             IO,
-        >::new(flash, workspace)
+            MAX_COLLECTIONS,
+            MAX_PENDING_RECLAIMS,
+        >(
+            backing,
+            &mut workspace,
+            config.min_free_regions,
+            config.wal_write_granule,
+            config.wal_record_magic,
+        )?;
+        Ok(Self::from_parts(backing, workspace, state))
+    }
+
+    /// Opens an already formatted store as a caller-driven future.
+    pub fn open_future(
+        backing: &'db mut IO,
+    ) -> impl Future<Output = Result<Self, StorageOpenError>> + 'db {
+        OpenStorageFuture::<
+            IO,
+            REGION_SIZE,
+            REGION_COUNT,
+            MAX_COLLECTIONS,
+            MAX_PENDING_RECLAIMS,
+        >::new(backing)
     }
 
     /// Opens an already formatted store and validates live collections.
-    pub fn open<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
-        flash: &mut IO,
-        workspace: &mut StorageWorkspace<REGION_SIZE>,
-    ) -> Result<Self, StorageOpenError> {
-        let storage = Self {
-            state: storage::open::<
-                REGION_SIZE,
-                REGION_COUNT,
-                IO,
-                MAX_COLLECTIONS,
-                MAX_PENDING_RECLAIMS,
-            >(flash, workspace)?,
-            dirty_frontiers: Vec::new(),
-        };
-        storage.validate_live_collections::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace)?;
+    pub fn open(backing: &'db mut IO) -> Result<Self, StorageOpenError> {
+        let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
+        let state = storage::reopen_without_reclaim_recovery::<
+            REGION_SIZE,
+            REGION_COUNT,
+            IO,
+            MAX_COLLECTIONS,
+            MAX_PENDING_RECLAIMS,
+        >(backing, &mut workspace)?;
+        let mut storage = Self::from_parts(backing, workspace, state);
+        storage.validate_live_collections()?;
+        storage
+            .state
+            .recover_pending_reclaims::<REGION_SIZE, REGION_COUNT, IO>(
+                storage.backing,
+                &mut storage.workspace,
+            )?;
+        storage
+            .state
+            .recover_abandoned_staged_regions::<REGION_SIZE, REGION_COUNT, IO>(
+                storage.backing,
+                &mut storage.workspace,
+            )?;
         Ok(storage)
+    }
+
+    fn from_parts(
+        backing: &'db mut IO,
+        workspace: StorageWorkspace<REGION_SIZE>,
+        state: StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+    ) -> Self {
+        Self {
+            backing,
+            workspace,
+            state,
+            dirty_frontiers: Vec::new(),
+            payload_scratch: [0; REGION_SIZE],
+            checkpoint_scratch: [0; REGION_SIZE],
+            collection_scratch: [0; REGION_SIZE],
+            open_scratch: [0; REGION_SIZE],
+            mode: StorageMode::Idle,
+        }
+    }
+
+    /// Consumes the storage context and returns its bound backing object.
+    pub fn into_backing(self) -> &'db mut IO {
+        self.backing
+    }
+
+    /// Returns the current active storage mode.
+    pub fn mode(&self) -> StorageMode {
+        self.mode
+    }
+
+    pub(crate) fn enter_mode(&mut self, next: StorageMode) -> Result<(), StorageRuntimeError> {
+        if self.mode != StorageMode::Idle {
+            return Err(StorageRuntimeError::InvalidStorageMode {
+                expected: StorageMode::expected_idle(),
+                actual: self.mode,
+            });
+        }
+        self.mode = next;
+        Ok(())
+    }
+
+    pub(crate) fn finish_mode(&mut self) {
+        self.mode = StorageMode::Idle;
+    }
+
+    pub(crate) fn set_mode_unchecked(&mut self, mode: StorageMode) {
+        self.mode = mode;
     }
 
     /// Returns the advanced runtime state backing this [`Storage`] value.
@@ -315,14 +391,30 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         &self.state
     }
 
-    /// Returns mutable access to the advanced runtime state.
-    pub fn runtime_mut(&mut self) -> &mut StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS> {
-        &mut self.state
+    /// Consumes the facade and returns the underlying runtime state.
+    #[cfg(test)]
+    pub(crate) fn into_runtime(self) -> StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS> {
+        self.state
     }
 
-    /// Consumes the facade and returns the underlying runtime state.
-    pub fn into_runtime(self) -> StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS> {
-        self.state
+    #[cfg(test)]
+    pub(crate) fn with_runtime_io_workspace<T>(
+        &mut self,
+        operation: impl FnOnce(
+            &mut StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+            &mut IO,
+            &mut StorageWorkspace<REGION_SIZE>,
+        ) -> T,
+    ) -> T {
+        operation(&mut self.state, self.backing, &mut self.workspace)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_io_workspace<T>(
+        &mut self,
+        operation: impl FnOnce(&mut IO, &mut StorageWorkspace<REGION_SIZE>) -> T,
+    ) -> T {
+        operation(self.backing, &mut self.workspace)
     }
 
     /// Returns storage metadata recovered from disk.
@@ -390,15 +482,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         self.state.tracked_user_collection_count()
     }
 
-    pub(crate) fn validate_live_collections<
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO: FlashIo,
-    >(
-        &self,
-        _flash: &mut IO,
-        _workspace: &mut StorageWorkspace<REGION_SIZE>,
-    ) -> Result<(), StorageOpenError> {
+    pub(crate) fn validate_live_collections(&self) -> Result<(), StorageOpenError> {
         for collection in self.collections() {
             if collection.basis() == StartupCollectionBasis::Dropped {
                 continue;
@@ -418,12 +502,11 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
     }
 
     pub(crate) fn from_runtime(
+        backing: &'db mut IO,
+        workspace: StorageWorkspace<REGION_SIZE>,
         state: StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
     ) -> Self {
-        Self {
-            state,
-            dirty_frontiers: Vec::new(),
-        }
+        Self::from_parts(backing, workspace, state)
     }
 
     fn dirty_frontier_is_active(&self, collection_id: CollectionId) -> bool {
@@ -482,539 +565,348 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         }
     }
 
-    /// Appends a `new_collection` WAL record for a supported user collection type.
-    pub fn append_new_collection<
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO: FlashIo,
-    >(
+    fn run_storage_operation<T>(
         &mut self,
-        flash: &mut IO,
-        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        mode: StorageMode,
+        operation: impl FnOnce(&mut Self) -> Result<T, StorageRuntimeError>,
+    ) -> Result<T, StorageRuntimeError> {
+        self.enter_mode(mode)?;
+        let result = operation(self);
+        self.finish_mode();
+        result
+    }
+
+    fn run_map_operation<T>(
+        &mut self,
+        mode: StorageMode,
+        operation: impl FnOnce(&mut Self) -> Result<T, MapStorageError>,
+    ) -> Result<T, MapStorageError> {
+        self.enter_mode(mode).map_err(MapStorageError::from)?;
+        let result = operation(self);
+        self.finish_mode();
+        result
+    }
+
+    /// Appends a `new_collection` WAL record for a supported user collection type.
+    pub fn append_new_collection(
+        &mut self,
         collection_id: CollectionId,
         collection_type: u16,
     ) -> Result<(), StorageRuntimeError> {
-        self.state
-            .append_new_collection::<REGION_SIZE, REGION_COUNT, IO>(
-                flash,
-                workspace,
-                collection_id,
-                collection_type,
-            )
+        self.run_storage_operation(
+            StorageMode::CreatingCollection(CollectionCreateMode::Running),
+            |this| {
+                this.state
+                    .append_new_collection::<REGION_SIZE, REGION_COUNT, IO>(
+                        this.backing,
+                        &mut this.workspace,
+                        collection_id,
+                        collection_type,
+                    )
+            },
+        )
     }
 
     /// Appends a raw `update` WAL payload for an existing collection.
-    pub fn append_update<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
+    pub fn append_update(
         &mut self,
-        flash: &mut IO,
-        workspace: &mut StorageWorkspace<REGION_SIZE>,
         collection_id: CollectionId,
         payload: &[u8],
     ) -> Result<(), StorageRuntimeError> {
-        self.state.append_update::<REGION_SIZE, REGION_COUNT, IO>(
-            flash,
-            workspace,
-            collection_id,
-            payload,
+        self.run_storage_operation(
+            StorageMode::UpdatingCollection(CollectionUpdateMode::Running),
+            |this| {
+                this.state.append_update::<REGION_SIZE, REGION_COUNT, IO>(
+                    this.backing,
+                    &mut this.workspace,
+                    collection_id,
+                    payload,
+                )
+            },
         )
     }
 
     /// Appends a raw `snapshot` WAL payload for an existing collection.
-    pub fn append_snapshot<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
+    pub fn append_snapshot(
         &mut self,
-        flash: &mut IO,
-        workspace: &mut StorageWorkspace<REGION_SIZE>,
         collection_id: CollectionId,
         collection_type: u16,
         payload: &[u8],
     ) -> Result<(), StorageRuntimeError> {
-        self.state.append_snapshot::<REGION_SIZE, REGION_COUNT, IO>(
-            flash,
-            workspace,
-            collection_id,
-            collection_type,
-            payload,
+        self.run_storage_operation(
+            StorageMode::SnapshottingCollection(CollectionSnapshotMode::Running),
+            |this| {
+                this.state.append_snapshot::<REGION_SIZE, REGION_COUNT, IO>(
+                    this.backing,
+                    &mut this.workspace,
+                    collection_id,
+                    collection_type,
+                    payload,
+                )
+            },
         )
     }
 
     /// Appends a `head` WAL record pointing at a committed region.
-    pub fn append_head<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
+    pub fn append_head(
         &mut self,
-        flash: &mut IO,
-        workspace: &mut StorageWorkspace<REGION_SIZE>,
         collection_id: CollectionId,
         collection_type: u16,
         region_index: u32,
     ) -> Result<(), StorageRuntimeError> {
-        self.state.append_head::<REGION_SIZE, REGION_COUNT, IO>(
-            flash,
-            workspace,
-            collection_id,
-            collection_type,
-            region_index,
-        )
+        self.run_storage_operation(StorageMode::AppendingWal(WalAppendMode::Running), |this| {
+            this.state.append_head::<REGION_SIZE, REGION_COUNT, IO>(
+                this.backing,
+                &mut this.workspace,
+                collection_id,
+                collection_type,
+                region_index,
+            )
+        })
     }
 
     /// Appends a `drop_collection` WAL record.
-    pub fn append_drop_collection<
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO: FlashIo,
-    >(
+    pub fn append_drop_collection(
         &mut self,
-        flash: &mut IO,
-        workspace: &mut StorageWorkspace<REGION_SIZE>,
         collection_id: CollectionId,
     ) -> Result<(), StorageRuntimeError> {
-        self.state
-            .append_drop_collection::<REGION_SIZE, REGION_COUNT, IO>(
-                flash,
-                workspace,
-                collection_id,
-            )
-    }
-
-    /// Appends an `alloc_begin` WAL record for a free-list region.
-    pub fn append_alloc_begin<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
-        &mut self,
-        flash: &mut IO,
-        workspace: &mut StorageWorkspace<REGION_SIZE>,
-        region_index: u32,
-        free_list_head_after: Option<u32>,
-    ) -> Result<(), StorageRuntimeError> {
-        self.state
-            .append_alloc_begin::<REGION_SIZE, REGION_COUNT, IO>(
-                flash,
-                workspace,
-                region_index,
-                free_list_head_after,
-            )
-    }
-
-    /// Appends `stage_region` for the current ready region.
-    pub fn stage_ready_region<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
-        &mut self,
-        flash: &mut IO,
-        workspace: &mut StorageWorkspace<REGION_SIZE>,
-        region_index: u32,
-    ) -> Result<(), StorageRuntimeError> {
-        self.state
-            .stage_ready_region::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace, region_index)
-    }
-
-    /// Appends a `free_list_head` WAL record.
-    pub fn append_free_list_head<
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO: FlashIo,
-    >(
-        &mut self,
-        flash: &mut IO,
-        workspace: &mut StorageWorkspace<REGION_SIZE>,
-        region_index: Option<u32>,
-    ) -> Result<(), StorageRuntimeError> {
-        self.state
-            .append_free_list_head::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace, region_index)
-    }
-
-    /// Appends a `reclaim_begin` WAL record for a detached region.
-    pub fn append_reclaim_begin<
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO: FlashIo,
-    >(
-        &mut self,
-        flash: &mut IO,
-        workspace: &mut StorageWorkspace<REGION_SIZE>,
-        region_index: u32,
-    ) -> Result<(), StorageRuntimeError> {
-        self.state
-            .append_reclaim_begin::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace, region_index)
-    }
-
-    /// Appends a `reclaim_end` WAL record for a previously detached region.
-    pub fn append_reclaim_end<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
-        &mut self,
-        flash: &mut IO,
-        workspace: &mut StorageWorkspace<REGION_SIZE>,
-        region_index: u32,
-    ) -> Result<(), StorageRuntimeError> {
-        self.state
-            .append_reclaim_end::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace, region_index)
-    }
-
-    /// Reclaims the current WAL head region and returns the new head.
-    pub fn reclaim_wal_head<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
-        &mut self,
-        flash: &mut IO,
-        workspace: &mut StorageWorkspace<REGION_SIZE>,
-    ) -> Result<u32, StorageRuntimeError> {
-        self.state
-            .reclaim_wal_head::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace)
-    }
-
-    /// Reclaims the current WAL head region as a caller-driven future.
-    pub fn reclaim_wal_head_future<
-        'a,
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO: FlashIo,
-    >(
-        &'a mut self,
-        flash: &'a mut IO,
-        workspace: &'a mut StorageWorkspace<REGION_SIZE>,
-    ) -> impl Future<Output = Result<u32, StorageRuntimeError>> + 'a {
-        ReclaimWalHeadFuture::<
-            MAX_COLLECTIONS,
-            MAX_PENDING_RECLAIMS,
-            REGION_SIZE,
-            REGION_COUNT,
-            IO,
-        >::new(self, flash, workspace)
-    }
-
-    /// Completes physical reclaim for a region already marked pending.
-    pub fn complete_pending_reclaim<
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO: FlashIo,
-    >(
-        &mut self,
-        flash: &mut IO,
-        workspace: &mut StorageWorkspace<REGION_SIZE>,
-        region_index: u32,
-    ) -> Result<(), StorageRuntimeError> {
-        self.state
-            .complete_pending_reclaim::<REGION_SIZE, REGION_COUNT, IO>(
-                flash,
-                workspace,
-                region_index,
-            )
-    }
-
-    /// Appends a `wal_recovery` record when replay requires one.
-    pub fn append_wal_recovery<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
-        &mut self,
-        flash: &mut IO,
-        workspace: &mut StorageWorkspace<REGION_SIZE>,
-    ) -> Result<(), StorageRuntimeError> {
-        self.state
-            .append_wal_recovery::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace)
-    }
-
-    /// Begins a WAL tail rotation and returns the reserved next region.
-    pub fn append_wal_rotation_start<
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO: FlashIo,
-    >(
-        &mut self,
-        flash: &mut IO,
-        workspace: &mut StorageWorkspace<REGION_SIZE>,
-    ) -> Result<u32, StorageRuntimeError> {
-        self.state
-            .append_wal_rotation_start::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace)
-    }
-
-    /// Finishes a WAL tail rotation after `append_wal_rotation_start`.
-    pub fn append_wal_rotation_finish<
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO: FlashIo,
-    >(
-        &mut self,
-        flash: &mut IO,
-        workspace: &mut StorageWorkspace<REGION_SIZE>,
-        next_region_index: u32,
-    ) -> Result<(), StorageRuntimeError> {
-        self.state
-            .append_wal_rotation_finish::<REGION_SIZE, REGION_COUNT, IO>(
-                flash,
-                workspace,
-                next_region_index,
-            )
-    }
-
-    /// Creates a new durable map collection.
-    pub fn create_map<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
-        &mut self,
-        flash: &mut IO,
-        workspace: &mut StorageWorkspace<REGION_SIZE>,
-        collection_id: CollectionId,
-    ) -> Result<(), StorageRuntimeError> {
-        self.append_new_collection::<REGION_SIZE, REGION_COUNT, IO>(
-            flash,
-            workspace,
-            collection_id,
-            CollectionType::MAP_CODE,
+        self.run_storage_operation(
+            StorageMode::DroppingCollection(CollectionDropMode::Running),
+            |this| {
+                this.state
+                    .append_drop_collection::<REGION_SIZE, REGION_COUNT, IO>(
+                        this.backing,
+                        &mut this.workspace,
+                        collection_id,
+                    )
+            },
         )
     }
 
-    /// Creates a new durable map collection as a caller-driven future.
-    pub fn create_map_future<
-        'a,
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO: FlashIo,
-    >(
-        &'a mut self,
-        flash: &'a mut IO,
-        workspace: &'a mut StorageWorkspace<REGION_SIZE>,
+    /// Appends an `alloc_begin` WAL record for a free-list region.
+    pub fn append_alloc_begin(
+        &mut self,
+        region_index: u32,
+        free_list_head_after: Option<u32>,
+    ) -> Result<(), StorageRuntimeError> {
+        self.run_storage_operation(
+            StorageMode::AllocatingRegion(AllocationMode::Running),
+            |this| {
+                this.state
+                    .append_alloc_begin::<REGION_SIZE, REGION_COUNT, IO>(
+                        this.backing,
+                        &mut this.workspace,
+                        region_index,
+                        free_list_head_after,
+                    )
+            },
+        )
+    }
+
+    /// Reserves a free region for a later committed-region write or WAL rotation.
+    pub fn reserve_next_region(&mut self) -> Result<u32, StorageRuntimeError> {
+        self.run_storage_operation(
+            StorageMode::AllocatingRegion(AllocationMode::Running),
+            |this| {
+                this.state
+                    .reserve_next_region::<REGION_SIZE, REGION_COUNT, IO>(
+                        this.backing,
+                        &mut this.workspace,
+                    )
+            },
+        )
+    }
+
+    /// Writes and syncs a committed collection region.
+    pub fn write_committed_region(
+        &mut self,
+        region_index: u32,
         collection_id: CollectionId,
-    ) -> impl Future<Output = Result<(), StorageRuntimeError>> + 'a {
-        run_once(move || {
-            self.create_map::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace, collection_id)
+        collection_format: u16,
+        payload: &[u8],
+    ) -> Result<(), StorageRuntimeError> {
+        self.run_storage_operation(
+            StorageMode::WritingCommittedRegion(CommittedRegionWriteMode::Running),
+            |this| {
+                this.state
+                    .write_committed_region::<REGION_SIZE, REGION_COUNT, IO>(
+                        this.backing,
+                        region_index,
+                        collection_id,
+                        collection_format,
+                        payload,
+                    )
+            },
+        )
+    }
+
+    /// Appends `stage_region` for the current ready region.
+    pub fn stage_ready_region(&mut self, region_index: u32) -> Result<(), StorageRuntimeError> {
+        self.run_storage_operation(StorageMode::AppendingWal(WalAppendMode::Running), |this| {
+            this.state
+                .stage_ready_region::<REGION_SIZE, REGION_COUNT, IO>(
+                    this.backing,
+                    &mut this.workspace,
+                    region_index,
+                )
         })
     }
 
-    /// Persists the supplied map frontier as a WAL snapshot basis.
-    pub fn snapshot_map<
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO: FlashIo,
-        K,
-        V,
-        const MAX_INDEXES: usize,
-    >(
+    /// Appends a `free_list_head` WAL record.
+    pub fn append_free_list_head(
         &mut self,
-        flash: &mut IO,
-        workspace: &mut StorageWorkspace<REGION_SIZE>,
-        map: &LsmMap<'_, K, V, MAX_INDEXES>,
-    ) -> Result<(), MapStorageError>
-    where
-        K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
-        V: Debug + Serialize + for<'de> Deserialize<'de>,
-    {
-        map.write_snapshot_to_storage::<
+        region_index: Option<u32>,
+    ) -> Result<(), StorageRuntimeError> {
+        self.run_storage_operation(StorageMode::AppendingWal(WalAppendMode::Running), |this| {
+            this.state
+                .append_free_list_head::<REGION_SIZE, REGION_COUNT, IO>(
+                    this.backing,
+                    &mut this.workspace,
+                    region_index,
+                )
+        })
+    }
+
+    /// Appends a `reclaim_begin` WAL record for a detached region.
+    pub fn append_reclaim_begin(&mut self, region_index: u32) -> Result<(), StorageRuntimeError> {
+        self.run_storage_operation(
+            StorageMode::ReclaimingRegion(RegionReclaimMode::Running),
+            |this| {
+                this.state
+                    .append_reclaim_begin::<REGION_SIZE, REGION_COUNT, IO>(
+                        this.backing,
+                        &mut this.workspace,
+                        region_index,
+                    )
+            },
+        )
+    }
+
+    /// Appends a `reclaim_end` WAL record for a previously detached region.
+    pub fn append_reclaim_end(&mut self, region_index: u32) -> Result<(), StorageRuntimeError> {
+        self.run_storage_operation(
+            StorageMode::ReclaimingRegion(RegionReclaimMode::Running),
+            |this| {
+                this.state
+                    .append_reclaim_end::<REGION_SIZE, REGION_COUNT, IO>(
+                        this.backing,
+                        &mut this.workspace,
+                        region_index,
+                    )
+            },
+        )
+    }
+
+    /// Reclaims the current WAL head region and returns the new head.
+    pub fn reclaim_wal_head(&mut self) -> Result<u32, StorageRuntimeError> {
+        self.run_storage_operation(
+            StorageMode::ReclaimingWalHead(WalHeadReclaimMode::Plan),
+            |this| {
+                this.state
+                    .reclaim_wal_head::<REGION_SIZE, REGION_COUNT, IO>(
+                        this.backing,
+                        &mut this.workspace,
+                    )
+            },
+        )
+    }
+
+    /// Reclaims the current WAL head region as a caller-driven future.
+    pub fn reclaim_wal_head_future<'a>(
+        &'a mut self,
+    ) -> ReclaimWalHeadFuture<
+        'a,
+        'db,
+        IO,
+        REGION_SIZE,
+        REGION_COUNT,
+        MAX_COLLECTIONS,
+        MAX_PENDING_RECLAIMS,
+    > {
+        ReclaimWalHeadFuture::<
+            'a,
+            'db,
+            IO,
             REGION_SIZE,
             REGION_COUNT,
-            IO,
             MAX_COLLECTIONS,
             MAX_PENDING_RECLAIMS,
-        >(&mut self.state, flash, workspace)?;
-        self.clear_dirty_frontier(map.id());
-        Ok(())
+        >::new(self)
     }
 
-    /// Persists the supplied map frontier as a caller-driven snapshot future.
-    pub fn snapshot_map_future<
-        'a,
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO: FlashIo,
-        K,
-        V,
-        const MAX_INDEXES: usize,
-    >(
-        &'a mut self,
-        flash: &'a mut IO,
-        workspace: &'a mut StorageWorkspace<REGION_SIZE>,
-        map: &'a LsmMap<'a, K, V, MAX_INDEXES>,
-    ) -> impl Future<Output = Result<(), MapStorageError>> + 'a
-    where
-        K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
-        V: Debug + Serialize + for<'de> Deserialize<'de>,
-    {
-        run_once(move || {
-            self.snapshot_map::<REGION_SIZE, REGION_COUNT, IO, K, V, MAX_INDEXES>(
-                flash, workspace, map,
-            )
+    /// Completes physical reclaim for a region already marked pending.
+    pub fn complete_pending_reclaim(
+        &mut self,
+        region_index: u32,
+    ) -> Result<(), StorageRuntimeError> {
+        self.run_storage_operation(
+            StorageMode::ReclaimingRegion(RegionReclaimMode::Running),
+            |this| {
+                this.state
+                    .complete_pending_reclaim::<REGION_SIZE, REGION_COUNT, IO>(
+                        this.backing,
+                        &mut this.workspace,
+                        region_index,
+                    )
+            },
+        )
+    }
+
+    /// Appends a `wal_recovery` record when replay requires one.
+    pub fn append_wal_recovery(&mut self) -> Result<(), StorageRuntimeError> {
+        self.run_storage_operation(StorageMode::AppendingWal(WalAppendMode::Running), |this| {
+            this.state
+                .append_wal_recovery::<REGION_SIZE, REGION_COUNT, IO>(
+                    this.backing,
+                    &mut this.workspace,
+                )
         })
     }
 
-    /// Encodes and appends a map update payload without mutating a caller-owned frontier.
-    pub fn append_map_update<
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO: FlashIo,
-        K,
-        V,
-        const MAX_INDEXES: usize,
-    >(
-        &mut self,
-        flash: &mut IO,
-        workspace: &mut StorageWorkspace<REGION_SIZE>,
-        collection_id: CollectionId,
-        update: &MapUpdate<K, V>,
-        payload_buffer: &mut [u8],
-    ) -> Result<(), MapStorageError>
-    where
-        K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
-        V: Debug + Serialize + for<'de> Deserialize<'de>,
-    {
-        let Some(collection) = self
-            .state
-            .collections()
-            .iter()
-            .find(|collection| collection.collection_id() == collection_id)
-        else {
-            return Err(MapStorageError::UnknownCollection(collection_id));
-        };
-        if collection.basis() == StartupCollectionBasis::Dropped {
-            return Err(MapStorageError::DroppedCollection(collection_id));
-        }
-        if collection.collection_type() != Some(CollectionType::MAP_CODE) {
-            return Err(MapStorageError::CollectionTypeMismatch {
-                collection_id,
-                expected: CollectionType::MAP_CODE,
-                actual: collection.collection_type(),
-            });
-        }
-
-        let used = LsmMap::<K, V, MAX_INDEXES>::encode_update_into(update, payload_buffer)?;
-        self.state
-            .append_update::<REGION_SIZE, REGION_COUNT, IO>(
-                flash,
-                workspace,
-                collection_id,
-                &payload_buffer[..used],
-            )
-            .map_err(MapStorageError::from)
-    }
-
-    /// Applies a map update to both the caller frontier and durable WAL state.
-    pub fn update_map_frontier<
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO: FlashIo,
-        K,
-        V,
-        const MAX_INDEXES: usize,
-        const MAX_RUNS: usize,
-    >(
-        &mut self,
-        flash: &mut IO,
-        workspace: &mut StorageWorkspace<REGION_SIZE>,
-        map: &mut LsmMap<'_, K, V, MAX_INDEXES, MAX_RUNS>,
-        update: &MapUpdate<K, V>,
-        payload_buffer: &mut [u8],
-    ) -> Result<(), MapStorageError>
-    where
-        K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
-        V: Debug + Serialize + for<'de> Deserialize<'de>,
-    {
-        let collection_id = map.id();
-        let Some(collection) = self
-            .state
-            .collections()
-            .iter()
-            .find(|collection| collection.collection_id() == collection_id)
-        else {
-            return Err(MapStorageError::UnknownCollection(collection_id));
-        };
-        if collection.basis() == StartupCollectionBasis::Dropped {
-            return Err(MapStorageError::DroppedCollection(collection_id));
-        }
-        if collection.collection_type() != Some(CollectionType::MAP_CODE) {
-            return Err(MapStorageError::CollectionTypeMismatch {
-                collection_id,
-                expected: CollectionType::MAP_CODE,
-                actual: collection.collection_type(),
-            });
-        }
-        self.ensure_dirty_frontier_budget(collection_id)
-            .map_err(MapStorageError::from)?;
-
-        let used = LsmMap::<K, V, MAX_INDEXES>::encode_update_into(update, payload_buffer)?;
-        let mut checkpoint = {
-            let (checkpoint_buffer, _) = workspace.encode_buffers();
-            map.checkpoint_into(checkpoint_buffer)?
-        };
-
-        match map.apply_update_payload(&payload_buffer[..used]) {
-            Ok(()) => {}
-            Err(MapError::BufferTooSmall) => {
-                {
-                    let (checkpoint_buffer, _) = workspace.encode_buffers();
-                    map.restore_from_checkpoint(checkpoint, checkpoint_buffer)?;
-                }
-
-                self.flush_map::<REGION_SIZE, REGION_COUNT, IO, K, V, MAX_INDEXES, MAX_RUNS>(
-                    flash, workspace, map,
-                )?;
-
-                checkpoint = {
-                    let (checkpoint_buffer, _) = workspace.encode_buffers();
-                    map.checkpoint_into(checkpoint_buffer)?
-                };
-
-                if let Err(error) = map.apply_update_payload(&payload_buffer[..used]) {
-                    let (checkpoint_buffer, _) = workspace.encode_buffers();
-                    map.restore_from_checkpoint(checkpoint, checkpoint_buffer)?;
-                    return Err(error.into());
-                }
-            }
-            Err(error) => {
-                let (checkpoint_buffer, _) = workspace.encode_buffers();
-                map.restore_from_checkpoint(checkpoint, checkpoint_buffer)?;
-                return Err(error.into());
-            }
-        }
-
-        if let Err(error) = self
-            .state
-            .append_update_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
-                flash,
-                workspace,
-                collection_id,
-                &payload_buffer[..used],
-            )
-        {
-            let (checkpoint_buffer, _) = workspace.encode_buffers();
-            map.restore_from_checkpoint(checkpoint, checkpoint_buffer)?;
-            return Err(error.into());
-        }
-
-        self.mark_dirty_frontier(collection_id)
-            .map_err(MapStorageError::from)?;
-        Ok(())
-    }
-
-    /// Encodes and appends a map update as a caller-driven future.
-    pub fn append_map_update_future<
-        'a,
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO: FlashIo,
-        K,
-        V,
-        const MAX_INDEXES: usize,
-    >(
-        &'a mut self,
-        flash: &'a mut IO,
-        workspace: &'a mut StorageWorkspace<REGION_SIZE>,
-        collection_id: CollectionId,
-        update: &'a MapUpdate<K, V>,
-        payload_buffer: &'a mut [u8],
-    ) -> impl Future<Output = Result<(), MapStorageError>> + 'a
-    where
-        K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
-        V: Debug + Serialize + for<'de> Deserialize<'de>,
-    {
-        run_once(move || {
-            self.append_map_update::<REGION_SIZE, REGION_COUNT, IO, K, V, MAX_INDEXES>(
-                flash,
-                workspace,
-                collection_id,
-                update,
-                payload_buffer,
-            )
+    /// Begins a WAL tail rotation and returns the reserved next region.
+    pub fn append_wal_rotation_start(&mut self) -> Result<u32, StorageRuntimeError> {
+        self.run_storage_operation(StorageMode::RotatingWal(WalRotationMode::Running), |this| {
+            this.state
+                .append_wal_rotation_start::<REGION_SIZE, REGION_COUNT, IO>(
+                    this.backing,
+                    &mut this.workspace,
+                )
         })
     }
 
-    /// Flushes the supplied map frontier into a new committed region.
-    pub fn flush_map<
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO: FlashIo,
-        K,
-        V,
-        const MAX_INDEXES: usize,
-        const MAX_RUNS: usize,
-    >(
+    /// Finishes a WAL tail rotation after `append_wal_rotation_start`.
+    pub fn append_wal_rotation_finish(
         &mut self,
-        flash: &mut IO,
-        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        next_region_index: u32,
+    ) -> Result<(), StorageRuntimeError> {
+        self.run_storage_operation(StorageMode::RotatingWal(WalRotationMode::Running), |this| {
+            this.state
+                .append_wal_rotation_finish::<REGION_SIZE, REGION_COUNT, IO>(
+                    this.backing,
+                    &mut this.workspace,
+                    next_region_index,
+                )
+        })
+    }
+
+    /// Creates a new durable map collection.
+    pub fn create_map(&mut self, collection_id: CollectionId) -> Result<(), StorageRuntimeError> {
+        self.append_new_collection(collection_id, CollectionType::MAP_CODE)
+    }
+
+    /// Creates a new durable map collection as a caller-driven future.
+    pub fn create_map_future<'a>(
+        &'a mut self,
+        collection_id: CollectionId,
+    ) -> impl Future<Output = Result<(), StorageRuntimeError>>
+           + 'a
+           + use<'a, 'db, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>
+    {
+        run_once(move || self.create_map(collection_id))
+    }
+
+    pub(crate) fn flush_map_inner<K, V, const MAX_INDEXES: usize, const MAX_RUNS: usize>(
+        &mut self,
         map: &mut LsmMap<'_, K, V, MAX_INDEXES, MAX_RUNS>,
     ) -> Result<u32, MapStorageError>
     where
@@ -1027,49 +919,272 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
             IO,
             MAX_COLLECTIONS,
             MAX_PENDING_RECLAIMS,
-        >(&mut self.state, flash, workspace)?;
+        >(&mut self.state, self.backing, &mut self.workspace)?;
         self.clear_dirty_frontier(map.id());
         Ok(region_index)
     }
 
-    /// Flushes the supplied map frontier as a caller-driven future.
-    pub fn flush_map_future<
+    /// Persists the supplied map frontier as a WAL snapshot basis.
+    pub fn snapshot_map<K, V, const MAX_INDEXES: usize>(
+        &mut self,
+        map: &LsmMap<'_, K, V, MAX_INDEXES>,
+    ) -> Result<(), MapStorageError>
+    where
+        K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
+        V: Debug + Serialize + for<'de> Deserialize<'de>,
+    {
+        self.run_map_operation(
+            StorageMode::SnapshottingCollection(CollectionSnapshotMode::Running),
+            |this| {
+                map.write_snapshot_to_storage::<
+                    REGION_SIZE,
+                    REGION_COUNT,
+                    IO,
+                    MAX_COLLECTIONS,
+                    MAX_PENDING_RECLAIMS,
+                >(&mut this.state, this.backing, &mut this.workspace)?;
+                this.clear_dirty_frontier(map.id());
+                Ok(())
+            },
+        )
+    }
+
+    /// Persists the supplied map frontier as a caller-driven snapshot future.
+    pub fn snapshot_map_future<'a, K, V, const MAX_INDEXES: usize>(
+        &'a mut self,
+        map: &'a LsmMap<'a, K, V, MAX_INDEXES>,
+    ) -> impl Future<Output = Result<(), MapStorageError>>
+           + 'a
+           + use<
         'a,
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO: FlashIo,
+        'db,
         K,
         V,
-        const MAX_INDEXES: usize,
-        const MAX_RUNS: usize,
-    >(
+        MAX_INDEXES,
+        IO,
+        REGION_SIZE,
+        REGION_COUNT,
+        MAX_COLLECTIONS,
+        MAX_PENDING_RECLAIMS,
+    >
+    where
+        K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
+        V: Debug + Serialize + for<'de> Deserialize<'de>,
+    {
+        run_once(move || self.snapshot_map::<K, V, MAX_INDEXES>(map))
+    }
+
+    /// Encodes and appends a map update payload without mutating a caller-owned frontier.
+    pub fn append_map_update<K, V, const MAX_INDEXES: usize>(
+        &mut self,
+        collection_id: CollectionId,
+        update: &MapUpdate<K, V>,
+    ) -> Result<(), MapStorageError>
+    where
+        K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
+        V: Debug + Serialize + for<'de> Deserialize<'de>,
+    {
+        self.run_map_operation(
+            StorageMode::UpdatingCollection(CollectionUpdateMode::Running),
+            |this| {
+                let Some(collection) = this
+                    .state
+                    .collections()
+                    .iter()
+                    .find(|collection| collection.collection_id() == collection_id)
+                else {
+                    return Err(MapStorageError::UnknownCollection(collection_id));
+                };
+                if collection.basis() == StartupCollectionBasis::Dropped {
+                    return Err(MapStorageError::DroppedCollection(collection_id));
+                }
+                if collection.collection_type() != Some(CollectionType::MAP_CODE) {
+                    return Err(MapStorageError::CollectionTypeMismatch {
+                        collection_id,
+                        expected: CollectionType::MAP_CODE,
+                        actual: collection.collection_type(),
+                    });
+                }
+
+                let used = LsmMap::<K, V, MAX_INDEXES>::encode_update_into(
+                    update,
+                    &mut this.payload_scratch,
+                )?;
+                this.state
+                    .append_update::<REGION_SIZE, REGION_COUNT, IO>(
+                        this.backing,
+                        &mut this.workspace,
+                        collection_id,
+                        &this.payload_scratch[..used],
+                    )
+                    .map_err(MapStorageError::from)
+            },
+        )
+    }
+
+    /// Applies a map update to both the caller frontier and durable WAL state.
+    pub fn update_map_frontier<K, V, const MAX_INDEXES: usize, const MAX_RUNS: usize>(
+        &mut self,
+        map: &mut LsmMap<'_, K, V, MAX_INDEXES, MAX_RUNS>,
+        update: &MapUpdate<K, V>,
+    ) -> Result<(), MapStorageError>
+    where
+        K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
+        V: Debug + Serialize + for<'de> Deserialize<'de>,
+    {
+        self.enter_mode(StorageMode::UpdatingCollection(
+            CollectionUpdateMode::Running,
+        ))
+        .map_err(MapStorageError::from)?;
+
+        let result = (|| {
+            let collection_id = map.id();
+            let Some(collection) = self
+                .state
+                .collections()
+                .iter()
+                .find(|collection| collection.collection_id() == collection_id)
+            else {
+                return Err(MapStorageError::UnknownCollection(collection_id));
+            };
+            if collection.basis() == StartupCollectionBasis::Dropped {
+                return Err(MapStorageError::DroppedCollection(collection_id));
+            }
+            if collection.collection_type() != Some(CollectionType::MAP_CODE) {
+                return Err(MapStorageError::CollectionTypeMismatch {
+                    collection_id,
+                    expected: CollectionType::MAP_CODE,
+                    actual: collection.collection_type(),
+                });
+            }
+            self.ensure_dirty_frontier_budget(collection_id)
+                .map_err(MapStorageError::from)?;
+
+            let used =
+                LsmMap::<K, V, MAX_INDEXES>::encode_update_into(update, &mut self.payload_scratch)?;
+            let mut checkpoint = map.checkpoint_into(&mut self.checkpoint_scratch)?;
+
+            match map.apply_update_payload(&self.payload_scratch[..used]) {
+                Ok(()) => {}
+                Err(MapError::BufferTooSmall) => {
+                    map.restore_from_checkpoint(checkpoint, &mut self.checkpoint_scratch)?;
+
+                    self.flush_map_inner::<K, V, MAX_INDEXES, MAX_RUNS>(map)?;
+
+                    checkpoint = map.checkpoint_into(&mut self.checkpoint_scratch)?;
+
+                    if let Err(error) = map.apply_update_payload(&self.payload_scratch[..used]) {
+                        map.restore_from_checkpoint(checkpoint, &mut self.checkpoint_scratch)?;
+                        return Err(error.into());
+                    }
+                }
+                Err(error) => {
+                    map.restore_from_checkpoint(checkpoint, &mut self.checkpoint_scratch)?;
+                    return Err(error.into());
+                }
+            }
+
+            if let Err(error) = self
+                .state
+                .append_update_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
+                    self.backing,
+                    &mut self.workspace,
+                    collection_id,
+                    &self.payload_scratch[..used],
+                )
+            {
+                map.restore_from_checkpoint(checkpoint, &mut self.checkpoint_scratch)?;
+                return Err(error.into());
+            }
+
+            self.mark_dirty_frontier(collection_id)
+                .map_err(MapStorageError::from)?;
+            Ok(())
+        })();
+
+        self.finish_mode();
+        result
+    }
+
+    /// Encodes and appends a map update as a caller-driven future.
+    pub fn append_map_update_future<'a, K, V, const MAX_INDEXES: usize>(
         &'a mut self,
-        flash: &'a mut IO,
-        workspace: &'a mut StorageWorkspace<REGION_SIZE>,
+        collection_id: CollectionId,
+        update: &'a MapUpdate<K, V>,
+    ) -> impl Future<Output = Result<(), MapStorageError>>
+           + 'a
+           + use<
+        'a,
+        'db,
+        K,
+        V,
+        MAX_INDEXES,
+        IO,
+        REGION_SIZE,
+        REGION_COUNT,
+        MAX_COLLECTIONS,
+        MAX_PENDING_RECLAIMS,
+    >
+    where
+        K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
+        V: Debug + Serialize + for<'de> Deserialize<'de>,
+    {
+        run_once(move || self.append_map_update::<K, V, MAX_INDEXES>(collection_id, update))
+    }
+
+    /// Flushes the supplied map frontier into a new committed region.
+    pub fn flush_map<K, V, const MAX_INDEXES: usize, const MAX_RUNS: usize>(
+        &mut self,
+        map: &mut LsmMap<'_, K, V, MAX_INDEXES, MAX_RUNS>,
+    ) -> Result<u32, MapStorageError>
+    where
+        K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
+        V: Debug + Serialize + for<'de> Deserialize<'de>,
+    {
+        self.run_map_operation(
+            StorageMode::FlushingCollection(CollectionFlushMode::CommitRegion),
+            |this| this.flush_map_inner::<K, V, MAX_INDEXES, MAX_RUNS>(map),
+        )
+    }
+
+    /// Flushes the supplied map frontier as a caller-driven future.
+    pub fn flush_map_future<'a, K, V, const MAX_INDEXES: usize, const MAX_RUNS: usize>(
+        &'a mut self,
         map: &'a mut LsmMap<'a, K, V, MAX_INDEXES, MAX_RUNS>,
-    ) -> impl Future<Output = Result<u32, MapStorageError>> + 'a
+    ) -> YieldingFlushMapFuture<
+        'a,
+        'db,
+        IO,
+        REGION_SIZE,
+        REGION_COUNT,
+        MAX_COLLECTIONS,
+        MAX_PENDING_RECLAIMS,
+        K,
+        V,
+        MAX_INDEXES,
+        MAX_RUNS,
+    >
     where
         K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
         V: Debug + Serialize + for<'de> Deserialize<'de>,
     {
         YieldingFlushMapFuture::<
-            MAX_COLLECTIONS,
-            MAX_PENDING_RECLAIMS,
+            'a,
+            'db,
+            IO,
             REGION_SIZE,
             REGION_COUNT,
-            IO,
+            MAX_COLLECTIONS,
+            MAX_PENDING_RECLAIMS,
             K,
             V,
             MAX_INDEXES,
             MAX_RUNS,
-        >::new(self, flash, workspace, map)
+        >::new(self, map)
     }
 
     /// Compacts a map's committed run set into one replacement manifest.
     pub fn compact_map<
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO: FlashIo,
         K,
         V,
         const MAX_INDEXES: usize,
@@ -1077,148 +1192,143 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         const REGION_TARGET: usize,
     >(
         &mut self,
-        flash: &mut IO,
-        workspace: &mut StorageWorkspace<REGION_SIZE>,
         collection_id: CollectionId,
-        scratch_buffer: &mut [u8],
     ) -> Result<Option<u32>, MapStorageError>
     where
         K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
         V: Debug + Serialize + for<'de> Deserialize<'de>,
     {
-        if REGION_TARGET == 0 {
-            return Err(MapStorageError::InvalidRegionTarget);
-        }
+        self.run_map_operation(
+            StorageMode::CompactingCollection(CollectionCompactionMode::Running),
+            |this| {
+                if REGION_TARGET == 0 {
+                    return Err(MapStorageError::InvalidRegionTarget);
+                }
 
-        let mut open_buffer = [0u8; REGION_SIZE];
-        let mut opened = LsmMap::<K, V, MAX_INDEXES, MAX_RUNS>::open_from_storage::<
-            REGION_SIZE,
-            REGION_COUNT,
-            IO,
-            MAX_COLLECTIONS,
-            MAX_PENDING_RECLAIMS,
-        >(
-            &self.state,
-            flash,
-            workspace,
-            collection_id,
-            &mut open_buffer,
-        )?;
+                let mut opened = LsmMap::<K, V, MAX_INDEXES, MAX_RUNS>::open_from_storage::<
+                    REGION_SIZE,
+                    REGION_COUNT,
+                    IO,
+                    MAX_COLLECTIONS,
+                    MAX_PENDING_RECLAIMS,
+                >(
+                    &this.state,
+                    this.backing,
+                    &mut this.workspace,
+                    collection_id,
+                    &mut this.open_scratch,
+                )?;
 
-        let Some(selected_runs) = opened.selected_compaction_run_count(REGION_TARGET)? else {
-            return Ok(None);
-        };
+                let Some(selected_runs) = opened.selected_compaction_run_count(REGION_TARGET)?
+                else {
+                    return Ok(None);
+                };
 
-        let planned_allocations = opened
-            .selected_compaction_state_count(selected_runs)?
-            .checked_add(1)
-            .ok_or(MapStorageError::Map(
-                crate::collections::map::MapError::SerializationError,
-            ))?;
-        let additional_allocations = if self.state.ready_region().is_some() {
-            planned_allocations.saturating_sub(1)
-        } else {
-            planned_allocations
-        };
-        self.state
-            .ensure_foreground_allocation_headroom_for::<REGION_SIZE, REGION_COUNT, IO>(
-                flash,
-                workspace,
-                additional_allocations,
-            )?;
+                let planned_allocations = opened
+                    .selected_compaction_state_count(selected_runs)?
+                    .checked_add(1)
+                    .ok_or(MapStorageError::Map(
+                        crate::collections::map::MapError::SerializationError,
+                    ))?;
+                let additional_allocations = if this.state.ready_region().is_some() {
+                    planned_allocations.saturating_sub(1)
+                } else {
+                    planned_allocations
+                };
+                this.state
+                    .ensure_foreground_allocation_headroom_for::<REGION_SIZE, REGION_COUNT, IO>(
+                        this.backing,
+                        &mut this.workspace,
+                        additional_allocations,
+                    )?;
 
-        let replacement_run = opened.write_compacted_run_to_storage::<
-            REGION_SIZE,
-            REGION_COUNT,
-            IO,
-            MAX_COLLECTIONS,
-            MAX_PENDING_RECLAIMS,
-        >(&mut self.state, flash, workspace, selected_runs)?;
-        let mut replacement =
-            LsmMap::<K, V, MAX_INDEXES, MAX_RUNS>::new(collection_id, scratch_buffer)?;
-        opened.move_unselected_runs_into(selected_runs, &mut replacement)?;
-        let manifest_region = replacement.commit_manifest_to_storage::<
-            REGION_SIZE,
-            REGION_COUNT,
-            IO,
-            MAX_COLLECTIONS,
-            MAX_PENDING_RECLAIMS,
-        >(&mut self.state, flash, workspace, replacement_run)?;
-        opened.reclaim_run_regions::<
-            REGION_SIZE,
-            REGION_COUNT,
-            IO,
-            MAX_COLLECTIONS,
-            MAX_PENDING_RECLAIMS,
-        >(&mut self.state, flash, workspace)?;
-        self.clear_dirty_frontier(collection_id);
-        Ok(Some(manifest_region))
+                let replacement_run = opened.write_compacted_run_to_storage::<
+                    REGION_SIZE,
+                    REGION_COUNT,
+                    IO,
+                    MAX_COLLECTIONS,
+                    MAX_PENDING_RECLAIMS,
+                >(&mut this.state, this.backing, &mut this.workspace, selected_runs)?;
+                let mut replacement = LsmMap::<K, V, MAX_INDEXES, MAX_RUNS>::new(
+                    collection_id,
+                    &mut this.collection_scratch,
+                )?;
+                opened.move_unselected_runs_into(selected_runs, &mut replacement)?;
+                let manifest_region = replacement.commit_manifest_to_storage::<
+                    REGION_SIZE,
+                    REGION_COUNT,
+                    IO,
+                    MAX_COLLECTIONS,
+                    MAX_PENDING_RECLAIMS,
+                >(&mut this.state, this.backing, &mut this.workspace, replacement_run)?;
+                opened.reclaim_run_regions::<
+                    REGION_SIZE,
+                    REGION_COUNT,
+                    IO,
+                    MAX_COLLECTIONS,
+                    MAX_PENDING_RECLAIMS,
+                >(&mut this.state, this.backing, &mut this.workspace)?;
+                this.clear_dirty_frontier(collection_id);
+                Ok(Some(manifest_region))
+            },
+        )
     }
 
     /// Drops a live map collection and begins reclaim for its last region basis.
-    pub fn drop_map<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
+    pub fn drop_map(
         &mut self,
-        flash: &mut IO,
-        workspace: &mut StorageWorkspace<REGION_SIZE>,
         collection_id: CollectionId,
     ) -> Result<Option<u32>, MapStorageError> {
-        let Some(collection) = self
-            .state
-            .collections()
-            .iter()
-            .find(|collection| collection.collection_id() == collection_id)
-        else {
-            return Err(MapStorageError::UnknownCollection(collection_id));
-        };
-        if collection.basis() == StartupCollectionBasis::Dropped {
-            return Err(MapStorageError::DroppedCollection(collection_id));
-        }
-        if collection.collection_type() != Some(CollectionType::MAP_CODE) {
-            return Err(MapStorageError::CollectionTypeMismatch {
-                collection_id,
-                expected: CollectionType::MAP_CODE,
-                actual: collection.collection_type(),
-            });
-        }
+        self.run_map_operation(
+            StorageMode::DroppingCollection(CollectionDropMode::Running),
+            |this| {
+                let Some(collection) = this
+                    .state
+                    .collections()
+                    .iter()
+                    .find(|collection| collection.collection_id() == collection_id)
+                else {
+                    return Err(MapStorageError::UnknownCollection(collection_id));
+                };
+                if collection.basis() == StartupCollectionBasis::Dropped {
+                    return Err(MapStorageError::DroppedCollection(collection_id));
+                }
+                if collection.collection_type() != Some(CollectionType::MAP_CODE) {
+                    return Err(MapStorageError::CollectionTypeMismatch {
+                        collection_id,
+                        expected: CollectionType::MAP_CODE,
+                        actual: collection.collection_type(),
+                    });
+                }
 
-        let reclaim = self
-            .state
-            .drop_collection_and_begin_reclaim::<REGION_SIZE, REGION_COUNT, IO>(
-                flash,
-                workspace,
-                collection_id,
-            )
-            .map_err(MapStorageError::from)?;
-        self.clear_dirty_frontier(collection_id);
-        Ok(reclaim)
+                let reclaim = this
+                    .state
+                    .drop_collection_and_begin_reclaim::<REGION_SIZE, REGION_COUNT, IO>(
+                        this.backing,
+                        &mut this.workspace,
+                        collection_id,
+                    )
+                    .map_err(MapStorageError::from)?;
+                this.clear_dirty_frontier(collection_id);
+                Ok(reclaim)
+            },
+        )
     }
 
     /// Drops a live map collection as a caller-driven future.
-    pub fn drop_map_future<'a, const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
+    pub fn drop_map_future<'a>(
         &'a mut self,
-        flash: &'a mut IO,
-        workspace: &'a mut StorageWorkspace<REGION_SIZE>,
         collection_id: CollectionId,
-    ) -> impl Future<Output = Result<Option<u32>, MapStorageError>> + 'a {
-        run_once(move || {
-            self.drop_map::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace, collection_id)
-        })
+    ) -> impl Future<Output = Result<Option<u32>, MapStorageError>>
+           + 'a
+           + use<'a, 'db, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>
+    {
+        run_once(move || self.drop_map(collection_id))
     }
 
     /// Opens a live map collection into a caller-owned frontier buffer.
-    pub fn open_map<
-        'a,
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO: FlashIo,
-        K,
-        V,
-        const MAX_INDEXES: usize,
-        const MAX_RUNS: usize,
-    >(
-        &self,
-        flash: &mut IO,
-        workspace: &mut StorageWorkspace<REGION_SIZE>,
+    pub fn open_map<'a, K, V, const MAX_INDEXES: usize, const MAX_RUNS: usize>(
+        &mut self,
         collection_id: CollectionId,
         buffer: &'a mut [u8],
     ) -> Result<LsmMap<'a, K, V, MAX_INDEXES, MAX_RUNS>, MapStorageError>
@@ -1226,12 +1336,22 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
         V: Debug + Serialize + for<'de> Deserialize<'de>,
     {
-        LsmMap::<K, V, MAX_INDEXES, MAX_RUNS>::open_from_storage::<
+        self.enter_mode(StorageMode::LoadingCollection(CollectionLoadMode::Running))
+            .map_err(MapStorageError::from)?;
+        let result = LsmMap::<K, V, MAX_INDEXES, MAX_RUNS>::open_from_storage::<
             REGION_SIZE,
             REGION_COUNT,
             IO,
             MAX_COLLECTIONS,
             MAX_PENDING_RECLAIMS,
-        >(&self.state, flash, workspace, collection_id, buffer)
+        >(
+            &self.state,
+            self.backing,
+            &mut self.workspace,
+            collection_id,
+            buffer,
+        );
+        self.finish_mode();
+        result
     }
 }

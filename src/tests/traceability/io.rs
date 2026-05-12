@@ -86,17 +86,12 @@ fn requirement_flash_io_trait_accepts_caller_defined_driver_types() {
     const REGION_COUNT: usize = 5;
     let mut flash = ForwardingFlash::<REGION_SIZE, REGION_COUNT, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
-    let mut storage = Storage::<8, 4>::format::<REGION_SIZE, REGION_COUNT, _>(
+    let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT, 8, 4>::format(
         &mut flash,
-        &mut workspace,
-        1,
-        8,
-        0xa5,
+        StorageFormatConfig::new(1, 8, 0xa5),
     )
     .unwrap();
-    storage
-        .create_map::<REGION_SIZE, REGION_COUNT, _>(&mut flash, &mut workspace, CollectionId(62))
-        .unwrap();
+    storage.create_map(CollectionId(62)).unwrap();
     assert_eq!(storage.collections()[0].collection_id(), CollectionId(62));
 }
 
@@ -112,21 +107,12 @@ fn requirement_flash_io_trait_supports_non_allocating_concrete_driver_usage() {
     assert_no_alloc("FlashIo concrete-driver operation path", || {
         let mut flash = ForwardingFlash::<REGION_SIZE, REGION_COUNT, 2048>::new(0xff);
         let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
-        let mut storage = Storage::<8, 4>::format::<REGION_SIZE, REGION_COUNT, _>(
+        let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT, 8, 4>::format(
             &mut flash,
-            &mut workspace,
-            1,
-            8,
-            0xa5,
+            StorageFormatConfig::new(1, 8, 0xa5),
         )
         .unwrap();
-        storage
-            .create_map::<REGION_SIZE, REGION_COUNT, _>(
-                &mut flash,
-                &mut workspace,
-                CollectionId(63),
-            )
-            .unwrap();
+        storage.create_map(CollectionId(63)).unwrap();
         assert_eq!(storage.collections()[0].collection_id(), CollectionId(63));
     });
 }

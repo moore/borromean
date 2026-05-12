@@ -8,8 +8,8 @@ local specifications.
 ## Supported Today
 
 - The durable storage engine is implemented by [`Storage`](src/lib.rs).
-- The caller supplies device access through [`FlashIo`](src/flash_io.rs) and temporary buffers
-  through [`StorageWorkspace`](src/workspace.rs).
+- The caller supplies device access through [`FlashIo`](src/flash_io.rs); `Storage` binds that
+  backing by exclusive mutable reference and owns the bounded scratch used by normal operations.
 - The only user collection type that is supported durably today is the map collection implemented by
   [`LsmMap`](src/collections/map/mod.rs).
 - The exported channel module is still experimental. It is documented as a public API surface, but
@@ -17,7 +17,8 @@ local specifications.
 
 ## Operating Model
 
-Borromean keeps logical storage state in `Storage` and keeps device ownership outside the crate.
+Borromean keeps logical storage state and bounded operation scratch in `Storage`, while the concrete
+device driver remains caller-provided through the `FlashIo` trait.
 Callers can drive the same operations in two styles:
 
 - Blocking entry points such as `Storage::format`, `Storage::open`, `Storage::create_map`, and
@@ -28,7 +29,8 @@ Callers can drive the same operations in two styles:
 In both styles the ownership model stays the same:
 
 - Borromean owns storage invariants and on-disk ordering rules.
-- The caller owns the flash driver, executor, and scratch memory.
+- The caller owns the flash driver and executor; `Storage` owns reusable operation scratch while it
+  holds the backing reference.
 - Map values are materialized in caller-owned buffers and serialized without heap allocation inside
   the core crate.
 

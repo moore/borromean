@@ -25,19 +25,17 @@ fn requirement_wal_storage_and_map_logic_are_exercised_through_separate_interfac
     let mut flash = MockFlash::<256, 4, 512>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
     let mut storage =
-        Storage::<8, 4>::format::<256, 4, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
-    storage
-        .create_map::<256, 4, _>(&mut flash, &mut workspace, CollectionId(7))
-        .unwrap();
+        Storage::<_, 256, 4, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
+            .unwrap();
+    storage.create_map(CollectionId(7)).unwrap();
 
     let mut source_buffer = [0u8; 256];
     let mut source = LsmMap::<u16, u16, 8>::new(CollectionId(7), &mut source_buffer).unwrap();
     source.set(5, 50).unwrap();
-    let region_index = storage
-        .flush_map::<256, 4, _, _, _, 8, 8>(&mut flash, &mut workspace, &mut source)
-        .unwrap();
+    let region_index = storage.flush_map::<_, _, 8, 8>(&mut source).unwrap();
 
-    let reopened = Storage::<8, 4>::open::<256, 4, _>(&mut flash, &mut workspace).unwrap();
+    drop(storage);
+    let mut reopened = Storage::<_, 256, 4, 8, 4>::open(&mut flash).unwrap();
     assert_eq!(
         reopened.collections()[0].basis(),
         StartupCollectionBasis::Region(region_index)
@@ -45,16 +43,11 @@ fn requirement_wal_storage_and_map_logic_are_exercised_through_separate_interfac
 
     let mut reopened_buffer = [0u8; 256];
     let reopened_map = reopened
-        .open_map::<256, 4, _, u16, u16, 8, 8>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(7),
-            &mut reopened_buffer,
-        )
+        .open_map::<u16, u16, 8, 8>(CollectionId(7), &mut reopened_buffer)
         .unwrap();
     assert_eq!(
-        reopened_map
-            .get::<256, _>(&mut flash, &mut workspace, &5)
+        reopened
+            .with_io_workspace(|flash, workspace| reopened_map.get::<256, _>(flash, workspace, &5))
             .unwrap(),
         Some(50)
     );
@@ -126,17 +119,14 @@ fn requirement_startup_and_reclaim_expose_stepwise_intermediate_states_between_p
     let mut flash = MockFlash::<256, 4, 512>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
     let mut storage =
-        Storage::<8, 4>::format::<256, 4, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
-    storage
-        .create_map::<256, 4, _>(&mut flash, &mut workspace, CollectionId(83))
-        .unwrap();
-    storage
-        .append_update::<256, 4, _>(&mut flash, &mut workspace, CollectionId(83), &[7, 70])
-        .unwrap();
+        Storage::<_, 256, 4, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
+            .unwrap();
+    storage.create_map(CollectionId(83)).unwrap();
+    storage.append_update(CollectionId(83), &[7, 70]).unwrap();
     drop(storage);
 
     {
-        let future = Storage::<8, 4>::open_future::<256, 4, _>(&mut flash, &mut workspace);
+        let future = Storage::<_, 256, 4, 8, 4>::open_future(&mut flash);
         let mut future = pin!(future);
 
         assert!(matches!(
@@ -152,10 +142,10 @@ fn requirement_startup_and_reclaim_expose_stepwise_intermediate_states_between_p
         assert_eq!(reopened.collections()[0].collection_id(), CollectionId(83));
     }
 
-    let (mut flash, mut workspace, mut storage, _next_region) =
-        super::super::setup_storage_with_stale_wal_head();
+    let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
+    let (mut storage, _next_region) = super::super::setup_storage_with_stale_wal_head(&mut flash);
     {
-        let future = storage.reclaim_wal_head_future::<512, 6, _>(&mut flash, &mut workspace);
+        let future = storage.reclaim_wal_head_future();
         let mut future = pin!(future);
 
         assert!(matches!(
@@ -168,20 +158,17 @@ fn requirement_startup_and_reclaim_expose_stepwise_intermediate_states_between_p
         ));
     }
 
-    let reopened = Storage::<8, 4>::open::<512, 6, _>(&mut flash, &mut workspace).unwrap();
+    let reopened = Storage::<_, 512, 6, 8, 4>::open(&mut flash).unwrap();
     assert!(reopened.pending_reclaims().is_empty());
     assert_eq!(
         reopened.collections()[0].basis(),
         StartupCollectionBasis::WalSnapshot
     );
 
-    let (mut flash, mut workspace, mut storage, next_region) =
-        super::super::setup_storage_with_stale_wal_head();
-    let reclaimed_head = super::super::poll_until_ready(
-        storage.reclaim_wal_head_future::<512, 6, _>(&mut flash, &mut workspace),
-        6,
-    )
-    .unwrap();
+    let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
+    let (mut storage, next_region) = super::super::setup_storage_with_stale_wal_head(&mut flash);
+    let reclaimed_head =
+        super::super::poll_until_ready(storage.reclaim_wal_head_future(), 6).unwrap();
     assert_eq!(reclaimed_head, next_region);
     assert_eq!(storage.wal_head(), next_region);
 }

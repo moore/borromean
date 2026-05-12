@@ -12,71 +12,43 @@ fn requirement_each_public_operation_future_completes_when_polled_directly() {
     const REGION_COUNT: usize = 5;
 
     let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 2048>::new(0xff);
-    let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
-    let mut storage = super::super::poll_ready(Storage::<8, 4>::format_future::<
-        REGION_SIZE,
-        REGION_COUNT,
-        _,
-    >(&mut flash, &mut workspace, 1, 8, 0xa5))
+    let mut storage = super::super::poll_ready(
+        Storage::<_, REGION_SIZE, REGION_COUNT, 8, 4>::format_future(
+            &mut flash,
+            StorageFormatConfig::new(1, 8, 0xa5),
+        ),
+    )
     .unwrap();
 
-    super::super::poll_ready(storage.create_map_future::<REGION_SIZE, REGION_COUNT, _>(
-        &mut flash,
-        &mut workspace,
-        CollectionId(82),
-    ))
-    .unwrap();
+    super::super::poll_ready(storage.create_map_future(CollectionId(82))).unwrap();
 
     let mut source_buffer = [0u8; REGION_SIZE];
     let mut source = LsmMap::<u16, u16, 8>::new(CollectionId(82), &mut source_buffer).unwrap();
     source.set(1, 10).unwrap();
-    super::super::poll_ready(
-        storage.snapshot_map_future::<REGION_SIZE, REGION_COUNT, _, _, _, 8>(
-            &mut flash,
-            &mut workspace,
-            &source,
-        ),
-    )
-    .unwrap();
+    super::super::poll_ready(storage.snapshot_map_future::<_, _, 8>(&source)).unwrap();
 
-    let mut payload_buffer = [0u8; 64];
-    super::super::poll_ready(
-        storage.append_map_update_future::<REGION_SIZE, REGION_COUNT, _, u16, u16, 8>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(82),
-            &MapUpdate::Set { key: 2, value: 20 },
-            &mut payload_buffer,
-        ),
-    )
+    super::super::poll_ready(storage.append_map_update_future::<u16, u16, 8>(
+        CollectionId(82),
+        &MapUpdate::Set { key: 2, value: 20 },
+    ))
     .unwrap();
 
     source.set(3, 30).unwrap();
-    let committed_region = super::super::poll_until_ready(
-        storage.flush_map_future::<REGION_SIZE, REGION_COUNT, _, _, _, 8, 8>(
-            &mut flash,
-            &mut workspace,
-            &mut source,
-        ),
-        4,
-    )
-    .unwrap();
+    let committed_region =
+        super::super::poll_until_ready(storage.flush_map_future::<_, _, 8, 8>(&mut source), 4)
+            .unwrap();
     assert_eq!(
         storage.collections()[0].basis(),
         StartupCollectionBasis::Region(committed_region)
     );
 
     let reclaim_region =
-        super::super::poll_ready(storage.drop_map_future::<REGION_SIZE, REGION_COUNT, _>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(82),
-        ))
-        .unwrap();
+        super::super::poll_ready(storage.drop_map_future(CollectionId(82))).unwrap();
     assert_eq!(reclaim_region, Some(committed_region));
 
+    drop(storage);
     let reopened = super::super::poll_until_ready(
-        Storage::<8, 4>::open_future::<REGION_SIZE, REGION_COUNT, _>(&mut flash, &mut workspace),
+        Storage::<_, REGION_SIZE, REGION_COUNT, 8, 4>::open_future(&mut flash),
         8,
     )
     .unwrap();
@@ -85,13 +57,10 @@ fn requirement_each_public_operation_future_completes_when_polled_directly() {
         StartupCollectionBasis::Dropped
     );
 
-    let (mut flash, mut workspace, mut storage, next_region) =
-        super::super::setup_storage_with_stale_wal_head();
-    let reclaimed_head = super::super::poll_until_ready(
-        storage.reclaim_wal_head_future::<512, 6, _>(&mut flash, &mut workspace),
-        6,
-    )
-    .unwrap();
+    let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
+    let (mut storage, next_region) = super::super::setup_storage_with_stale_wal_head(&mut flash);
+    let reclaimed_head =
+        super::super::poll_until_ready(storage.reclaim_wal_head_future(), 6).unwrap();
     assert_eq!(reclaimed_head, next_region);
 }
 
@@ -106,20 +75,17 @@ fn requirement_flush_future_keeps_collection_basis_on_previous_state_until_head_
         let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
         let mut workspace = StorageWorkspace::<512>::new();
         let mut storage =
-            Storage::<8, 4>::format::<512, 5, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+            Storage::<_, 512, 5, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
+                .unwrap();
 
-        storage
-            .create_map::<512, 5, _>(&mut flash, &mut workspace, CollectionId(82))
-            .unwrap();
+        storage.create_map(CollectionId(82)).unwrap();
 
         let previous_region = {
             let mut previous_buffer = [0u8; 512];
             let mut previous =
                 LsmMap::<u16, u16, 8>::new(CollectionId(82), &mut previous_buffer).unwrap();
             previous.set(1, 10).unwrap();
-            storage
-                .flush_map::<512, 5, _, _, _, 8, 8>(&mut flash, &mut workspace, &mut previous)
-                .unwrap()
+            storage.flush_map::<_, _, 8, 8>(&mut previous).unwrap()
         };
 
         {
@@ -129,11 +95,7 @@ fn requirement_flush_future_keeps_collection_basis_on_previous_state_until_head_
             replacement.set(1, 11).unwrap();
             replacement.set(2, 22).unwrap();
 
-            let future = storage.flush_map_future::<512, 5, _, _, _, 8, 8>(
-                &mut flash,
-                &mut workspace,
-                &mut replacement,
-            );
+            let future = storage.flush_map_future::<_, _, 8, 8>(&mut replacement);
             let mut future = pin!(future);
 
             for _ in 0..pending_polls {
@@ -153,20 +115,17 @@ fn requirement_flush_future_keeps_collection_basis_on_previous_state_until_head_
     let mut flash = MockFlash::<512, 6, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =
-        Storage::<8, 4>::format::<512, 6, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+        Storage::<_, 512, 6, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
+            .unwrap();
 
-    storage
-        .create_map::<512, 6, _>(&mut flash, &mut workspace, CollectionId(82))
-        .unwrap();
+    storage.create_map(CollectionId(82)).unwrap();
 
     let previous_region = {
         let mut previous_buffer = [0u8; 512];
         let mut previous =
             LsmMap::<u16, u16, 8>::new(CollectionId(82), &mut previous_buffer).unwrap();
         previous.set(1, 10).unwrap();
-        storage
-            .flush_map::<512, 6, _, _, _, 8, 8>(&mut flash, &mut workspace, &mut previous)
-            .unwrap()
+        storage.flush_map::<_, _, 8, 8>(&mut previous).unwrap()
     };
 
     let replacement_region = {
@@ -176,11 +135,7 @@ fn requirement_flush_future_keeps_collection_basis_on_previous_state_until_head_
         replacement.set(1, 11).unwrap();
         replacement.set(2, 22).unwrap();
 
-        let future = storage.flush_map_future::<512, 6, _, _, _, 8, 8>(
-            &mut flash,
-            &mut workspace,
-            &mut replacement,
-        );
+        let future = storage.flush_map_future::<_, _, 8, 8>(&mut replacement);
         let mut future = pin!(future);
 
         assert!(matches!(
@@ -205,9 +160,30 @@ fn requirement_flush_future_keeps_collection_basis_on_previous_state_until_head_
 }
 
 //= spec/implementation.md#operation-requirements
-//= type=todo
+//= type=test
 //# `RING-IMPL-OP-005` Public operations SHOULD keep borrows of
 //# storage-owned scratch internal to the operation so embedded callers can
 //# reuse one `Storage` context across sequential operations.
 #[test]
-fn todo_storage_owned_scratch_is_reusable_across_operations() {}
+fn requirement_storage_owned_scratch_is_reusable_across_operations() {
+    let mut flash = MockFlash::<512, 6, 2048>::new(0xff);
+    let mut storage =
+        Storage::<_, 512, 6, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
+            .unwrap();
+
+    storage.create_map(CollectionId(83)).unwrap();
+    storage
+        .append_map_update::<u16, u16, 8>(CollectionId(83), &MapUpdate::Set { key: 1, value: 10 })
+        .unwrap();
+    storage
+        .append_map_update::<u16, u16, 8>(CollectionId(83), &MapUpdate::Set { key: 2, value: 20 })
+        .unwrap();
+
+    let mut map_buffer = [0u8; 512];
+    let map = storage
+        .open_map::<u16, u16, 8, 8>(CollectionId(83), &mut map_buffer)
+        .unwrap();
+    assert_eq!(map.get_frontier(&1).unwrap(), Some(10));
+    assert_eq!(map.get_frontier(&2).unwrap(), Some(20));
+    assert_eq!(storage.mode(), StorageMode::Idle);
+}

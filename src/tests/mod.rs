@@ -212,7 +212,8 @@ fn requirement_storage_facade_accessors_reflect_runtime_state() {
     let mut flash = MockFlash::<512, 4, 1024>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =
-        Storage::<8, 4>::format::<512, 4, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+        Storage::<_, 512, 4, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
+            .unwrap();
 
     assert_eq!(
         storage.wal_append_offset(),
@@ -225,12 +226,7 @@ fn requirement_storage_facade_accessors_reflect_runtime_state() {
     assert_eq!(storage.tracked_user_collection_count(), 0);
 
     storage
-        .append_new_collection::<512, 4, _>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(321),
-            CollectionType::MAP_CODE,
-        )
+        .append_new_collection(CollectionId(321), CollectionType::MAP_CODE)
         .unwrap();
 
     assert_eq!(storage.tracked_user_collection_count(), 1);
@@ -246,44 +242,30 @@ fn requirement_storage_facade_raw_wal_wrappers_update_runtime_state() {
     let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =
-        Storage::<8, 4>::format::<512, 5, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+        Storage::<_, 512, 5, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
+            .unwrap();
 
     let collection_id = CollectionId(322);
     storage
-        .append_new_collection::<512, 5, _>(
-            &mut flash,
-            &mut workspace,
-            collection_id,
-            CollectionType::MAP_CODE,
-        )
+        .append_new_collection(collection_id, CollectionType::MAP_CODE)
         .unwrap();
-    storage
-        .append_drop_collection::<512, 5, _>(&mut flash, &mut workspace, collection_id)
-        .unwrap();
+    storage.append_drop_collection(collection_id).unwrap();
     assert_eq!(
         storage.collections()[0].basis(),
         StartupCollectionBasis::Dropped
     );
 
     let free_head = storage.last_free_list_head().unwrap();
-    storage
-        .append_alloc_begin::<512, 5, _>(&mut flash, &mut workspace, free_head, Some(2))
-        .unwrap();
+    storage.append_alloc_begin(free_head, Some(2)).unwrap();
     assert_eq!(storage.ready_region(), Some(free_head));
     assert_eq!(storage.last_free_list_head(), Some(2));
 
-    storage
-        .append_free_list_head::<512, 5, _>(&mut flash, &mut workspace, None)
-        .unwrap();
+    storage.append_free_list_head(None).unwrap();
     assert_eq!(storage.last_free_list_head(), None);
 
-    storage
-        .append_reclaim_begin::<512, 5, _>(&mut flash, &mut workspace, 3)
-        .unwrap();
+    storage.append_reclaim_begin(3).unwrap();
     assert_eq!(storage.pending_reclaims(), &[3]);
-    storage
-        .append_reclaim_end::<512, 5, _>(&mut flash, &mut workspace, 3)
-        .unwrap();
+    storage.append_reclaim_end(3).unwrap();
     assert_eq!(storage.pending_reclaims(), &[]);
 }
 
@@ -296,10 +278,11 @@ fn requirement_storage_facade_rejects_unneeded_wal_recovery_record() {
     let mut flash = MockFlash::<512, 4, 1024>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =
-        Storage::<8, 4>::format::<512, 4, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+        Storage::<_, 512, 4, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
+            .unwrap();
 
     assert!(matches!(
-        storage.append_wal_recovery::<512, 4, _>(&mut flash, &mut workspace),
+        storage.append_wal_recovery(),
         Err(StorageRuntimeError::WalRecoveryNotNeeded)
     ));
 }
@@ -316,12 +299,10 @@ fn requirement_storage_facade_reports_and_clears_pending_wal_recovery_boundary()
     let corrupt_offset = metadata.wal_record_area_offset().unwrap();
     flash.write_region(0, corrupt_offset, &[0x10; 8]).unwrap();
 
-    let mut storage = Storage::<8, 4>::open::<256, 4, _>(&mut flash, &mut workspace).unwrap();
+    let mut storage = Storage::<_, 256, 4, 8, 4>::open(&mut flash).unwrap();
     assert!(storage.pending_wal_recovery_boundary());
 
-    storage
-        .append_wal_recovery::<256, 4, _>(&mut flash, &mut workspace)
-        .unwrap();
+    storage.append_wal_recovery().unwrap();
 
     assert!(!storage.pending_wal_recovery_boundary());
 }
@@ -354,57 +335,66 @@ fn complete_pending_reclaim_returns_old_map_region_to_free_list_result(
     let mut flash = MockFlash::<512, 7, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =
-        Storage::<8, 4>::format::<512, 7, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+        Storage::<_, 512, 7, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
+            .unwrap();
 
-    storage
-        .create_map::<512, 7, _>(&mut flash, &mut workspace, CollectionId(14))
-        .unwrap();
+    storage.create_map(CollectionId(14)).unwrap();
 
     let mut map_buffer = [0u8; 512];
     let mut map = LsmMap::<i32, i32, 4>::new(CollectionId(14), &mut map_buffer).unwrap();
     map.set(3, 30).unwrap();
-    let first_region = storage
-        .flush_map::<512, 7, _, _, _, 4, 4>(&mut flash, &mut workspace, &mut map)
-        .unwrap();
+    let first_region = storage.flush_map::<_, _, 4, 4>(&mut map).unwrap();
 
     map.set(4, 40).unwrap();
-    storage
-        .flush_map::<512, 7, _, _, _, 4, 4>(&mut flash, &mut workspace, &mut map)
-        .unwrap();
+    storage.flush_map::<_, _, 4, 4>(&mut map).unwrap();
     assert_eq!(storage.pending_reclaims(), &[first_region]);
-    let previous_chain =
-        free_list_chain::<512, 7, 2048, 8>(&flash, 0xff, storage.last_free_list_head());
+    let previous_head = storage.last_free_list_head();
+    let previous_chain = storage.with_io_workspace(|flash, _workspace| {
+        free_list_chain::<512, 7, 2048, 8>(&*flash, 0xff, previous_head)
+    });
     let previous_tail = storage.free_list_tail().unwrap();
-    let wal_tail_before_reclaim = storage.runtime().wal_tail();
+    let wal_tail_before_reclaim = storage.wal_tail();
 
-    flash.clear_operations();
-    storage
-        .complete_pending_reclaim::<512, 7, _>(&mut flash, &mut workspace, first_region)
-        .unwrap();
+    storage.with_io_workspace(|flash, _workspace| flash.clear_operations());
+    storage.complete_pending_reclaim(first_region).unwrap();
 
     let mut reclaim_operations = heapless::Vec::<crate::MockOperation, 64>::new();
-    for operation in flash.operations() {
-        reclaim_operations.push(*operation).unwrap();
-    }
+    storage.with_io_workspace(|flash, _workspace| {
+        for operation in flash.operations() {
+            reclaim_operations.push(*operation).unwrap();
+        }
+    });
 
     assert!(storage.pending_reclaims().is_empty());
-    let new_chain = free_list_chain::<512, 7, 2048, 8>(&flash, 0xff, storage.last_free_list_head());
+    let new_head = storage.last_free_list_head();
+    let new_chain = storage.with_io_workspace(|flash, _workspace| {
+        free_list_chain::<512, 7, 2048, 8>(&*flash, 0xff, new_head)
+    });
     let footer_offset = 512 - FreePointerFooter::ENCODED_LEN;
-    let previous_tail_footer = FreePointerFooter::decode(
-        &flash.region_bytes(previous_tail).unwrap()[footer_offset..],
-        0xff,
-    )
-    .unwrap();
-    let reclaimed_footer = FreePointerFooter::decode(
-        &flash.region_bytes(first_region).unwrap()[footer_offset..],
-        0xff,
-    )
-    .unwrap();
+    let previous_tail_footer = storage
+        .with_io_workspace(|flash, _workspace| {
+            FreePointerFooter::decode(
+                &flash.region_bytes(previous_tail).unwrap()[footer_offset..],
+                0xff,
+            )
+        })
+        .unwrap();
+    let reclaimed_footer = storage
+        .with_io_workspace(|flash, _workspace| {
+            FreePointerFooter::decode(
+                &flash.region_bytes(first_region).unwrap()[footer_offset..],
+                0xff,
+            )
+        })
+        .unwrap();
 
-    let reopened = Storage::<8, 4>::open::<512, 7, _>(&mut flash, &mut workspace).unwrap();
+    drop(storage);
+    let mut reopened = Storage::<_, 512, 7, 8, 4>::open(&mut flash).unwrap();
     assert!(reopened.pending_reclaims().is_empty());
-    let reopened_chain =
-        free_list_chain::<512, 7, 2048, 8>(&flash, 0xff, reopened.last_free_list_head());
+    let reopened_head = reopened.last_free_list_head();
+    let reopened_chain = reopened.with_io_workspace(|flash, _workspace| {
+        free_list_chain::<512, 7, 2048, 8>(&*flash, 0xff, reopened_head)
+    });
 
     CompletedPendingReclaimResult {
         reclaimed_region: first_region,
@@ -482,27 +472,19 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize> 
     }
 }
 
-fn rotate_wal_tail_for_collection<const REGION_COUNT: usize>(
-    storage: &mut Storage<8, 4>,
-    flash: &mut MockFlash<512, REGION_COUNT, 4096>,
-    workspace: &mut StorageWorkspace<512>,
+fn rotate_wal_tail_for_collection<'db, IO: FlashIo, const REGION_COUNT: usize>(
+    storage: &mut Storage<'db, IO, 512, REGION_COUNT, 8, 4>,
     collection_id: CollectionId,
 ) -> u32 {
     for _ in 0..128 {
-        match storage.append_wal_rotation_start::<512, REGION_COUNT, _>(flash, workspace) {
+        match storage.append_wal_rotation_start() {
             Ok(region_index) => {
-                storage
-                    .append_wal_rotation_finish::<512, REGION_COUNT, _>(
-                        flash,
-                        workspace,
-                        region_index,
-                    )
-                    .unwrap();
+                storage.append_wal_rotation_finish(region_index).unwrap();
                 return region_index;
             }
-            Err(StorageRuntimeError::InvalidRotationWindow { .. }) => storage
-                .append_update::<512, REGION_COUNT, _>(flash, workspace, collection_id, &[0])
-                .unwrap(),
+            Err(StorageRuntimeError::InvalidRotationWindow { .. }) => {
+                storage.append_update(collection_id, &[0]).unwrap()
+            }
             Err(other) => panic!("unexpected rotation-start error: {other:?}"),
         }
     }
@@ -514,24 +496,27 @@ fn wal_and_map_region_formats() -> (Header, Header) {
     let mut flash = MockFlash::<512, 7, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =
-        Storage::<8, 4>::format::<512, 7, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+        Storage::<_, 512, 7, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
+            .unwrap();
 
-    let wal_header =
-        Header::decode(&flash.region_bytes(0).unwrap()[..Header::ENCODED_LEN]).unwrap();
-
-    storage
-        .create_map::<512, 7, _>(&mut flash, &mut workspace, CollectionId(43))
+    let wal_header = storage
+        .with_io_workspace(|flash, _workspace| {
+            Header::decode(&flash.region_bytes(0).unwrap()[..Header::ENCODED_LEN])
+        })
         .unwrap();
+
+    storage.create_map(CollectionId(43)).unwrap();
 
     let mut map_buffer = [0u8; 512];
     let mut map = LsmMap::<i32, i32, 4>::new(CollectionId(43), &mut map_buffer).unwrap();
     map.set(3, 30).unwrap();
 
-    let region_index = storage
-        .flush_map::<512, 7, _, _, _, 4, 4>(&mut flash, &mut workspace, &mut map)
+    let region_index = storage.flush_map::<_, _, 4, 4>(&mut map).unwrap();
+    let map_header = storage
+        .with_io_workspace(|flash, _workspace| {
+            Header::decode(&flash.region_bytes(region_index).unwrap()[..Header::ENCODED_LEN])
+        })
         .unwrap();
-    let map_header =
-        Header::decode(&flash.region_bytes(region_index).unwrap()[..Header::ENCODED_LEN]).unwrap();
 
     (wal_header, map_header)
 }
@@ -571,193 +556,98 @@ fn requirement_wal_v1_collection_format_is_reserved_to_wal_regions() {
     assert_ne!(map_header.collection_format, WAL_V1_FORMAT);
 }
 
-fn setup_storage_with_stale_wal_head() -> (
-    MockFlash<512, 8, 4096>,
-    StorageWorkspace<512>,
-    Storage<8, 4>,
-    u32,
-) {
-    let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
-    let mut workspace = StorageWorkspace::<512>::new();
+fn setup_storage_with_stale_wal_head<'db>(
+    flash: &'db mut MockFlash<512, 8, 4096>,
+) -> (Storage<'db, MockFlash<512, 8, 4096>, 512, 8, 8, 4>, u32) {
     let mut storage =
-        Storage::<8, 4>::format::<512, 8, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+        Storage::<_, 512, 8, 8, 4>::format(flash, StorageFormatConfig::new(1, 8, 0xa5)).unwrap();
 
     storage
-        .append_new_collection::<512, 8, _>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(31),
-            CollectionType::MAP_CODE,
-        )
+        .append_new_collection(CollectionId(31), CollectionType::MAP_CODE)
         .unwrap();
+    storage.append_update(CollectionId(31), &[1, 2, 3]).unwrap();
+
+    let next_region = rotate_wal_tail_for_collection(&mut storage, CollectionId(31));
     storage
-        .append_update::<512, 8, _>(&mut flash, &mut workspace, CollectionId(31), &[1, 2, 3])
+        .append_snapshot(CollectionId(31), CollectionType::MAP_CODE, &[9, 8, 7])
         .unwrap();
 
-    let next_region =
-        rotate_wal_tail_for_collection(&mut storage, &mut flash, &mut workspace, CollectionId(31));
-    storage
-        .append_snapshot::<512, 8, _>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(31),
-            CollectionType::MAP_CODE,
-            &[9, 8, 7],
-        )
-        .unwrap();
-
-    (flash, workspace, storage, next_region)
+    (storage, next_region)
 }
 
-fn setup_storage_with_live_snapshot_in_wal_head() -> (
-    MockFlash<512, 6, 4096>,
-    StorageWorkspace<512>,
-    Storage<8, 4>,
-    u32,
-) {
-    let mut flash = MockFlash::<512, 6, 4096>::new(0xff);
-    let mut workspace = StorageWorkspace::<512>::new();
+fn setup_storage_with_live_snapshot_in_wal_head<'db>(
+    flash: &'db mut MockFlash<512, 6, 4096>,
+) -> (Storage<'db, MockFlash<512, 6, 4096>, 512, 6, 8, 4>, u32) {
     let mut storage =
-        Storage::<8, 4>::format::<512, 6, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+        Storage::<_, 512, 6, 8, 4>::format(flash, StorageFormatConfig::new(1, 8, 0xa5)).unwrap();
 
     storage
-        .append_new_collection::<512, 6, _>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(32),
-            CollectionType::MAP_CODE,
-        )
+        .append_new_collection(CollectionId(32), CollectionType::MAP_CODE)
         .unwrap();
     storage
-        .append_snapshot::<512, 6, _>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(32),
-            CollectionType::MAP_CODE,
-            &[4, 5, 6],
-        )
+        .append_snapshot(CollectionId(32), CollectionType::MAP_CODE, &[4, 5, 6])
         .unwrap();
     storage
-        .append_new_collection::<512, 6, _>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(132),
-            CollectionType::MAP_CODE,
-        )
+        .append_new_collection(CollectionId(132), CollectionType::MAP_CODE)
         .unwrap();
     storage
-        .append_snapshot::<512, 6, _>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(132),
-            CollectionType::MAP_CODE,
-            &[0],
-        )
+        .append_snapshot(CollectionId(132), CollectionType::MAP_CODE, &[0])
         .unwrap();
 
-    let next_region =
-        rotate_wal_tail_for_collection(&mut storage, &mut flash, &mut workspace, CollectionId(132));
+    let next_region = rotate_wal_tail_for_collection(&mut storage, CollectionId(132));
 
-    (flash, workspace, storage, next_region)
+    (storage, next_region)
 }
 
-fn setup_storage_with_live_snapshot_and_update_in_wal_head() -> (
-    MockFlash<512, 6, 4096>,
-    StorageWorkspace<512>,
-    Storage<8, 4>,
-    u32,
-) {
-    let mut flash = MockFlash::<512, 6, 4096>::new(0xff);
-    let mut workspace = StorageWorkspace::<512>::new();
+fn setup_storage_with_live_snapshot_and_update_in_wal_head<'db>(
+    flash: &'db mut MockFlash<512, 6, 4096>,
+) -> (Storage<'db, MockFlash<512, 6, 4096>, 512, 6, 8, 4>, u32) {
     let mut storage =
-        Storage::<8, 4>::format::<512, 6, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+        Storage::<_, 512, 6, 8, 4>::format(flash, StorageFormatConfig::new(1, 8, 0xa5)).unwrap();
 
     storage
-        .append_new_collection::<512, 6, _>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(33),
-            CollectionType::MAP_CODE,
-        )
+        .append_new_collection(CollectionId(33), CollectionType::MAP_CODE)
         .unwrap();
     storage
-        .append_snapshot::<512, 6, _>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(33),
-            CollectionType::MAP_CODE,
-            &[7, 8, 9],
-        )
+        .append_snapshot(CollectionId(33), CollectionType::MAP_CODE, &[7, 8, 9])
+        .unwrap();
+    storage.append_update(CollectionId(33), &[1, 3, 5]).unwrap();
+    storage
+        .append_new_collection(CollectionId(133), CollectionType::MAP_CODE)
         .unwrap();
     storage
-        .append_update::<512, 6, _>(&mut flash, &mut workspace, CollectionId(33), &[1, 3, 5])
-        .unwrap();
-    storage
-        .append_new_collection::<512, 6, _>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(133),
-            CollectionType::MAP_CODE,
-        )
-        .unwrap();
-    storage
-        .append_snapshot::<512, 6, _>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(133),
-            CollectionType::MAP_CODE,
-            &[0],
-        )
+        .append_snapshot(CollectionId(133), CollectionType::MAP_CODE, &[0])
         .unwrap();
 
-    let next_region =
-        rotate_wal_tail_for_collection(&mut storage, &mut flash, &mut workspace, CollectionId(133));
+    let next_region = rotate_wal_tail_for_collection(&mut storage, CollectionId(133));
 
-    (flash, workspace, storage, next_region)
+    (storage, next_region)
 }
 
-fn setup_storage_with_live_empty_head_map_in_wal_head() -> (
-    MockFlash<512, 6, 4096>,
-    StorageWorkspace<512>,
-    Storage<8, 4>,
-    u32,
-) {
-    let mut flash = MockFlash::<512, 6, 4096>::new(0xff);
-    let mut workspace = StorageWorkspace::<512>::new();
+fn setup_storage_with_live_empty_head_map_in_wal_head<'db>(
+    flash: &'db mut MockFlash<512, 6, 4096>,
+) -> (Storage<'db, MockFlash<512, 6, 4096>, 512, 6, 8, 4>, u32) {
     let mut storage =
-        Storage::<8, 4>::format::<512, 6, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+        Storage::<_, 512, 6, 8, 4>::format(flash, StorageFormatConfig::new(1, 8, 0xa5)).unwrap();
 
-    storage
-        .create_map::<512, 6, _>(&mut flash, &mut workspace, CollectionId(36))
-        .unwrap();
+    storage.create_map(CollectionId(36)).unwrap();
     let mut target_payload = [0u8; 64];
     storage
-        .append_map_update::<512, 6, _, i32, i32, 4>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(36),
-            &MapUpdate::Set { key: 1, value: 10 },
-            &mut target_payload,
-        )
+        .append_map_update::<i32, i32, 4>(CollectionId(36), &MapUpdate::Set { key: 1, value: 10 })
         .unwrap();
 
-    storage
-        .create_map::<512, 6, _>(&mut flash, &mut workspace, CollectionId(136))
-        .unwrap();
+    storage.create_map(CollectionId(136)).unwrap();
 
-    let next_region =
-        rotate_wal_tail_for_collection(&mut storage, &mut flash, &mut workspace, CollectionId(136));
+    let next_region = rotate_wal_tail_for_collection(&mut storage, CollectionId(136));
     storage
-        .append_snapshot::<512, 6, _>(
-            &mut flash,
-            &mut workspace,
+        .append_snapshot(
             CollectionId(136),
             CollectionType::MAP_CODE,
             &crate::EMPTY_MAP_SNAPSHOT,
         )
         .unwrap();
 
-    (flash, workspace, storage, next_region)
+    (storage, next_region)
 }
 
 //= spec/implementation.md#operation-future-regression-requirements
@@ -769,12 +659,9 @@ fn requirement_storage_format_future_polls_to_completion() {
     let mut flash = MockFlash::<256, 4, 128>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
 
-    let storage = poll_ready(Storage::<8, 4>::format_future::<256, 4, _>(
+    let storage = poll_ready(Storage::<_, 256, 4, 8, 4>::format_future(
         &mut flash,
-        &mut workspace,
-        1,
-        8,
-        0xa5,
+        StorageFormatConfig::new(1, 8, 0xa5),
     ))
     .unwrap();
 
@@ -796,25 +683,16 @@ fn requirement_storage_open_future_polls_to_completion() {
 
     {
         let mut storage =
-            Storage::<8, 4>::format::<256, 4, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+            Storage::<_, 256, 4, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
+                .unwrap();
         storage
-            .append_new_collection::<256, 4, _>(
-                &mut flash,
-                &mut workspace,
-                CollectionId(7),
-                CollectionType::MAP_CODE,
-            )
+            .append_new_collection(CollectionId(7), CollectionType::MAP_CODE)
             .unwrap();
-        storage
-            .append_update::<256, 4, _>(&mut flash, &mut workspace, CollectionId(7), &[1, 2, 3])
-            .unwrap();
+        storage.append_update(CollectionId(7), &[1, 2, 3]).unwrap();
     }
 
-    let reopened = poll_until_ready(
-        Storage::<8, 4>::open_future::<256, 4, _>(&mut flash, &mut workspace),
-        7,
-    )
-    .unwrap();
+    let reopened =
+        poll_until_ready(Storage::<_, 256, 4, 8, 4>::open_future(&mut flash), 8).unwrap();
 
     assert_eq!(reopened.collections().len(), 1);
     assert_eq!(reopened.collections()[0].collection_id(), CollectionId(7));
@@ -829,16 +707,16 @@ fn requirement_storage_open_future_polls_to_completion() {
 fn requirement_storage_open_future_yields_between_startup_phases() {
     let mut flash = MockFlash::<256, 4, 256>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
-    Storage::<8, 4>::format::<256, 4, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+    Storage::<_, 256, 4, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5)).unwrap();
 
-    let future = Storage::<8, 4>::open_future::<256, 4, _>(&mut flash, &mut workspace);
+    let future = Storage::<_, 256, 4, 8, 4>::open_future(&mut flash);
     let mut future = pin!(future);
 
     assert!(matches!(poll_once(future.as_mut()), Poll::Pending));
     assert!(matches!(poll_once(future.as_mut()), Poll::Pending));
     assert!(matches!(poll_once(future.as_mut()), Poll::Pending));
 
-    let reopened = match poll_until_ready(future, 4) {
+    let reopened = match poll_until_ready(future, 5) {
         Ok(reopened) => reopened,
         Err(error) => panic!("unexpected open error: {error:?}"),
     };
@@ -854,16 +732,16 @@ fn requirement_storage_open_future_yields_between_startup_phases() {
 fn requirement_storage_open_future_drop_before_completion_leaves_store_openable() {
     let mut flash = MockFlash::<256, 4, 256>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
-    Storage::<8, 4>::format::<256, 4, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+    Storage::<_, 256, 4, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5)).unwrap();
 
     {
-        let future = Storage::<8, 4>::open_future::<256, 4, _>(&mut flash, &mut workspace);
+        let future = Storage::<_, 256, 4, 8, 4>::open_future(&mut flash);
         let mut future = pin!(future);
         assert!(matches!(poll_once(future.as_mut()), Poll::Pending));
         assert!(matches!(poll_once(future.as_mut()), Poll::Pending));
     }
 
-    let reopened = Storage::<8, 4>::open::<256, 4, _>(&mut flash, &mut workspace).unwrap();
+    let mut reopened = Storage::<_, 256, 4, 8, 4>::open(&mut flash).unwrap();
     assert_eq!(reopened.wal_head(), 0);
     assert_eq!(reopened.wal_tail(), 0);
     assert!(reopened.collections().is_empty());
@@ -875,13 +753,10 @@ fn requirement_storage_open_future_drop_before_completion_leaves_store_openable(
 //# head to the reclaimed successor, and append the old head to the free-list tail.
 #[test]
 fn requirement_storage_reclaim_wal_head_future_polls_to_completion() {
-    let (mut flash, mut workspace, mut storage, next_region) = setup_storage_with_stale_wal_head();
+    let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
+    let (mut storage, next_region) = setup_storage_with_stale_wal_head(&mut flash);
 
-    let reclaimed_head = poll_until_ready(
-        storage.reclaim_wal_head_future::<512, 6, _>(&mut flash, &mut workspace),
-        6,
-    )
-    .unwrap();
+    let reclaimed_head = poll_until_ready(storage.reclaim_wal_head_future(), 6).unwrap();
 
     assert_eq!(reclaimed_head, next_region);
     assert_eq!(storage.wal_head(), next_region);
@@ -894,10 +769,11 @@ fn requirement_storage_reclaim_wal_head_future_polls_to_completion() {
 //# before completing with updated WAL head.
 #[test]
 fn requirement_storage_reclaim_wal_head_future_yields_between_reclaim_phases() {
-    let (mut flash, mut workspace, mut storage, next_region) = setup_storage_with_stale_wal_head();
+    let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
+    let (mut storage, next_region) = setup_storage_with_stale_wal_head(&mut flash);
 
     let (first, second, third, fourth, fifth, reclaimed_head) = {
-        let future = storage.reclaim_wal_head_future::<512, 6, _>(&mut flash, &mut workspace);
+        let future = storage.reclaim_wal_head_future();
         let mut future = pin!(future);
 
         let first = matches!(poll_once(future.as_mut()), Poll::Pending);
@@ -928,18 +804,20 @@ fn requirement_storage_reclaim_wal_head_future_yields_between_reclaim_phases() {
 //# the store recoverable with original WAL head and live collection basis.
 #[test]
 fn requirement_storage_reclaim_wal_head_future_drop_after_reclaim_begin_remains_recoverable() {
-    let (mut flash, mut workspace, mut storage, _next_region) = setup_storage_with_stale_wal_head();
+    let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
+    let (mut storage, _next_region) = setup_storage_with_stale_wal_head(&mut flash);
     let original_head = storage.wal_head();
 
     {
-        let future = storage.reclaim_wal_head_future::<512, 6, _>(&mut flash, &mut workspace);
+        let future = storage.reclaim_wal_head_future();
         let mut future = pin!(future);
 
         assert!(matches!(poll_once(future.as_mut()), Poll::Pending));
         assert!(matches!(poll_once(future.as_mut()), Poll::Pending));
     }
 
-    let reopened = Storage::<8, 4>::open::<512, 6, _>(&mut flash, &mut workspace).unwrap();
+    drop(storage);
+    let mut reopened = Storage::<_, 512, 8, 8, 4>::open(&mut flash).unwrap();
     assert_eq!(reopened.wal_head(), original_head);
     assert!(reopened.pending_reclaims().is_empty());
     assert_eq!(
@@ -957,52 +835,32 @@ fn requirement_storage_map_operation_futures_poll_to_completion() {
     let mut flash = MockFlash::<512, 7, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =
-        Storage::<8, 4>::format::<512, 7, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+        Storage::<_, 512, 7, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
+            .unwrap();
 
-    poll_ready(storage.create_map_future::<512, 5, _>(
-        &mut flash,
-        &mut workspace,
-        CollectionId(41),
-    ))
-    .unwrap();
+    poll_ready(storage.create_map_future(CollectionId(41))).unwrap();
 
     let mut source_buffer = [0u8; 512];
     let mut source = LsmMap::<i32, i32, 4>::new(CollectionId(41), &mut source_buffer).unwrap();
     source.set(1, 10).unwrap();
-    poll_ready(storage.snapshot_map_future::<512, 5, _, _, _, 4>(
-        &mut flash,
-        &mut workspace,
-        &source,
-    ))
-    .unwrap();
+    poll_ready(storage.snapshot_map_future::<_, _, 4>(&source)).unwrap();
 
     let mut payload_buffer = [0u8; 128];
-    poll_ready(storage.append_map_update_future::<512, 5, _, i32, i32, 4>(
-        &mut flash,
-        &mut workspace,
+    poll_ready(storage.append_map_update_future::<i32, i32, 4>(
         CollectionId(41),
         &MapUpdate::Set { key: 2, value: 20 },
-        &mut payload_buffer,
     ))
     .unwrap();
 
     source.set(3, 30).unwrap();
-    let committed_region = poll_until_ready(
-        storage.flush_map_future::<512, 7, _, _, _, 4, 4>(&mut flash, &mut workspace, &mut source),
-        4,
-    )
-    .unwrap();
+    let committed_region =
+        poll_until_ready(storage.flush_map_future::<_, _, 4, 4>(&mut source), 4).unwrap();
     assert_eq!(
         storage.collections()[0].basis(),
         StartupCollectionBasis::Region(committed_region)
     );
 
-    let reclaim_region = poll_ready(storage.drop_map_future::<512, 5, _>(
-        &mut flash,
-        &mut workspace,
-        CollectionId(41),
-    ))
-    .unwrap();
+    let reclaim_region = poll_ready(storage.drop_map_future(CollectionId(41))).unwrap();
 
     assert_eq!(reclaim_region, Some(committed_region));
     assert_eq!(
@@ -1021,19 +879,17 @@ fn requirement_storage_flush_map_future_yields_between_durable_phases() {
     let mut flash = MockFlash::<512, 7, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =
-        Storage::<8, 4>::format::<512, 7, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+        Storage::<_, 512, 7, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
+            .unwrap();
 
-    storage
-        .create_map::<512, 7, _>(&mut flash, &mut workspace, CollectionId(42))
-        .unwrap();
+    storage.create_map(CollectionId(42)).unwrap();
 
     let region_index = {
         let mut map_buffer = [0u8; 512];
         let mut map = LsmMap::<i32, i32, 4>::new(CollectionId(42), &mut map_buffer).unwrap();
         map.set(5, 50).unwrap();
 
-        let future =
-            storage.flush_map_future::<512, 7, _, _, _, 4, 4>(&mut flash, &mut workspace, &mut map);
+        let future = storage.flush_map_future::<_, _, 4, 4>(&mut map);
         let mut future = pin!(future);
 
         assert!(matches!(poll_once(future.as_mut()), Poll::Pending));
@@ -1061,19 +917,17 @@ fn requirement_storage_flush_map_future_drop_after_region_write_remains_recovera
     let mut flash = MockFlash::<512, 7, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =
-        Storage::<8, 4>::format::<512, 7, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+        Storage::<_, 512, 7, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
+            .unwrap();
 
-    storage
-        .create_map::<512, 7, _>(&mut flash, &mut workspace, CollectionId(43))
-        .unwrap();
+    storage.create_map(CollectionId(43)).unwrap();
 
     {
         let mut map_buffer = [0u8; 512];
         let mut map = LsmMap::<i32, i32, 4>::new(CollectionId(43), &mut map_buffer).unwrap();
         map.set(7, 70).unwrap();
 
-        let future =
-            storage.flush_map_future::<512, 7, _, _, _, 4, 4>(&mut flash, &mut workspace, &mut map);
+        let future = storage.flush_map_future::<_, _, 4, 4>(&mut map);
         let mut future = pin!(future);
 
         assert!(matches!(poll_once(future.as_mut()), Poll::Pending));
@@ -1086,12 +940,14 @@ fn requirement_storage_flush_map_future_drop_after_region_write_remains_recovera
         StartupCollectionBasis::Empty
     );
 
-    let reopened = Storage::<8, 4>::open::<512, 7, _>(&mut flash, &mut workspace).unwrap();
+    let ready_region = storage.ready_region();
+    drop(storage);
+    let mut reopened = Storage::<_, 512, 7, 8, 4>::open(&mut flash).unwrap();
     assert_eq!(
         reopened.collections()[0].basis(),
         StartupCollectionBasis::Empty
     );
-    assert_eq!(reopened.ready_region(), storage.ready_region());
+    assert_eq!(reopened.ready_region(), ready_region);
 }
 
 //= spec/implementation.md#architecture-requirements
@@ -1113,25 +969,19 @@ fn requirement_storage_append_and_reopen_round_trip_through_flash() {
 
     {
         let mut storage =
-            Storage::<8, 4>::format::<256, 4, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+            Storage::<_, 256, 4, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
+                .unwrap();
         storage
-            .append_new_collection::<256, 4, _>(
-                &mut flash,
-                &mut workspace,
-                CollectionId(7),
-                CollectionType::MAP_CODE,
-            )
+            .append_new_collection(CollectionId(7), CollectionType::MAP_CODE)
             .unwrap();
-        storage
-            .append_update::<256, 4, _>(&mut flash, &mut workspace, CollectionId(7), &[1, 2, 3])
-            .unwrap();
+        storage.append_update(CollectionId(7), &[1, 2, 3]).unwrap();
 
         assert_eq!(storage.collections().len(), 1);
         assert_eq!(storage.collections()[0].collection_id(), CollectionId(7));
         assert_eq!(storage.collections()[0].pending_update_count(), 1);
     }
 
-    let reopened = Storage::<8, 4>::open::<256, 4, _>(&mut flash, &mut workspace).unwrap();
+    let mut reopened = Storage::<_, 256, 4, 8, 4>::open(&mut flash).unwrap();
 
     assert_eq!(reopened.collections().len(), 1);
     assert_eq!(reopened.collections()[0].collection_id(), CollectionId(7));
@@ -1155,14 +1005,9 @@ fn requirement_storage_append_new_collection_rejects_unsupported_channel_collect
     let mut flash = MockFlash::<256, 4, 256>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
     assert!(matches!(
-        Storage::<8, 4>::format::<256, 4, _>(&mut flash, &mut workspace, 1, 8, 0xa5)
+        Storage::<_, 256, 4, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
             .unwrap()
-            .append_new_collection::<256, 4, _>(
-                &mut flash,
-                &mut workspace,
-                CollectionId(22),
-                CollectionType::CHANNEL_CODE,
-            ),
+            .append_new_collection(CollectionId(22), CollectionType::CHANNEL_CODE,),
         Err(StorageRuntimeError::UnsupportedCollectionType(
             CollectionType::CHANNEL_CODE
         ))
@@ -1183,11 +1028,10 @@ fn todo_storage_api_binds_backing_and_scratch() {}
 //# region.
 #[test]
 fn requirement_storage_reclaim_wal_head_updates_runtime_head_to_next_region() {
-    let (mut flash, mut workspace, mut storage, next_region) = setup_storage_with_stale_wal_head();
+    let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
+    let (mut storage, next_region) = setup_storage_with_stale_wal_head(&mut flash);
 
-    let reclaimed_head = storage
-        .reclaim_wal_head::<512, 6, _>(&mut flash, &mut workspace)
-        .unwrap();
+    let reclaimed_head = storage.reclaim_wal_head().unwrap();
 
     assert_eq!(reclaimed_head, next_region);
     assert_eq!(storage.wal_head(), next_region);
@@ -1200,28 +1044,29 @@ fn requirement_storage_reclaim_wal_head_updates_runtime_head_to_next_region() {
 //# live while replay needs it to reconstruct `region_index` as staged.
 #[test]
 fn requirement_storage_reclaim_wal_head_blocks_on_live_staged_region() {
-    let (mut flash, mut workspace, mut storage, _) = setup_storage_with_stale_wal_head();
+    let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
+    let (mut storage, _) = setup_storage_with_stale_wal_head(&mut flash);
 
     let staged_region = storage
-        .runtime_mut()
-        .reserve_next_region::<512, 6, _>(&mut flash, &mut workspace)
+        .with_runtime_io_workspace(|runtime, flash, workspace| {
+            runtime.reserve_next_region::<512, 8, _>(flash, workspace)
+        })
         .unwrap();
     storage
-        .runtime()
-        .write_committed_region::<512, 6, _>(
-            &mut flash,
-            staged_region,
-            CollectionId(31),
-            MAP_REGION_V1_FORMAT,
-            &[1, 2, 3],
-        )
+        .with_runtime_io_workspace(|runtime, flash, _workspace| {
+            runtime.write_committed_region::<512, 8, _>(
+                flash,
+                staged_region,
+                CollectionId(31),
+                MAP_REGION_V1_FORMAT,
+                &[1, 2, 3],
+            )
+        })
         .unwrap();
-    storage
-        .stage_ready_region::<512, 6, _>(&mut flash, &mut workspace, staged_region)
-        .unwrap();
+    storage.stage_ready_region(staged_region).unwrap();
 
     assert_eq!(
-        storage.reclaim_wal_head::<512, 6, _>(&mut flash, &mut workspace),
+        storage.reclaim_wal_head(),
         Err(StorageRuntimeError::WalHeadReclaimBlockedByStagedRegions)
     );
 }
@@ -1233,30 +1078,30 @@ fn requirement_storage_reclaim_wal_head_blocks_on_live_staged_region() {
 //# records rather than a WAL-specific head record type.
 #[test]
 fn requirement_storage_reclaim_wal_head_appends_an_ordinary_head_record_for_wal_movement() {
-    let (mut flash, mut workspace, mut storage, next_region) = setup_storage_with_stale_wal_head();
+    let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
+    let (mut storage, next_region) = setup_storage_with_stale_wal_head(&mut flash);
 
-    let reclaimed_head = storage
-        .reclaim_wal_head::<512, 6, _>(&mut flash, &mut workspace)
-        .unwrap();
+    let reclaimed_head = storage.reclaim_wal_head().unwrap();
 
     let mut saw_wal_head_record = false;
     storage
-        .runtime()
-        .visit_wal_records::<512, _, (), _>(&mut flash, &mut workspace, |_flash, record| {
-            if let WalRecord::Head {
-                collection_id,
-                collection_type,
-                region_index,
-            } = record
-            {
-                if collection_id == CollectionId(0)
-                    && collection_type == CollectionType::WAL_CODE
-                    && region_index == reclaimed_head
+        .with_runtime_io_workspace(|runtime, flash, workspace| {
+            runtime.visit_wal_records::<512, _, (), _>(flash, workspace, |_flash, record| {
+                if let WalRecord::Head {
+                    collection_id,
+                    collection_type,
+                    region_index,
+                } = record
                 {
-                    saw_wal_head_record = true;
+                    if collection_id == CollectionId(0)
+                        && collection_type == CollectionType::WAL_CODE
+                        && region_index == reclaimed_head
+                    {
+                        saw_wal_head_record = true;
+                    }
                 }
-            }
-            Ok(())
+                Ok(())
+            })
         })
         .unwrap();
 
@@ -1270,11 +1115,10 @@ fn requirement_storage_reclaim_wal_head_appends_an_ordinary_head_record_for_wal_
 //# the WAL.
 #[test]
 fn requirement_storage_reclaim_wal_head_returns_old_head_region_to_free_list_tail() {
-    let (mut flash, mut workspace, mut storage, _) = setup_storage_with_stale_wal_head();
+    let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
+    let (mut storage, _) = setup_storage_with_stale_wal_head(&mut flash);
 
-    storage
-        .reclaim_wal_head::<512, 6, _>(&mut flash, &mut workspace)
-        .unwrap();
+    storage.reclaim_wal_head().unwrap();
 
     assert_eq!(storage.free_list_tail(), Some(0));
     assert!(storage.pending_reclaims().is_empty());
@@ -1289,29 +1133,28 @@ fn requirement_storage_reclaim_wal_head_returns_old_head_region_to_free_list_tai
 //# updates).
 #[test]
 fn requirement_storage_reclaim_wal_head_copies_live_snapshot_basis_to_tail() {
-    let (mut flash, mut workspace, mut storage, next_region) =
-        setup_storage_with_live_snapshot_in_wal_head();
+    let mut flash = MockFlash::<512, 6, 4096>::new(0xff);
+    let (mut storage, next_region) = setup_storage_with_live_snapshot_in_wal_head(&mut flash);
 
-    let reclaimed_head = storage
-        .reclaim_wal_head::<512, 6, _>(&mut flash, &mut workspace)
-        .unwrap();
+    let reclaimed_head = storage.reclaim_wal_head().unwrap();
 
     let mut saw_snapshot = false;
     storage
-        .runtime()
-        .visit_wal_records::<512, _, (), _>(&mut flash, &mut workspace, |_flash, record| {
-            if let WalRecord::Snapshot {
-                collection_id,
-                payload,
-                ..
-            } = record
-            {
-                if collection_id == CollectionId(32) {
-                    assert_eq!(payload, &[4, 5, 6]);
-                    saw_snapshot = true;
+        .with_runtime_io_workspace(|runtime, flash, workspace| {
+            runtime.visit_wal_records::<512, _, (), _>(flash, workspace, |_flash, record| {
+                if let WalRecord::Snapshot {
+                    collection_id,
+                    payload,
+                    ..
+                } = record
+                {
+                    if collection_id == CollectionId(32) {
+                        assert_eq!(payload, &[4, 5, 6]);
+                        saw_snapshot = true;
+                    }
                 }
-            }
-            Ok(())
+                Ok(())
+            })
         })
         .unwrap();
 
@@ -1327,37 +1170,37 @@ fn requirement_storage_reclaim_wal_head_copies_live_snapshot_basis_to_tail() {
 //# post-basis updates MUST NOT depend on bytes in the reclaimed region.
 #[test]
 fn requirement_storage_reclaim_wal_head_copies_live_updates_after_basis_to_tail() {
-    let (mut flash, mut workspace, mut storage, next_region) =
-        setup_storage_with_live_snapshot_and_update_in_wal_head();
+    let mut flash = MockFlash::<512, 6, 4096>::new(0xff);
+    let (mut storage, next_region) =
+        setup_storage_with_live_snapshot_and_update_in_wal_head(&mut flash);
 
-    let reclaimed_head = storage
-        .reclaim_wal_head::<512, 6, _>(&mut flash, &mut workspace)
-        .unwrap();
+    let reclaimed_head = storage.reclaim_wal_head().unwrap();
 
     let mut saw_snapshot = false;
     let mut saw_update = false;
     storage
-        .runtime()
-        .visit_wal_records::<512, _, (), _>(&mut flash, &mut workspace, |_flash, record| {
-            match record {
-                WalRecord::Snapshot {
-                    collection_id: CollectionId(33),
-                    payload,
-                    ..
-                } => {
-                    assert_eq!(payload, &[7, 8, 9]);
-                    saw_snapshot = true;
+        .with_runtime_io_workspace(|runtime, flash, workspace| {
+            runtime.visit_wal_records::<512, _, (), _>(flash, workspace, |_flash, record| {
+                match record {
+                    WalRecord::Snapshot {
+                        collection_id: CollectionId(33),
+                        payload,
+                        ..
+                    } => {
+                        assert_eq!(payload, &[7, 8, 9]);
+                        saw_snapshot = true;
+                    }
+                    WalRecord::Update {
+                        collection_id: CollectionId(33),
+                        payload,
+                    } => {
+                        assert_eq!(payload, &[1, 3, 5]);
+                        saw_update = true;
+                    }
+                    _ => {}
                 }
-                WalRecord::Update {
-                    collection_id: CollectionId(33),
-                    payload,
-                } => {
-                    assert_eq!(payload, &[1, 3, 5]);
-                    saw_update = true;
-                }
-                _ => {}
-            }
-            Ok(())
+                Ok(())
+            })
         })
         .unwrap();
 
@@ -1379,12 +1222,10 @@ fn requirement_storage_reclaim_wal_head_copies_live_updates_after_basis_to_tail(
 //# updates.
 #[test]
 fn requirement_storage_reclaim_wal_head_rewrites_empty_head_map_as_snapshot_basis() {
-    let (mut flash, mut workspace, mut storage, next_region) =
-        setup_storage_with_live_empty_head_map_in_wal_head();
+    let mut flash = MockFlash::<512, 6, 4096>::new(0xff);
+    let (mut storage, next_region) = setup_storage_with_live_empty_head_map_in_wal_head(&mut flash);
 
-    let reclaimed_head = storage
-        .reclaim_wal_head::<512, 6, _>(&mut flash, &mut workspace)
-        .unwrap();
+    let reclaimed_head = storage.reclaim_wal_head().unwrap();
 
     let target = storage
         .collections()
@@ -1397,29 +1238,45 @@ fn requirement_storage_reclaim_wal_head_rewrites_empty_head_map_as_snapshot_basi
     assert_eq!(storage.wal_head(), next_region);
 }
 
-fn reclaim_wal_head_and_reopen_empty_head_map() -> (
-    MockFlash<512, 6, 4096>,
-    StorageWorkspace<512>,
-    Storage<8, 4>,
-    Storage<8, 4>,
+#[derive(Debug)]
+struct ReclaimReplaySnapshot {
+    collections: heapless::Vec<StartupCollection, 8>,
+    last_free_list_head: Option<u32>,
+    staged_regions: heapless::Vec<u32, 4>,
+    ready_region: Option<u32>,
+    pending_reclaims: heapless::Vec<u32, 4>,
+    free_list_tail: Option<u32>,
+    wal_head: u32,
+}
+
+fn reclaim_wal_head_and_reopen_empty_head_map<'db>(
+    flash: &'db mut MockFlash<512, 6, 4096>,
+) -> (
+    ReclaimReplaySnapshot,
+    Storage<'db, MockFlash<512, 6, 4096>, 512, 6, 8, 4>,
     Option<u32>,
     Option<u32>,
 ) {
-    let (mut flash, mut workspace, mut storage, _) =
-        setup_storage_with_live_empty_head_map_in_wal_head();
+    let (mut storage, _) = setup_storage_with_live_empty_head_map_in_wal_head(flash);
     let expected_free_list_head = storage.last_free_list_head();
     let expected_ready_region = storage.ready_region();
 
-    storage
-        .reclaim_wal_head::<512, 6, _>(&mut flash, &mut workspace)
-        .unwrap();
+    storage.reclaim_wal_head().unwrap();
 
-    let reopened = Storage::<8, 4>::open::<512, 6, _>(&mut flash, &mut workspace).unwrap();
+    let snapshot = ReclaimReplaySnapshot {
+        collections: heapless::Vec::from_slice(storage.collections()).unwrap(),
+        last_free_list_head: storage.last_free_list_head(),
+        staged_regions: heapless::Vec::from_slice(storage.staged_regions()).unwrap(),
+        ready_region: storage.ready_region(),
+        pending_reclaims: heapless::Vec::from_slice(storage.pending_reclaims()).unwrap(),
+        free_list_tail: storage.free_list_tail(),
+        wal_head: storage.wal_head(),
+    };
+    drop(storage);
+    let mut reopened = Storage::<_, 512, 6, 8, 4>::open(flash).unwrap();
 
     (
-        flash,
-        workspace,
-        storage,
+        snapshot,
         reopened,
         expected_free_list_head,
         expected_ready_region,
@@ -1433,15 +1290,16 @@ fn reclaim_wal_head_and_reopen_empty_head_map() -> (
 //# tail.
 #[test]
 fn requirement_storage_reclaim_wal_head_reopen_keeps_the_wal_chain_walkable() {
-    let (mut flash, mut workspace, _, reopened, _, _) =
-        reclaim_wal_head_and_reopen_empty_head_map();
+    let mut flash = MockFlash::<512, 6, 4096>::new(0xff);
+    let (_, mut reopened, _, _) = reclaim_wal_head_and_reopen_empty_head_map(&mut flash);
 
     let mut record_count = 0usize;
     reopened
-        .runtime()
-        .visit_wal_records::<512, _, (), _>(&mut flash, &mut workspace, |_flash, _record| {
-            record_count += 1;
-            Ok(())
+        .with_runtime_io_workspace(|runtime, flash, workspace| {
+            runtime.visit_wal_records::<512, _, (), _>(flash, workspace, |_flash, _record| {
+                record_count += 1;
+                Ok(())
+            })
         })
         .unwrap();
 
@@ -1458,27 +1316,25 @@ fn requirement_storage_reclaim_wal_head_reopen_keeps_the_wal_chain_walkable() {
 //# the pre-reclaim logical state.
 #[test]
 fn requirement_storage_reclaim_wal_head_reopen_preserves_replay_result() {
-    let (mut flash, mut workspace, storage, reopened, _, _) =
-        reclaim_wal_head_and_reopen_empty_head_map();
+    let mut flash = MockFlash::<512, 6, 4096>::new(0xff);
+    let (snapshot, mut reopened, _, _) = reclaim_wal_head_and_reopen_empty_head_map(&mut flash);
 
-    assert_eq!(reopened.collections(), storage.collections());
+    assert_eq!(reopened.collections(), snapshot.collections.as_slice());
+    assert_eq!(reopened.last_free_list_head(), snapshot.last_free_list_head);
     assert_eq!(
-        reopened.last_free_list_head(),
-        storage.last_free_list_head()
+        reopened.staged_regions(),
+        snapshot.staged_regions.as_slice()
     );
-    assert_eq!(reopened.staged_regions(), storage.staged_regions());
-    assert_eq!(reopened.ready_region(), storage.ready_region());
-    assert_eq!(reopened.pending_reclaims(), storage.pending_reclaims());
-    assert_eq!(reopened.free_list_tail(), storage.free_list_tail());
+    assert_eq!(reopened.ready_region(), snapshot.ready_region);
+    assert_eq!(
+        reopened.pending_reclaims(),
+        snapshot.pending_reclaims.as_slice()
+    );
+    assert_eq!(reopened.free_list_tail(), snapshot.free_list_tail);
 
     let mut reopen_buffer = [0u8; 512];
     let reopened_map = reopened
-        .open_map::<512, 6, _, i32, i32, 4, 4>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(36),
-            &mut reopen_buffer,
-        )
+        .open_map::<i32, i32, 4, 4>(CollectionId(36), &mut reopen_buffer)
         .unwrap();
 
     assert_eq!(reopened_map.get_frontier(&1).unwrap(), Some(10));
@@ -1494,9 +1350,10 @@ fn requirement_storage_reclaim_wal_head_reopen_preserves_replay_result() {
 //# override, if any.
 #[test]
 fn requirement_storage_reclaim_wal_head_reopen_preserves_effective_wal_head() {
-    let (_, _, storage, reopened, _, _) = reclaim_wal_head_and_reopen_empty_head_map();
+    let mut flash = MockFlash::<512, 6, 4096>::new(0xff);
+    let (snapshot, reopened, _, _) = reclaim_wal_head_and_reopen_empty_head_map(&mut flash);
 
-    assert_eq!(reopened.wal_head(), storage.wal_head());
+    assert_eq!(reopened.wal_head(), snapshot.wal_head);
 }
 
 //= spec/ring.md#wal-reclaim-eligibility
@@ -1504,8 +1361,9 @@ fn requirement_storage_reclaim_wal_head_reopen_preserves_effective_wal_head() {
 //# `RING-WAL-RECLAIM-POST-002` The recovered free-list head MUST match pre-reclaim allocator state.
 #[test]
 fn requirement_storage_reclaim_wal_head_reopen_preserves_free_list_head() {
-    let (_, _, _, reopened, expected_free_list_head, _) =
-        reclaim_wal_head_and_reopen_empty_head_map();
+    let mut flash = MockFlash::<512, 6, 4096>::new(0xff);
+    let (_, reopened, expected_free_list_head, _) =
+        reclaim_wal_head_and_reopen_empty_head_map(&mut flash);
 
     assert_eq!(reopened.last_free_list_head(), expected_free_list_head);
 }
@@ -1516,8 +1374,9 @@ fn requirement_storage_reclaim_wal_head_reopen_preserves_free_list_head() {
 //# allocator state.
 #[test]
 fn requirement_storage_reclaim_wal_head_reopen_preserves_ready_region() {
-    let (_, _, _, reopened, _, expected_ready_region) =
-        reclaim_wal_head_and_reopen_empty_head_map();
+    let mut flash = MockFlash::<512, 6, 4096>::new(0xff);
+    let (_, reopened, _, expected_ready_region) =
+        reclaim_wal_head_and_reopen_empty_head_map(&mut flash);
 
     assert_eq!(reopened.ready_region(), expected_ready_region);
 }
@@ -1528,26 +1387,22 @@ fn requirement_storage_reclaim_wal_head_reopen_preserves_ready_region() {
 //# with no broken `link` path.
 #[test]
 fn requirement_storage_reclaim_wal_head_reopen_has_no_broken_link_path() {
-    let (mut flash, mut workspace, _, reopened, _, _) =
-        reclaim_wal_head_and_reopen_empty_head_map();
+    let mut flash = MockFlash::<512, 6, 4096>::new(0xff);
+    let (_, mut reopened, _, _) = reclaim_wal_head_and_reopen_empty_head_map(&mut flash);
     let mut reopen_buffer = [0u8; 512];
 
     reopened
-        .runtime()
-        .visit_wal_records::<512, _, (), _>(&mut flash, &mut workspace, |_flash, _record| Ok(()))
+        .with_runtime_io_workspace(|runtime, flash, workspace| {
+            runtime.visit_wal_records::<512, _, (), _>(flash, workspace, |_flash, _record| Ok(()))
+        })
         .unwrap();
 
     let reopened_map = reopened
-        .open_map::<512, 6, _, i32, i32, 4, 4>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(36),
-            &mut reopen_buffer,
-        )
+        .open_map::<i32, i32, 4, 4>(CollectionId(36), &mut reopen_buffer)
         .unwrap();
     assert_eq!(
-        reopened_map
-            .get::<512, _>(&mut flash, &mut workspace, &1)
+        reopened
+            .with_io_workspace(|flash, workspace| reopened_map.get::<512, _>(flash, workspace, &1))
             .unwrap(),
         Some(10)
     );
@@ -1563,20 +1418,14 @@ fn requirement_storage_works_through_flash_io_trait_backend() {
     let mut workspace = StorageWorkspace::<256>::new();
 
     let mut storage =
-        Storage::<8, 4>::format::<256, 4, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+        Storage::<_, 256, 4, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
+            .unwrap();
     storage
-        .append_new_collection::<256, 4, _>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(9),
-            CollectionType::MAP_CODE,
-        )
+        .append_new_collection(CollectionId(9), CollectionType::MAP_CODE)
         .unwrap();
-    storage
-        .append_update::<256, 4, _>(&mut flash, &mut workspace, CollectionId(9), &[4, 5])
-        .unwrap();
+    storage.append_update(CollectionId(9), &[4, 5]).unwrap();
 
-    let reopened = Storage::<8, 4>::open::<256, 4, _>(&mut flash, &mut workspace).unwrap();
+    let mut reopened = Storage::<_, 256, 4, 8, 4>::open(&mut flash).unwrap();
     assert_eq!(reopened.collections().len(), 1);
     assert_eq!(reopened.collections()[0].collection_id(), CollectionId(9));
     assert_eq!(reopened.collections()[0].pending_update_count(), 1);
@@ -1591,19 +1440,16 @@ fn requirement_storage_map_api_restores_snapshot_and_updates() {
     let mut flash = MockFlash::<512, 4, 1024>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =
-        Storage::<8, 4>::format::<512, 4, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+        Storage::<_, 512, 4, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
+            .unwrap();
 
-    storage
-        .create_map::<512, 4, _>(&mut flash, &mut workspace, CollectionId(11))
-        .unwrap();
+    storage.create_map(CollectionId(11)).unwrap();
 
     let mut source_buffer = [0u8; 512];
     let mut source = LsmMap::<i32, i32, 4>::new(CollectionId(11), &mut source_buffer).unwrap();
     source.set(1, 10).unwrap();
     source.set(2, 20).unwrap();
-    storage
-        .snapshot_map::<512, 4, _, _, _, 4>(&mut flash, &mut workspace, &source)
-        .unwrap();
+    storage.snapshot_map::<_, _, 4>(&source).unwrap();
 
     let mut update_payload = [0u8; 64];
     let update_len = LsmMap::<i32, i32, 4>::encode_update_into(
@@ -1612,22 +1458,12 @@ fn requirement_storage_map_api_restores_snapshot_and_updates() {
     )
     .unwrap();
     storage
-        .append_update::<512, 4, _>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(11),
-            &update_payload[..update_len],
-        )
+        .append_update(CollectionId(11), &update_payload[..update_len])
         .unwrap();
 
     let mut reopen_buffer = [0u8; 512];
     let reopened = storage
-        .open_map::<512, 4, _, i32, i32, 4, 4>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(11),
-            &mut reopen_buffer,
-        )
+        .open_map::<i32, i32, 4, 4>(CollectionId(11), &mut reopen_buffer)
         .unwrap();
 
     assert_eq!(reopened.get_frontier(&1).unwrap(), Some(10));
@@ -1644,21 +1480,14 @@ fn requirement_storage_map_frontiers_do_not_exceed_the_configured_dirty_collecti
     const REGION_COUNT: usize = 6;
     let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 4096>::new(0xff);
     let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
-    let mut storage = Storage::<8, 4>::format::<REGION_SIZE, REGION_COUNT, _>(
+    let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT, 8, 4>::format(
         &mut flash,
-        &mut workspace,
-        2,
-        8,
-        0xa5,
+        StorageFormatConfig::new(2, 8, 0xa5),
     )
     .unwrap();
 
-    storage
-        .create_map::<REGION_SIZE, REGION_COUNT, _>(&mut flash, &mut workspace, CollectionId(48))
-        .unwrap();
-    storage
-        .create_map::<REGION_SIZE, REGION_COUNT, _>(&mut flash, &mut workspace, CollectionId(49))
-        .unwrap();
+    storage.create_map(CollectionId(48)).unwrap();
+    storage.create_map(CollectionId(49)).unwrap();
 
     let mut first_buffer = [0u8; 128];
     let mut second_buffer = [0u8; 128];
@@ -1667,22 +1496,16 @@ fn requirement_storage_map_frontiers_do_not_exceed_the_configured_dirty_collecti
     let mut payload_buffer = [0u8; 64];
 
     storage
-        .update_map_frontier::<REGION_SIZE, REGION_COUNT, _, u16, u16, 8, 8>(
-            &mut flash,
-            &mut workspace,
+        .update_map_frontier::<u16, u16, 8, 8>(
             &mut first_map,
             &MapUpdate::Set { key: 1, value: 10 },
-            &mut payload_buffer,
         )
         .unwrap();
 
     let error = storage
-        .update_map_frontier::<REGION_SIZE, REGION_COUNT, _, u16, u16, 8, 8>(
-            &mut flash,
-            &mut workspace,
+        .update_map_frontier::<u16, u16, 8, 8>(
             &mut second_map,
             &MapUpdate::Set { key: 2, value: 20 },
-            &mut payload_buffer,
         )
         .unwrap_err();
 
@@ -1696,21 +1519,12 @@ fn requirement_storage_map_frontiers_do_not_exceed_the_configured_dirty_collecti
     assert_eq!(first_map.get_frontier(&1).unwrap(), Some(10));
     assert_eq!(second_map.get_frontier(&2).unwrap(), None);
 
-    storage
-        .flush_map::<REGION_SIZE, REGION_COUNT, _, u16, u16, 8, 8>(
-            &mut flash,
-            &mut workspace,
-            &mut first_map,
-        )
-        .unwrap();
+    storage.flush_map::<u16, u16, 8, 8>(&mut first_map).unwrap();
 
     storage
-        .update_map_frontier::<REGION_SIZE, REGION_COUNT, _, u16, u16, 8, 8>(
-            &mut flash,
-            &mut workspace,
+        .update_map_frontier::<u16, u16, 8, 8>(
             &mut second_map,
             &MapUpdate::Set { key: 2, value: 20 },
-            &mut payload_buffer,
         )
         .unwrap();
     assert_eq!(second_map.get_frontier(&2).unwrap(), Some(20));
@@ -1730,49 +1544,26 @@ fn requirement_storage_map_frontier_overflow_flushes_and_commits_a_new_region_he
     let capacity = smallest_map_capacity_for_repeated_updates(3);
     let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 4096>::new(0xff);
     let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
-    let mut storage = Storage::<8, 4>::format::<REGION_SIZE, REGION_COUNT, _>(
+    let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT, 8, 4>::format(
         &mut flash,
-        &mut workspace,
-        2,
-        8,
-        0xa5,
+        StorageFormatConfig::new(2, 8, 0xa5),
     )
     .unwrap();
 
-    storage
-        .create_map::<REGION_SIZE, REGION_COUNT, _>(&mut flash, &mut workspace, CollectionId(46))
-        .unwrap();
+    storage.create_map(CollectionId(46)).unwrap();
 
     let mut map_buffer = vec![0u8; capacity];
     let mut map = LsmMap::<u16, u16, 8>::new(CollectionId(46), &mut map_buffer).unwrap();
     let mut payload_buffer = [0u8; 64];
 
     storage
-        .update_map_frontier::<REGION_SIZE, REGION_COUNT, _, u16, u16, 8, 8>(
-            &mut flash,
-            &mut workspace,
-            &mut map,
-            &MapUpdate::Set { key: 1, value: 10 },
-            &mut payload_buffer,
-        )
+        .update_map_frontier::<u16, u16, 8, 8>(&mut map, &MapUpdate::Set { key: 1, value: 10 })
         .unwrap();
     storage
-        .update_map_frontier::<REGION_SIZE, REGION_COUNT, _, u16, u16, 8, 8>(
-            &mut flash,
-            &mut workspace,
-            &mut map,
-            &MapUpdate::Set { key: 1, value: 20 },
-            &mut payload_buffer,
-        )
+        .update_map_frontier::<u16, u16, 8, 8>(&mut map, &MapUpdate::Set { key: 1, value: 20 })
         .unwrap();
     storage
-        .update_map_frontier::<REGION_SIZE, REGION_COUNT, _, u16, u16, 8, 8>(
-            &mut flash,
-            &mut workspace,
-            &mut map,
-            &MapUpdate::Set { key: 1, value: 30 },
-            &mut payload_buffer,
-        )
+        .update_map_frontier::<u16, u16, 8, 8>(&mut map, &MapUpdate::Set { key: 1, value: 30 })
         .unwrap();
 
     assert_eq!(
@@ -1781,13 +1572,7 @@ fn requirement_storage_map_frontier_overflow_flushes_and_commits_a_new_region_he
     );
 
     storage
-        .update_map_frontier::<REGION_SIZE, REGION_COUNT, _, u16, u16, 8, 8>(
-            &mut flash,
-            &mut workspace,
-            &mut map,
-            &MapUpdate::Set { key: 1, value: 40 },
-            &mut payload_buffer,
-        )
+        .update_map_frontier::<u16, u16, 8, 8>(&mut map, &MapUpdate::Set { key: 1, value: 40 })
         .unwrap();
 
     let StartupCollectionBasis::Region(region_index) = storage.collections()[0].basis() else {
@@ -1796,10 +1581,15 @@ fn requirement_storage_map_frontier_overflow_flushes_and_commits_a_new_region_he
 
     let mut seen = heapless::Vec::<WalRecordType, 12>::new();
     storage
-        .runtime()
-        .visit_wal_records::<REGION_SIZE, _, (), _>(&mut flash, &mut workspace, |_flash, record| {
-            seen.push(record.record_type()).unwrap();
-            Ok(())
+        .with_runtime_io_workspace(|runtime, flash, workspace| {
+            runtime.visit_wal_records::<REGION_SIZE, _, (), _>(
+                flash,
+                workspace,
+                |_flash, record| {
+                    seen.push(record.record_type()).unwrap();
+                    Ok(())
+                },
+            )
         })
         .unwrap();
 
@@ -1809,12 +1599,7 @@ fn requirement_storage_map_frontier_overflow_flushes_and_commits_a_new_region_he
 
     let mut reopen_buffer = [0u8; REGION_SIZE];
     let reopened = storage
-        .open_map::<REGION_SIZE, REGION_COUNT, _, u16, u16, 8, 8>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(46),
-            &mut reopen_buffer,
-        )
+        .open_map::<u16, u16, 8, 8>(CollectionId(46), &mut reopen_buffer)
         .unwrap();
     assert_eq!(
         storage.collections()[0].basis(),
@@ -1835,18 +1620,13 @@ fn requirement_storage_map_frontier_continues_accumulating_updates_after_an_over
     let capacity = smallest_map_capacity_for_repeated_updates(3);
     let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 4096>::new(0xff);
     let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
-    let mut storage = Storage::<8, 4>::format::<REGION_SIZE, REGION_COUNT, _>(
+    let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT, 8, 4>::format(
         &mut flash,
-        &mut workspace,
-        2,
-        8,
-        0xa5,
+        StorageFormatConfig::new(2, 8, 0xa5),
     )
     .unwrap();
 
-    storage
-        .create_map::<REGION_SIZE, REGION_COUNT, _>(&mut flash, &mut workspace, CollectionId(47))
-        .unwrap();
+    storage.create_map(CollectionId(47)).unwrap();
 
     let mut map_buffer = vec![0u8; capacity];
     let mut map = LsmMap::<u16, u16, 8>::new(CollectionId(47), &mut map_buffer).unwrap();
@@ -1854,24 +1634,12 @@ fn requirement_storage_map_frontier_continues_accumulating_updates_after_an_over
 
     for value in [10u16, 20, 30] {
         storage
-            .update_map_frontier::<REGION_SIZE, REGION_COUNT, _, u16, u16, 8, 8>(
-                &mut flash,
-                &mut workspace,
-                &mut map,
-                &MapUpdate::Set { key: 1, value },
-                &mut payload_buffer,
-            )
+            .update_map_frontier::<u16, u16, 8, 8>(&mut map, &MapUpdate::Set { key: 1, value })
             .unwrap();
     }
 
     storage
-        .update_map_frontier::<REGION_SIZE, REGION_COUNT, _, u16, u16, 8, 8>(
-            &mut flash,
-            &mut workspace,
-            &mut map,
-            &MapUpdate::Set { key: 1, value: 40 },
-            &mut payload_buffer,
-        )
+        .update_map_frontier::<u16, u16, 8, 8>(&mut map, &MapUpdate::Set { key: 1, value: 40 })
         .unwrap();
 
     let StartupCollectionBasis::Region(head_after_flush) = storage.collections()[0].basis() else {
@@ -1879,13 +1647,7 @@ fn requirement_storage_map_frontier_continues_accumulating_updates_after_an_over
     };
 
     storage
-        .update_map_frontier::<REGION_SIZE, REGION_COUNT, _, u16, u16, 8, 8>(
-            &mut flash,
-            &mut workspace,
-            &mut map,
-            &MapUpdate::Set { key: 2, value: 50 },
-            &mut payload_buffer,
-        )
+        .update_map_frontier::<u16, u16, 8, 8>(&mut map, &MapUpdate::Set { key: 2, value: 50 })
         .unwrap();
 
     assert_eq!(
@@ -1897,12 +1659,7 @@ fn requirement_storage_map_frontier_continues_accumulating_updates_after_an_over
 
     let mut reopen_buffer = [0u8; REGION_SIZE];
     let reopened = storage
-        .open_map::<REGION_SIZE, REGION_COUNT, _, u16, u16, 8, 8>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(47),
-            &mut reopen_buffer,
-        )
+        .open_map::<u16, u16, 8, 8>(CollectionId(47), &mut reopen_buffer)
         .unwrap();
     assert_eq!(reopened.get_frontier(&1).unwrap(), Some(40));
     assert_eq!(reopened.get_frontier(&2).unwrap(), Some(50));
@@ -1917,40 +1674,22 @@ fn requirement_storage_map_api_appends_typed_updates() {
     let mut flash = MockFlash::<512, 7, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =
-        Storage::<8, 4>::format::<512, 7, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+        Storage::<_, 512, 7, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
+            .unwrap();
 
-    storage
-        .create_map::<512, 7, _>(&mut flash, &mut workspace, CollectionId(17))
-        .unwrap();
+    storage.create_map(CollectionId(17)).unwrap();
 
     let mut payload_buffer = [0u8; 128];
     storage
-        .append_map_update::<512, 5, _, i32, i32, 4>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(17),
-            &MapUpdate::Set { key: 4, value: 40 },
-            &mut payload_buffer,
-        )
+        .append_map_update::<i32, i32, 4>(CollectionId(17), &MapUpdate::Set { key: 4, value: 40 })
         .unwrap();
     storage
-        .append_map_update::<512, 5, _, i32, i32, 4>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(17),
-            &MapUpdate::Delete { key: 4 },
-            &mut payload_buffer,
-        )
+        .append_map_update::<i32, i32, 4>(CollectionId(17), &MapUpdate::Delete { key: 4 })
         .unwrap();
 
     let mut reopen_buffer = [0u8; 512];
     let reopened = storage
-        .open_map::<512, 7, _, i32, i32, 4, 4>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(17),
-            &mut reopen_buffer,
-        )
+        .open_map::<i32, i32, 4, 4>(CollectionId(17), &mut reopen_buffer)
         .unwrap();
 
     assert_eq!(reopened.get_frontier(&4).unwrap(), None);
@@ -1965,20 +1704,17 @@ fn requirement_storage_map_api_flushes_committed_region_basis() {
     let mut flash = MockFlash::<512, 4, 1024>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =
-        Storage::<8, 4>::format::<512, 4, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+        Storage::<_, 512, 4, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
+            .unwrap();
 
-    storage
-        .create_map::<512, 4, _>(&mut flash, &mut workspace, CollectionId(12))
-        .unwrap();
+    storage.create_map(CollectionId(12)).unwrap();
 
     let mut map_buffer = [0u8; 512];
     let mut map = LsmMap::<i32, i32, 4>::new(CollectionId(12), &mut map_buffer).unwrap();
     map.set(5, 50).unwrap();
     map.set(7, 70).unwrap();
 
-    let region_index = storage
-        .flush_map::<512, 4, _, _, _, 4, 4>(&mut flash, &mut workspace, &mut map)
-        .unwrap();
+    let region_index = storage.flush_map::<_, _, 4, 4>(&mut map).unwrap();
     assert_eq!(
         storage.collections()[0].basis(),
         StartupCollectionBasis::Region(region_index)
@@ -1987,23 +1723,18 @@ fn requirement_storage_map_api_flushes_committed_region_basis() {
 
     let mut reopen_buffer = [0u8; 512];
     let reopened = storage
-        .open_map::<512, 4, _, i32, i32, 4, 4>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(12),
-            &mut reopen_buffer,
-        )
+        .open_map::<i32, i32, 4, 4>(CollectionId(12), &mut reopen_buffer)
         .unwrap();
 
     assert_eq!(
-        reopened
-            .get::<512, _>(&mut flash, &mut workspace, &5)
+        storage
+            .with_io_workspace(|flash, workspace| reopened.get::<512, _>(flash, workspace, &5))
             .unwrap(),
         Some(50)
     );
     assert_eq!(
-        reopened
-            .get::<512, _>(&mut flash, &mut workspace, &7)
+        storage
+            .with_io_workspace(|flash, workspace| reopened.get::<512, _>(flash, workspace, &7))
             .unwrap(),
         Some(70)
     );
@@ -2022,113 +1753,81 @@ fn requirement_storage_compact_map_target_then_greedy_preserves_unselected_runs(
 
     let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 8192>::new(0xff);
     let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
-    let mut storage = Storage::<8, 8>::format::<REGION_SIZE, REGION_COUNT, _>(
+    let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT, 8, 8>::format(
         &mut flash,
-        &mut workspace,
-        1,
-        8,
-        0xa5,
+        StorageFormatConfig::new(1, 8, 0xa5),
     )
     .unwrap();
 
-    storage
-        .create_map::<REGION_SIZE, REGION_COUNT, _>(&mut flash, &mut workspace, CollectionId(70))
-        .unwrap();
+    storage.create_map(CollectionId(70)).unwrap();
 
     let mut map_buffer = [0u8; REGION_SIZE];
     let mut map =
         LsmMap::<i32, i32, MAX_INDEXES, MAX_RUNS>::new(CollectionId(70), &mut map_buffer).unwrap();
     map.set(1, 10).unwrap();
     storage
-        .flush_map::<REGION_SIZE, REGION_COUNT, _, _, _, MAX_INDEXES, MAX_RUNS>(
-            &mut flash,
-            &mut workspace,
-            &mut map,
-        )
+        .flush_map::<_, _, MAX_INDEXES, MAX_RUNS>(&mut map)
         .unwrap();
 
     for key in 10..15 {
         map.set(key, key * 10).unwrap();
     }
     storage
-        .flush_map::<REGION_SIZE, REGION_COUNT, _, _, _, MAX_INDEXES, MAX_RUNS>(
-            &mut flash,
-            &mut workspace,
-            &mut map,
-        )
+        .flush_map::<_, _, MAX_INDEXES, MAX_RUNS>(&mut map)
         .unwrap();
 
     map.set(100, 1000).unwrap();
     storage
-        .flush_map::<REGION_SIZE, REGION_COUNT, _, _, _, MAX_INDEXES, MAX_RUNS>(
-            &mut flash,
-            &mut workspace,
-            &mut map,
-        )
+        .flush_map::<_, _, MAX_INDEXES, MAX_RUNS>(&mut map)
         .unwrap();
 
     map.set(200, 2000).unwrap();
     storage
-        .flush_map::<REGION_SIZE, REGION_COUNT, _, _, _, MAX_INDEXES, MAX_RUNS>(
-            &mut flash,
-            &mut workspace,
-            &mut map,
-        )
+        .flush_map::<_, _, MAX_INDEXES, MAX_RUNS>(&mut map)
         .unwrap();
 
     let mut before_buffer = [0u8; REGION_SIZE];
     let before = storage
-        .open_map::<REGION_SIZE, REGION_COUNT, _, i32, i32, MAX_INDEXES, MAX_RUNS>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(70),
-            &mut before_buffer,
-        )
+        .open_map::<i32, i32, MAX_INDEXES, MAX_RUNS>(CollectionId(70), &mut before_buffer)
         .unwrap();
     assert_eq!(before.run_count(), 4);
 
     let mut scratch_buffer = [0u8; REGION_SIZE];
     let compacted_manifest = storage
-        .compact_map::<REGION_SIZE, REGION_COUNT, _, i32, i32, MAX_INDEXES, MAX_RUNS, 3>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(70),
-            &mut scratch_buffer,
-        )
+        .compact_map::<i32, i32, MAX_INDEXES, MAX_RUNS, 3>(CollectionId(70))
         .unwrap();
     assert!(compacted_manifest.is_some());
 
     let mut after_buffer = [0u8; REGION_SIZE];
     let after = storage
-        .open_map::<REGION_SIZE, REGION_COUNT, _, i32, i32, MAX_INDEXES, MAX_RUNS>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(70),
-            &mut after_buffer,
-        )
+        .open_map::<i32, i32, MAX_INDEXES, MAX_RUNS>(CollectionId(70), &mut after_buffer)
         .unwrap();
     assert_eq!(after.run_count(), 3);
     assert_eq!(
-        after
-            .get::<REGION_SIZE, _>(&mut flash, &mut workspace, &200)
+        storage
+            .with_io_workspace(
+                |flash, workspace| after.get::<REGION_SIZE, _>(flash, workspace, &200)
+            )
             .unwrap(),
         Some(2000)
     );
     assert_eq!(
-        after
-            .get::<REGION_SIZE, _>(&mut flash, &mut workspace, &100)
+        storage
+            .with_io_workspace(
+                |flash, workspace| after.get::<REGION_SIZE, _>(flash, workspace, &100)
+            )
             .unwrap(),
         Some(1000)
     );
     assert_eq!(
-        after
-            .get::<REGION_SIZE, _>(&mut flash, &mut workspace, &10)
+        storage
+            .with_io_workspace(|flash, workspace| after.get::<REGION_SIZE, _>(flash, workspace, &10))
             .unwrap(),
         Some(100)
     );
     assert_eq!(
-        after
-            .get::<REGION_SIZE, _>(&mut flash, &mut workspace, &1)
+        storage
+            .with_io_workspace(|flash, workspace| after.get::<REGION_SIZE, _>(flash, workspace, &1))
             .unwrap(),
         Some(10)
     );
@@ -2147,93 +1846,61 @@ fn requirement_storage_compact_map_preserves_tombstone_masking() {
 
     let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 8192>::new(0xff);
     let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
-    let mut storage = Storage::<8, 8>::format::<REGION_SIZE, REGION_COUNT, _>(
+    let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT, 8, 8>::format(
         &mut flash,
-        &mut workspace,
-        1,
-        8,
-        0xa5,
+        StorageFormatConfig::new(1, 8, 0xa5),
     )
     .unwrap();
 
-    storage
-        .create_map::<REGION_SIZE, REGION_COUNT, _>(&mut flash, &mut workspace, CollectionId(71))
-        .unwrap();
+    storage.create_map(CollectionId(71)).unwrap();
 
     let mut map_buffer = [0u8; REGION_SIZE];
     let mut map =
         LsmMap::<i32, i32, MAX_INDEXES, MAX_RUNS>::new(CollectionId(71), &mut map_buffer).unwrap();
     map.set(1, 10).unwrap();
     storage
-        .flush_map::<REGION_SIZE, REGION_COUNT, _, _, _, MAX_INDEXES, MAX_RUNS>(
-            &mut flash,
-            &mut workspace,
-            &mut map,
-        )
+        .flush_map::<_, _, MAX_INDEXES, MAX_RUNS>(&mut map)
         .unwrap();
 
     map.delete(1).unwrap();
     storage
-        .flush_map::<REGION_SIZE, REGION_COUNT, _, _, _, MAX_INDEXES, MAX_RUNS>(
-            &mut flash,
-            &mut workspace,
-            &mut map,
-        )
+        .flush_map::<_, _, MAX_INDEXES, MAX_RUNS>(&mut map)
         .unwrap();
 
     map.set(2, 20).unwrap();
     storage
-        .flush_map::<REGION_SIZE, REGION_COUNT, _, _, _, MAX_INDEXES, MAX_RUNS>(
-            &mut flash,
-            &mut workspace,
-            &mut map,
-        )
+        .flush_map::<_, _, MAX_INDEXES, MAX_RUNS>(&mut map)
         .unwrap();
 
     let mut before_buffer = [0u8; REGION_SIZE];
     let before = storage
-        .open_map::<REGION_SIZE, REGION_COUNT, _, i32, i32, MAX_INDEXES, MAX_RUNS>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(71),
-            &mut before_buffer,
-        )
+        .open_map::<i32, i32, MAX_INDEXES, MAX_RUNS>(CollectionId(71), &mut before_buffer)
         .unwrap();
     assert_eq!(
-        before
-            .get::<REGION_SIZE, _>(&mut flash, &mut workspace, &1)
+        storage
+            .with_io_workspace(|flash, workspace| before.get::<REGION_SIZE, _>(flash, workspace, &1))
             .unwrap(),
         None
     );
 
     let mut scratch_buffer = [0u8; REGION_SIZE];
     storage
-        .compact_map::<REGION_SIZE, REGION_COUNT, _, i32, i32, MAX_INDEXES, MAX_RUNS, 1>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(71),
-            &mut scratch_buffer,
-        )
+        .compact_map::<i32, i32, MAX_INDEXES, MAX_RUNS, 1>(CollectionId(71))
         .unwrap();
 
     let mut after_buffer = [0u8; REGION_SIZE];
     let after = storage
-        .open_map::<REGION_SIZE, REGION_COUNT, _, i32, i32, MAX_INDEXES, MAX_RUNS>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(71),
-            &mut after_buffer,
-        )
+        .open_map::<i32, i32, MAX_INDEXES, MAX_RUNS>(CollectionId(71), &mut after_buffer)
         .unwrap();
     assert_eq!(
-        after
-            .get::<REGION_SIZE, _>(&mut flash, &mut workspace, &1)
+        storage
+            .with_io_workspace(|flash, workspace| after.get::<REGION_SIZE, _>(flash, workspace, &1))
             .unwrap(),
         None
     );
     assert_eq!(
-        after
-            .get::<REGION_SIZE, _>(&mut flash, &mut workspace, &2)
+        storage
+            .with_io_workspace(|flash, workspace| after.get::<REGION_SIZE, _>(flash, workspace, &2))
             .unwrap(),
         Some(20)
     );
@@ -2252,18 +1919,13 @@ fn requirement_storage_compact_map_streams_replacement_larger_than_frontier_capa
 
     let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 16384>::new(0xff);
     let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
-    let mut storage = Storage::<8, 16>::format::<REGION_SIZE, REGION_COUNT, _>(
+    let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT, 8, 16>::format(
         &mut flash,
-        &mut workspace,
-        1,
-        8,
-        0xa5,
+        StorageFormatConfig::new(1, 8, 0xa5),
     )
     .unwrap();
 
-    storage
-        .create_map::<REGION_SIZE, REGION_COUNT, _>(&mut flash, &mut workspace, CollectionId(72))
-        .unwrap();
+    storage.create_map(CollectionId(72)).unwrap();
 
     let mut map_buffer = [0u8; REGION_SIZE];
     let mut map =
@@ -2274,52 +1936,35 @@ fn requirement_storage_compact_map_streams_replacement_larger_than_frontier_capa
             map.set(key, key * 10).unwrap();
         }
         storage
-            .flush_map::<REGION_SIZE, REGION_COUNT, _, _, _, MAX_INDEXES, MAX_RUNS>(
-                &mut flash,
-                &mut workspace,
-                &mut map,
-            )
+            .flush_map::<_, _, MAX_INDEXES, MAX_RUNS>(&mut map)
             .unwrap();
     }
 
     let mut before_buffer = [0u8; REGION_SIZE];
     let before = storage
-        .open_map::<REGION_SIZE, REGION_COUNT, _, i32, i32, MAX_INDEXES, MAX_RUNS>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(72),
-            &mut before_buffer,
-        )
+        .open_map::<i32, i32, MAX_INDEXES, MAX_RUNS>(CollectionId(72), &mut before_buffer)
         .unwrap();
     assert_eq!(before.run_count(), 3);
 
     let mut scratch_buffer = [0u8; REGION_SIZE];
     let compacted_manifest = storage
-        .compact_map::<REGION_SIZE, REGION_COUNT, _, i32, i32, MAX_INDEXES, MAX_RUNS, 1>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(72),
-            &mut scratch_buffer,
-        )
+        .compact_map::<i32, i32, MAX_INDEXES, MAX_RUNS, 1>(CollectionId(72))
         .unwrap();
     assert!(compacted_manifest.is_some());
 
     let mut after_buffer = [0u8; REGION_SIZE];
     let after = storage
-        .open_map::<REGION_SIZE, REGION_COUNT, _, i32, i32, MAX_INDEXES, MAX_RUNS>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(72),
-            &mut after_buffer,
-        )
+        .open_map::<i32, i32, MAX_INDEXES, MAX_RUNS>(CollectionId(72), &mut after_buffer)
         .unwrap();
     assert_eq!(after.run_count(), 1);
     for run in 0..3 {
         for offset in 0..MAX_INDEXES {
             let key = run * 10 + offset as i32;
             assert_eq!(
-                after
-                    .get::<REGION_SIZE, _>(&mut flash, &mut workspace, &key)
+                storage
+                    .with_io_workspace(|flash, workspace| {
+                        after.get::<REGION_SIZE, _>(flash, workspace, &key)
+                    })
                     .unwrap(),
                 Some(key * 10)
             );
@@ -2327,31 +1972,23 @@ fn requirement_storage_compact_map_streams_replacement_larger_than_frontier_capa
     }
 
     let second_manifest = storage
-        .compact_map::<REGION_SIZE, REGION_COUNT, _, i32, i32, MAX_INDEXES, MAX_RUNS, 1>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(72),
-            &mut scratch_buffer,
-        )
+        .compact_map::<i32, i32, MAX_INDEXES, MAX_RUNS, 1>(CollectionId(72))
         .unwrap();
     assert!(second_manifest.is_some());
 
     let mut second_buffer = [0u8; REGION_SIZE];
     let second = storage
-        .open_map::<REGION_SIZE, REGION_COUNT, _, i32, i32, MAX_INDEXES, MAX_RUNS>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(72),
-            &mut second_buffer,
-        )
+        .open_map::<i32, i32, MAX_INDEXES, MAX_RUNS>(CollectionId(72), &mut second_buffer)
         .unwrap();
     assert_eq!(second.run_count(), 1);
     for run in 0..3 {
         for offset in 0..MAX_INDEXES {
             let key = run * 10 + offset as i32;
             assert_eq!(
-                second
-                    .get::<REGION_SIZE, _>(&mut flash, &mut workspace, &key)
+                storage
+                    .with_io_workspace(|flash, workspace| {
+                        second.get::<REGION_SIZE, _>(flash, workspace, &key)
+                    })
                     .unwrap(),
                 Some(key * 10)
             );
@@ -2368,49 +2005,47 @@ fn requirement_storage_map_replacement_flush_records_reclaim_after_new_head() {
     let mut flash = MockFlash::<512, 7, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =
-        Storage::<8, 4>::format::<512, 7, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+        Storage::<_, 512, 7, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
+            .unwrap();
 
-    storage
-        .create_map::<512, 7, _>(&mut flash, &mut workspace, CollectionId(18))
-        .unwrap();
+    storage.create_map(CollectionId(18)).unwrap();
 
     let mut map_buffer = [0u8; 512];
     let mut map = LsmMap::<i32, i32, 4>::new(CollectionId(18), &mut map_buffer).unwrap();
     map.set(1, 10).unwrap();
-    let first_region = storage
-        .flush_map::<512, 7, _, _, _, 4, 4>(&mut flash, &mut workspace, &mut map)
-        .unwrap();
+    let first_region = storage.flush_map::<_, _, 4, 4>(&mut map).unwrap();
 
     map.set(2, 20).unwrap();
-    let second_region = storage
-        .flush_map::<512, 7, _, _, _, 4, 4>(&mut flash, &mut workspace, &mut map)
-        .unwrap();
+    let second_region = storage.flush_map::<_, _, 4, 4>(&mut map).unwrap();
 
     let mut saw_reclaim_begin = false;
     let mut saw_alloc_begin = false;
     let mut saw_replacement_head = false;
     storage
-        .runtime()
-        .visit_wal_records::<512, _, (), _>(&mut flash, &mut workspace, |_flash, record| {
-            match record {
-                crate::WalRecord::AllocBegin { .. } => {
-                    saw_alloc_begin = true;
+        .with_runtime_io_workspace(|runtime, flash, workspace| {
+            runtime.visit_wal_records::<512, _, (), _>(flash, workspace, |_flash, record| {
+                match record {
+                    crate::WalRecord::AllocBegin { .. } => {
+                        saw_alloc_begin = true;
+                    }
+                    crate::WalRecord::ReclaimBegin { region_index }
+                        if region_index == first_region =>
+                    {
+                        assert!(saw_replacement_head);
+                        saw_reclaim_begin = true;
+                    }
+                    crate::WalRecord::Head {
+                        collection_id,
+                        region_index,
+                        ..
+                    } if collection_id == CollectionId(18) && region_index == second_region => {
+                        assert!(!saw_reclaim_begin);
+                        saw_replacement_head = true;
+                    }
+                    _ => {}
                 }
-                crate::WalRecord::ReclaimBegin { region_index } if region_index == first_region => {
-                    assert!(saw_replacement_head);
-                    saw_reclaim_begin = true;
-                }
-                crate::WalRecord::Head {
-                    collection_id,
-                    region_index,
-                    ..
-                } if collection_id == CollectionId(18) && region_index == second_region => {
-                    assert!(!saw_reclaim_begin);
-                    saw_replacement_head = true;
-                }
-                _ => {}
-            }
-            Ok(())
+                Ok(())
+            })
         })
         .unwrap();
 
@@ -2428,23 +2063,18 @@ fn requirement_storage_map_replacement_flush_is_completed_during_reopen() {
     let mut flash = MockFlash::<512, 7, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =
-        Storage::<8, 4>::format::<512, 7, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+        Storage::<_, 512, 7, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
+            .unwrap();
 
-    storage
-        .create_map::<512, 7, _>(&mut flash, &mut workspace, CollectionId(13))
-        .unwrap();
+    storage.create_map(CollectionId(13)).unwrap();
 
     let mut map_buffer = [0u8; 512];
     let mut map = LsmMap::<i32, i32, 4>::new(CollectionId(13), &mut map_buffer).unwrap();
     map.set(1, 10).unwrap();
-    let first_region = storage
-        .flush_map::<512, 7, _, _, _, 4, 4>(&mut flash, &mut workspace, &mut map)
-        .unwrap();
+    let first_region = storage.flush_map::<_, _, 4, 4>(&mut map).unwrap();
 
     map.set(1, 20).unwrap();
-    let second_region = storage
-        .flush_map::<512, 7, _, _, _, 4, 4>(&mut flash, &mut workspace, &mut map)
-        .unwrap();
+    let second_region = storage.flush_map::<_, _, 4, 4>(&mut map).unwrap();
 
     assert_ne!(first_region, second_region);
     assert_eq!(
@@ -2453,18 +2083,13 @@ fn requirement_storage_map_replacement_flush_is_completed_during_reopen() {
     );
     assert_eq!(storage.pending_reclaims(), &[first_region]);
 
-    let reopened = Storage::<8, 4>::open::<512, 7, _>(&mut flash, &mut workspace).unwrap();
+    let mut reopened = Storage::<_, 512, 7, 8, 4>::open(&mut flash).unwrap();
     assert!(reopened.pending_reclaims().is_empty());
     assert_eq!(reopened.free_list_tail(), Some(first_region));
 
     let mut reopen_buffer = [0u8; 512];
     let reopened_map = reopened
-        .open_map::<512, 7, _, i32, i32, 4, 4>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(13),
-            &mut reopen_buffer,
-        )
+        .open_map::<i32, i32, 4, 4>(CollectionId(13), &mut reopen_buffer)
         .unwrap();
     assert_eq!(
         reopened_map
@@ -2474,62 +2099,58 @@ fn requirement_storage_map_replacement_flush_is_completed_during_reopen() {
     );
 }
 
-fn replace_map_into_pending_reclaim_with_empty_free_list() -> (
-    MockFlash<512, 5, 2048>,
-    StorageWorkspace<512>,
-    Storage<8, 4>,
+fn replace_map_into_pending_reclaim_with_empty_free_list<'db>(
+    flash: &'db mut MockFlash<512, 5, 2048>,
+) -> (
+    Storage<'db, MockFlash<512, 5, 2048>, 512, 5, 8, 4>,
     u32,
     u32,
 ) {
-    let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
-    let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =
-        Storage::<8, 4>::format::<512, 5, _>(&mut flash, &mut workspace, 0, 8, 0xa5).unwrap();
+        Storage::<_, 512, 5, 8, 4>::format(flash, StorageFormatConfig::new(0, 8, 0xa5)).unwrap();
 
-    storage
-        .create_map::<512, 7, _>(&mut flash, &mut workspace, CollectionId(26))
-        .unwrap();
+    storage.create_map(CollectionId(26)).unwrap();
 
     let mut map_buffer = [0u8; 512];
     let mut map = LsmMap::<i32, i32, 4>::new(CollectionId(26), &mut map_buffer).unwrap();
     map.set(1, 10).unwrap();
-    let first_region = storage
-        .flush_map::<512, 7, _, _, _, 4, 4>(&mut flash, &mut workspace, &mut map)
-        .unwrap();
+    let first_region = storage.flush_map::<_, _, 4, 4>(&mut map).unwrap();
 
     map.set(2, 20).unwrap();
-    let second_region = storage
-        .flush_map::<512, 7, _, _, _, 4, 4>(&mut flash, &mut workspace, &mut map)
-        .unwrap();
+    let second_region = storage.flush_map::<_, _, 4, 4>(&mut map).unwrap();
 
     assert_ne!(first_region, second_region);
     assert_eq!(storage.last_free_list_head(), None);
     assert_eq!(storage.free_list_tail(), None);
     assert_eq!(storage.pending_reclaims(), &[first_region]);
 
-    (flash, workspace, storage, first_region, second_region)
+    (storage, first_region, second_region)
 }
 
-fn replace_map_and_reopen_empty_free_list() -> (
-    MockFlash<512, 5, 2048>,
-    StorageWorkspace<512>,
-    Storage<8, 4>,
-    Storage<8, 4>,
+#[derive(Debug)]
+struct ReplacementSnapshot {
+    last_free_list_head: Option<u32>,
+    free_list_tail: Option<u32>,
+}
+
+fn replace_map_and_reopen_empty_free_list<'db>(
+    flash: &'db mut MockFlash<512, 5, 2048>,
+) -> (
+    ReplacementSnapshot,
+    Storage<'db, MockFlash<512, 5, 2048>, 512, 5, 8, 4>,
     u32,
     u32,
 ) {
-    let (mut flash, mut workspace, storage, first_region, second_region) =
-        replace_map_into_pending_reclaim_with_empty_free_list();
-    let reopened = Storage::<8, 4>::open::<512, 7, _>(&mut flash, &mut workspace).unwrap();
+    let (storage, first_region, second_region) =
+        replace_map_into_pending_reclaim_with_empty_free_list(flash);
+    let snapshot = ReplacementSnapshot {
+        last_free_list_head: storage.last_free_list_head(),
+        free_list_tail: storage.free_list_tail(),
+    };
+    drop(storage);
+    let mut reopened = Storage::<_, 512, 5, 8, 4>::open(flash).unwrap();
 
-    (
-        flash,
-        workspace,
-        storage,
-        reopened,
-        first_region,
-        second_region,
-    )
+    (snapshot, reopened, first_region, second_region)
 }
 
 //= spec/map.md#map-storage-integration-requirements
@@ -2539,7 +2160,8 @@ fn replace_map_and_reopen_empty_free_list() -> (
 #[test]
 fn requirement_storage_reopen_after_replacement_initializes_allocator_from_recovered_free_list_head(
 ) {
-    let (_, _, _, reopened, first_region, _) = replace_map_and_reopen_empty_free_list();
+    let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
+    let (_, reopened, first_region, _) = replace_map_and_reopen_empty_free_list(&mut flash);
 
     assert_eq!(reopened.last_free_list_head(), Some(first_region));
 }
@@ -2550,7 +2172,8 @@ fn requirement_storage_reopen_after_replacement_initializes_allocator_from_recov
 //# free-list tail from the recovered reclaimed region.
 #[test]
 fn requirement_storage_reopen_after_replacement_reconstructs_free_list_tail() {
-    let (_, _, _, reopened, first_region, _) = replace_map_and_reopen_empty_free_list();
+    let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
+    let (_, reopened, first_region, _) = replace_map_and_reopen_empty_free_list(&mut flash);
 
     assert_eq!(reopened.free_list_tail(), Some(first_region));
 }
@@ -2565,8 +2188,8 @@ fn requirement_storage_reopen_after_replacement_reconstructs_free_list_tail() {
 //# `pending_wal_recovery_boundary`.
 #[test]
 fn requirement_storage_reopen_after_replacement_recovers_collection_and_reclaim_state() {
-    let (mut flash, mut workspace, _, reopened, _, second_region) =
-        replace_map_and_reopen_empty_free_list();
+    let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
+    let (_, mut reopened, _, second_region) = replace_map_and_reopen_empty_free_list(&mut flash);
 
     assert_eq!(
         reopened.collections()[0].basis(),
@@ -2578,22 +2201,17 @@ fn requirement_storage_reopen_after_replacement_recovers_collection_and_reclaim_
 
     let mut reopen_buffer = [0u8; 512];
     let reopened_map = reopened
-        .open_map::<512, 5, _, i32, i32, 4, 4>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(26),
-            &mut reopen_buffer,
-        )
+        .open_map::<i32, i32, 4, 4>(CollectionId(26), &mut reopen_buffer)
         .unwrap();
     assert_eq!(
-        reopened_map
-            .get::<512, _>(&mut flash, &mut workspace, &1)
+        reopened
+            .with_io_workspace(|flash, workspace| reopened_map.get::<512, _>(flash, workspace, &1))
             .unwrap(),
         Some(10)
     );
     assert_eq!(
-        reopened_map
-            .get::<512, _>(&mut flash, &mut workspace, &2)
+        reopened
+            .with_io_workspace(|flash, workspace| reopened_map.get::<512, _>(flash, workspace, &2))
             .unwrap(),
         Some(20)
     );
@@ -2605,8 +2223,9 @@ fn requirement_storage_reopen_after_replacement_recovers_collection_and_reclaim_
 //# reachable from any live collection head or live WAL state.
 #[test]
 fn requirement_storage_replacement_flush_detaches_reclaimed_region_from_live_state() {
-    let (_, _, storage, first_region, second_region) =
-        replace_map_into_pending_reclaim_with_empty_free_list();
+    let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
+    let (storage, first_region, second_region) =
+        replace_map_into_pending_reclaim_with_empty_free_list(&mut flash);
 
     assert_eq!(
         storage.collections()[0].basis(),
@@ -2621,10 +2240,13 @@ fn requirement_storage_replacement_flush_detaches_reclaimed_region_from_live_sta
 //# this procedure is being re-entered during crash recovery.
 #[test]
 fn requirement_storage_replacement_flush_keeps_detached_region_out_of_free_list_chain() {
-    let (flash, _, storage, first_region, _) =
-        replace_map_into_pending_reclaim_with_empty_free_list();
+    let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
+    let (storage, first_region, _) =
+        replace_map_into_pending_reclaim_with_empty_free_list(&mut flash);
+    let last_free_list_head = storage.last_free_list_head();
+    drop(storage);
 
-    let chain = free_list_chain::<512, 5, 2048, 8>(&flash, 0xff, storage.last_free_list_head());
+    let chain = free_list_chain::<512, 5, 2048, 8>(&flash, 0xff, last_free_list_head);
     assert!(!chain.contains(&first_region));
 }
 
@@ -2636,12 +2258,14 @@ fn requirement_storage_replacement_flush_keeps_detached_region_out_of_free_list_
 #[test]
 fn requirement_storage_reopen_after_replacement_recovers_singleton_free_list_for_reclaimed_region()
 {
-    let (flash, _, storage, reopened, first_region, _) = replace_map_and_reopen_empty_free_list();
+    let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
+    let (snapshot, reopened, first_region, _) = replace_map_and_reopen_empty_free_list(&mut flash);
 
-    assert_eq!(storage.last_free_list_head(), None);
-    assert_eq!(storage.free_list_tail(), None);
+    assert_eq!(snapshot.last_free_list_head, None);
+    assert_eq!(snapshot.free_list_tail, None);
     assert_eq!(reopened.last_free_list_head(), Some(first_region));
     assert_eq!(reopened.free_list_tail(), Some(first_region));
+    drop(reopened);
 
     let footer_offset = 512 - FreePointerFooter::ENCODED_LEN;
     let footer = FreePointerFooter::decode(
@@ -2660,7 +2284,9 @@ fn requirement_storage_reopen_after_replacement_recovers_singleton_free_list_for
 //# about to become the new free-list tail.
 #[test]
 fn requirement_storage_reopen_after_replacement_leaves_new_free_list_tail_uninitialized() {
-    let (flash, _, _, _, first_region, _) = replace_map_and_reopen_empty_free_list();
+    let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
+    let (_, reopened, first_region, _) = replace_map_and_reopen_empty_free_list(&mut flash);
+    drop(reopened);
 
     let footer_offset = 512 - FreePointerFooter::ENCODED_LEN;
     let footer = FreePointerFooter::decode(
@@ -2677,25 +2303,35 @@ fn requirement_storage_reopen_after_replacement_leaves_new_free_list_tail_uninit
 //# any two steps above.
 #[test]
 fn requirement_storage_reopen_after_replacement_recovers_reclaim_idempotently() {
-    let (mut flash, mut workspace, _, reopened_once, _, _) =
-        replace_map_and_reopen_empty_free_list();
+    let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
+    let (_, reopened_once, _, _) = replace_map_and_reopen_empty_free_list(&mut flash);
+    drop(reopened_once);
 
-    let reopened_twice = Storage::<8, 4>::open::<512, 7, _>(&mut flash, &mut workspace).unwrap();
+    let reopened_once = Storage::<_, 512, 5, 8, 4>::open(&mut flash).unwrap();
+    let snapshot_collections: heapless::Vec<StartupCollection, 8> =
+        heapless::Vec::from_slice(reopened_once.collections()).unwrap();
+    let snapshot_last_free_list_head = reopened_once.last_free_list_head();
+    let snapshot_free_list_tail = reopened_once.free_list_tail();
+    let snapshot_pending_reclaims: heapless::Vec<u32, 4> =
+        heapless::Vec::from_slice(reopened_once.pending_reclaims()).unwrap();
+    let snapshot_ready_region = reopened_once.ready_region();
+    drop(reopened_once);
+    let reopened_twice = Storage::<_, 512, 5, 8, 4>::open(&mut flash).unwrap();
 
-    assert_eq!(reopened_twice.collections(), reopened_once.collections());
+    assert_eq!(
+        reopened_twice.collections(),
+        snapshot_collections.as_slice()
+    );
     assert_eq!(
         reopened_twice.last_free_list_head(),
-        reopened_once.last_free_list_head()
+        snapshot_last_free_list_head
     );
-    assert_eq!(
-        reopened_twice.free_list_tail(),
-        reopened_once.free_list_tail()
-    );
+    assert_eq!(reopened_twice.free_list_tail(), snapshot_free_list_tail);
     assert_eq!(
         reopened_twice.pending_reclaims(),
-        reopened_once.pending_reclaims()
+        snapshot_pending_reclaims.as_slice()
     );
-    assert_eq!(reopened_twice.ready_region(), reopened_once.ready_region());
+    assert_eq!(reopened_twice.ready_region(), snapshot_ready_region);
 }
 
 //= spec/ring.md#core-requirements
@@ -2708,23 +2344,18 @@ fn requirement_storage_map_flush_rejects_consuming_min_free_region_reserve() {
     let mut flash = MockFlash::<512, 7, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =
-        Storage::<8, 4>::format::<512, 7, _>(&mut flash, &mut workspace, 4, 8, 0xa5).unwrap();
+        Storage::<_, 512, 7, 8, 4>::format(&mut flash, StorageFormatConfig::new(4, 8, 0xa5))
+            .unwrap();
 
-    storage
-        .create_map::<512, 7, _>(&mut flash, &mut workspace, CollectionId(23))
-        .unwrap();
+    storage.create_map(CollectionId(23)).unwrap();
 
     let mut map_buffer = [0u8; 512];
     let mut map = LsmMap::<i32, i32, 4>::new(CollectionId(23), &mut map_buffer).unwrap();
     map.set(1, 10).unwrap();
-    storage
-        .flush_map::<512, 7, _, _, _, 4, 4>(&mut flash, &mut workspace, &mut map)
-        .unwrap();
+    storage.flush_map::<_, _, 4, 4>(&mut map).unwrap();
 
     map.set(2, 20).unwrap();
-    let error = storage
-        .flush_map::<512, 7, _, _, _, 4, 4>(&mut flash, &mut workspace, &mut map)
-        .unwrap_err();
+    let error = storage.flush_map::<_, _, 4, 4>(&mut map).unwrap_err();
 
     assert!(matches!(
         error,
@@ -2744,29 +2375,22 @@ fn requirement_storage_map_flush_completes_detached_reclaims_before_using_reserv
     let mut flash = MockFlash::<512, 9, 4096>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =
-        Storage::<8, 4>::format::<512, 9, _>(&mut flash, &mut workspace, 3, 8, 0xa5).unwrap();
+        Storage::<_, 512, 9, 8, 4>::format(&mut flash, StorageFormatConfig::new(3, 8, 0xa5))
+            .unwrap();
 
-    storage
-        .create_map::<512, 9, _>(&mut flash, &mut workspace, CollectionId(24))
-        .unwrap();
+    storage.create_map(CollectionId(24)).unwrap();
 
     let mut map_buffer = [0u8; 512];
     let mut map = LsmMap::<i32, i32, 4>::new(CollectionId(24), &mut map_buffer).unwrap();
     map.set(1, 10).unwrap();
-    let first_region = storage
-        .flush_map::<512, 9, _, _, _, 4, 4>(&mut flash, &mut workspace, &mut map)
-        .unwrap();
+    let first_region = storage.flush_map::<_, _, 4, 4>(&mut map).unwrap();
 
     map.set(2, 20).unwrap();
-    let second_region = storage
-        .flush_map::<512, 9, _, _, _, 4, 4>(&mut flash, &mut workspace, &mut map)
-        .unwrap();
+    let second_region = storage.flush_map::<_, _, 4, 4>(&mut map).unwrap();
     assert_eq!(storage.pending_reclaims(), &[first_region]);
 
     map.set(3, 30).unwrap();
-    let third_region = storage
-        .flush_map::<512, 9, _, _, _, 4, 4>(&mut flash, &mut workspace, &mut map)
-        .unwrap();
+    let third_region = storage.flush_map::<_, _, 4, 4>(&mut map).unwrap();
 
     assert_ne!(third_region, first_region);
     assert_ne!(third_region, second_region);
@@ -2782,62 +2406,40 @@ fn requirement_storage_map_flush_reclaims_wal_head_before_consuming_min_free_reg
     let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =
-        Storage::<8, 4>::format::<512, 8, _>(&mut flash, &mut workspace, 3, 8, 0xa5).unwrap();
+        Storage::<_, 512, 8, 8, 4>::format(&mut flash, StorageFormatConfig::new(3, 8, 0xa5))
+            .unwrap();
 
     storage
-        .append_new_collection::<512, 8, _>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(130),
-            CollectionType::MAP_CODE,
-        )
+        .append_new_collection(CollectionId(130), CollectionType::MAP_CODE)
         .unwrap();
     storage
-        .append_update::<512, 8, _>(&mut flash, &mut workspace, CollectionId(130), &[1, 2, 3])
+        .append_update(CollectionId(130), &[1, 2, 3])
         .unwrap();
 
-    let reclaimed_head =
-        rotate_wal_tail_for_collection(&mut storage, &mut flash, &mut workspace, CollectionId(130));
+    let reclaimed_head = rotate_wal_tail_for_collection(&mut storage, CollectionId(130));
     storage
-        .append_snapshot::<512, 8, _>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(130),
-            CollectionType::MAP_CODE,
-            &[9, 9, 9],
-        )
+        .append_snapshot(CollectionId(130), CollectionType::MAP_CODE, &[9, 9, 9])
         .unwrap();
 
-    storage
-        .create_map::<512, 8, _>(&mut flash, &mut workspace, CollectionId(25))
-        .unwrap();
+    storage.create_map(CollectionId(25)).unwrap();
 
     let mut map_buffer = [0u8; 512];
     let mut map = LsmMap::<i32, i32, 4>::new(CollectionId(25), &mut map_buffer).unwrap();
     map.set(1, 10).unwrap();
-    let first_region = storage
-        .flush_map::<512, 8, _, _, _, 4, 4>(&mut flash, &mut workspace, &mut map)
-        .unwrap();
+    let first_region = storage.flush_map::<_, _, 4, 4>(&mut map).unwrap();
 
     map.set(2, 20).unwrap();
-    let second_region = storage
-        .flush_map::<512, 8, _, _, _, 4, 4>(&mut flash, &mut workspace, &mut map)
-        .unwrap();
+    let second_region = storage.flush_map::<_, _, 4, 4>(&mut map).unwrap();
 
     assert_ne!(second_region, first_region);
     assert_eq!(storage.wal_head(), reclaimed_head);
     assert_eq!(storage.pending_reclaims(), &[first_region]);
     assert_eq!(storage.free_list_tail(), Some(0));
 
-    let reopened = Storage::<8, 4>::open::<512, 8, _>(&mut flash, &mut workspace).unwrap();
+    let mut reopened = Storage::<_, 512, 8, 8, 4>::open(&mut flash).unwrap();
     let mut reopen_buffer = [0u8; 512];
     let reopened_map = reopened
-        .open_map::<512, 8, _, i32, i32, 4, 4>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(25),
-            &mut reopen_buffer,
-        )
+        .open_map::<i32, i32, 4, 4>(CollectionId(25), &mut reopen_buffer)
         .unwrap();
 
     assert_eq!(
@@ -2988,32 +2590,34 @@ fn requirement_storage_complete_pending_reclaim_prepares_the_reclaimed_footer_be
 #[test]
 fn requirement_storage_complete_pending_reclaim_records_free_list_head_before_reclaim_end_when_the_list_was_empty(
 ) {
-    let (mut flash, mut workspace, mut storage, first_region, _) =
-        replace_map_into_pending_reclaim_with_empty_free_list();
+    let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
+    let (mut storage, first_region, _) =
+        replace_map_into_pending_reclaim_with_empty_free_list(&mut flash);
 
-    storage
-        .complete_pending_reclaim::<512, 7, _>(&mut flash, &mut workspace, first_region)
-        .unwrap();
+    storage.complete_pending_reclaim(first_region).unwrap();
 
     let mut saw_free_list_head = false;
     let mut saw_reclaim_end = false;
     storage
-        .runtime()
-        .visit_wal_records::<512, _, (), _>(&mut flash, &mut workspace, |_flash, record| {
-            match record {
-                crate::WalRecord::FreeListHead { region_index }
-                    if region_index == Some(first_region) =>
-                {
-                    assert!(!saw_reclaim_end);
-                    saw_free_list_head = true;
+        .with_runtime_io_workspace(|runtime, flash, workspace| {
+            runtime.visit_wal_records::<512, _, (), _>(flash, workspace, |_flash, record| {
+                match record {
+                    crate::WalRecord::FreeListHead { region_index }
+                        if region_index == Some(first_region) =>
+                    {
+                        assert!(!saw_reclaim_end);
+                        saw_free_list_head = true;
+                    }
+                    crate::WalRecord::ReclaimEnd { region_index }
+                        if region_index == first_region =>
+                    {
+                        assert!(saw_free_list_head);
+                        saw_reclaim_end = true;
+                    }
+                    _ => {}
                 }
-                crate::WalRecord::ReclaimEnd { region_index } if region_index == first_region => {
-                    assert!(saw_free_list_head);
-                    saw_reclaim_end = true;
-                }
-                _ => {}
-            }
-            Ok(())
+                Ok(())
+            })
         })
         .unwrap();
 
@@ -3078,25 +2682,20 @@ fn requirement_storage_reopen_discards_reclaim_begin_before_replacement_detaches
     let mut flash = MockFlash::<512, 7, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =
-        Storage::<8, 4>::format::<512, 7, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+        Storage::<_, 512, 7, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
+            .unwrap();
 
-    storage
-        .create_map::<512, 7, _>(&mut flash, &mut workspace, CollectionId(20))
-        .unwrap();
+    storage.create_map(CollectionId(20)).unwrap();
 
     let mut map_buffer = [0u8; 512];
     let mut map = LsmMap::<i32, i32, 4>::new(CollectionId(20), &mut map_buffer).unwrap();
     map.set(1, 10).unwrap();
-    let first_region = storage
-        .flush_map::<512, 7, _, _, _, 4, 4>(&mut flash, &mut workspace, &mut map)
-        .unwrap();
+    let first_region = storage.flush_map::<_, _, 4, 4>(&mut map).unwrap();
 
-    storage
-        .append_reclaim_begin::<512, 5, _>(&mut flash, &mut workspace, first_region)
-        .unwrap();
+    storage.append_reclaim_begin(first_region).unwrap();
     assert_eq!(storage.pending_reclaims(), &[first_region]);
 
-    let reopened = Storage::<8, 4>::open::<512, 7, _>(&mut flash, &mut workspace).unwrap();
+    let mut reopened = Storage::<_, 512, 7, 8, 4>::open(&mut flash).unwrap();
     assert_eq!(
         reopened.collections()[0].basis(),
         StartupCollectionBasis::Region(first_region)
@@ -3105,12 +2704,7 @@ fn requirement_storage_reopen_discards_reclaim_begin_before_replacement_detaches
 
     let mut reopen_buffer = [0u8; 512];
     let reopened_map = reopened
-        .open_map::<512, 7, _, i32, i32, 4, 4>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(20),
-            &mut reopen_buffer,
-        )
+        .open_map::<i32, i32, 4, 4>(CollectionId(20), &mut reopen_buffer)
         .unwrap();
     assert_eq!(
         reopened_map
@@ -3130,22 +2724,17 @@ fn requirement_storage_drop_map_starts_reclaim_for_committed_region_basis() {
     let mut flash = MockFlash::<512, 7, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =
-        Storage::<8, 4>::format::<512, 7, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+        Storage::<_, 512, 7, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
+            .unwrap();
 
-    storage
-        .create_map::<512, 7, _>(&mut flash, &mut workspace, CollectionId(15))
-        .unwrap();
+    storage.create_map(CollectionId(15)).unwrap();
 
     let mut map_buffer = [0u8; 512];
     let mut map = LsmMap::<i32, i32, 4>::new(CollectionId(15), &mut map_buffer).unwrap();
     map.set(8, 80).unwrap();
-    let region_index = storage
-        .flush_map::<512, 7, _, _, _, 4, 4>(&mut flash, &mut workspace, &mut map)
-        .unwrap();
+    let region_index = storage.flush_map::<_, _, 4, 4>(&mut map).unwrap();
 
-    let reclaim_region = storage
-        .drop_map::<512, 7, _>(&mut flash, &mut workspace, CollectionId(15))
-        .unwrap();
+    let reclaim_region = storage.drop_map(CollectionId(15)).unwrap();
 
     assert_eq!(reclaim_region, Some(region_index));
     assert_eq!(
@@ -3155,7 +2744,7 @@ fn requirement_storage_drop_map_starts_reclaim_for_committed_region_basis() {
     assert_eq!(storage.pending_reclaims(), &[region_index]);
     assert_eq!(storage.tracked_user_collection_count(), 0);
 
-    let reopened = Storage::<8, 4>::open::<512, 7, _>(&mut flash, &mut workspace).unwrap();
+    let mut reopened = Storage::<_, 512, 7, 8, 4>::open(&mut flash).unwrap();
     assert_eq!(
         reopened.collections()[0].basis(),
         StartupCollectionBasis::Dropped
@@ -3164,12 +2753,7 @@ fn requirement_storage_drop_map_starts_reclaim_for_committed_region_basis() {
     assert_eq!(reopened.free_list_tail(), Some(region_index));
 
     let mut reopen_buffer = [0u8; 512];
-    let result = reopened.open_map::<512, 7, _, i32, i32, 4, 4>(
-        &mut flash,
-        &mut workspace,
-        CollectionId(15),
-        &mut reopen_buffer,
-    );
+    let result = reopened.open_map::<i32, i32, 4, 4>(CollectionId(15), &mut reopen_buffer);
     assert!(matches!(
         result,
         Err(MapStorageError::DroppedCollection(CollectionId(15)))
@@ -3185,25 +2769,20 @@ fn requirement_storage_reopen_discards_reclaim_begin_before_drop_detaches_live_r
     let mut flash = MockFlash::<512, 7, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =
-        Storage::<8, 4>::format::<512, 7, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+        Storage::<_, 512, 7, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
+            .unwrap();
 
-    storage
-        .create_map::<512, 7, _>(&mut flash, &mut workspace, CollectionId(21))
-        .unwrap();
+    storage.create_map(CollectionId(21)).unwrap();
 
     let mut map_buffer = [0u8; 512];
     let mut map = LsmMap::<i32, i32, 4>::new(CollectionId(21), &mut map_buffer).unwrap();
     map.set(8, 80).unwrap();
-    let region_index = storage
-        .flush_map::<512, 7, _, _, _, 4, 4>(&mut flash, &mut workspace, &mut map)
-        .unwrap();
+    let region_index = storage.flush_map::<_, _, 4, 4>(&mut map).unwrap();
 
-    storage
-        .append_reclaim_begin::<512, 5, _>(&mut flash, &mut workspace, region_index)
-        .unwrap();
+    storage.append_reclaim_begin(region_index).unwrap();
     assert_eq!(storage.pending_reclaims(), &[region_index]);
 
-    let reopened = Storage::<8, 4>::open::<512, 7, _>(&mut flash, &mut workspace).unwrap();
+    let mut reopened = Storage::<_, 512, 7, 8, 4>::open(&mut flash).unwrap();
     assert_eq!(
         reopened.collections()[0].basis(),
         StartupCollectionBasis::Region(region_index)
@@ -3212,12 +2791,7 @@ fn requirement_storage_reopen_discards_reclaim_begin_before_drop_detaches_live_r
 
     let mut reopen_buffer = [0u8; 512];
     let reopened_map = reopened
-        .open_map::<512, 7, _, i32, i32, 4, 4>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(21),
-            &mut reopen_buffer,
-        )
+        .open_map::<i32, i32, 4, 4>(CollectionId(21), &mut reopen_buffer)
         .unwrap();
     assert_eq!(
         reopened_map
@@ -3236,40 +2810,36 @@ fn requirement_storage_drop_map_records_reclaim_before_drop() {
     let mut flash = MockFlash::<512, 7, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =
-        Storage::<8, 4>::format::<512, 7, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+        Storage::<_, 512, 7, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
+            .unwrap();
 
-    storage
-        .create_map::<512, 7, _>(&mut flash, &mut workspace, CollectionId(19))
-        .unwrap();
+    storage.create_map(CollectionId(19)).unwrap();
 
     let mut map_buffer = [0u8; 512];
     let mut map = LsmMap::<i32, i32, 4>::new(CollectionId(19), &mut map_buffer).unwrap();
     map.set(8, 80).unwrap();
-    storage
-        .flush_map::<512, 7, _, _, _, 4, 4>(&mut flash, &mut workspace, &mut map)
-        .unwrap();
+    storage.flush_map::<_, _, 4, 4>(&mut map).unwrap();
 
-    storage
-        .drop_map::<512, 7, _>(&mut flash, &mut workspace, CollectionId(19))
-        .unwrap();
+    storage.drop_map(CollectionId(19)).unwrap();
 
     let mut last_two = [(crate::WalRecordType::WalRecovery, CollectionId(0)); 2];
     storage
-        .runtime()
-        .visit_wal_records::<512, _, (), _>(&mut flash, &mut workspace, |_flash, record| {
-            let record_type = record.record_type();
-            if matches!(
-                record_type,
-                crate::WalRecordType::ReclaimBegin | crate::WalRecordType::DropCollection
-            ) {
-                let collection_id = match record {
-                    crate::WalRecord::DropCollection { collection_id } => collection_id,
-                    _ => CollectionId(0),
-                };
-                last_two.rotate_left(1);
-                last_two[last_two.len() - 1] = (record_type, collection_id);
-            }
-            Ok(())
+        .with_runtime_io_workspace(|runtime, flash, workspace| {
+            runtime.visit_wal_records::<512, _, (), _>(flash, workspace, |_flash, record| {
+                let record_type = record.record_type();
+                if matches!(
+                    record_type,
+                    crate::WalRecordType::ReclaimBegin | crate::WalRecordType::DropCollection
+                ) {
+                    let collection_id = match record {
+                        crate::WalRecord::DropCollection { collection_id } => collection_id,
+                        _ => CollectionId(0),
+                    };
+                    last_two.rotate_left(1);
+                    last_two[last_two.len() - 1] = (record_type, collection_id);
+                }
+                Ok(())
+            })
         })
         .unwrap();
 
@@ -3291,22 +2861,17 @@ fn requirement_storage_drop_map_from_snapshot_basis_has_no_region_reclaim() {
     let mut flash = MockFlash::<512, 7, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =
-        Storage::<8, 4>::format::<512, 7, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+        Storage::<_, 512, 7, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
+            .unwrap();
 
-    storage
-        .create_map::<512, 7, _>(&mut flash, &mut workspace, CollectionId(16))
-        .unwrap();
+    storage.create_map(CollectionId(16)).unwrap();
 
     let mut map_buffer = [0u8; 512];
     let mut map = LsmMap::<i32, i32, 4>::new(CollectionId(16), &mut map_buffer).unwrap();
     map.set(1, 10).unwrap();
-    storage
-        .snapshot_map::<512, 5, _, _, _, 4>(&mut flash, &mut workspace, &map)
-        .unwrap();
+    storage.snapshot_map::<_, _, 4>(&map).unwrap();
 
-    let reclaim_region = storage
-        .drop_map::<512, 7, _>(&mut flash, &mut workspace, CollectionId(16))
-        .unwrap();
+    let reclaim_region = storage.drop_map(CollectionId(16)).unwrap();
 
     assert_eq!(reclaim_region, None);
     assert_eq!(

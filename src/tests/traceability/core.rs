@@ -64,32 +64,20 @@ fn requirement_storage_facade_preserves_ring_behavior_through_delegating_entry_p
     let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =
-        Storage::<8, 4>::format::<512, 5, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+        Storage::<_, 512, 5, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
+            .unwrap();
 
-    storage
-        .create_map::<512, 5, _>(&mut flash, &mut workspace, CollectionId(86))
-        .unwrap();
+    storage.create_map(CollectionId(86)).unwrap();
 
     let mut payload_buffer = [0u8; 64];
     storage
-        .append_map_update::<512, 5, _, u16, u16, 8>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(86),
-            &MapUpdate::Set { key: 7, value: 70 },
-            &mut payload_buffer,
-        )
+        .append_map_update::<u16, u16, 8>(CollectionId(86), &MapUpdate::Set { key: 7, value: 70 })
         .unwrap();
 
-    let reopened = Storage::<8, 4>::open::<512, 5, _>(&mut flash, &mut workspace).unwrap();
+    let mut reopened = Storage::<_, 512, 5, 8, 4>::open(&mut flash).unwrap();
     let mut map_buffer = [0u8; 512];
     let map = reopened
-        .open_map::<512, 5, _, u16, u16, 8, 8>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(86),
-            &mut map_buffer,
-        )
+        .open_map::<u16, u16, 8, 8>(CollectionId(86), &mut map_buffer)
         .unwrap();
     assert_eq!(map.get_frontier(&7).unwrap(), Some(70));
 }

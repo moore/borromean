@@ -3,7 +3,10 @@ use heapless::Vec;
 use crate::disk::{FreePointerFooter, Header, WalRegionPrologue, WAL_V1_FORMAT};
 use crate::flash_io::FlashIo;
 use crate::mock::{MockError, MockFormatError};
-use crate::startup::{open_formatted_store, StartupCollection, StartupError, StartupState};
+use crate::mode::StorageMode;
+use crate::startup::{
+    apply_wal_record, open_formatted_store, StartupCollection, StartupError, StartupState,
+};
 use crate::wal_record::{
     decode_record, encode_record_into, WalRecord, WalRecordError, WalRecordType,
 };
@@ -14,6 +17,13 @@ use crate::{CollectionId, CollectionType, StartupCollectionBasis};
 /// Errors returned by low-level shared storage operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StorageRuntimeError {
+    /// A public operation was requested while another operation mode was active.
+    InvalidStorageMode {
+        /// Required source mode.
+        expected: StorageMode,
+        /// Actual current mode.
+        actual: StorageMode,
+    },
     /// Formatting the backing store failed.
     Format(MockFormatError),
     /// The backing I/O adapter failed.
@@ -1158,7 +1168,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         record: WalRecord<'_>,
     ) -> Result<(), StorageRuntimeError> {
         self.ensure_append_reserve::<REGION_SIZE, REGION_COUNT, IO>(workspace, flash, record)?;
-        self.write_record_and_reopen::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace, record)
+        self.write_record_and_apply::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace, record)
     }
 
     fn append_record_with_rotation<
@@ -1182,20 +1192,52 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         }
     }
 
-    fn write_record_and_reopen<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
+    fn write_record_and_apply<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
         &mut self,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
         record: WalRecord<'_>,
     ) -> Result<(), StorageRuntimeError> {
-        self.write_record_raw::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace, record)?;
-        *self = reopen_without_reclaim_recovery::<
-            REGION_SIZE,
-            REGION_COUNT,
-            IO,
-            MAX_COLLECTIONS,
-            MAX_PENDING_RECLAIMS,
-        >(flash, workspace)?;
+        let encoded_len =
+            self.write_record_raw::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace, record)?;
+        if matches!(
+            record,
+            WalRecord::Head { .. } | WalRecord::FreeListHead { .. } | WalRecord::ReclaimEnd { .. }
+        ) {
+            *self = reopen_without_reclaim_recovery::<
+                REGION_SIZE,
+                REGION_COUNT,
+                IO,
+                MAX_COLLECTIONS,
+                MAX_PENDING_RECLAIMS,
+            >(flash, workspace)?;
+        } else {
+            self.apply_synced_record(record, encoded_len)?;
+        }
+        Ok(())
+    }
+
+    fn apply_synced_record(
+        &mut self,
+        record: WalRecord<'_>,
+        encoded_len: usize,
+    ) -> Result<(), StorageRuntimeError> {
+        apply_wal_record(
+            self.metadata,
+            record,
+            &mut self.collections,
+            &mut self.last_free_list_head,
+            &mut self.ready_region,
+            &mut self.staged_regions,
+            &mut self.pending_reclaims,
+        )?;
+        self.wal_append_offset = self
+            .wal_append_offset
+            .checked_add(encoded_len)
+            .ok_or(StorageRuntimeError::WalRotationRequired)?;
+        if matches!(record, WalRecord::WalRecovery) {
+            self.pending_wal_recovery_boundary = false;
+        }
         Ok(())
     }
 
@@ -1204,7 +1246,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
         record: WalRecord<'_>,
-    ) -> Result<(), StorageRuntimeError> {
+    ) -> Result<usize, StorageRuntimeError> {
         let (physical, logical) = workspace.encode_buffers();
         let encoded_len = encode_record_into(record, self.metadata, physical, logical)?;
         if self
@@ -1221,7 +1263,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
             &physical[..encoded_len],
         )?;
         flash.sync()?;
-        Ok(())
+        Ok(encoded_len)
     }
 
     fn copy_encoded_record_with_rotation<
@@ -2461,4 +2503,5 @@ fn find_link_target_in_wal_region<const REGION_SIZE: usize, IO: FlashIo>(
 }
 
 #[cfg(test)]
+#[allow(unused_mut, unused_variables)]
 mod tests;

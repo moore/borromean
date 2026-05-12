@@ -503,7 +503,7 @@ pub(crate) fn replay_open_wal_chain<
                     }
                     _ => None,
                 };
-                apply_record(
+                apply_wal_record(
                     plan.metadata,
                     record,
                     &mut plan.collections,
@@ -935,7 +935,7 @@ where
     })
 }
 
-fn apply_record<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>(
+pub(crate) fn apply_wal_record<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>(
     metadata: StorageMetadata,
     record: WalRecord<'_>,
     collections: &mut Vec<StartupCollection, MAX_COLLECTIONS>,
@@ -1364,4 +1364,5 @@ fn reconstruct_free_list_tail<IO: FlashIo>(
 }
 
 #[cfg(test)]
+#[allow(unused_mut, unused_variables)]
 mod tests;

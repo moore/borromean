@@ -4,7 +4,7 @@ use crate::MockFlash;
 use crate::StorageWorkspace;
 use crate::{
     CollectionId, CollectionType, Header, LsmMap, MockOperation, StartupCollectionBasis, Storage,
-    WalRecord, WalRegionPrologue,
+    StorageFormatConfig, WalRecord, WalRegionPrologue,
 };
 use core::mem::size_of;
 use heapless::Vec;
@@ -1784,19 +1784,13 @@ fn requirement_region_reachable_from_live_state_follows_map_head_references_to_r
     const MAX_RUNS: usize = 16;
 
     let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 16384>::new(0xff);
-    let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
-    let mut storage = Storage::<8, 8>::format::<REGION_SIZE, REGION_COUNT, _>(
+    let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT, 8, 8>::format(
         &mut flash,
-        &mut workspace,
-        1,
-        8,
-        0xa5,
+        StorageFormatConfig::new(1, 8, 0xa5),
     )
     .unwrap();
     let collection_id = CollectionId(707);
-    storage
-        .create_map::<REGION_SIZE, REGION_COUNT, _>(&mut flash, &mut workspace, collection_id)
-        .unwrap();
+    storage.create_map(collection_id).unwrap();
 
     let mut map_buffer = [0u8; 8192];
     let mut map =
@@ -1805,26 +1799,24 @@ fn requirement_region_reachable_from_live_state_follows_map_head_references_to_r
         map.set(key, key * 10).unwrap();
     }
     storage
-        .flush_map::<REGION_SIZE, REGION_COUNT, _, i32, i32, MAX_INDEXES, MAX_RUNS>(
-            &mut flash,
-            &mut workspace,
-            &mut map,
-        )
+        .flush_map::<i32, i32, MAX_INDEXES, MAX_RUNS>(&mut map)
         .unwrap();
 
-    let run_region = (0..REGION_COUNT as u32)
-        .find(|region_index| {
-            read_header_from_flash::<REGION_SIZE, REGION_COUNT, _>(&mut flash, *region_index)
-                .is_ok_and(|header| {
-                    header.collection_id == collection_id
-                        && header.collection_format == crate::MAP_RUN_V1_FORMAT
-                })
+    let run_region = storage
+        .with_io_workspace(|flash, _workspace| {
+            (0..REGION_COUNT as u32).find(|region_index| {
+                read_header_from_flash::<REGION_SIZE, REGION_COUNT, _>(flash, *region_index)
+                    .is_ok_and(|header| {
+                        header.collection_id == collection_id
+                            && header.collection_format == crate::MAP_RUN_V1_FORMAT
+                    })
+            })
         })
         .expect("flush should write at least one map run region");
 
     assert!(storage
-        .runtime()
-        .region_reachable_from_live_state::<REGION_SIZE, _>(&mut flash, &mut workspace, run_region)
+        .with_runtime_io_workspace(|runtime, flash, workspace| runtime
+            .region_reachable_from_live_state::<REGION_SIZE, _>(flash, workspace, run_region))
         .unwrap());
 }
 

@@ -12,25 +12,18 @@ fn requirement_open_future_preserves_replay_context_across_pending_polls() {
     let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =
-        Storage::<8, 4>::format::<512, 5, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+        Storage::<_, 512, 5, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
+            .unwrap();
 
-    storage
-        .create_map::<512, 5, _>(&mut flash, &mut workspace, CollectionId(83))
-        .unwrap();
+    storage.create_map(CollectionId(83)).unwrap();
     let mut payload_buffer = [0u8; 64];
     storage
-        .append_map_update::<512, 5, _, u16, u16, 8>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(83),
-            &MapUpdate::Set { key: 7, value: 70 },
-            &mut payload_buffer,
-        )
+        .append_map_update::<u16, u16, 8>(CollectionId(83), &MapUpdate::Set { key: 7, value: 70 })
         .unwrap();
     drop(storage);
 
-    let reopened = {
-        let future = Storage::<8, 4>::open_future::<512, 5, _>(&mut flash, &mut workspace);
+    let mut reopened = {
+        let future = Storage::<_, 512, 5, 8, 4>::open_future(&mut flash);
         let mut future = pin!(future);
 
         assert!(matches!(
@@ -46,12 +39,7 @@ fn requirement_open_future_preserves_replay_context_across_pending_polls() {
     };
     let mut map_buffer = [0u8; 512];
     let map = reopened
-        .open_map::<512, 5, _, u16, u16, 8, 8>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(83),
-            &mut map_buffer,
-        )
+        .open_map::<u16, u16, 8, 8>(CollectionId(83), &mut map_buffer)
         .unwrap();
     assert_eq!(map.get_frontier(&7).unwrap(), Some(70));
 }
@@ -65,27 +53,22 @@ fn requirement_startup_open_paths_complete_without_heap_allocation() {
     let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage =
-        Storage::<8, 4>::format::<512, 5, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+        Storage::<_, 512, 5, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
+            .unwrap();
 
-    storage
-        .create_map::<512, 5, _>(&mut flash, &mut workspace, CollectionId(84))
-        .unwrap();
-    storage
-        .append_update::<512, 5, _>(&mut flash, &mut workspace, CollectionId(84), &[1, 2, 3])
-        .unwrap();
+    storage.create_map(CollectionId(84)).unwrap();
+    storage.append_update(CollectionId(84), &[1, 2, 3]).unwrap();
     drop(storage);
 
     assert_no_alloc("blocking open", || {
-        let reopened = Storage::<8, 4>::open::<512, 5, _>(&mut flash, &mut workspace).unwrap();
+        let mut reopened = Storage::<_, 512, 5, 8, 4>::open(&mut flash).unwrap();
         assert_eq!(reopened.collections()[0].collection_id(), CollectionId(84));
     });
 
     assert_no_alloc("future open", || {
-        let reopened = super::super::poll_until_ready(
-            Storage::<8, 4>::open_future::<512, 5, _>(&mut flash, &mut workspace),
-            8,
-        )
-        .unwrap();
+        let reopened =
+            super::super::poll_until_ready(Storage::<_, 512, 5, 8, 4>::open_future(&mut flash), 8)
+                .unwrap();
         assert_eq!(reopened.collections()[0].collection_id(), CollectionId(84));
     });
 }
@@ -114,15 +97,18 @@ fn todo_startup_validates_live_collections_before_reachability_reclaim() {}
 //# operation framework used for normal foreground work.
 #[test]
 fn requirement_blocking_and_future_open_recover_the_same_pending_reclaim_state() {
-    let (mut blocking_flash, mut blocking_workspace, _, first_region, second_region) =
-        super::super::replace_map_into_pending_reclaim_with_empty_free_list();
-    let reopened_blocking =
-        Storage::<8, 4>::open::<512, 3, _>(&mut blocking_flash, &mut blocking_workspace).unwrap();
+    let mut blocking_flash = MockFlash::<512, 5, 2048>::new(0xff);
+    let (storage, first_region, second_region) =
+        super::super::replace_map_into_pending_reclaim_with_empty_free_list(&mut blocking_flash);
+    drop(storage);
+    let reopened_blocking = Storage::<_, 512, 5, 8, 4>::open(&mut blocking_flash).unwrap();
 
-    let (mut future_flash, mut future_workspace, _, _, _) =
-        super::super::replace_map_into_pending_reclaim_with_empty_free_list();
+    let mut future_flash = MockFlash::<512, 5, 2048>::new(0xff);
+    let (future_storage, _, _) =
+        super::super::replace_map_into_pending_reclaim_with_empty_free_list(&mut future_flash);
+    drop(future_storage);
     let reopened_future = super::super::poll_until_ready(
-        Storage::<8, 4>::open_future::<512, 3, _>(&mut future_flash, &mut future_workspace),
+        Storage::<_, 512, 5, 8, 4>::open_future(&mut future_flash),
         8,
     )
     .unwrap();

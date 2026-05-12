@@ -18,8 +18,7 @@ and how its in-memory frontier merges with the retained durable basis.
 The Tier 1 supported API for readers and integrators is:
 
 - `Storage` for formatting, opening, replaying, and mutating the store
-- `FlashIo` for caller-owned device access
-- `StorageWorkspace` for caller-owned scratch buffers
+- `FlashIo` for caller-provided device access bound into `Storage`
 - `CollectionId` and `CollectionType` for stable collection identity
 - `LsmMap` and `MapUpdate` for the durable map collection
 - `MockFlash` for tests and examples
@@ -33,19 +32,20 @@ the primary onboarding path.
 The common storage flow is:
 
 1. Construct a flash backend that implements `FlashIo`.
-2. Allocate a `StorageWorkspace<REGION_SIZE>`.
-3. Format or open the store through `Storage`.
-4. Create or open a map collection.
-5. Apply updates, snapshot the frontier, or flush it into manifest-backed
+2. Format or open the store through `Storage`, which binds exclusive mutable access to the backend.
+3. Create or open a map collection.
+4. Apply updates, snapshot the frontier, or flush it into manifest-backed
    committed runs.
-6. Re-open the store later and reconstruct collection state from replay.
+5. Re-open the store later and reconstruct collection state from replay.
 
 Two execution styles expose the same logic:
 
 - Blocking methods do the whole operation immediately.
 - Future-returning methods package the same operation as a caller-driven future.
 
-Both styles keep I/O and workspace dependencies explicit in the function signatures.
+Both styles drive the same storage context. Normal operations use the backing and reusable scratch
+owned by `Storage`; low-level runtime helpers may still expose `StorageWorkspace` for internal and
+test-support code.
 
 ## Durable Map Model
 

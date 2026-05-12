@@ -2,11 +2,9 @@ use super::*;
 use heapless::Vec as HeaplessVec;
 use std::mem::size_of;
 
-fn storage_with_max_seen_sequence() -> (MockFlash<128, 4, 256>, StorageWorkspace<128>, Storage<8, 4>)
-{
+fn flash_with_max_seen_sequence() -> MockFlash<128, 4, 256> {
     let mut flash = MockFlash::<128, 4, 256>::new(0xff);
-    let mut workspace = StorageWorkspace::<128>::new();
-    Storage::<8, 4>::format::<128, 4, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+    Storage::<_, 128, 4, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5)).unwrap();
 
     let header = Header {
         sequence: u64::MAX,
@@ -17,8 +15,7 @@ fn storage_with_max_seen_sequence() -> (MockFlash<128, 4, 256>, StorageWorkspace
     header.encode_into(&mut header_bytes).unwrap();
     flash.write_region(0, 0, &header_bytes).unwrap();
 
-    let storage = Storage::<8, 4>::open::<128, 4, _>(&mut flash, &mut workspace).unwrap();
-    (flash, workspace, storage)
+    flash
 }
 
 //= spec/implementation.md#arithmetic-requirements
@@ -59,13 +56,14 @@ fn requirement_boundary_sensitive_storage_and_map_lengths_stay_in_range() {
 #[test]
 fn requirement_arithmetic_boundary_failures_surface_explicit_error_variants() {
     let mut flash = MockFlash::<64, 4, 256>::new(0xff);
-    let mut workspace = StorageWorkspace::<64>::new();
     let storage =
-        Storage::<8, 4>::format::<64, 4, _>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+        Storage::<_, 64, 4, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
+            .unwrap();
 
     let oversized_payload = [0u8; 64];
+    let runtime = storage.into_runtime();
     assert!(matches!(
-        storage.runtime().write_committed_region::<64, 4, _>(
+        runtime.write_committed_region::<64, 4, _>(
             &mut flash,
             1,
             CollectionId(9),
@@ -97,10 +95,12 @@ fn requirement_arithmetic_boundary_failures_surface_explicit_error_variants() {
 fn requirement_sequence_advancement_stops_at_the_maximum_value_instead_of_wrapping() {
     assert_eq!(CollectionId(u64::MAX).increment(), None);
 
-    let (mut flash, mut workspace, storage) = storage_with_max_seen_sequence();
+    let mut flash = flash_with_max_seen_sequence();
+    let storage = Storage::<_, 128, 4, 8, 4>::open(&mut flash).unwrap();
     assert_eq!(storage.max_seen_sequence(), u64::MAX);
+    let runtime = storage.into_runtime();
     assert_eq!(
-        storage.runtime().write_committed_region::<128, 4, _>(
+        runtime.write_committed_region::<128, 4, _>(
             &mut flash,
             1,
             CollectionId(11),
@@ -110,7 +110,7 @@ fn requirement_sequence_advancement_stops_at_the_maximum_value_instead_of_wrappi
         Err(StorageRuntimeError::WalRotationRequired)
     );
 
-    let reopened = Storage::<8, 4>::open::<128, 4, _>(&mut flash, &mut workspace).unwrap();
+    let reopened = Storage::<_, 128, 4, 8, 4>::open(&mut flash).unwrap();
     assert_eq!(reopened.max_seen_sequence(), u64::MAX);
     assert_eq!(reopened.wal_head(), 0);
 }
