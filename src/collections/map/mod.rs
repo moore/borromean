@@ -68,6 +68,94 @@ impl From<postcard::Error> for MapError {
     }
 }
 
+/// Errors returned by public map key encoding helpers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LsmKeyError {
+    /// The destination buffer was too small for the encoded key.
+    BufferTooSmall,
+    /// Serialization or decode failed.
+    SerializationError,
+}
+
+impl From<postcard::Error> for LsmKeyError {
+    fn from(error: postcard::Error) -> Self {
+        match error {
+            postcard::Error::SerializeBufferFull => Self::BufferTooSmall,
+            _ => Self::SerializationError,
+        }
+    }
+}
+
+/// Errors returned by public map value encoding helpers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LsmValueError {
+    /// The destination buffer was too small for the encoded value.
+    BufferTooSmall,
+    /// Serialization or decode failed.
+    SerializationError,
+}
+
+impl From<postcard::Error> for LsmValueError {
+    fn from(error: postcard::Error) -> Self {
+        match error {
+            postcard::Error::SerializeBufferFull => Self::BufferTooSmall,
+            _ => Self::SerializationError,
+        }
+    }
+}
+
+/// Public key boundary for durable LSM maps.
+///
+/// The default implementation preserves the current postcard-encoded key
+/// bytes while giving the API a named extension point for future multipart
+/// keys and prefix matching.
+pub trait LsmKey:
+    Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>
+{
+    /// Encodes the key into `out` and returns the number of bytes written.
+    fn encode_key(&self, out: &mut [u8]) -> Result<usize, LsmKeyError> {
+        to_slice(self, out)
+            .map(|encoded| encoded.len())
+            .map_err(LsmKeyError::from)
+    }
+
+    /// Decodes a key from the current stable key bytes.
+    fn decode_key(bytes: &[u8]) -> Result<Self, LsmKeyError>
+    where
+        Self: Sized,
+    {
+        from_bytes(bytes).map_err(LsmKeyError::from)
+    }
+}
+
+impl<T> LsmKey for T where
+    T: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>
+{
+}
+
+/// Public value boundary for durable LSM maps.
+///
+/// The default implementation preserves the current postcard-encoded value
+/// bytes while giving the API a named extension point for future validation.
+pub trait LsmValue: Debug + Serialize + for<'de> Deserialize<'de> {
+    /// Encodes the value into `out` and returns the number of bytes written.
+    fn encode_value(&self, out: &mut [u8]) -> Result<usize, LsmValueError> {
+        to_slice(self, out)
+            .map(|encoded| encoded.len())
+            .map_err(LsmValueError::from)
+    }
+
+    /// Decodes a value from the current stable value bytes.
+    fn decode_value(bytes: &[u8]) -> Result<Self, LsmValueError>
+    where
+        Self: Sized,
+    {
+        from_bytes(bytes).map_err(LsmValueError::from)
+    }
+}
+
+impl<T> LsmValue for T where T: Debug + Serialize + for<'de> Deserialize<'de> {}
+
 /// Logical map entry stored in compacted snapshots and frontiers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(bound(
@@ -208,6 +296,9 @@ impl From<DiskError> for MapStorageError {
         Self::Disk(error)
     }
 }
+
+/// Error type returned by the public `LsmMap` object API.
+pub type LsmMapError = MapStorageError;
 
 /// Logical map mutation encoded into WAL update payloads.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1042,8 +1133,33 @@ enum SearchResult {
     NotFound(RecordIndex),
 }
 
-/// Caller-owned bounded map frontier used by the durable map collection.
-pub struct LsmMap<'a, K, V, const MAX_INDEXES: usize, const MAX_RUNS: usize = MAX_INDEXES> {
+/// Small durable map handle used by the public object-level API.
+pub struct LsmMap<K, V, const MAX_INDEXES: usize, const MAX_RUNS: usize = MAX_INDEXES> {
+    pub(crate) collection_id: CollectionId,
+    pub(crate) compaction_region_target: usize,
+    _phantom: PhantomData<(K, V)>,
+}
+
+impl<K, V, const MAX_INDEXES: usize, const MAX_RUNS: usize> LsmMap<K, V, MAX_INDEXES, MAX_RUNS> {
+    pub(crate) const fn from_collection_id(
+        collection_id: CollectionId,
+        compaction_region_target: usize,
+    ) -> Self {
+        Self {
+            collection_id,
+            compaction_region_target,
+            _phantom: PhantomData,
+        }
+    }
+
+    /// Returns the stable collection id for this durable map.
+    pub fn collection_id(&self) -> CollectionId {
+        self.collection_id
+    }
+}
+
+/// Caller-owned bounded map frontier used by advanced storage helpers.
+pub struct MapFrontier<'a, K, V, const MAX_INDEXES: usize, const MAX_RUNS: usize = MAX_INDEXES> {
     id: CollectionId,
     record_count: EntryCount,
     next_record_offset: RecordOffset,
@@ -1607,7 +1723,7 @@ fn read_run_segment_next_region<const REGION_SIZE: usize, IO: FlashIo>(
 }
 
 impl<'a, K, V, const MAX_INDEXES: usize, const MAX_RUNS: usize>
-    LsmMap<'a, K, V, MAX_INDEXES, MAX_RUNS>
+    MapFrontier<'a, K, V, MAX_INDEXES, MAX_RUNS>
 where
     K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
     V: Debug + Serialize + for<'de> Deserialize<'de>,
@@ -1902,6 +2018,10 @@ where
         Ok(count)
     }
 
+    pub(crate) fn frontier_is_empty(&self) -> bool {
+        self.record_count.0 == 0
+    }
+
     pub(crate) fn selected_compaction_run_count(
         &self,
         region_target: usize,
@@ -2106,6 +2226,18 @@ where
             }
         }
         Ok(())
+    }
+
+    pub(crate) fn push_retained_run(
+        &mut self,
+        run: MapRunDescriptor<K>,
+    ) -> Result<(), MapStorageError> {
+        self.runs
+            .push(run)
+            .map_err(|_| MapStorageError::TooManyRuns {
+                collection_id: self.id,
+                max_runs: MAX_RUNS,
+            })
     }
 
     pub(crate) fn reclaim_run_regions<
@@ -2846,7 +2978,7 @@ where
         Ok(())
     }
 
-    fn next_run_generation(&self) -> u64 {
+    pub(crate) fn next_run_generation(&self) -> u64 {
         self.runs
             .iter()
             .map(|run| run.generation)
@@ -2930,7 +3062,7 @@ where
         }
     }
 
-    fn planned_frontier_run_region_count<const REGION_SIZE: usize>(
+    pub(crate) fn planned_frontier_run_region_count<const REGION_SIZE: usize>(
         &self,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
         generation: u64,
@@ -2975,7 +3107,7 @@ where
         Ok(region_count)
     }
 
-    fn write_frontier_run_to_storage<
+    pub(crate) fn write_frontier_run_to_storage<
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
         IO: FlashIo,
@@ -3599,7 +3731,7 @@ fn load_map_basis_from_flash<
     metadata: crate::StorageMetadata,
     collection_id: CollectionId,
     region_index: u32,
-    map: &mut LsmMap<'_, K, V, MAX_INDEXES, MAX_RUNS>,
+    map: &mut MapFrontier<'_, K, V, MAX_INDEXES, MAX_RUNS>,
 ) -> Result<(), MapStorageError>
 where
     K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
@@ -3614,24 +3746,11 @@ where
 
     match header.collection_format {
         MAP_REGION_V1_FORMAT => {
-            let snapshot = legacy_snapshot_from_payload(payload)?;
-            let (entry_count, _, _, _) = snapshot_parts(snapshot)?;
-            map.runs.clear();
-            map.runs
-                .push(MapRunDescriptor {
-                    source: MapRunSource::LegacyRegion,
-                    generation: 0,
-                    first_region: region_index,
-                    region_count: 1,
-                    approx_state_count: u32::try_from(entry_count)
-                        .map_err(|_| MapStorageError::Map(MapError::SerializationError))?,
-                    lower_key: None,
-                    upper_key: None,
-                })
-                .map_err(|_| MapStorageError::TooManyRuns {
-                    collection_id,
-                    max_runs: MAX_RUNS,
-                })?;
+            return Err(MapStorageError::UnsupportedRegionFormat {
+                collection_id,
+                region_index,
+                actual: MAP_REGION_V1_FORMAT,
+            });
         }
         MAP_MANIFEST_V1_FORMAT => {
             map.load_manifest_descriptors(payload, collection_id, region_index)?;
@@ -3654,10 +3773,6 @@ pub(crate) fn map_head_region_references_region<const REGION_SIZE: usize, IO: Fl
     head_region: u32,
     target_region: u32,
 ) -> Result<bool, MapStorageError> {
-    if head_region == target_region {
-        return Ok(true);
-    }
-
     let mut manifest_region = [0u8; REGION_SIZE];
     let (header, payload) = read_committed_region::<REGION_SIZE, IO>(
         flash,
@@ -3669,7 +3784,11 @@ pub(crate) fn map_head_region_references_region<const REGION_SIZE: usize, IO: Fl
         return Err(MapStorageError::UnknownCollection(collection_id));
     }
     if header.collection_format == MAP_REGION_V1_FORMAT {
-        return Ok(false);
+        return Err(MapStorageError::UnsupportedRegionFormat {
+            collection_id,
+            region_index: head_region,
+            actual: MAP_REGION_V1_FORMAT,
+        });
     }
     if header.collection_format != MAP_MANIFEST_V1_FORMAT {
         return Err(MapStorageError::UnsupportedRegionFormat {
@@ -3677,6 +3796,9 @@ pub(crate) fn map_head_region_references_region<const REGION_SIZE: usize, IO: Fl
             region_index: head_region,
             actual: header.collection_format,
         });
+    }
+    if head_region == target_region {
+        return Ok(true);
     }
 
     let mut offset = 0usize;

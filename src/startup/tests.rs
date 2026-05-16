@@ -1452,7 +1452,11 @@ fn requirement_storage_open_path_rejects_invalid_retained_map_region_snapshot_an
         let result = reopened.open_map::<i32, i32, 4, 4>(CollectionId(43), &mut reopen_buffer);
         assert!(matches!(
             result,
-            Err(MapStorageError::Map(MapError::SerializationError))
+            Err(MapStorageError::UnsupportedRegionFormat {
+                collection_id: CollectionId(43),
+                region_index: actual_region,
+                actual: MAP_REGION_V1_FORMAT,
+            }) if actual_region == region_index
         ));
     }
 

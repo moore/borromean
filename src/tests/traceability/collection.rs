@@ -16,7 +16,7 @@ fn requirement_map_durability_and_recovery_only_change_when_the_shared_storage_e
     storage.create_map(CollectionId(84)).unwrap();
 
     let mut source_buffer = [0u8; 512];
-    let mut source = LsmMap::<u16, u16, 8>::new(CollectionId(84), &mut source_buffer).unwrap();
+    let mut source = MapFrontier::<u16, u16, 8>::new(CollectionId(84), &mut source_buffer).unwrap();
     source.set(1, 10).unwrap();
 
     let mut before_snapshot_buffer = [0u8; 512];
@@ -70,7 +70,7 @@ fn requirement_collection_operations_with_io_are_drivable_as_runtime_agnostic_fu
     super::super::poll_ready(storage.create_map_future(CollectionId(84))).unwrap();
 
     let mut source_buffer = [0u8; 512];
-    let mut source = LsmMap::<u16, u16, 8>::new(CollectionId(84), &mut source_buffer).unwrap();
+    let mut source = MapFrontier::<u16, u16, 8>::new(CollectionId(84), &mut source_buffer).unwrap();
     source.set(1, 10).unwrap();
     super::super::poll_ready(storage.snapshot_map_future::<_, _, 8>(&source)).unwrap();
 

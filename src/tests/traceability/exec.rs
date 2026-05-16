@@ -102,7 +102,7 @@ fn requirement_each_fallible_storage_operation_is_drivable_as_one_future() {
     super::super::poll_ready(storage.create_map_future(CollectionId(81))).unwrap();
 
     let mut source_buffer = [0u8; REGION_SIZE];
-    let mut source = LsmMap::<u16, u16, 8>::new(CollectionId(81), &mut source_buffer).unwrap();
+    let mut source = MapFrontier::<u16, u16, 8>::new(CollectionId(81), &mut source_buffer).unwrap();
     source.set(1, 10).unwrap();
     super::super::poll_ready(storage.snapshot_map_future::<_, _, 8>(&source)).unwrap();
 
@@ -197,7 +197,7 @@ fn requirement_single_threaded_poll_loop_drives_operation_futures_to_completion(
 
     let committed_region = {
         let mut map_buffer = [0u8; REGION_SIZE];
-        let mut map = LsmMap::<u16, u16, 8>::new(CollectionId(81), &mut map_buffer).unwrap();
+        let mut map = MapFrontier::<u16, u16, 8>::new(CollectionId(81), &mut map_buffer).unwrap();
         map.set(7, 70).unwrap();
         super::super::poll_until_ready(storage.flush_map_future::<_, _, 8, 8>(&mut map), 4).unwrap()
     };
@@ -245,7 +245,7 @@ fn requirement_storage_can_be_reused_only_after_an_operation_future_is_finished_
     storage.create_map(CollectionId(82)).unwrap();
 
     let mut map_buffer = [0u8; 512];
-    let mut map = LsmMap::<u16, u16, 8>::new(CollectionId(82), &mut map_buffer).unwrap();
+    let mut map = MapFrontier::<u16, u16, 8>::new(CollectionId(82), &mut map_buffer).unwrap();
     map.set(1, 10).unwrap();
 
     {

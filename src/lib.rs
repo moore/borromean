@@ -15,9 +15,9 @@
 //!
 //! # Example
 //!
-//! ```no_run
+//! ```
 //! use borromean::{
-//!     CollectionId, MapUpdate, MockFlash, Storage, StorageFormatConfig,
+//!     LsmMap, MockFlash, Storage, StorageFormatConfig,
 //! };
 //!
 //! const REGION_SIZE: usize = 512;
@@ -26,26 +26,13 @@
 //! let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 1024>::new(0xff);
 //! let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT, 8, 4>::format(
 //!     &mut flash,
-//!     StorageFormatConfig::new(1, 8, 0xa5),
+//!     StorageFormatConfig::new(2, 8, 0xa5),
 //! )
 //! .unwrap();
 //!
-//! storage
-//!     .create_map(CollectionId::new(1))
-//!     .unwrap();
-//!
-//! storage
-//!     .append_map_update::<u16, u16, 8>(
-//!         CollectionId::new(1),
-//!         &MapUpdate::Set { key: 7, value: 70 },
-//!     )
-//!     .unwrap();
-//!
-//! let mut map_buffer = [0u8; REGION_SIZE];
-//! let map = storage
-//!     .open_map::<u16, u16, 8, 8>(CollectionId::new(1), &mut map_buffer)
-//!     .unwrap();
-//! assert_eq!(map.get_frontier(&7).unwrap(), Some(70));
+//! let mut map = LsmMap::<u16, u16, 8>::new(&mut storage).unwrap();
+//! map.set(&mut storage, 7, 70).unwrap();
+//! assert_eq!(map.get(&mut storage, &7, |_, value| *value).unwrap(), Some(70));
 //! ```
 #![no_std]
 #![cfg_attr(
@@ -251,6 +238,158 @@ impl From<MapStorageError> for StorageOpenError {
     fn from(error: MapStorageError) -> Self {
         Self::Map(error)
     }
+}
+
+fn dirty_frontier_is_active_in<const MAX_COLLECTIONS: usize>(
+    dirty_frontiers: &Vec<CollectionId, MAX_COLLECTIONS>,
+    collection_id: CollectionId,
+) -> bool {
+    dirty_frontiers.contains(&collection_id)
+}
+
+fn ensure_dirty_frontier_budget_for<
+    const MAX_COLLECTIONS: usize,
+    const MAX_PENDING_RECLAIMS: usize,
+>(
+    state: &StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+    dirty_frontiers: &Vec<CollectionId, MAX_COLLECTIONS>,
+    collection_id: CollectionId,
+) -> Result<(), StorageRuntimeError> {
+    if dirty_frontier_is_active_in(dirty_frontiers, collection_id) {
+        return Ok(());
+    }
+
+    let dirty_after = dirty_frontiers
+        .len()
+        .checked_add(1)
+        .ok_or(StorageRuntimeError::TooManyTrackedCollections)?;
+    let required_min_free_regions = u32::try_from(
+        dirty_after
+            .checked_add(1)
+            .ok_or(StorageRuntimeError::TooManyTrackedCollections)?,
+    )
+    .map_err(|_| StorageRuntimeError::TooManyTrackedCollections)?;
+    if required_min_free_regions > state.metadata().min_free_regions {
+        return Err(StorageRuntimeError::TooManyDirtyFrontiers {
+            dirty_frontiers: dirty_after,
+            min_free_regions: state.metadata().min_free_regions,
+        });
+    }
+    Ok(())
+}
+
+fn mark_dirty_frontier_in<const MAX_COLLECTIONS: usize>(
+    dirty_frontiers: &mut Vec<CollectionId, MAX_COLLECTIONS>,
+    collection_id: CollectionId,
+) -> Result<(), StorageRuntimeError> {
+    if dirty_frontiers.contains(&collection_id) {
+        return Ok(());
+    }
+    dirty_frontiers
+        .push(collection_id)
+        .map_err(|_| StorageRuntimeError::TooManyTrackedCollections)
+}
+
+fn clear_dirty_frontier_in<const MAX_COLLECTIONS: usize>(
+    dirty_frontiers: &mut Vec<CollectionId, MAX_COLLECTIONS>,
+    collection_id: CollectionId,
+) {
+    if let Some(index) = dirty_frontiers
+        .iter()
+        .position(|active| *active == collection_id)
+    {
+        dirty_frontiers.remove(index);
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn update_map_frontier_parts<
+    K,
+    V,
+    IO,
+    const REGION_SIZE: usize,
+    const REGION_COUNT: usize,
+    const MAX_COLLECTIONS: usize,
+    const MAX_PENDING_RECLAIMS: usize,
+    const MAX_INDEXES: usize,
+    const MAX_RUNS: usize,
+>(
+    state: &mut StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+    backing: &mut IO,
+    workspace: &mut StorageWorkspace<REGION_SIZE>,
+    dirty_frontiers: &mut Vec<CollectionId, MAX_COLLECTIONS>,
+    payload_scratch: &mut [u8; REGION_SIZE],
+    checkpoint_scratch: &mut [u8; REGION_SIZE],
+    map: &mut MapFrontier<'_, K, V, MAX_INDEXES, MAX_RUNS>,
+    update: &MapUpdate<K, V>,
+) -> Result<(), MapStorageError>
+where
+    IO: FlashIo,
+    K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
+    V: Debug + Serialize + for<'de> Deserialize<'de>,
+{
+    let collection_id = map.id();
+    let Some(collection) = state
+        .collections()
+        .iter()
+        .find(|collection| collection.collection_id() == collection_id)
+    else {
+        return Err(MapStorageError::UnknownCollection(collection_id));
+    };
+    if collection.basis() == StartupCollectionBasis::Dropped {
+        return Err(MapStorageError::DroppedCollection(collection_id));
+    }
+    if collection.collection_type() != Some(CollectionType::MAP_CODE) {
+        return Err(MapStorageError::CollectionTypeMismatch {
+            collection_id,
+            expected: CollectionType::MAP_CODE,
+            actual: collection.collection_type(),
+        });
+    }
+    ensure_dirty_frontier_budget_for(state, dirty_frontiers, collection_id)
+        .map_err(MapStorageError::from)?;
+
+    let used = MapFrontier::<K, V, MAX_INDEXES>::encode_update_into(update, payload_scratch)?;
+    let mut checkpoint = map.checkpoint_into(checkpoint_scratch)?;
+
+    match map.apply_update_payload(&payload_scratch[..used]) {
+        Ok(()) => {}
+        Err(MapError::BufferTooSmall) => {
+            map.restore_from_checkpoint(checkpoint, checkpoint_scratch)?;
+
+            map.flush_to_storage::<
+                REGION_SIZE,
+                REGION_COUNT,
+                IO,
+                MAX_COLLECTIONS,
+                MAX_PENDING_RECLAIMS,
+            >(state, backing, workspace)?;
+            clear_dirty_frontier_in(dirty_frontiers, collection_id);
+
+            checkpoint = map.checkpoint_into(checkpoint_scratch)?;
+
+            if let Err(error) = map.apply_update_payload(&payload_scratch[..used]) {
+                map.restore_from_checkpoint(checkpoint, checkpoint_scratch)?;
+                return Err(error.into());
+            }
+        }
+        Err(error) => {
+            map.restore_from_checkpoint(checkpoint, checkpoint_scratch)?;
+            return Err(error.into());
+        }
+    }
+
+    if let Err(error) = state.append_update_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
+        backing,
+        workspace,
+        collection_id,
+        &payload_scratch[..used],
+    ) {
+        map.restore_from_checkpoint(checkpoint, checkpoint_scratch)?;
+        return Err(error.into());
+    }
+
+    mark_dirty_frontier_in(dirty_frontiers, collection_id).map_err(MapStorageError::from)
 }
 
 impl<
@@ -462,6 +601,21 @@ impl<
         self.state.collections()
     }
 
+    pub(crate) fn allocate_map_collection_id(&self) -> Result<CollectionId, StorageRuntimeError> {
+        let mut next = 1u64;
+        for collection in self.collections() {
+            let candidate = collection
+                .collection_id()
+                .0
+                .checked_add(1)
+                .ok_or(StorageRuntimeError::TooManyTrackedCollections)?;
+            if candidate > next {
+                next = candidate;
+            }
+        }
+        Ok(CollectionId(next))
+    }
+
     /// Returns regions awaiting reclaim completion.
     pub fn pending_reclaims(&self) -> &[u32] {
         self.state.pending_reclaims()
@@ -507,52 +661,6 @@ impl<
         state: StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
     ) -> Self {
         Self::from_parts(backing, workspace, state)
-    }
-
-    fn dirty_frontier_is_active(&self, collection_id: CollectionId) -> bool {
-        self.dirty_frontiers.contains(&collection_id)
-    }
-
-    fn ensure_dirty_frontier_budget(
-        &self,
-        collection_id: CollectionId,
-    ) -> Result<(), StorageRuntimeError> {
-        if self.dirty_frontier_is_active(collection_id) {
-            return Ok(());
-        }
-
-        let dirty_after = self
-            .dirty_frontiers
-            .len()
-            .checked_add(1)
-            .ok_or(StorageRuntimeError::TooManyTrackedCollections)?;
-        let required_min_free_regions = u32::try_from(
-            dirty_after
-                .checked_add(1)
-                .ok_or(StorageRuntimeError::TooManyTrackedCollections)?,
-        )
-        .map_err(|_| StorageRuntimeError::TooManyTrackedCollections)?;
-        if required_min_free_regions > self.state.metadata().min_free_regions {
-            return Err(StorageRuntimeError::TooManyDirtyFrontiers {
-                dirty_frontiers: dirty_after,
-                min_free_regions: self.state.metadata().min_free_regions,
-            });
-        }
-
-        Ok(())
-    }
-
-    fn mark_dirty_frontier(
-        &mut self,
-        collection_id: CollectionId,
-    ) -> Result<(), StorageRuntimeError> {
-        if self.dirty_frontier_is_active(collection_id) {
-            return Ok(());
-        }
-
-        self.dirty_frontiers
-            .push(collection_id)
-            .map_err(|_| StorageRuntimeError::TooManyTrackedCollections)
     }
 
     fn clear_dirty_frontier(&mut self, collection_id: CollectionId) {
@@ -907,7 +1015,7 @@ impl<
 
     pub(crate) fn flush_map_inner<K, V, const MAX_INDEXES: usize, const MAX_RUNS: usize>(
         &mut self,
-        map: &mut LsmMap<'_, K, V, MAX_INDEXES, MAX_RUNS>,
+        map: &mut MapFrontier<'_, K, V, MAX_INDEXES, MAX_RUNS>,
     ) -> Result<u32, MapStorageError>
     where
         K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
@@ -927,7 +1035,7 @@ impl<
     /// Persists the supplied map frontier as a WAL snapshot basis.
     pub fn snapshot_map<K, V, const MAX_INDEXES: usize>(
         &mut self,
-        map: &LsmMap<'_, K, V, MAX_INDEXES>,
+        map: &MapFrontier<'_, K, V, MAX_INDEXES>,
     ) -> Result<(), MapStorageError>
     where
         K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
@@ -952,7 +1060,7 @@ impl<
     /// Persists the supplied map frontier as a caller-driven snapshot future.
     pub fn snapshot_map_future<'a, K, V, const MAX_INDEXES: usize>(
         &'a mut self,
-        map: &'a LsmMap<'a, K, V, MAX_INDEXES>,
+        map: &'a MapFrontier<'a, K, V, MAX_INDEXES>,
     ) -> impl Future<Output = Result<(), MapStorageError>>
            + 'a
            + use<
@@ -1006,7 +1114,7 @@ impl<
                     });
                 }
 
-                let used = LsmMap::<K, V, MAX_INDEXES>::encode_update_into(
+                let used = MapFrontier::<K, V, MAX_INDEXES>::encode_update_into(
                     update,
                     &mut this.payload_scratch,
                 )?;
@@ -1025,7 +1133,7 @@ impl<
     /// Applies a map update to both the caller frontier and durable WAL state.
     pub fn update_map_frontier<K, V, const MAX_INDEXES: usize, const MAX_RUNS: usize>(
         &mut self,
-        map: &mut LsmMap<'_, K, V, MAX_INDEXES, MAX_RUNS>,
+        map: &mut MapFrontier<'_, K, V, MAX_INDEXES, MAX_RUNS>,
         update: &MapUpdate<K, V>,
     ) -> Result<(), MapStorageError>
     where
@@ -1037,70 +1145,26 @@ impl<
         ))
         .map_err(MapStorageError::from)?;
 
-        let result = (|| {
-            let collection_id = map.id();
-            let Some(collection) = self
-                .state
-                .collections()
-                .iter()
-                .find(|collection| collection.collection_id() == collection_id)
-            else {
-                return Err(MapStorageError::UnknownCollection(collection_id));
-            };
-            if collection.basis() == StartupCollectionBasis::Dropped {
-                return Err(MapStorageError::DroppedCollection(collection_id));
-            }
-            if collection.collection_type() != Some(CollectionType::MAP_CODE) {
-                return Err(MapStorageError::CollectionTypeMismatch {
-                    collection_id,
-                    expected: CollectionType::MAP_CODE,
-                    actual: collection.collection_type(),
-                });
-            }
-            self.ensure_dirty_frontier_budget(collection_id)
-                .map_err(MapStorageError::from)?;
-
-            let used =
-                LsmMap::<K, V, MAX_INDEXES>::encode_update_into(update, &mut self.payload_scratch)?;
-            let mut checkpoint = map.checkpoint_into(&mut self.checkpoint_scratch)?;
-
-            match map.apply_update_payload(&self.payload_scratch[..used]) {
-                Ok(()) => {}
-                Err(MapError::BufferTooSmall) => {
-                    map.restore_from_checkpoint(checkpoint, &mut self.checkpoint_scratch)?;
-
-                    self.flush_map_inner::<K, V, MAX_INDEXES, MAX_RUNS>(map)?;
-
-                    checkpoint = map.checkpoint_into(&mut self.checkpoint_scratch)?;
-
-                    if let Err(error) = map.apply_update_payload(&self.payload_scratch[..used]) {
-                        map.restore_from_checkpoint(checkpoint, &mut self.checkpoint_scratch)?;
-                        return Err(error.into());
-                    }
-                }
-                Err(error) => {
-                    map.restore_from_checkpoint(checkpoint, &mut self.checkpoint_scratch)?;
-                    return Err(error.into());
-                }
-            }
-
-            if let Err(error) = self
-                .state
-                .append_update_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
-                    self.backing,
-                    &mut self.workspace,
-                    collection_id,
-                    &self.payload_scratch[..used],
-                )
-            {
-                map.restore_from_checkpoint(checkpoint, &mut self.checkpoint_scratch)?;
-                return Err(error.into());
-            }
-
-            self.mark_dirty_frontier(collection_id)
-                .map_err(MapStorageError::from)?;
-            Ok(())
-        })();
+        let result = update_map_frontier_parts::<
+            K,
+            V,
+            IO,
+            REGION_SIZE,
+            REGION_COUNT,
+            MAX_COLLECTIONS,
+            MAX_PENDING_RECLAIMS,
+            MAX_INDEXES,
+            MAX_RUNS,
+        >(
+            &mut self.state,
+            self.backing,
+            &mut self.workspace,
+            &mut self.dirty_frontiers,
+            &mut self.payload_scratch,
+            &mut self.checkpoint_scratch,
+            map,
+            update,
+        );
 
         self.finish_mode();
         result
@@ -1135,7 +1199,7 @@ impl<
     /// Flushes the supplied map frontier into a new committed region.
     pub fn flush_map<K, V, const MAX_INDEXES: usize, const MAX_RUNS: usize>(
         &mut self,
-        map: &mut LsmMap<'_, K, V, MAX_INDEXES, MAX_RUNS>,
+        map: &mut MapFrontier<'_, K, V, MAX_INDEXES, MAX_RUNS>,
     ) -> Result<u32, MapStorageError>
     where
         K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
@@ -1150,7 +1214,7 @@ impl<
     /// Flushes the supplied map frontier as a caller-driven future.
     pub fn flush_map_future<'a, K, V, const MAX_INDEXES: usize, const MAX_RUNS: usize>(
         &'a mut self,
-        map: &'a mut LsmMap<'a, K, V, MAX_INDEXES, MAX_RUNS>,
+        map: &'a mut MapFrontier<'a, K, V, MAX_INDEXES, MAX_RUNS>,
     ) -> YieldingFlushMapFuture<
         'a,
         'db,
@@ -1198,14 +1262,26 @@ impl<
         K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
         V: Debug + Serialize + for<'de> Deserialize<'de>,
     {
+        self.compact_map_with_target::<K, V, MAX_INDEXES, MAX_RUNS>(collection_id, REGION_TARGET)
+    }
+
+    pub(crate) fn compact_map_with_target<K, V, const MAX_INDEXES: usize, const MAX_RUNS: usize>(
+        &mut self,
+        collection_id: CollectionId,
+        region_target: usize,
+    ) -> Result<Option<u32>, MapStorageError>
+    where
+        K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
+        V: Debug + Serialize + for<'de> Deserialize<'de>,
+    {
         self.run_map_operation(
             StorageMode::CompactingCollection(CollectionCompactionMode::Running),
             |this| {
-                if REGION_TARGET == 0 {
+                if region_target == 0 {
                     return Err(MapStorageError::InvalidRegionTarget);
                 }
 
-                let mut opened = LsmMap::<K, V, MAX_INDEXES, MAX_RUNS>::open_from_storage::<
+                let mut opened = MapFrontier::<K, V, MAX_INDEXES, MAX_RUNS>::open_from_storage::<
                     REGION_SIZE,
                     REGION_COUNT,
                     IO,
@@ -1219,17 +1295,28 @@ impl<
                     &mut this.open_scratch,
                 )?;
 
-                let Some(selected_runs) = opened.selected_compaction_run_count(REGION_TARGET)?
+                let Some(selected_runs) = opened.selected_compaction_run_count(region_target)?
                 else {
                     return Ok(None);
                 };
+                let frontier_generation = opened.next_run_generation().saturating_add(1);
 
-                let planned_allocations = opened
+                let mut planned_allocations = opened
                     .selected_compaction_state_count(selected_runs)?
                     .checked_add(1)
                     .ok_or(MapStorageError::Map(
                         crate::collections::map::MapError::SerializationError,
                     ))?;
+                if !opened.frontier_is_empty() {
+                    planned_allocations = planned_allocations
+                        .checked_add(opened.planned_frontier_run_region_count(
+                            &mut this.workspace,
+                            frontier_generation,
+                        )?)
+                        .ok_or(MapStorageError::Map(
+                            crate::collections::map::MapError::SerializationError,
+                        ))?;
+                }
                 let additional_allocations = if this.state.ready_region().is_some() {
                     planned_allocations.saturating_sub(1)
                 } else {
@@ -1249,10 +1336,29 @@ impl<
                     MAX_COLLECTIONS,
                     MAX_PENDING_RECLAIMS,
                 >(&mut this.state, this.backing, &mut this.workspace, selected_runs)?;
-                let mut replacement = LsmMap::<K, V, MAX_INDEXES, MAX_RUNS>::new(
+                let frontier_run = if opened.frontier_is_empty() {
+                    None
+                } else {
+                    opened.write_frontier_run_to_storage::<
+                        REGION_SIZE,
+                        REGION_COUNT,
+                        IO,
+                        MAX_COLLECTIONS,
+                        MAX_PENDING_RECLAIMS,
+                    >(
+                        &mut this.state,
+                        this.backing,
+                        &mut this.workspace,
+                        frontier_generation,
+                    )?
+                };
+                let mut replacement = MapFrontier::<K, V, MAX_INDEXES, MAX_RUNS>::new(
                     collection_id,
                     &mut this.collection_scratch,
                 )?;
+                if let Some(run) = replacement_run {
+                    replacement.push_retained_run(run)?;
+                }
                 opened.move_unselected_runs_into(selected_runs, &mut replacement)?;
                 let manifest_region = replacement.commit_manifest_to_storage::<
                     REGION_SIZE,
@@ -1260,7 +1366,7 @@ impl<
                     IO,
                     MAX_COLLECTIONS,
                     MAX_PENDING_RECLAIMS,
-                >(&mut this.state, this.backing, &mut this.workspace, replacement_run)?;
+                >(&mut this.state, this.backing, &mut this.workspace, frontier_run)?;
                 opened.reclaim_run_regions::<
                     REGION_SIZE,
                     REGION_COUNT,
@@ -1331,14 +1437,14 @@ impl<
         &mut self,
         collection_id: CollectionId,
         buffer: &'a mut [u8],
-    ) -> Result<LsmMap<'a, K, V, MAX_INDEXES, MAX_RUNS>, MapStorageError>
+    ) -> Result<MapFrontier<'a, K, V, MAX_INDEXES, MAX_RUNS>, MapStorageError>
     where
         K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
         V: Debug + Serialize + for<'de> Deserialize<'de>,
     {
         self.enter_mode(StorageMode::LoadingCollection(CollectionLoadMode::Running))
             .map_err(MapStorageError::from)?;
-        let result = LsmMap::<K, V, MAX_INDEXES, MAX_RUNS>::open_from_storage::<
+        let result = MapFrontier::<K, V, MAX_INDEXES, MAX_RUNS>::open_from_storage::<
             REGION_SIZE,
             REGION_COUNT,
             IO,
@@ -1353,5 +1459,322 @@ impl<
         );
         self.finish_mode();
         result
+    }
+}
+
+impl<K, V, const MAX_INDEXES: usize, const MAX_RUNS: usize> LsmMap<K, V, MAX_INDEXES, MAX_RUNS>
+where
+    K: LsmKey,
+    V: LsmValue,
+{
+    fn default_compaction_region_target() -> usize {
+        match MAX_RUNS.checked_sub(1) {
+            Some(0) | None => 1,
+            Some(target) => target,
+        }
+    }
+
+    /// Creates a new durable map collection and returns its small handle.
+    pub fn new<
+        'db,
+        IO: FlashIo,
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        const MAX_COLLECTIONS: usize,
+        const MAX_PENDING_RECLAIMS: usize,
+    >(
+        storage: &mut Storage<
+            'db,
+            IO,
+            REGION_SIZE,
+            REGION_COUNT,
+            MAX_COLLECTIONS,
+            MAX_PENDING_RECLAIMS,
+        >,
+    ) -> Result<Self, LsmMapError> {
+        let collection_id = storage.allocate_map_collection_id()?;
+        storage.create_map(collection_id)?;
+        Ok(Self::from_collection_id(
+            collection_id,
+            Self::default_compaction_region_target(),
+        ))
+    }
+
+    /// Opens and validates an existing durable map collection.
+    pub fn open<
+        'db,
+        IO: FlashIo,
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        const MAX_COLLECTIONS: usize,
+        const MAX_PENDING_RECLAIMS: usize,
+    >(
+        collection_id: CollectionId,
+        storage: &mut Storage<
+            'db,
+            IO,
+            REGION_SIZE,
+            REGION_COUNT,
+            MAX_COLLECTIONS,
+            MAX_PENDING_RECLAIMS,
+        >,
+    ) -> Result<Self, LsmMapError> {
+        storage
+            .enter_mode(StorageMode::LoadingCollection(CollectionLoadMode::Running))
+            .map_err(MapStorageError::from)?;
+        let result = (|| {
+            let _frontier = MapFrontier::<K, V, MAX_INDEXES, MAX_RUNS>::open_from_storage::<
+                REGION_SIZE,
+                REGION_COUNT,
+                IO,
+                MAX_COLLECTIONS,
+                MAX_PENDING_RECLAIMS,
+            >(
+                &storage.state,
+                storage.backing,
+                &mut storage.workspace,
+                collection_id,
+                &mut storage.open_scratch,
+            )?;
+            Ok(Self::from_collection_id(
+                collection_id,
+                Self::default_compaction_region_target(),
+            ))
+        })();
+        storage.finish_mode();
+        result
+    }
+
+    /// Overrides the region-count threshold used by `set` and `delete`.
+    pub fn with_compaction_region_target(
+        mut self,
+        region_target: usize,
+    ) -> Result<Self, LsmMapError> {
+        if region_target == 0 {
+            return Err(MapStorageError::InvalidRegionTarget);
+        }
+        self.compaction_region_target = region_target;
+        Ok(self)
+    }
+
+    /// Returns the configured compaction region threshold.
+    pub fn compaction_region_target(&self) -> usize {
+        self.compaction_region_target
+    }
+
+    /// Reads `key` and calls `f` once with the visible value when present.
+    pub fn get<
+        'db,
+        R,
+        F,
+        IO: FlashIo,
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        const MAX_COLLECTIONS: usize,
+        const MAX_PENDING_RECLAIMS: usize,
+    >(
+        &self,
+        storage: &mut Storage<
+            'db,
+            IO,
+            REGION_SIZE,
+            REGION_COUNT,
+            MAX_COLLECTIONS,
+            MAX_PENDING_RECLAIMS,
+        >,
+        key: &K,
+        f: F,
+    ) -> Result<Option<R>, LsmMapError>
+    where
+        F: FnOnce(&K, &V) -> R,
+    {
+        storage
+            .enter_mode(StorageMode::ReadingStorage(ReadMode::Running))
+            .map_err(MapStorageError::from)?;
+        let result = (|| {
+            let frontier = MapFrontier::<K, V, MAX_INDEXES, MAX_RUNS>::open_from_storage::<
+                REGION_SIZE,
+                REGION_COUNT,
+                IO,
+                MAX_COLLECTIONS,
+                MAX_PENDING_RECLAIMS,
+            >(
+                &storage.state,
+                storage.backing,
+                &mut storage.workspace,
+                self.collection_id,
+                &mut storage.open_scratch,
+            )?;
+            frontier.get::<REGION_SIZE, IO>(storage.backing, &mut storage.workspace, key)
+        })();
+        storage.finish_mode();
+
+        match result? {
+            Some(value) => Ok(Some(f(key, &value))),
+            None => Ok(None),
+        }
+    }
+
+    /// Sets `key` to `value` and reports whether compaction is now needed.
+    pub fn set<
+        'db,
+        IO: FlashIo,
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        const MAX_COLLECTIONS: usize,
+        const MAX_PENDING_RECLAIMS: usize,
+    >(
+        &mut self,
+        storage: &mut Storage<
+            'db,
+            IO,
+            REGION_SIZE,
+            REGION_COUNT,
+            MAX_COLLECTIONS,
+            MAX_PENDING_RECLAIMS,
+        >,
+        key: K,
+        value: V,
+    ) -> Result<bool, LsmMapError> {
+        storage
+            .enter_mode(StorageMode::UpdatingCollection(
+                CollectionUpdateMode::Running,
+            ))
+            .map_err(MapStorageError::from)?;
+        let result = (|| {
+            let mut frontier = MapFrontier::<K, V, MAX_INDEXES, MAX_RUNS>::open_from_storage::<
+                REGION_SIZE,
+                REGION_COUNT,
+                IO,
+                MAX_COLLECTIONS,
+                MAX_PENDING_RECLAIMS,
+            >(
+                &storage.state,
+                storage.backing,
+                &mut storage.workspace,
+                self.collection_id,
+                &mut storage.open_scratch,
+            )?;
+            let update = MapUpdate::Set { key, value };
+            update_map_frontier_parts::<
+                K,
+                V,
+                IO,
+                REGION_SIZE,
+                REGION_COUNT,
+                MAX_COLLECTIONS,
+                MAX_PENDING_RECLAIMS,
+                MAX_INDEXES,
+                MAX_RUNS,
+            >(
+                &mut storage.state,
+                storage.backing,
+                &mut storage.workspace,
+                &mut storage.dirty_frontiers,
+                &mut storage.payload_scratch,
+                &mut storage.checkpoint_scratch,
+                &mut frontier,
+                &update,
+            )?;
+            Ok(frontier
+                .selected_compaction_run_count(self.compaction_region_target)?
+                .is_some())
+        })();
+        storage.finish_mode();
+        result
+    }
+
+    /// Deletes `key` and reports whether compaction is now needed.
+    pub fn delete<
+        'db,
+        IO: FlashIo,
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        const MAX_COLLECTIONS: usize,
+        const MAX_PENDING_RECLAIMS: usize,
+    >(
+        &mut self,
+        storage: &mut Storage<
+            'db,
+            IO,
+            REGION_SIZE,
+            REGION_COUNT,
+            MAX_COLLECTIONS,
+            MAX_PENDING_RECLAIMS,
+        >,
+        key: K,
+    ) -> Result<bool, LsmMapError> {
+        storage
+            .enter_mode(StorageMode::UpdatingCollection(
+                CollectionUpdateMode::Running,
+            ))
+            .map_err(MapStorageError::from)?;
+        let result = (|| {
+            let mut frontier = MapFrontier::<K, V, MAX_INDEXES, MAX_RUNS>::open_from_storage::<
+                REGION_SIZE,
+                REGION_COUNT,
+                IO,
+                MAX_COLLECTIONS,
+                MAX_PENDING_RECLAIMS,
+            >(
+                &storage.state,
+                storage.backing,
+                &mut storage.workspace,
+                self.collection_id,
+                &mut storage.open_scratch,
+            )?;
+            let update = MapUpdate::Delete { key };
+            update_map_frontier_parts::<
+                K,
+                V,
+                IO,
+                REGION_SIZE,
+                REGION_COUNT,
+                MAX_COLLECTIONS,
+                MAX_PENDING_RECLAIMS,
+                MAX_INDEXES,
+                MAX_RUNS,
+            >(
+                &mut storage.state,
+                storage.backing,
+                &mut storage.workspace,
+                &mut storage.dirty_frontiers,
+                &mut storage.payload_scratch,
+                &mut storage.checkpoint_scratch,
+                &mut frontier,
+                &update,
+            )?;
+            Ok(frontier
+                .selected_compaction_run_count(self.compaction_region_target)?
+                .is_some())
+        })();
+        storage.finish_mode();
+        result
+    }
+
+    /// Compacts selected committed runs. Having nothing to compact is success.
+    pub fn compact<
+        'db,
+        IO: FlashIo,
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        const MAX_COLLECTIONS: usize,
+        const MAX_PENDING_RECLAIMS: usize,
+    >(
+        &mut self,
+        storage: &mut Storage<
+            'db,
+            IO,
+            REGION_SIZE,
+            REGION_COUNT,
+            MAX_COLLECTIONS,
+            MAX_PENDING_RECLAIMS,
+        >,
+    ) -> Result<(), LsmMapError> {
+        storage.compact_map_with_target::<K, V, MAX_INDEXES, MAX_RUNS>(
+            self.collection_id,
+            self.compaction_region_target,
+        )?;
+        Ok(())
     }
 }

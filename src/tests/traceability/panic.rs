@@ -67,7 +67,7 @@ fn requirement_public_decode_and_open_paths_expose_explicit_error_results() {
     type Flash = MockFlash<256, 5, 2048>;
     type Workspace = StorageWorkspace<256>;
     type Store<'db> = Storage<'db, Flash, 256, 5, 8, 4>;
-    type Map<'a> = LsmMap<'a, u16, u16, 8>;
+    type Map<'a> = MapFrontier<'a, u16, u16, 8>;
     type Update = MapUpdate<u16, u16>;
     type Runtime = StorageRuntime<8, 4>;
     type CreateMapFn<'db> = fn(&mut Store<'db>, CollectionId) -> Result<(), StorageRuntimeError>;
@@ -124,11 +124,11 @@ fn requirement_public_decode_and_open_paths_expose_explicit_error_results() {
     fn assert_open_from_storage_signature<'a>(_: OpenFromStorageFn<'a>) {}
 
     assert_open_map_signature(Storage::<Flash, 256, 5, 8, 4>::open_map::<u16, u16, 8, 8>);
-    assert_map_new_signature(LsmMap::<u16, u16, 8>::new);
-    assert_map_set_signature(LsmMap::<u16, u16, 8>::set);
-    assert_map_load_snapshot_signature(LsmMap::<u16, u16, 8>::load_snapshot);
+    assert_map_new_signature(MapFrontier::<u16, u16, 8>::new);
+    assert_map_set_signature(MapFrontier::<u16, u16, 8>::set);
+    assert_map_load_snapshot_signature(MapFrontier::<u16, u16, 8>::load_snapshot);
     assert_open_from_storage_signature(
-        LsmMap::<u16, u16, 8>::open_from_storage::<256, 5, Flash, 8, 4>,
+        MapFrontier::<u16, u16, 8>::open_from_storage::<256, 5, Flash, 8, 4>,
     );
 }
 

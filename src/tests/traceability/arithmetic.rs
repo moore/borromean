@@ -38,7 +38,7 @@ fn requirement_boundary_sensitive_storage_and_map_lengths_stay_in_range() {
     );
 
     let mut map_buffer = [0u8; 64];
-    let mut map = LsmMap::<u16, u16, 8>::new(CollectionId(7), &mut map_buffer).unwrap();
+    let mut map = MapFrontier::<u16, u16, 8>::new(CollectionId(7), &mut map_buffer).unwrap();
     map.set(1, 10).unwrap();
     map.set(2, 20).unwrap();
 
@@ -77,7 +77,7 @@ fn requirement_arithmetic_boundary_failures_surface_explicit_error_variants() {
     ));
 
     let mut map_buffer = [0u8; 64];
-    let mut map = LsmMap::<u16, u16, 8>::new(CollectionId(9), &mut map_buffer).unwrap();
+    let mut map = MapFrontier::<u16, u16, 8>::new(CollectionId(9), &mut map_buffer).unwrap();
     let mut malformed_region = [0u8; 8];
     malformed_region[..size_of::<u32>()].copy_from_slice(&u32::MAX.to_le_bytes());
     assert!(matches!(
@@ -124,7 +124,8 @@ fn requirement_sequence_advancement_stops_at_the_maximum_value_instead_of_wrappi
 fn requirement_lossy_integer_width_conversions_fail_with_explicit_map_errors() {
     let mut map_buffer = [0u8; 70_000];
     let mut map =
-        LsmMap::<u16, HeaplessVec<u8, 66_000>, 8>::new(CollectionId(12), &mut map_buffer).unwrap();
+        MapFrontier::<u16, HeaplessVec<u8, 66_000>, 8>::new(CollectionId(12), &mut map_buffer)
+            .unwrap();
     let large_value = HeaplessVec::<u8, 66_000>::from_slice(&[0u8; 66_000]).unwrap();
 
     assert!(matches!(

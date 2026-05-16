@@ -311,7 +311,7 @@ fn smallest_map_capacity_for_repeated_updates(update_count: usize) -> usize {
     (4..256)
         .find(|capacity| {
             let mut buffer = vec![0u8; *capacity];
-            let mut map = LsmMap::<u16, u16, 8>::new(CollectionId(200), &mut buffer).unwrap();
+            let mut map = MapFrontier::<u16, u16, 8>::new(CollectionId(200), &mut buffer).unwrap();
             (0..update_count).all(|index| map.set(1, u16::try_from(index).unwrap()).is_ok())
         })
         .expect("expected a bounded map capacity within the search range")
@@ -341,7 +341,7 @@ fn complete_pending_reclaim_returns_old_map_region_to_free_list_result(
     storage.create_map(CollectionId(14)).unwrap();
 
     let mut map_buffer = [0u8; 512];
-    let mut map = LsmMap::<i32, i32, 4>::new(CollectionId(14), &mut map_buffer).unwrap();
+    let mut map = MapFrontier::<i32, i32, 4>::new(CollectionId(14), &mut map_buffer).unwrap();
     map.set(3, 30).unwrap();
     let first_region = storage.flush_map::<_, _, 4, 4>(&mut map).unwrap();
 
@@ -508,7 +508,7 @@ fn wal_and_map_region_formats() -> (Header, Header) {
     storage.create_map(CollectionId(43)).unwrap();
 
     let mut map_buffer = [0u8; 512];
-    let mut map = LsmMap::<i32, i32, 4>::new(CollectionId(43), &mut map_buffer).unwrap();
+    let mut map = MapFrontier::<i32, i32, 4>::new(CollectionId(43), &mut map_buffer).unwrap();
     map.set(3, 30).unwrap();
 
     let region_index = storage.flush_map::<_, _, 4, 4>(&mut map).unwrap();
@@ -841,7 +841,7 @@ fn requirement_storage_map_operation_futures_poll_to_completion() {
     poll_ready(storage.create_map_future(CollectionId(41))).unwrap();
 
     let mut source_buffer = [0u8; 512];
-    let mut source = LsmMap::<i32, i32, 4>::new(CollectionId(41), &mut source_buffer).unwrap();
+    let mut source = MapFrontier::<i32, i32, 4>::new(CollectionId(41), &mut source_buffer).unwrap();
     source.set(1, 10).unwrap();
     poll_ready(storage.snapshot_map_future::<_, _, 4>(&source)).unwrap();
 
@@ -886,7 +886,7 @@ fn requirement_storage_flush_map_future_yields_between_durable_phases() {
 
     let region_index = {
         let mut map_buffer = [0u8; 512];
-        let mut map = LsmMap::<i32, i32, 4>::new(CollectionId(42), &mut map_buffer).unwrap();
+        let mut map = MapFrontier::<i32, i32, 4>::new(CollectionId(42), &mut map_buffer).unwrap();
         map.set(5, 50).unwrap();
 
         let future = storage.flush_map_future::<_, _, 4, 4>(&mut map);
@@ -924,7 +924,7 @@ fn requirement_storage_flush_map_future_drop_after_region_write_remains_recovera
 
     {
         let mut map_buffer = [0u8; 512];
-        let mut map = LsmMap::<i32, i32, 4>::new(CollectionId(43), &mut map_buffer).unwrap();
+        let mut map = MapFrontier::<i32, i32, 4>::new(CollectionId(43), &mut map_buffer).unwrap();
         map.set(7, 70).unwrap();
 
         let future = storage.flush_map_future::<_, _, 4, 4>(&mut map);
@@ -1446,13 +1446,13 @@ fn requirement_storage_map_api_restores_snapshot_and_updates() {
     storage.create_map(CollectionId(11)).unwrap();
 
     let mut source_buffer = [0u8; 512];
-    let mut source = LsmMap::<i32, i32, 4>::new(CollectionId(11), &mut source_buffer).unwrap();
+    let mut source = MapFrontier::<i32, i32, 4>::new(CollectionId(11), &mut source_buffer).unwrap();
     source.set(1, 10).unwrap();
     source.set(2, 20).unwrap();
     storage.snapshot_map::<_, _, 4>(&source).unwrap();
 
     let mut update_payload = [0u8; 64];
-    let update_len = LsmMap::<i32, i32, 4>::encode_update_into(
+    let update_len = MapFrontier::<i32, i32, 4>::encode_update_into(
         &MapUpdate::Set { key: 2, value: 99 },
         &mut update_payload,
     )
@@ -1491,8 +1491,10 @@ fn requirement_storage_map_frontiers_do_not_exceed_the_configured_dirty_collecti
 
     let mut first_buffer = [0u8; 128];
     let mut second_buffer = [0u8; 128];
-    let mut first_map = LsmMap::<u16, u16, 8>::new(CollectionId(48), &mut first_buffer).unwrap();
-    let mut second_map = LsmMap::<u16, u16, 8>::new(CollectionId(49), &mut second_buffer).unwrap();
+    let mut first_map =
+        MapFrontier::<u16, u16, 8>::new(CollectionId(48), &mut first_buffer).unwrap();
+    let mut second_map =
+        MapFrontier::<u16, u16, 8>::new(CollectionId(49), &mut second_buffer).unwrap();
     let mut payload_buffer = [0u8; 64];
 
     storage
@@ -1553,7 +1555,7 @@ fn requirement_storage_map_frontier_overflow_flushes_and_commits_a_new_region_he
     storage.create_map(CollectionId(46)).unwrap();
 
     let mut map_buffer = vec![0u8; capacity];
-    let mut map = LsmMap::<u16, u16, 8>::new(CollectionId(46), &mut map_buffer).unwrap();
+    let mut map = MapFrontier::<u16, u16, 8>::new(CollectionId(46), &mut map_buffer).unwrap();
     let mut payload_buffer = [0u8; 64];
 
     storage
@@ -1629,7 +1631,7 @@ fn requirement_storage_map_frontier_continues_accumulating_updates_after_an_over
     storage.create_map(CollectionId(47)).unwrap();
 
     let mut map_buffer = vec![0u8; capacity];
-    let mut map = LsmMap::<u16, u16, 8>::new(CollectionId(47), &mut map_buffer).unwrap();
+    let mut map = MapFrontier::<u16, u16, 8>::new(CollectionId(47), &mut map_buffer).unwrap();
     let mut payload_buffer = [0u8; 64];
 
     for value in [10u16, 20, 30] {
@@ -1710,7 +1712,7 @@ fn requirement_storage_map_api_flushes_committed_region_basis() {
     storage.create_map(CollectionId(12)).unwrap();
 
     let mut map_buffer = [0u8; 512];
-    let mut map = LsmMap::<i32, i32, 4>::new(CollectionId(12), &mut map_buffer).unwrap();
+    let mut map = MapFrontier::<i32, i32, 4>::new(CollectionId(12), &mut map_buffer).unwrap();
     map.set(5, 50).unwrap();
     map.set(7, 70).unwrap();
 
@@ -1763,7 +1765,8 @@ fn requirement_storage_compact_map_target_then_greedy_preserves_unselected_runs(
 
     let mut map_buffer = [0u8; REGION_SIZE];
     let mut map =
-        LsmMap::<i32, i32, MAX_INDEXES, MAX_RUNS>::new(CollectionId(70), &mut map_buffer).unwrap();
+        MapFrontier::<i32, i32, MAX_INDEXES, MAX_RUNS>::new(CollectionId(70), &mut map_buffer)
+            .unwrap();
     map.set(1, 10).unwrap();
     storage
         .flush_map::<_, _, MAX_INDEXES, MAX_RUNS>(&mut map)
@@ -1856,7 +1859,8 @@ fn requirement_storage_compact_map_preserves_tombstone_masking() {
 
     let mut map_buffer = [0u8; REGION_SIZE];
     let mut map =
-        LsmMap::<i32, i32, MAX_INDEXES, MAX_RUNS>::new(CollectionId(71), &mut map_buffer).unwrap();
+        MapFrontier::<i32, i32, MAX_INDEXES, MAX_RUNS>::new(CollectionId(71), &mut map_buffer)
+            .unwrap();
     map.set(1, 10).unwrap();
     storage
         .flush_map::<_, _, MAX_INDEXES, MAX_RUNS>(&mut map)
@@ -1929,7 +1933,8 @@ fn requirement_storage_compact_map_streams_replacement_larger_than_frontier_capa
 
     let mut map_buffer = [0u8; REGION_SIZE];
     let mut map =
-        LsmMap::<i32, i32, MAX_INDEXES, MAX_RUNS>::new(CollectionId(72), &mut map_buffer).unwrap();
+        MapFrontier::<i32, i32, MAX_INDEXES, MAX_RUNS>::new(CollectionId(72), &mut map_buffer)
+            .unwrap();
     for run in 0..3 {
         for offset in 0..MAX_INDEXES {
             let key = run * 10 + offset as i32;
@@ -2011,7 +2016,7 @@ fn requirement_storage_map_replacement_flush_records_reclaim_after_new_head() {
     storage.create_map(CollectionId(18)).unwrap();
 
     let mut map_buffer = [0u8; 512];
-    let mut map = LsmMap::<i32, i32, 4>::new(CollectionId(18), &mut map_buffer).unwrap();
+    let mut map = MapFrontier::<i32, i32, 4>::new(CollectionId(18), &mut map_buffer).unwrap();
     map.set(1, 10).unwrap();
     let first_region = storage.flush_map::<_, _, 4, 4>(&mut map).unwrap();
 
@@ -2069,7 +2074,7 @@ fn requirement_storage_map_replacement_flush_is_completed_during_reopen() {
     storage.create_map(CollectionId(13)).unwrap();
 
     let mut map_buffer = [0u8; 512];
-    let mut map = LsmMap::<i32, i32, 4>::new(CollectionId(13), &mut map_buffer).unwrap();
+    let mut map = MapFrontier::<i32, i32, 4>::new(CollectionId(13), &mut map_buffer).unwrap();
     map.set(1, 10).unwrap();
     let first_region = storage.flush_map::<_, _, 4, 4>(&mut map).unwrap();
 
@@ -2112,7 +2117,7 @@ fn replace_map_into_pending_reclaim_with_empty_free_list<'db>(
     storage.create_map(CollectionId(26)).unwrap();
 
     let mut map_buffer = [0u8; 512];
-    let mut map = LsmMap::<i32, i32, 4>::new(CollectionId(26), &mut map_buffer).unwrap();
+    let mut map = MapFrontier::<i32, i32, 4>::new(CollectionId(26), &mut map_buffer).unwrap();
     map.set(1, 10).unwrap();
     let first_region = storage.flush_map::<_, _, 4, 4>(&mut map).unwrap();
 
@@ -2350,7 +2355,7 @@ fn requirement_storage_map_flush_rejects_consuming_min_free_region_reserve() {
     storage.create_map(CollectionId(23)).unwrap();
 
     let mut map_buffer = [0u8; 512];
-    let mut map = LsmMap::<i32, i32, 4>::new(CollectionId(23), &mut map_buffer).unwrap();
+    let mut map = MapFrontier::<i32, i32, 4>::new(CollectionId(23), &mut map_buffer).unwrap();
     map.set(1, 10).unwrap();
     storage.flush_map::<_, _, 4, 4>(&mut map).unwrap();
 
@@ -2381,7 +2386,7 @@ fn requirement_storage_map_flush_completes_detached_reclaims_before_using_reserv
     storage.create_map(CollectionId(24)).unwrap();
 
     let mut map_buffer = [0u8; 512];
-    let mut map = LsmMap::<i32, i32, 4>::new(CollectionId(24), &mut map_buffer).unwrap();
+    let mut map = MapFrontier::<i32, i32, 4>::new(CollectionId(24), &mut map_buffer).unwrap();
     map.set(1, 10).unwrap();
     let first_region = storage.flush_map::<_, _, 4, 4>(&mut map).unwrap();
 
@@ -2424,7 +2429,7 @@ fn requirement_storage_map_flush_reclaims_wal_head_before_consuming_min_free_reg
     storage.create_map(CollectionId(25)).unwrap();
 
     let mut map_buffer = [0u8; 512];
-    let mut map = LsmMap::<i32, i32, 4>::new(CollectionId(25), &mut map_buffer).unwrap();
+    let mut map = MapFrontier::<i32, i32, 4>::new(CollectionId(25), &mut map_buffer).unwrap();
     map.set(1, 10).unwrap();
     let first_region = storage.flush_map::<_, _, 4, 4>(&mut map).unwrap();
 
@@ -2688,7 +2693,7 @@ fn requirement_storage_reopen_discards_reclaim_begin_before_replacement_detaches
     storage.create_map(CollectionId(20)).unwrap();
 
     let mut map_buffer = [0u8; 512];
-    let mut map = LsmMap::<i32, i32, 4>::new(CollectionId(20), &mut map_buffer).unwrap();
+    let mut map = MapFrontier::<i32, i32, 4>::new(CollectionId(20), &mut map_buffer).unwrap();
     map.set(1, 10).unwrap();
     let first_region = storage.flush_map::<_, _, 4, 4>(&mut map).unwrap();
 
@@ -2730,7 +2735,7 @@ fn requirement_storage_drop_map_starts_reclaim_for_committed_region_basis() {
     storage.create_map(CollectionId(15)).unwrap();
 
     let mut map_buffer = [0u8; 512];
-    let mut map = LsmMap::<i32, i32, 4>::new(CollectionId(15), &mut map_buffer).unwrap();
+    let mut map = MapFrontier::<i32, i32, 4>::new(CollectionId(15), &mut map_buffer).unwrap();
     map.set(8, 80).unwrap();
     let region_index = storage.flush_map::<_, _, 4, 4>(&mut map).unwrap();
 
@@ -2775,7 +2780,7 @@ fn requirement_storage_reopen_discards_reclaim_begin_before_drop_detaches_live_r
     storage.create_map(CollectionId(21)).unwrap();
 
     let mut map_buffer = [0u8; 512];
-    let mut map = LsmMap::<i32, i32, 4>::new(CollectionId(21), &mut map_buffer).unwrap();
+    let mut map = MapFrontier::<i32, i32, 4>::new(CollectionId(21), &mut map_buffer).unwrap();
     map.set(8, 80).unwrap();
     let region_index = storage.flush_map::<_, _, 4, 4>(&mut map).unwrap();
 
@@ -2816,7 +2821,7 @@ fn requirement_storage_drop_map_records_reclaim_before_drop() {
     storage.create_map(CollectionId(19)).unwrap();
 
     let mut map_buffer = [0u8; 512];
-    let mut map = LsmMap::<i32, i32, 4>::new(CollectionId(19), &mut map_buffer).unwrap();
+    let mut map = MapFrontier::<i32, i32, 4>::new(CollectionId(19), &mut map_buffer).unwrap();
     map.set(8, 80).unwrap();
     storage.flush_map::<_, _, 4, 4>(&mut map).unwrap();
 
@@ -2867,7 +2872,7 @@ fn requirement_storage_drop_map_from_snapshot_basis_has_no_region_reclaim() {
     storage.create_map(CollectionId(16)).unwrap();
 
     let mut map_buffer = [0u8; 512];
-    let mut map = LsmMap::<i32, i32, 4>::new(CollectionId(16), &mut map_buffer).unwrap();
+    let mut map = MapFrontier::<i32, i32, 4>::new(CollectionId(16), &mut map_buffer).unwrap();
     map.set(1, 10).unwrap();
     storage.snapshot_map::<_, _, 4>(&map).unwrap();
 

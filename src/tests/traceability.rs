@@ -3,9 +3,9 @@ extern crate std;
 use super::assert_no_alloc;
 use crate::{
     decode_record, encode_record_into, CollectionCreateMode, CollectionId, CollectionUpdateMode,
-    DiskError, FlashIo, FreePointerFooter, Header, LsmMap, MapError, MapStorageError, MapUpdate,
-    MockError, MockFlash, MockFormatError, MockOperation, StartupCollectionBasis, StartupError,
-    Storage, StorageFormatConfig, StorageMetadata, StorageMode, StorageRuntimeError,
+    DiskError, FlashIo, FreePointerFooter, Header, MapError, MapFrontier, MapStorageError,
+    MapUpdate, MockError, MockFlash, MockFormatError, MockOperation, StartupCollectionBasis,
+    StartupError, Storage, StorageFormatConfig, StorageMetadata, StorageMode, StorageRuntimeError,
     StorageWorkspace, WalRecord, WalRegionPrologue, MAP_REGION_V1_FORMAT, WAL_V1_FORMAT,
 };
 

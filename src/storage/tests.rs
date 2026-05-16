@@ -3,8 +3,8 @@ use crate::wal_record::{encode_record_into, encoded_record_len};
 use crate::MockFlash;
 use crate::StorageWorkspace;
 use crate::{
-    CollectionId, CollectionType, Header, LsmMap, MockOperation, StartupCollectionBasis, Storage,
-    StorageFormatConfig, WalRecord, WalRegionPrologue,
+    CollectionId, CollectionType, Header, MapFrontier, MockOperation, StartupCollectionBasis,
+    Storage, StorageFormatConfig, WalRecord, WalRegionPrologue,
 };
 use core::mem::size_of;
 use heapless::Vec;
@@ -1794,7 +1794,8 @@ fn requirement_region_reachable_from_live_state_follows_map_head_references_to_r
 
     let mut map_buffer = [0u8; 8192];
     let mut map =
-        LsmMap::<i32, i32, MAX_INDEXES, MAX_RUNS>::new(collection_id, &mut map_buffer).unwrap();
+        MapFrontier::<i32, i32, MAX_INDEXES, MAX_RUNS>::new(collection_id, &mut map_buffer)
+            .unwrap();
     for key in 0..100 {
         map.set(key, key * 10).unwrap();
     }

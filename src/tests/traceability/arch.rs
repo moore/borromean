@@ -30,7 +30,7 @@ fn requirement_wal_storage_and_map_logic_are_exercised_through_separate_interfac
     storage.create_map(CollectionId(7)).unwrap();
 
     let mut source_buffer = [0u8; 256];
-    let mut source = LsmMap::<u16, u16, 8>::new(CollectionId(7), &mut source_buffer).unwrap();
+    let mut source = MapFrontier::<u16, u16, 8>::new(CollectionId(7), &mut source_buffer).unwrap();
     source.set(5, 50).unwrap();
     let region_index = storage.flush_map::<_, _, 8, 8>(&mut source).unwrap();
 

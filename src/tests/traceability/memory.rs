@@ -55,7 +55,7 @@ fn requirement_explicit_collection_and_reclaim_capacities_fail_when_exhausted() 
     ));
 
     let mut tiny_buffer = [0u8; 16];
-    let mut tiny_map = LsmMap::<u16, u16, 8>::new(CollectionId(3), &mut tiny_buffer).unwrap();
+    let mut tiny_map = MapFrontier::<u16, u16, 8>::new(CollectionId(3), &mut tiny_buffer).unwrap();
     tiny_map.set(1, 10).unwrap();
     assert!(matches!(tiny_map.set(2, 20), Err(MapError::BufferTooSmall)));
 }
@@ -96,7 +96,8 @@ fn requirement_scratch_space_is_owned_by_storage_context() {
 fn requirement_map_round_trips_large_snapshots_using_only_borrowed_buffers() {
     let mut source_buffer = [0u8; 512];
     let mut source =
-        LsmMap::<u16, HeaplessVec<u8, 96>, 8>::new(CollectionId(6), &mut source_buffer).unwrap();
+        MapFrontier::<u16, HeaplessVec<u8, 96>, 8>::new(CollectionId(6), &mut source_buffer)
+            .unwrap();
     source
         .set(1, HeaplessVec::<u8, 96>::from_slice(&[0x11; 96]).unwrap())
         .unwrap();
@@ -111,7 +112,8 @@ fn requirement_map_round_trips_large_snapshots_using_only_borrowed_buffers() {
 
     let mut reopened_buffer = [0u8; 512];
     let mut reopened =
-        LsmMap::<u16, HeaplessVec<u8, 96>, 8>::new(CollectionId(6), &mut reopened_buffer).unwrap();
+        MapFrontier::<u16, HeaplessVec<u8, 96>, 8>::new(CollectionId(6), &mut reopened_buffer)
+            .unwrap();
     assert_no_alloc("load_snapshot", || {
         reopened.load_snapshot(&snapshot[..snapshot_len]).unwrap();
     });
@@ -165,7 +167,7 @@ fn requirement_disk_format_buffer_sizes_are_exposed_by_constants_or_workspace_co
 #[test]
 fn requirement_map_in_memory_state_runs_inside_a_borrowed_buffer_without_allocating() {
     let mut map_buffer = [0u8; 128];
-    let mut map = LsmMap::<u16, u16, 8>::new(CollectionId(7), &mut map_buffer).unwrap();
+    let mut map = MapFrontier::<u16, u16, 8>::new(CollectionId(7), &mut map_buffer).unwrap();
 
     assert_no_alloc("map set/get", || {
         map.set(1, 10).unwrap();
@@ -175,7 +177,7 @@ fn requirement_map_in_memory_state_runs_inside_a_borrowed_buffer_without_allocat
     });
 
     let mut tiny_buffer = [0u8; 16];
-    let mut tiny_map = LsmMap::<u16, u16, 8>::new(CollectionId(8), &mut tiny_buffer).unwrap();
+    let mut tiny_map = MapFrontier::<u16, u16, 8>::new(CollectionId(8), &mut tiny_buffer).unwrap();
     tiny_map.set(1, 10).unwrap();
     assert!(matches!(tiny_map.set(2, 20), Err(MapError::BufferTooSmall)));
 }
@@ -197,7 +199,7 @@ fn requirement_collection_api_uses_storage_owned_operation_buffers() {
         .append_map_update::<u16, u16, 8>(CollectionId(92), &MapUpdate::Set { key: 9, value: 90 })
         .unwrap();
     let mut map_buffer = [0u8; 256];
-    let mut map = LsmMap::<u16, u16, 8>::new(CollectionId(92), &mut map_buffer).unwrap();
+    let mut map = MapFrontier::<u16, u16, 8>::new(CollectionId(92), &mut map_buffer).unwrap();
     map.set(9, 90).unwrap();
     storage.snapshot_map(&map).unwrap();
 }

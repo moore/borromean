@@ -23,7 +23,7 @@ fn requirement_each_public_operation_future_completes_when_polled_directly() {
     super::super::poll_ready(storage.create_map_future(CollectionId(82))).unwrap();
 
     let mut source_buffer = [0u8; REGION_SIZE];
-    let mut source = LsmMap::<u16, u16, 8>::new(CollectionId(82), &mut source_buffer).unwrap();
+    let mut source = MapFrontier::<u16, u16, 8>::new(CollectionId(82), &mut source_buffer).unwrap();
     source.set(1, 10).unwrap();
     super::super::poll_ready(storage.snapshot_map_future::<_, _, 8>(&source)).unwrap();
 
@@ -83,7 +83,7 @@ fn requirement_flush_future_keeps_collection_basis_on_previous_state_until_head_
         let previous_region = {
             let mut previous_buffer = [0u8; 512];
             let mut previous =
-                LsmMap::<u16, u16, 8>::new(CollectionId(82), &mut previous_buffer).unwrap();
+                MapFrontier::<u16, u16, 8>::new(CollectionId(82), &mut previous_buffer).unwrap();
             previous.set(1, 10).unwrap();
             storage.flush_map::<_, _, 8, 8>(&mut previous).unwrap()
         };
@@ -91,7 +91,7 @@ fn requirement_flush_future_keeps_collection_basis_on_previous_state_until_head_
         {
             let mut replacement_buffer = [0u8; 512];
             let mut replacement =
-                LsmMap::<u16, u16, 8>::new(CollectionId(82), &mut replacement_buffer).unwrap();
+                MapFrontier::<u16, u16, 8>::new(CollectionId(82), &mut replacement_buffer).unwrap();
             replacement.set(1, 11).unwrap();
             replacement.set(2, 22).unwrap();
 
@@ -123,7 +123,7 @@ fn requirement_flush_future_keeps_collection_basis_on_previous_state_until_head_
     let previous_region = {
         let mut previous_buffer = [0u8; 512];
         let mut previous =
-            LsmMap::<u16, u16, 8>::new(CollectionId(82), &mut previous_buffer).unwrap();
+            MapFrontier::<u16, u16, 8>::new(CollectionId(82), &mut previous_buffer).unwrap();
         previous.set(1, 10).unwrap();
         storage.flush_map::<_, _, 8, 8>(&mut previous).unwrap()
     };
@@ -131,7 +131,7 @@ fn requirement_flush_future_keeps_collection_basis_on_previous_state_until_head_
     let replacement_region = {
         let mut replacement_buffer = [0u8; 512];
         let mut replacement =
-            LsmMap::<u16, u16, 8>::new(CollectionId(82), &mut replacement_buffer).unwrap();
+            MapFrontier::<u16, u16, 8>::new(CollectionId(82), &mut replacement_buffer).unwrap();
         replacement.set(1, 11).unwrap();
         replacement.set(2, 22).unwrap();
 

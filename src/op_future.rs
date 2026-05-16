@@ -9,7 +9,7 @@ use crate::mode::{CollectionFlushMode, OpenMode, StorageMode, WalHeadReclaimMode
 use crate::startup::StartupOpenPlan;
 use crate::storage::WalHeadReclaimPlan;
 use crate::{
-    CollectionType, FlashIo, LsmMap, MapStorageError, StartupCollectionBasis, Storage,
+    CollectionType, FlashIo, MapFrontier, MapStorageError, StartupCollectionBasis, Storage,
     StorageFormatConfig, StorageOpenError, StorageRuntimeError, StorageWorkspace,
 };
 
@@ -150,7 +150,7 @@ pub struct YieldingFlushMapFuture<
 {
     storage:
         &'a mut Storage<'db, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
-    map: &'a mut LsmMap<'a, K, V, MAX_INDEXES, MAX_RUNS>,
+    map: &'a mut MapFrontier<'a, K, V, MAX_INDEXES, MAX_RUNS>,
     phase: u8,
 }
 
@@ -195,7 +195,7 @@ where
             MAX_COLLECTIONS,
             MAX_PENDING_RECLAIMS,
         >,
-        map: &'a mut LsmMap<'a, K, V, MAX_INDEXES, MAX_RUNS>,
+        map: &'a mut MapFrontier<'a, K, V, MAX_INDEXES, MAX_RUNS>,
     ) -> Self {
         Self {
             storage,
