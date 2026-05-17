@@ -79,6 +79,7 @@ fn requirement_public_decode_and_open_paths_expose_explicit_error_results() {
         &Runtime,
         &mut Flash,
         &mut Workspace,
+        &mut [u8],
         CollectionId,
         &'a mut [u8],
     ) -> Result<Map<'a>, MapStorageError>;

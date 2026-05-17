@@ -1050,7 +1050,12 @@ impl<
                     IO,
                     MAX_COLLECTIONS,
                     MAX_PENDING_RECLAIMS,
-                >(&mut this.state, this.backing, &mut this.workspace)?;
+                >(
+                    &mut this.state,
+                    this.backing,
+                    &mut this.workspace,
+                    &mut this.payload_scratch,
+                )?;
                 this.clear_dirty_frontier(map.id());
                 Ok(())
             },
@@ -1291,6 +1296,7 @@ impl<
                     &this.state,
                     this.backing,
                     &mut this.workspace,
+                    &mut this.collection_scratch,
                     collection_id,
                     &mut this.open_scratch,
                 )?;
@@ -1454,6 +1460,7 @@ impl<
             &self.state,
             self.backing,
             &mut self.workspace,
+            &mut self.open_scratch,
             collection_id,
             buffer,
         );
@@ -1533,6 +1540,7 @@ where
                 &storage.state,
                 storage.backing,
                 &mut storage.workspace,
+                &mut storage.collection_scratch,
                 collection_id,
                 &mut storage.open_scratch,
             )?;
@@ -1602,6 +1610,7 @@ where
                 &storage.state,
                 storage.backing,
                 &mut storage.workspace,
+                &mut storage.collection_scratch,
                 self.collection_id,
                 &mut storage.open_scratch,
             )?;
@@ -1652,6 +1661,7 @@ where
                 &storage.state,
                 storage.backing,
                 &mut storage.workspace,
+                &mut storage.collection_scratch,
                 self.collection_id,
                 &mut storage.open_scratch,
             )?;
@@ -1720,6 +1730,7 @@ where
                 &storage.state,
                 storage.backing,
                 &mut storage.workspace,
+                &mut storage.collection_scratch,
                 self.collection_id,
                 &mut storage.open_scratch,
             )?;

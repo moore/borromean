@@ -714,10 +714,10 @@ fn requirement_committed_region_and_legacy_snapshot_helpers_accept_exact_boundar
     legacy_payload[..REGION_SNAPSHOT_LEN_SIZE]
         .copy_from_slice(&(EMPTY_MAP_SNAPSHOT.len() as u32).to_le_bytes());
     legacy_payload[REGION_SNAPSHOT_LEN_SIZE..].copy_from_slice(&EMPTY_MAP_SNAPSHOT);
-    assert_eq!(
-        legacy_snapshot_from_payload(&legacy_payload).unwrap(),
-        EMPTY_MAP_SNAPSHOT.as_slice()
-    );
+    let mut map_buffer = [0u8; ENTRY_COUNT_SIZE];
+    let mut map = MapFrontier::<i32, i32, 0>::new(CollectionId(96), &mut map_buffer).unwrap();
+    map.load_region(&legacy_payload).unwrap();
+    assert_eq!(map.get_frontier(&1).unwrap(), None);
 }
 
 //= spec/map.md#snapshot-frontier-and-logical-map-requirements
@@ -765,20 +765,8 @@ fn requirement_run_descriptor_selection_and_generation_helpers_count_only_run_ch
             upper_key: Some(9),
         })
         .unwrap();
-    map.runs
-        .push(MapRunDescriptor {
-            source: MapRunSource::LegacyRegion,
-            generation: 0,
-            first_region: 3,
-            region_count: 1,
-            approx_state_count: 99,
-            lower_key: None,
-            upper_key: None,
-        })
-        .unwrap();
-
-    assert_eq!(map.layer_count(), 3);
-    assert_eq!(map.run_count(), 3);
+    assert_eq!(map.layer_count(), 2);
+    assert_eq!(map.run_count(), 2);
     assert_eq!(map.live_run_region_count().unwrap(), 3);
     assert_eq!(map.next_run_generation(), 8);
     assert_eq!(map.selected_compaction_run_count(3).unwrap(), None);
@@ -787,10 +775,6 @@ fn requirement_run_descriptor_selection_and_generation_helpers_count_only_run_ch
     assert_eq!(map.selected_compaction_state_count(2).unwrap(), 7);
     assert!(matches!(
         map.selected_compaction_state_count(3),
-        Err(MapError::SerializationError)
-    ));
-    assert!(matches!(
-        map.selected_compaction_state_count(5),
         Err(MapError::IndexOutOfBounds)
     ));
 }
@@ -1142,18 +1126,6 @@ fn requirement_commit_manifest_reclaims_previous_manifest_and_retains_only_run_c
             map.flush_to_storage::<REGION_SIZE, REGION_COUNT, _, 8, 4>(runtime, flash, workspace)
         })
         .unwrap();
-    map.runs
-        .push(MapRunDescriptor {
-            source: MapRunSource::LegacyRegion,
-            generation: 0,
-            first_region: 9,
-            region_count: 1,
-            approx_state_count: 1,
-            lower_key: None,
-            upper_key: None,
-        })
-        .unwrap();
-
     let second_manifest = storage
         .with_runtime_io_workspace(|runtime, flash, workspace| {
             map.commit_manifest_to_storage::<REGION_SIZE, REGION_COUNT, _, 8, 4>(
@@ -1177,8 +1149,8 @@ fn requirement_commit_manifest_reclaims_previous_manifest_and_retains_only_run_c
 //# `RING-IMPL-REGRESSION-027` Flushing a map to storage MUST commit a manifest-backed run-chain
 //# basis and reject flushes that exceed configured run capacity.
 #[test]
-fn requirement_flush_to_storage_converts_valid_legacy_regions_and_enforces_run_capacity() {
-    const REGION_SIZE: usize = 256;
+fn requirement_flush_to_storage_commits_manifest_and_enforces_run_capacity() {
+    const REGION_SIZE: usize = 512;
     const REGION_COUNT: usize = 12;
     let collection_id = CollectionId(108);
 
@@ -1191,45 +1163,15 @@ fn requirement_flush_to_storage_converts_valid_legacy_regions_and_enforces_run_c
     .unwrap();
     storage.create_map(collection_id).unwrap();
 
-    let mut legacy_buffer = [0u8; REGION_SIZE];
-    let mut legacy = MapFrontier::<i32, i32, 4>::new(collection_id, &mut legacy_buffer).unwrap();
-    legacy.set(1, 10).unwrap();
-    let mut legacy_payload = [0u8; REGION_SIZE];
-    let legacy_used = legacy.encode_region_into(&mut legacy_payload).unwrap();
-    storage.with_io_workspace(|flash, _workspace| {
-        write_committed_payload(
-            flash,
-            5,
-            1,
-            collection_id,
-            MAP_REGION_V1_FORMAT,
-            &legacy_payload[..legacy_used],
-        )
-    });
-    storage
-        .append_head(collection_id, CollectionType::MAP_CODE, 5)
-        .unwrap();
-
     let mut buffer = [0u8; REGION_SIZE];
     let mut map = MapFrontier::<i32, i32, 4, 2>::new(collection_id, &mut buffer).unwrap();
-    map.runs
-        .push(MapRunDescriptor {
-            source: MapRunSource::LegacyRegion,
-            generation: 0,
-            first_region: 5,
-            region_count: 1,
-            approx_state_count: 1,
-            lower_key: None,
-            upper_key: None,
-        })
-        .unwrap();
     map.set(2, 20).unwrap();
     storage
         .with_runtime_io_workspace(|runtime, flash, workspace| {
             map.flush_to_storage::<REGION_SIZE, REGION_COUNT, _, 8, 4>(runtime, flash, workspace)
         })
         .unwrap();
-    assert_eq!(map.runs.len(), 2);
+    assert_eq!(map.runs.len(), 1);
 
     let mut too_many_buffer = [0u8; REGION_SIZE];
     let mut too_many =
@@ -1337,40 +1279,15 @@ fn requirement_committed_run_storage_helpers_validate_headers_and_next_links() {
 //# `RING-IMPL-REGRESSION-029` Map lookup helpers MUST read manifest run chains, and
 //# head-reference checks MUST report manifest and run regions as reachable.
 #[test]
-fn requirement_lookup_and_head_reference_helpers_follow_legacy_regions_and_manifest_runs() {
+fn requirement_lookup_and_head_reference_helpers_follow_manifest_runs() {
     const REGION_SIZE: usize = 256;
     let collection_id = CollectionId(101);
     let metadata = StorageMetadata::new(REGION_SIZE as u32, 5, 0, 8, 0xff, 0xa5).unwrap();
     let mut flash = MockFlash::<REGION_SIZE, 5, 1024>::new(0xff);
     let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
 
-    let mut legacy_buffer = [0u8; REGION_SIZE];
-    let mut legacy = MapFrontier::<i32, i32, 8>::new(collection_id, &mut legacy_buffer).unwrap();
-    legacy.set(1, 10).unwrap();
-    legacy.set(2, 20).unwrap();
-    let mut legacy_payload = [0u8; REGION_SIZE];
-    let legacy_used = legacy.encode_region_into(&mut legacy_payload).unwrap();
-    write_committed_payload(
-        &mut flash,
-        1,
-        1,
-        collection_id,
-        MAP_REGION_V1_FORMAT,
-        &legacy_payload[..legacy_used],
-    );
-
     let mut map_buffer = [0u8; REGION_SIZE];
     let map = MapFrontier::<i32, i32, 8>::new(collection_id, &mut map_buffer).unwrap();
-    assert_eq!(
-        map.lookup_legacy_region::<REGION_SIZE, _>(&mut flash, &mut workspace, 1, &1)
-            .unwrap(),
-        LookupResult::Set(10)
-    );
-    assert_eq!(
-        map.lookup_legacy_region::<REGION_SIZE, _>(&mut flash, &mut workspace, 1, &3)
-            .unwrap(),
-        LookupResult::NotFound
-    );
 
     let run_entries = [
         Entry {
@@ -1431,8 +1348,10 @@ fn requirement_lookup_and_head_reference_helpers_follow_legacy_regions_and_manif
         &manifest_payload[..manifest_used],
     );
 
+    let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
     assert!(map_head_region_references_region::<REGION_SIZE, _>(
         &mut flash,
+        &mut workspace,
         metadata,
         collection_id,
         3,
@@ -1441,6 +1360,7 @@ fn requirement_lookup_and_head_reference_helpers_follow_legacy_regions_and_manif
     .unwrap());
     assert!(map_head_region_references_region::<REGION_SIZE, _>(
         &mut flash,
+        &mut workspace,
         metadata,
         collection_id,
         3,
@@ -1449,6 +1369,7 @@ fn requirement_lookup_and_head_reference_helpers_follow_legacy_regions_and_manif
     .unwrap());
     assert!(!map_head_region_references_region::<REGION_SIZE, _>(
         &mut flash,
+        &mut workspace,
         metadata,
         collection_id,
         3,
@@ -1665,6 +1586,10 @@ fn requirement_update_payload_round_trip_applies_frontier_change() {
 //# MUST yield an empty logical map.
 #[test]
 fn requirement_empty_map_open_matches_new_map_state() {
+    assert_empty_map_open_matches_new_map_state();
+}
+
+fn assert_empty_map_open_matches_new_map_state() {
     const REGION_SIZE: usize = 512;
     const REGION_COUNT: usize = 4;
     const MAX_INDEXES: usize = 4;
@@ -1699,7 +1624,7 @@ fn requirement_empty_map_open_matches_new_map_state() {
 //# state used by an empty durable map basis.
 #[test]
 fn requirement_empty_map_new_matches_empty_durable_basis_state() {
-    requirement_empty_map_open_matches_new_map_state();
+    assert_empty_map_open_matches_new_map_state();
 }
 
 //= spec/map.md#snapshot-payload-format
@@ -1708,6 +1633,10 @@ fn requirement_empty_map_new_matches_empty_durable_basis_state() {
 //# `[entry_count:u32 little-endian][entry_bytes_len:u32 little-endian][entry_bytes][entry_refs]`.
 #[test]
 fn requirement_snapshot_encoding_stores_header_compact_entries_and_refs() {
+    assert_snapshot_encoding_stores_header_compact_entries_and_refs();
+}
+
+fn assert_snapshot_encoding_stores_header_compact_entries_and_refs() {
     const BUFFER_SIZE: usize = 512;
     const MAX_INDEXES: usize = 4;
     let id = CollectionId(71);
@@ -1785,7 +1714,7 @@ fn requirement_snapshot_encoding_stores_header_compact_entries_and_refs() {
 //# the exact byte length of the compact serialized entry data that follows.
 #[test]
 fn requirement_snapshot_encoding_records_entry_count_and_entry_bytes_len() {
-    requirement_snapshot_encoding_stores_header_compact_entries_and_refs();
+    assert_snapshot_encoding_stores_header_compact_entries_and_refs();
 }
 
 //= spec/ring.md#collection-head-state-machine
@@ -1879,6 +1808,10 @@ fn requirement_map_collection_format_covers_empty_state_snapshot_update_region_a
 //# describes the live immutable map run set.
 #[test]
 fn requirement_region_round_trip_restores_logical_state() {
+    assert_region_round_trip_restores_logical_state();
+}
+
+fn assert_region_round_trip_restores_logical_state() {
     const BUFFER_SIZE: usize = 512;
     const MAX_INDEXES: usize = 4;
     let id = CollectionId(11);
@@ -1938,7 +1871,7 @@ fn requirement_region_round_trip_restores_logical_state() {
 //# identify a unique committed region payload format.
 #[test]
 fn requirement_non_wal_collection_format_pair_identifies_map_region_payloads() {
-    requirement_region_round_trip_restores_logical_state();
+    assert_region_round_trip_restores_logical_state();
 }
 
 //= spec/map.md#committed-head-format
@@ -1991,7 +1924,7 @@ fn requirement_region_payload_prefix_matches_embedded_snapshot_len() {
 //# the same logical state as reading the manifest-described run chains.
 #[test]
 fn requirement_region_loading_matches_embedded_snapshot_loading() {
-    requirement_region_round_trip_restores_logical_state();
+    assert_region_round_trip_restores_logical_state();
 }
 
 //= spec/ring.md#core-requirements
@@ -2053,6 +1986,10 @@ fn requirement_map_updates_append_new_head_records_and_replacement_reclaims_the_
 //# `MAP_CODE`.
 #[test]
 fn requirement_open_from_storage_rejects_live_collections_with_a_non_map_collection_type() {
+    assert_open_from_storage_rejects_live_collections_with_a_non_map_collection_type();
+}
+
+fn assert_open_from_storage_rejects_live_collections_with_a_non_map_collection_type() {
     let mut flash = MockFlash::<512, 4, 256>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
     init_user_region_header(&mut flash, 2, 4, CollectionId(61), MAP_REGION_V1_FORMAT);
@@ -2071,11 +2008,13 @@ fn requirement_open_from_storage_rejects_live_collections_with_a_non_map_collect
 
     let mut workspace = StorageWorkspace::<512>::new();
     let runtime = crate::storage::open::<512, 4, _, 8, 4>(&mut flash, &mut workspace).unwrap();
+    let mut basis_scratch = [0u8; 512];
     let mut reopen_buffer = [0u8; 512];
     let result = MapFrontier::<i32, i32, 4>::open_from_storage::<512, 4, _, 8, 4>(
         &runtime,
         &mut flash,
         &mut workspace,
+        &mut basis_scratch,
         CollectionId(61),
         &mut reopen_buffer,
     );
@@ -2097,7 +2036,7 @@ fn requirement_open_from_storage_rejects_live_collections_with_a_non_map_collect
 //# must treat the mismatch as corruption.
 #[test]
 fn requirement_replay_rejects_retained_type_bearing_record_type_mismatch() {
-    requirement_open_from_storage_rejects_live_collections_with_a_non_map_collection_type();
+    assert_open_from_storage_rejects_live_collections_with_a_non_map_collection_type();
 }
 
 //= spec/map.md#validation-and-open-rules
@@ -2228,6 +2167,10 @@ fn requirement_mutable_map_frontier_capacity_is_bounded_by_its_configured_buffer
 //# in replay order.
 #[test]
 fn requirement_storage_snapshot_replay_restores_map_frontier() {
+    assert_storage_snapshot_replay_restores_map_frontier();
+}
+
+fn assert_storage_snapshot_replay_restores_map_frontier() {
     const REGION_SIZE: usize = 512;
     const REGION_COUNT: usize = 4;
     const MAX_INDEXES: usize = 4;
@@ -2277,7 +2220,7 @@ fn requirement_storage_snapshot_replay_restores_map_frontier() {
 //# older values from the retained basis for the same key.
 #[test]
 fn requirement_later_retained_map_updates_override_durable_basis_values() {
-    requirement_storage_snapshot_replay_restores_map_frontier();
+    assert_storage_snapshot_replay_restores_map_frontier();
 }
 
 //= spec/ring.md#collection-head-state-machine
@@ -2285,7 +2228,7 @@ fn requirement_later_retained_map_updates_override_durable_basis_values() {
 //# `RING-FORMAT-003` The frontier MUST take precedence over older values in the durable basis.
 #[test]
 fn requirement_map_frontier_takes_precedence_over_older_durable_basis_values() {
-    requirement_storage_snapshot_replay_restores_map_frontier();
+    assert_storage_snapshot_replay_restores_map_frontier();
 }
 
 //= spec/map.md#validation-and-open-rules
@@ -2313,11 +2256,13 @@ fn requirement_open_from_storage_rejects_unsupported_committed_region_format() {
 
     let mut workspace = StorageWorkspace::<512>::new();
     let runtime = crate::storage::open::<512, 4, _, 8, 4>(&mut flash, &mut workspace).unwrap();
+    let mut basis_scratch = [0u8; 512];
     let mut reopen_buffer = [0u8; 512];
     let result = MapFrontier::<i32, i32, 4>::open_from_storage::<512, 4, _, 8, 4>(
         &runtime,
         &mut flash,
         &mut workspace,
+        &mut basis_scratch,
         CollectionId(72),
         &mut reopen_buffer,
     );
@@ -2332,13 +2277,11 @@ fn requirement_open_from_storage_rejects_unsupported_committed_region_format() {
     ));
 }
 
-//= spec/map.md#validation-and-open-rules
-//= type=test
-//# `MAP-VALIDATE-004` Opening a live map collection MUST reject
-//# retained committed-region payloads, snapshot payloads, or update
-//# payloads that fail map-specific validation.
-#[test]
-fn requirement_open_from_storage_rejects_invalid_retained_region_snapshot_and_update_payloads() {
+fn assert_open_rejects_invalid_retained_region_snapshot_and_update_payloads(
+    region_collection_id: CollectionId,
+    snapshot_collection_id: CollectionId,
+    update_collection_id: CollectionId,
+) {
     {
         let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
         let mut workspace = StorageWorkspace::<512>::new();
@@ -2346,7 +2289,7 @@ fn requirement_open_from_storage_rejects_invalid_retained_region_snapshot_and_up
             Storage::<_, 512, 5, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
                 .unwrap();
 
-        storage.create_map(CollectionId(40)).unwrap();
+        storage.create_map(region_collection_id).unwrap();
 
         let region_index = storage
             .with_runtime_io_workspace(|runtime, flash, workspace| {
@@ -2358,27 +2301,27 @@ fn requirement_open_from_storage_rejects_invalid_retained_region_snapshot_and_up
                 runtime.write_committed_region::<512, 5, _>(
                     flash,
                     region_index,
-                    CollectionId(40),
+                    region_collection_id,
                     MAP_REGION_V1_FORMAT,
                     &[1, 2, 3],
                 )
             })
             .unwrap();
         storage
-            .append_head(CollectionId(40), CollectionType::MAP_CODE, region_index)
+            .append_head(region_collection_id, CollectionType::MAP_CODE, region_index)
             .unwrap();
 
         drop(storage);
         let mut reopened = Storage::<_, 512, 5, 8, 4>::open(&mut flash).unwrap();
         let mut reopen_buffer = [0u8; 512];
-        let result = reopened.open_map::<i32, i32, 4, 4>(CollectionId(40), &mut reopen_buffer);
+        let result = reopened.open_map::<i32, i32, 4, 4>(region_collection_id, &mut reopen_buffer);
         assert!(matches!(
             result,
             Err(MapStorageError::UnsupportedRegionFormat {
-                collection_id: CollectionId(40),
+                collection_id,
                 region_index: actual_region,
                 actual: MAP_REGION_V1_FORMAT,
-            }) if actual_region == region_index
+            }) if collection_id == region_collection_id && actual_region == region_index
         ));
     }
 
@@ -2389,15 +2332,16 @@ fn requirement_open_from_storage_rejects_invalid_retained_region_snapshot_and_up
             Storage::<_, 512, 4, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
                 .unwrap();
 
-        storage.create_map(CollectionId(41)).unwrap();
+        storage.create_map(snapshot_collection_id).unwrap();
         storage
-            .append_snapshot(CollectionId(41), CollectionType::MAP_CODE, &[1])
+            .append_snapshot(snapshot_collection_id, CollectionType::MAP_CODE, &[1])
             .unwrap();
 
         drop(storage);
         let mut reopened = Storage::<_, 512, 4, 8, 4>::open(&mut flash).unwrap();
         let mut reopen_buffer = [0u8; 512];
-        let result = reopened.open_map::<i32, i32, 4, 4>(CollectionId(41), &mut reopen_buffer);
+        let result =
+            reopened.open_map::<i32, i32, 4, 4>(snapshot_collection_id, &mut reopen_buffer);
         assert!(matches!(
             result,
             Err(MapStorageError::Map(MapError::SerializationError))
@@ -2411,18 +2355,34 @@ fn requirement_open_from_storage_rejects_invalid_retained_region_snapshot_and_up
             Storage::<_, 512, 4, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
                 .unwrap();
 
-        storage.create_map(CollectionId(42)).unwrap();
-        storage.append_update(CollectionId(42), &[0xff]).unwrap();
+        storage.create_map(update_collection_id).unwrap();
+        storage
+            .append_update(update_collection_id, &[0xff])
+            .unwrap();
 
         drop(storage);
         let mut reopened = Storage::<_, 512, 4, 8, 4>::open(&mut flash).unwrap();
         let mut reopen_buffer = [0u8; 512];
-        let result = reopened.open_map::<i32, i32, 4, 4>(CollectionId(42), &mut reopen_buffer);
+        let result = reopened.open_map::<i32, i32, 4, 4>(update_collection_id, &mut reopen_buffer);
         assert!(matches!(
             result,
             Err(MapStorageError::Map(MapError::SerializationError))
         ));
     }
+}
+
+//= spec/map.md#validation-and-open-rules
+//= type=test
+//# `MAP-VALIDATE-004` Opening a live map collection MUST reject
+//# retained committed-region payloads, snapshot payloads, or update
+//# payloads that fail map-specific validation.
+#[test]
+fn requirement_open_from_storage_rejects_invalid_retained_region_snapshot_and_update_payloads() {
+    assert_open_rejects_invalid_retained_region_snapshot_and_update_payloads(
+        CollectionId(40),
+        CollectionId(41),
+        CollectionId(42),
+    );
 }
 
 //= spec/ring.md#collection-head-state-machine
@@ -2434,7 +2394,11 @@ fn requirement_open_from_storage_rejects_invalid_retained_region_snapshot_and_up
 //# collection's normative specification.
 #[test]
 fn requirement_replay_rejects_invalid_live_collection_payloads() {
-    requirement_open_from_storage_rejects_invalid_retained_region_snapshot_and_update_payloads();
+    assert_open_rejects_invalid_retained_region_snapshot_and_update_payloads(
+        CollectionId(43),
+        CollectionId(44),
+        CollectionId(45),
+    );
 }
 
 //= spec/map.md#map-storage-integration-requirements
@@ -2508,6 +2472,10 @@ fn requirement_storage_visit_wal_records_exposes_map_collection_records() {
 //# region in place.
 #[test]
 fn requirement_storage_region_flush_restores_map_basis() {
+    assert_storage_region_flush_restores_map_basis();
+}
+
+fn assert_storage_region_flush_restores_map_basis() {
     const REGION_SIZE: usize = 512;
     const REGION_COUNT: usize = 4;
     const MAX_INDEXES: usize = 4;
@@ -2572,7 +2540,7 @@ fn requirement_storage_region_flush_restores_map_basis() {
 //# satisfy this requirement.
 #[test]
 fn requirement_map_flush_preserves_log_structured_collection_writes() {
-    requirement_storage_region_flush_restores_map_basis();
+    assert_storage_region_flush_restores_map_basis();
 }
 
 fn k_v_vec(count: usize) -> impl Strategy<Value = Vec<(i32, i32)>> {

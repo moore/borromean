@@ -2020,6 +2020,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
             if collection.collection_type() == Some(CollectionType::MAP_CODE)
                 && crate::collections::map::map_head_region_references_region::<REGION_SIZE, IO>(
                     flash,
+                    workspace,
                     self.metadata,
                     collection.collection_id(),
                     head_region,
