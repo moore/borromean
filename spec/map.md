@@ -20,14 +20,14 @@ This document has two layers:
   format, helper behavior, storage integration, manifest/run-chain
   support, and compaction behavior
 - the implemented whole-run LSM map model, including manifest/run
-  structure, flush rules, and asynchronous whole-run compaction
+  structure, flush rules, and deferred explicit whole-run compaction
 
 The map is implemented as a manifest-backed LSM for committed
 run-chain state: frontier updates flush into immutable sorted runs, runs
 can overlap by key range, reads resolve newest-to-oldest, and
-asynchronous compaction replaces complete runs with merged replacement
-runs. The earlier single committed-region snapshot basis is retired and
-is no longer part of the supported map contract.
+deferred explicit compaction replaces complete runs with merged replacement
+runs when callers invoke compaction. The earlier single committed-region
+snapshot basis is retired and is no longer part of the supported map contract.
 
 ## Key And Value Model
 
@@ -46,20 +46,16 @@ trait LsmKey {
     fn decode_key(encoded: &[u8]) -> Result<Self, LsmKeyError>
     where
         Self: Sized;
-
-    fn compare_encoded(left: &[u8], right: &[u8]) -> core::cmp::Ordering {
-        left.cmp(right)
-    }
 }
 ```
 
-`encode_key` produces the canonical durable key bytes. Those bytes are
-the ordering surface for snapshots, run segments, manifests, lookup,
-and compaction. For simple keys, lexicographic byte comparison can be
-the complete ordering rule. For keys whose natural ordering is not
-lexicographic over their raw bytes, `encode_key` should transform the
-key into an order-preserving representation, or `compare_encoded` should
-define the stable comparison used by the map.
+`encode_key` produces the canonical durable key bytes. The current
+implementation still orders map entries and run bounds with `K: Ord`, while
+the encoded bytes provide the stable persisted key representation. For keys
+whose natural ordering is not lexicographic over their raw bytes, `K: Ord`
+must define the stable map ordering and the encoded representation must remain
+compatible with that ordering wherever committed run metadata uses decoded key
+bounds.
 
 Multipart keys should be represented as ordered, self-delimiting encoded
 parts inside the canonical key bytes. For example, a logical key such as
@@ -165,15 +161,14 @@ storage discriminator, not a caller-facing map API argument, and it is
 distinct from map committed-region format codes such as
 `MAP_MANIFEST_V1_FORMAT` and `MAP_RUN_V1_FORMAT`.
 
-The current repository implementation still exposes lower-level storage
-bindings such as `Storage::create_map`, `Storage::open_map` with a
-frontier byte buffer, `update_map_frontier`, `append_map_update`,
-`snapshot_map`, `flush_map`, `compact_map`, and `drop_map`. It also
-threads `StorageWorkspace`, scratch buffers, and const capacities through
-separate calls. In this specification those names describe
-implementation plumbing that should move behind the object-level API
-above. The `*_future` methods are caller-driven future variants of the
-same lower-level operations and do not define separate logical behavior.
+The repository implementation also exposes lower-level storage bindings such
+as `Storage::create_map`, `Storage::open_map` with a frontier byte buffer,
+`update_map_frontier`, `append_map_update`, `snapshot_map`, `flush_map`,
+`compact_map`, and `drop_map`. Those APIs are advanced plumbing around
+`MapFrontier` and the shared runtime; normal map use should prefer the
+object-level `LsmMap` API above. The `*_future` methods are caller-driven
+future variants of the same lower-level operations and do not define separate
+logical behavior.
 
 ## Empty Logical State
 
@@ -448,16 +443,16 @@ discarded depending on whether the live basis was already detached.
 These requirements cover implemented whole-run compaction behavior.
 
 Compaction is a physical rewrite of immutable runs, not a logical map
-mutation. The requirements therefore focus on the properties that make
-asynchronous compaction safe: selected runs are reduced according to the
-target-then-greedy policy, unselected runs remain live, duplicate keys
-resolve with newest-wins semantics, and tombstones continue masking older
-values. Streaming the replacement directly into run storage is necessary
-because the merged output can be larger than the mutable frontier. These
-properties are sufficient for compaction correctness because after the
-replacement manifest commits, every visible lookup observes the same
-logical result while the physical run set has fewer or better-shaped
-runs.
+mutation. It is deferred and explicit rather than performed in the middle of a
+CRUD operation. The requirements therefore focus on the properties that make a
+separate compaction operation safe: selected runs are reduced according to the
+target-then-greedy policy, unselected runs remain live, duplicate keys resolve
+with newest-wins semantics, and tombstones continue masking older values.
+Streaming the replacement directly into run storage is necessary because the
+merged output can be larger than the mutable frontier. These properties are
+sufficient for compaction correctness because after the replacement manifest
+commits, every visible lookup observes the same logical result while the
+physical run set has fewer or better-shaped runs.
 
 1. `RING-IMPL-REGRESSION-110` Targeted then greedy map compaction MUST reduce selected runs while
    preserving unselected runs and all visible key/value lookups.
@@ -532,7 +527,7 @@ new manifest that omits them is durable. After the replacement manifest
 is durable, omitted run regions become eligible for ordinary Borromean
 reclaim.
 
-## Whole-Run Async Compaction
+## Whole-Run Deferred Compaction
 
 Compaction operates on complete runs, not on key-range slices and not on
 individual physical regions within a run. A compaction job reads the
@@ -556,9 +551,10 @@ single merge pass after duplicate keys and masked tombstones are
 discarded.
 
 This gives the map the deferred whole-run merge behavior wanted from a
-fractal-index-inspired design, but schedules the work asynchronously
-like an LSM database instead of pushing buffered messages through an
-internal tree on node overflow.
+fractal-index-inspired design. CRUD operations do not run that work inline:
+`set` and `delete` report whether compaction is needed, and callers invoke
+`compact` or `compact_map` separately instead of pushing buffered messages
+through an internal tree on node overflow.
 
 ## Runtime Integration Status
 

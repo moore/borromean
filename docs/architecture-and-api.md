@@ -49,20 +49,25 @@ test-support code.
 
 ## Durable Map Model
 
-The implemented durable map collection uses four payload shapes:
+The implemented durable map collection uses three supported live payload
+families:
 
 - update payloads in WAL records
 - snapshot payloads in WAL records
-- legacy single-region map payloads, readable for compatibility
 - manifest and immutable run segment payloads in committed map regions
 
-`LsmMap` keeps a bounded in-memory frontier in a caller-owned buffer plus a
-bounded descriptor list for durable runs. It does not materialize committed
-runs into RAM during open. When a map is reopened:
+`MAP_REGION_V1_FORMAT`, the earlier single-region committed map format, is
+retired. Helpers still cover its payload shape for historical tests, but a
+live map collection that uses it as the committed durable basis is rejected.
+
+`LsmMap` is the small object-level public handle for normal map use.
+`MapFrontier` is the advanced caller-buffer frontier used by lower-level
+storage helpers and tests. Open and read paths do not materialize committed
+runs into RAM; they keep bounded run descriptors and read candidate run regions
+on demand. When a map is reopened:
 
 - the retained durable basis is selected from the replay-tracked empty basis, snapshot basis, or
   region basis
-- a legacy map region is represented as a legacy source descriptor
 - a manifest region is parsed into newest-to-oldest immutable run descriptors
 - later retained update payloads are replayed into the frontier in order
 - reads check the frontier first, then read candidate run regions on demand
@@ -72,9 +77,10 @@ The normative byte-level rules for those payloads live in [../spec/map.md](../sp
 Flushes now write immutable sorted run regions, stage them, write a manifest,
 and commit the manifest as the collection head. Reads use newest-wins semantics:
 newer runs may overlap older runs, and a newer tombstone masks older values.
-`Storage::compact_map` performs blocking whole-run compaction with the
-Target-Then-Greedy selection policy. A later async compaction API can mirror
-that blocking operation without changing the on-disk model.
+Compaction is deferred and explicit: `get`, `set`, and `delete` do not perform
+whole-run compaction inline. `set` and `delete` may report that compaction is
+needed, and callers can then invoke `Storage::compact_map` or `LsmMap::compact`
+as a separate operation using the Target-Then-Greedy selection policy.
 
 ## Module Guide
 
@@ -95,6 +101,6 @@ current integration points in `lib`, `storage`, `startup`, and the collection mo
 
 ## Experimental Surface
 
-The exported `channel` module is still experimental. It has API documentation so readers can inspect
-the design, but it is not yet backed by the durable storage engine and is out of scope for the
-current collection specifications.
+The exported `channel` module is still experimental. It is covered by
+[../spec/channel.md](../spec/channel.md), but it is not yet backed by the
+durable storage engine.

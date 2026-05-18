@@ -38,7 +38,7 @@ In both styles the ownership model stays the same:
 
 - Storage format and crash semantics: [spec/ring.md](spec/ring.md)
 - Implementation architecture and API constraints: [spec/implementation.md](spec/implementation.md)
-- Durable map collection format, current validation rules, and target
+- Durable map collection format, current validation rules, and implemented
   whole-run LSM design: [spec/map.md](spec/map.md)
 - Experimental channel collection behavior: [spec/channel.md](spec/channel.md)
 - Mock flash backend behavior: [spec/mock.md](spec/mock.md)

@@ -2,7 +2,8 @@
 
 ## Table Of Contents
 
-This document is organized from the conceptual model toward the concrete mechanisms that make the model durable and recoverable.
+This document is organized from the conceptual model toward the concrete mechanisms that make the
+model durable and recoverable.
 
 - [Requirements Format](#requirements-format)
 - [Reader Model](#reader-model)
@@ -871,7 +872,8 @@ through `AppendUpdate`, and applies that update to RAM.
 `update` record through `AppendUpdate` and applies that update to the
 existing RAM frontier.
 
-9. `EmptyClean | EmptyDirty | WALSnapshotClean | WALSnapshotDirty | RegionClean | RegionDirty --CommitCollectionSnapshot--> WALSnapshotClean`
+9. `EmptyClean | EmptyDirty | WALSnapshotClean | WALSnapshotDirty | RegionClean | RegionDirty
+--CommitCollectionSnapshot--> WALSnapshotClean`
 `CommitCollectionSnapshot(collection_id, payload)` appends a
 `snapshot` record through `CommitSnapshotHead`.
 Durable after the `snapshot` record is durable. The snapshot becomes the
@@ -880,7 +882,8 @@ dirty frontier is clear. Clean-source snapshotting is allowed because a
 collection operation may choose to rewrite its clean basis into a
 different retained WAL snapshot without changing logical content.
 
-10. `EmptyClean | EmptyDirty | WALSnapshotClean | WALSnapshotDirty | RegionClean | RegionDirty --CommitCollectionRegion--> RegionClean`
+10. `EmptyClean | EmptyDirty | WALSnapshotClean | WALSnapshotDirty | RegionClean | RegionDirty
+--CommitCollectionRegion--> RegionClean`
 `CommitCollectionRegion(collection_id, region_index, payload)` runs the
 region-commit operation: reserve or stage a target region as needed,
 write the committed collection region, then append the user
@@ -892,7 +895,8 @@ dirty frontier is clear. Clean-source committed writes are allowed for
 snapshot materialization, manifest rewrite, or compaction where the
 logical state is unchanged but the retained committed layout changes.
 
-11. `EmptyClean | EmptyDirty | WALSnapshotClean | WALSnapshotDirty | RegionClean | RegionDirty --DropCollection--> Dropped`
+11. `EmptyClean | EmptyDirty | WALSnapshotClean | WALSnapshotDirty | RegionClean | RegionDirty
+--DropCollection--> Dropped`
 `DropCollection(collection_id)` appends `drop_collection(collection_id)`
 through `CommitDropCollection`, after any required detachment or reclaim
 setup represented by the operation's edge sequence.
@@ -2686,18 +2690,18 @@ Crash-safety ordering requirement:
 1. `RING-REGION-RECLAIM-ORDER-001` `reclaim_begin(r)` MUST be durable before any live metadata stops
 referencing `r`.
 2. `RING-REGION-RECLAIM-ORDER-002` Before any durable write makes `r` reachable from
-   `t_prev.next_tail`,
+`t_prev.next_tail`,
 the implementation MUST ensure that `r` already has the correct
 free-list-tail footer state, namely an uninitialized
 `r.free_pointer.next_tail`.
-3. `RING-REGION-RECLAIM-ORDER-003` If `t_prev = none`, `free_list_head(r)` MUST be durable before
-`reclaim_end(r)` is acknowledged.
+3. `RING-REGION-RECLAIM-ORDER-003` If `t_prev = none`, `free_list_head(r)` MUST be durable
+before `reclaim_end(r)` is acknowledged.
 4. `RING-REGION-RECLAIM-ORDER-004` If `t_prev` exists, the `t_prev.next_tail = r` write MUST be
-   synced before
+synced before
 `reclaim_end(r)` is acknowledged.
-5. `RING-REGION-RECLAIM-ORDER-005` The reclaim procedure MUST be idempotent across crashes between
-   any
-two steps above.
+5. `RING-REGION-RECLAIM-ORDER-005` The reclaim procedure MUST be idempotent across crashes
+between any two steps above.
+
 ## Chapter 8: Durability, Crash Cuts, And Formatting
 
 This chapter defines the write/sync cuts that make transitions durable,
@@ -3089,5 +3093,5 @@ rotation, reclaim, and WAL/state facade helpers.
     records so reopening through flash restores the collection and pending update state.
 36. `RING-IMPL-REGRESSION-105` WAL-head reclaim MUST update runtime WAL head and tail to the next
     region.
-37. `RING-IMPL-REGRESSION-106` WAL-head reclaim MUST rewrite a live `EmptyClean` map as a WAL snapshot
-    basis while preserving pending updates.
+37. `RING-IMPL-REGRESSION-106` WAL-head reclaim MUST rewrite a live `EmptyClean` map as a WAL
+    snapshot basis while preserving pending updates.
