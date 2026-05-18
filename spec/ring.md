@@ -770,7 +770,7 @@ Mechanism review:
 - **Crash cuts**: a collection remains on the prior basis until the
   target basis record is durable.
 
-### Collection Head Submachine
+### Collection Head State Machine
 
 Each tracked user collection is in one explicit collection state. The
 state name includes both the durable basis and whether a volatile

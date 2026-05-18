@@ -111,9 +111,11 @@ fn requirement_encoding_and_decoding_round_trip_from_plain_byte_buffers() {
 //= spec/implementation.md#architecture-requirements
 //= type=test
 //# `RING-IMPL-ARCH-005` The implementation SHOULD model complex
-//# multi-step procedures such as startup replay and reclaim as explicit
-//# phase machines so that each durable transition is inspectable in code
-//# review and testable in isolation.
+//# multi-step procedures such as startup replay, append, allocation,
+//# region write, WAL rotation, region reclaim, and WAL-head reclaim as an
+//# explicit storage-mode machine with operation-specific sub-enums so that
+//# each durable transition is inspectable in code review and testable in
+//# isolation.
 #[test]
 fn requirement_startup_and_reclaim_expose_stepwise_intermediate_states_between_polls() {
     let mut flash = MockFlash::<256, 4, 512>::new(0xff);

@@ -83,10 +83,16 @@ fn todo_startup_uses_storage_context_decode_scratch() {}
 
 //= spec/ring.md#startup-replay-algorithm
 //= type=todo
-//# `RING-STARTUP-024` After live collection type and retained data validation
-//# has succeeded, process each pending reclaim in WAL order. If an ordered
-//# staged region is not reachable from validated live collection state or the
-//# WAL chain, recover it through the same WAL-tracked reclaim procedure.
+//# `RING-STARTUP-024` After live collection type and retained data
+//# validation has succeeded, process each pending reclaim in WAL order:
+//# if the target region is still reachable from any live collection head
+//# or the WAL chain, leave it allocated because the reclaim did not reach
+//# the detach point durably.
+//# If the target region is unreachable from live state and not yet in the
+//# free-list chain, complete the free-list append using the Region
+//# Reclaim procedure.
+//# If the target region is already reachable from the free-list chain,
+//# finish the reclaim transaction by appending `reclaim_end(region_index)`.
 #[test]
 fn todo_startup_validates_live_collections_before_reachability_reclaim() {}
 
