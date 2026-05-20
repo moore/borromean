@@ -4,7 +4,7 @@ use crate::disk::{
     DiskError, FreePointerFooter, Header, StorageMetadata, WalRegionPrologue, WAL_V1_FORMAT,
 };
 use crate::flash_io::FlashIo;
-use crate::mock::MockError;
+use crate::flash_io::StorageIoError;
 use crate::wal_record::{
     decode_record, encode_record_into, encoded_record_len, WalRecord, WalRecordError,
 };
@@ -17,7 +17,10 @@ pub enum StartupError {
     /// Disk structure decoding failed.
     Disk(DiskError),
     /// The backing I/O adapter failed.
-    Mock(MockError),
+    Mock(crate::MockError),
+    /// The Linux file-backed mmap backend failed.
+    #[cfg(all(feature = "file-backing", target_os = "linux"))]
+    FileBacking(crate::file_backing::FileBackingError),
     /// WAL record decoding failed.
     WalRecord(WalRecordError),
     /// Metadata was missing from the device.
@@ -132,9 +135,19 @@ impl From<DiskError> for StartupError {
     }
 }
 
-impl From<MockError> for StartupError {
-    fn from(error: MockError) -> Self {
+impl From<crate::MockError> for StartupError {
+    fn from(error: crate::MockError) -> Self {
         Self::Mock(error)
+    }
+}
+
+impl From<StorageIoError> for StartupError {
+    fn from(error: StorageIoError) -> Self {
+        match error {
+            StorageIoError::Mock(error) => Self::Mock(error),
+            #[cfg(all(feature = "file-backing", target_os = "linux"))]
+            StorageIoError::FileBacking(error) => Self::FileBacking(error),
+        }
     }
 }
 

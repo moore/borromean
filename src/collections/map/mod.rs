@@ -1,7 +1,7 @@
 //! Durable map collection implementation and storage helpers.
 
 use crate::disk::{DiskError, FreePointerFooter, Header};
-use crate::flash_io::FlashIo;
+use crate::flash_io::{FlashIo, StorageIoError};
 use crate::mock::MockError;
 use crate::storage::{StorageRuntime, StorageRuntimeError, StorageVisitError};
 use crate::workspace::StorageWorkspace;
@@ -288,6 +288,18 @@ impl From<StorageRuntimeError> for MapStorageError {
 impl From<MockError> for MapStorageError {
     fn from(error: MockError) -> Self {
         Self::Mock(error)
+    }
+}
+
+impl From<StorageIoError> for MapStorageError {
+    fn from(error: StorageIoError) -> Self {
+        match error {
+            StorageIoError::Mock(error) => Self::Mock(error),
+            #[cfg(all(feature = "file-backing", target_os = "linux"))]
+            StorageIoError::FileBacking(error) => Self::Storage(StorageRuntimeError::from(
+                crate::flash_io::StorageIoError::FileBacking(error),
+            )),
+        }
     }
 }
 

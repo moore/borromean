@@ -50,6 +50,12 @@
     )
 )]
 
+#[cfg(all(feature = "file-backing", not(target_os = "linux")))]
+compile_error!("the file-backing feature is currently supported only on Linux");
+
+#[cfg(any(test, feature = "std", feature = "file-backing"))]
+extern crate std;
+
 #[cfg(test)]
 #[allow(unused_mut, unused_variables)]
 mod tests;
@@ -65,6 +71,12 @@ pub use mock::*;
 /// Tier 1 I/O trait implemented by caller-owned flash adapters.
 pub mod flash_io;
 pub use flash_io::*;
+
+/// Linux host-file backing implemented with a mutable mmap.
+#[cfg(all(feature = "file-backing", target_os = "linux"))]
+pub mod file_backing;
+#[cfg(all(feature = "file-backing", target_os = "linux"))]
+pub use file_backing::*;
 
 /// Tier 1 workspace buffers borrowed by replay and mutation operations.
 pub mod workspace;

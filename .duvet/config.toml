@@ -24,6 +24,10 @@ source = "spec/mock.md"
 format = "markdown"
 
 [[specification]]
+source = "spec/file.md"
+format = "markdown"
+
+[[specification]]
 source = "spec/implementation-policy.md"
 format = "markdown"
 

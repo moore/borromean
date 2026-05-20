@@ -1,7 +1,7 @@
 use heapless::Vec;
 
 use crate::disk::{FreePointerFooter, Header, WalRegionPrologue, WAL_V1_FORMAT};
-use crate::flash_io::FlashIo;
+use crate::flash_io::{FlashIo, StorageFormatError, StorageIoError};
 use crate::mock::{MockError, MockFormatError};
 use crate::mode::StorageMode;
 use crate::startup::{
@@ -26,8 +26,14 @@ pub enum StorageRuntimeError {
     },
     /// Formatting the backing store failed.
     Format(MockFormatError),
+    /// Formatting the Linux file-backed mmap backend failed.
+    #[cfg(all(feature = "file-backing", target_os = "linux"))]
+    FileBackingFormat(crate::file_backing::FileBackingFormatError),
     /// The backing I/O adapter failed.
     Mock(MockError),
+    /// The Linux file-backed mmap backend failed.
+    #[cfg(all(feature = "file-backing", target_os = "linux"))]
+    FileBacking(crate::file_backing::FileBackingError),
     /// Startup replay or recovery failed.
     Startup(StartupError),
     /// WAL record encoding or decoding failed.
@@ -153,9 +159,29 @@ impl From<MockFormatError> for StorageRuntimeError {
     }
 }
 
+impl From<StorageFormatError> for StorageRuntimeError {
+    fn from(error: StorageFormatError) -> Self {
+        match error {
+            StorageFormatError::Mock(error) => Self::Format(error),
+            #[cfg(all(feature = "file-backing", target_os = "linux"))]
+            StorageFormatError::FileBacking(error) => Self::FileBackingFormat(error),
+        }
+    }
+}
+
 impl From<MockError> for StorageRuntimeError {
     fn from(error: MockError) -> Self {
         Self::Mock(error)
+    }
+}
+
+impl From<StorageIoError> for StorageRuntimeError {
+    fn from(error: StorageIoError) -> Self {
+        match error {
+            StorageIoError::Mock(error) => Self::Mock(error),
+            #[cfg(all(feature = "file-backing", target_os = "linux"))]
+            StorageIoError::FileBacking(error) => Self::FileBacking(error),
+        }
     }
 }
 
@@ -2350,7 +2376,7 @@ fn read_header_from_flash<const REGION_SIZE: usize, const REGION_COUNT: usize, I
     let mut header_bytes = [0u8; crate::Header::ENCODED_LEN];
     flash
         .read_region(region_index, 0, &mut header_bytes)
-        .map_err(StorageRuntimeError::Mock)?;
+        .map_err(StorageRuntimeError::from)?;
     crate::Header::decode(&header_bytes).map_err(|error| StorageRuntimeError::Startup(error.into()))
 }
 

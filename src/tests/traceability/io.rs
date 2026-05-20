@@ -10,11 +10,11 @@ fn requirement_flash_io_trait_exposes_only_primitive_storage_operations() {
     struct SurfaceCheckedFlash;
 
     impl FlashIo for SurfaceCheckedFlash {
-        fn read_metadata(&mut self) -> Result<Option<StorageMetadata>, MockError> {
+        fn read_metadata(&mut self) -> Result<Option<StorageMetadata>, StorageIoError> {
             Ok(None)
         }
 
-        fn write_metadata(&mut self, _metadata: StorageMetadata) -> Result<(), MockError> {
+        fn write_metadata(&mut self, _metadata: StorageMetadata) -> Result<(), StorageIoError> {
             Ok(())
         }
 
@@ -23,7 +23,7 @@ fn requirement_flash_io_trait_exposes_only_primitive_storage_operations() {
             _region_index: u32,
             _offset: usize,
             _buffer: &mut [u8],
-        ) -> Result<(), MockError> {
+        ) -> Result<(), StorageIoError> {
             Ok(())
         }
 
@@ -32,15 +32,15 @@ fn requirement_flash_io_trait_exposes_only_primitive_storage_operations() {
             _region_index: u32,
             _offset: usize,
             _data: &[u8],
-        ) -> Result<(), MockError> {
+        ) -> Result<(), StorageIoError> {
             Ok(())
         }
 
-        fn erase_region(&mut self, _region_index: u32) -> Result<(), MockError> {
+        fn erase_region(&mut self, _region_index: u32) -> Result<(), StorageIoError> {
             Ok(())
         }
 
-        fn sync(&mut self) -> Result<(), MockError> {
+        fn sync(&mut self) -> Result<(), StorageIoError> {
             Ok(())
         }
 
@@ -49,8 +49,10 @@ fn requirement_flash_io_trait_exposes_only_primitive_storage_operations() {
             _min_free_regions: u32,
             _wal_write_granule: u32,
             _wal_record_magic: u8,
-        ) -> Result<StorageMetadata, MockFormatError> {
-            Err(MockFormatError::RegionCountTooLarge)
+        ) -> Result<StorageMetadata, StorageFormatError> {
+            Err(StorageFormatError::from(
+                MockFormatError::RegionCountTooLarge,
+            ))
         }
     }
 
@@ -60,19 +62,24 @@ fn requirement_flash_io_trait_exposes_only_primitive_storage_operations() {
     // stopped exposing the expected `Result`-based contract, this test
     // would stop compiling. Runtime-style hook surfaces are separately
     // prohibited by `RING-IMPL-IO-005`.
-    let _: fn(&mut SurfaceCheckedFlash) -> Result<Option<StorageMetadata>, MockError> =
+    let _: fn(&mut SurfaceCheckedFlash) -> Result<Option<StorageMetadata>, StorageIoError> =
         <SurfaceCheckedFlash as FlashIo>::read_metadata;
-    let _: fn(&mut SurfaceCheckedFlash, StorageMetadata) -> Result<(), MockError> =
+    let _: fn(&mut SurfaceCheckedFlash, StorageMetadata) -> Result<(), StorageIoError> =
         <SurfaceCheckedFlash as FlashIo>::write_metadata;
-    let _: fn(&mut SurfaceCheckedFlash, u32, usize, &mut [u8]) -> Result<(), MockError> =
+    let _: fn(&mut SurfaceCheckedFlash, u32, usize, &mut [u8]) -> Result<(), StorageIoError> =
         <SurfaceCheckedFlash as FlashIo>::read_region;
-    let _: fn(&mut SurfaceCheckedFlash, u32, usize, &[u8]) -> Result<(), MockError> =
+    let _: fn(&mut SurfaceCheckedFlash, u32, usize, &[u8]) -> Result<(), StorageIoError> =
         <SurfaceCheckedFlash as FlashIo>::write_region;
-    let _: fn(&mut SurfaceCheckedFlash, u32) -> Result<(), MockError> =
+    let _: fn(&mut SurfaceCheckedFlash, u32) -> Result<(), StorageIoError> =
         <SurfaceCheckedFlash as FlashIo>::erase_region;
-    let _: fn(&mut SurfaceCheckedFlash) -> Result<(), MockError> =
+    let _: fn(&mut SurfaceCheckedFlash) -> Result<(), StorageIoError> =
         <SurfaceCheckedFlash as FlashIo>::sync;
-    let _: fn(&mut SurfaceCheckedFlash, u32, u32, u8) -> Result<StorageMetadata, MockFormatError> =
+    let _: fn(
+        &mut SurfaceCheckedFlash,
+        u32,
+        u32,
+        u8,
+    ) -> Result<StorageMetadata, StorageFormatError> =
         <SurfaceCheckedFlash as FlashIo>::format_empty_store;
 }
 

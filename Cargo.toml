@@ -11,9 +11,16 @@ keywords = ["embeded", "nostd", "storage", "flash", "collections"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+[features]
+default = []
+std = []
+file-backing = ["std", "dep:libc", "dep:memmap2"]
+
 [dependencies]
 crc = "3.2.1"
 heapless = { version = "0.8.0", features = ["serde"] }
+libc = { version = "0.2", optional = true }
+memmap2 = { version = "0.9", optional = true }
 postcard = { version = "1.0.8", features = ["use-crc"] }
 serde = { version = "1.0", default-features = false, features = ["derive"] }
 

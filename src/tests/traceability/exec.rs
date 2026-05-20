@@ -28,14 +28,16 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize>
 impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize> FlashIo
     for ObservedFlash<REGION_SIZE, REGION_COUNT, MAX_LOG>
 {
-    fn read_metadata(&mut self) -> Result<Option<StorageMetadata>, MockError> {
+    fn read_metadata(&mut self) -> Result<Option<StorageMetadata>, StorageIoError> {
         self.note_call();
-        self.inner.read_metadata()
+        self.inner.read_metadata().map_err(StorageIoError::from)
     }
 
-    fn write_metadata(&mut self, metadata: StorageMetadata) -> Result<(), MockError> {
+    fn write_metadata(&mut self, metadata: StorageMetadata) -> Result<(), StorageIoError> {
         self.note_call();
-        self.inner.write_metadata(metadata)
+        self.inner
+            .write_metadata(metadata)
+            .map_err(StorageIoError::from)
     }
 
     fn read_region(
@@ -43,9 +45,11 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize> 
         region_index: u32,
         offset: usize,
         buffer: &mut [u8],
-    ) -> Result<(), MockError> {
+    ) -> Result<(), StorageIoError> {
         self.note_call();
-        self.inner.read_region(region_index, offset, buffer)
+        self.inner
+            .read_region(region_index, offset, buffer)
+            .map_err(StorageIoError::from)
     }
 
     fn write_region(
@@ -53,19 +57,23 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize> 
         region_index: u32,
         offset: usize,
         data: &[u8],
-    ) -> Result<(), MockError> {
+    ) -> Result<(), StorageIoError> {
         self.note_call();
-        self.inner.write_region(region_index, offset, data)
+        self.inner
+            .write_region(region_index, offset, data)
+            .map_err(StorageIoError::from)
     }
 
-    fn erase_region(&mut self, region_index: u32) -> Result<(), MockError> {
+    fn erase_region(&mut self, region_index: u32) -> Result<(), StorageIoError> {
         self.note_call();
-        self.inner.erase_region(region_index)
+        self.inner
+            .erase_region(region_index)
+            .map_err(StorageIoError::from)
     }
 
-    fn sync(&mut self) -> Result<(), MockError> {
+    fn sync(&mut self) -> Result<(), StorageIoError> {
         self.note_call();
-        self.inner.sync()
+        self.inner.sync().map_err(StorageIoError::from)
     }
 
     fn format_empty_store(
@@ -73,10 +81,11 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize> 
         min_free_regions: u32,
         wal_write_granule: u32,
         wal_record_magic: u8,
-    ) -> Result<StorageMetadata, MockFormatError> {
+    ) -> Result<StorageMetadata, StorageFormatError> {
         self.note_call();
         self.inner
             .format_empty_store(min_free_regions, wal_write_granule, wal_record_magic)
+            .map_err(StorageFormatError::from)
     }
 }
 
