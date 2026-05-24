@@ -69,6 +69,66 @@ run_perf() {
     cargo run --release --features perf-tools --bin file_backing_perf -- --config "$config_path"
 }
 
+run_perf_matrix() {
+    local configs=(
+        perf/file_backing.toml
+        perf/file_backing_update_hot.toml
+        perf/file_backing_read_hits.toml
+        perf/file_backing_read_misses.toml
+        perf/file_backing_mixed_update.toml
+    )
+    local config_path
+    for config_path in "${configs[@]}"; do
+        echo "==> cargo run --release --features perf-tools --bin file_backing_perf -- --config ${config_path}"
+        cargo run --release --features perf-tools --bin file_backing_perf -- --config "$config_path"
+    done
+}
+
+run_perf_profile_for_config() {
+    local label="$1"
+    local config_path="$2"
+    local profile_dir="${BORROMEAN_PERF_PROFILE_DIR:-target/perf/profiles}"
+    local frequency="${BORROMEAN_PERF_PROFILE_FREQ:-997}"
+    local base_name
+    local output_prefix
+    base_name="$(basename "$config_path" .toml)"
+    output_prefix="${profile_dir}/${label}-${base_name}"
+
+    if ! command -v perf >/dev/null 2>&1; then
+        echo "perf is required for profiling but was not found on PATH" >&2
+        return 127
+    fi
+
+    mkdir -p "$profile_dir"
+    echo "==> RUSTFLAGS=\"${RUSTFLAGS:-} -C force-frame-pointers=yes\" cargo build --release --features perf-tools --bin file_backing_perf"
+    RUSTFLAGS="${RUSTFLAGS:-} -C force-frame-pointers=yes" \
+        cargo build --release --features perf-tools --bin file_backing_perf
+
+    echo "==> perf stat -d -o ${output_prefix}.stat.txt -- target/release/file_backing_perf --config ${config_path}"
+    perf stat -d \
+        -o "${output_prefix}.stat.txt" \
+        -- target/release/file_backing_perf --config "$config_path"
+
+    echo "==> perf record -F ${frequency} -g -o ${output_prefix}.perf.data -- target/release/file_backing_perf --config ${config_path}"
+    perf record -F "$frequency" -g \
+        -o "${output_prefix}.perf.data" \
+        -- target/release/file_backing_perf --config "$config_path"
+
+    echo "==> perf report --stdio -i ${output_prefix}.perf.data > ${output_prefix}.perf.txt"
+    perf report --stdio -i "${output_prefix}.perf.data" > "${output_prefix}.perf.txt"
+    echo "profile artifacts: ${output_prefix}.stat.txt ${output_prefix}.perf.data ${output_prefix}.perf.txt"
+}
+
+run_perf_profile() {
+    local config_path="${BORROMEAN_PERF_PROFILE_CONFIG:-perf/file_backing_smoke.toml}"
+    run_perf_profile_for_config "file" "$config_path"
+}
+
+run_perf_profile_memory() {
+    local config_path="${BORROMEAN_PERF_MEMORY_PROFILE_CONFIG:-perf/file_backing_memory_profile.toml}"
+    run_perf_profile_for_config "memory" "$config_path"
+}
+
 run_bench() {
     echo "==> cargo bench --features file-backing --bench file_backing_mmap"
     cargo bench --features file-backing --bench file_backing_mmap
@@ -90,6 +150,12 @@ Tasks:
   perf     Run the FileBacking perf runner (override config with BORROMEAN_PERF_CONFIG)
   perf-test
            Alias for perf
+  perf-matrix
+           Run insert, update, read-hit, read-miss, and mixed perf comparison configs
+  perf-profile
+           Profile a release perf run with frame pointers (override config with BORROMEAN_PERF_PROFILE_CONFIG)
+  perf-profile-memory
+           Profile a memory-backed Borromean perf run (override config with BORROMEAN_PERF_MEMORY_PROFILE_CONFIG)
   bench    Run Criterion benchmarks for the FileBacking mmap backend
 USAGE
 }
@@ -119,6 +185,15 @@ run_task() {
             ;;
         perf|perf-test|perf-tests)
             run_perf
+            ;;
+        perf-matrix)
+            run_perf_matrix
+            ;;
+        perf-profile)
+            run_perf_profile
+            ;;
+        perf-profile-memory)
+            run_perf_profile_memory
             ;;
         bench)
             run_bench

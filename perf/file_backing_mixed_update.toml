@@ -1,8 +1,4 @@
 [geometry]
-# Supported region sizes: 4096, 8192, 16384, 65536.
-# Supported region counts: 64, 256, 1024, 1599, 4096.
-# 4096 regions at 4 KiB keeps the file small while forcing run flushes
-# and compactions during a short perf run.
 region_size = 4096
 region_count = 4096
 
@@ -10,7 +6,7 @@ region_count = 4096
 engines = ["borromean", "borromean-memory", "redb"]
 
 [backing]
-path = "target/perf/file_backing.db"
+path = "target/perf/file_backing_mixed_update.db"
 allocation_policy = "fallback-on-unsupported"
 madvise_policy = "normal"
 erased_byte = 0xff
@@ -19,7 +15,7 @@ remove_existing = true
 remove_after = false
 
 [redb]
-path = "target/perf/redb.db"
+path = "target/perf/redb_mixed_update.db"
 remove_existing = true
 remove_after = false
 compact_interval = 0
@@ -27,7 +23,7 @@ compact_after_workload = false
 durability = "immediate"
 
 [preload]
-count = 0
+count = 1000
 
 [storage]
 min_free_regions = 2
@@ -38,13 +34,13 @@ wal_record_magic = 0xa5
 map_count = 1
 operation_count = 3000
 warmup_count = 0
-key_space = 100000
+key_space = 1000
 seed = 0x123456789abcdef
-read_ratio = 0
-set_ratio = 100
+read_ratio = 80
+set_ratio = 20
 delete_ratio = 0
 value_size_bytes = 64
-key_mode = "insert-range"
+key_mode = "preloaded"
 compact_on_signal = true
 compaction_region_target = 64
 
@@ -52,6 +48,6 @@ compaction_region_target = 64
 optimize_after_workload = false
 
 [output]
-json_path = "target/perf/file_backing.json"
+json_path = "target/perf/file_backing_mixed_update.json"
 latency_sample_interval = 250
-progress_interval = 250
+progress_interval = 500

@@ -6,11 +6,12 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use borromean::{
-    AllocationPolicy, FileBacking, FileBackingOptions, LsmMap, MadvisePolicy, Storage,
-    StorageFormatConfig,
+    AllocationPolicy, CollectionId, FileBacking, FileBackingOptions, FlashIo, FreePointerFooter,
+    Header, LsmMap, MadvisePolicy, MockError, MockFormatError, Storage, StorageFormatConfig,
+    StorageFormatError, StorageIoError, StorageMetadata, WalRegionPrologue, WAL_V1_FORMAT,
 };
 use heapless::Vec as HeaplessVec;
-use redb::{Database, Durability, ReadableDatabase, TableDefinition};
+use redb::{Builder as RedbBuilder, Database, Durability, ReadableDatabase, TableDefinition};
 use serde::{Deserialize, Serialize};
 
 const DEFAULT_CONFIG_PATH: &str = "perf/file_backing.toml";
@@ -35,7 +36,11 @@ struct PerfConfig {
     #[serde(default)]
     storage: StorageConfig,
     #[serde(default)]
+    preload: PreloadConfig,
+    #[serde(default)]
     workload: WorkloadConfig,
+    #[serde(default)]
+    maintenance: MaintenanceConfig,
     #[serde(default)]
     output: OutputConfig,
 }
@@ -63,6 +68,8 @@ fn default_comparison_engines() -> Vec<EngineKind> {
 #[serde(rename_all = "lowercase")]
 enum EngineKind {
     Borromean,
+    #[serde(rename = "borromean-memory")]
+    BorromeanMemory,
     Redb,
 }
 
@@ -70,6 +77,15 @@ impl EngineKind {
     fn as_str(self) -> &'static str {
         match self {
             Self::Borromean => "borromean",
+            Self::BorromeanMemory => "borromean-memory",
+            Self::Redb => "redb",
+        }
+    }
+
+    fn comparison_label(self) -> &'static str {
+        match self {
+            Self::Borromean => "borromean-file",
+            Self::BorromeanMemory => "borromean-memory",
             Self::Redb => "redb",
         }
     }
@@ -117,6 +133,8 @@ struct RedbConfig {
     path: PathBuf,
     remove_existing: bool,
     remove_after: bool,
+    #[serde(default)]
+    cache_size_bytes: Option<usize>,
     compact_interval: u64,
     compact_after_workload: bool,
     durability: RedbDurability,
@@ -128,6 +146,7 @@ impl Default for RedbConfig {
             path: PathBuf::from("target/perf/redb.db"),
             remove_existing: true,
             remove_after: false,
+            cache_size_bytes: None,
             compact_interval: 0,
             compact_after_workload: false,
             durability: RedbDurability::Immediate,
@@ -208,6 +227,13 @@ impl Default for StorageConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreloadConfig {
+    #[serde(default)]
+    count: u64,
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct WorkloadConfig {
@@ -221,6 +247,8 @@ struct WorkloadConfig {
     delete_ratio: u32,
     #[serde(default = "default_value_size_bytes")]
     value_size_bytes: usize,
+    #[serde(default)]
+    key_mode: WorkloadKeyMode,
     compact_on_signal: bool,
     #[serde(default)]
     compact_interval: u64,
@@ -240,6 +268,7 @@ impl Default for WorkloadConfig {
             set_ratio: 45,
             delete_ratio: 5,
             value_size_bytes: default_value_size_bytes(),
+            key_mode: WorkloadKeyMode::default(),
             compact_on_signal: true,
             compact_interval: 0,
             compaction_region_target: None,
@@ -247,8 +276,26 @@ impl Default for WorkloadConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum WorkloadKeyMode {
+    #[default]
+    Random,
+    Preloaded,
+    Missing,
+    SingleKey,
+    InsertRange,
+}
+
 fn default_value_size_bytes() -> usize {
     8
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MaintenanceConfig {
+    #[serde(default)]
+    optimize_after_workload: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -285,16 +332,95 @@ struct EffectiveGeometry {
 struct WorkloadCounters {
     reads: u64,
     sets: u64,
+    set_inserts_expected: u64,
+    set_updates_expected: u64,
     deletes: u64,
     compactions: u64,
+    hits: u64,
     misses: u64,
+    read_hits_expected: u64,
+    read_misses_expected: u64,
 }
 
 #[derive(Debug, Default, Clone, Serialize)]
 struct WorkloadTimings {
+    operation_generation_nanos: u128,
     reads_nanos: u128,
     writes_nanos: u128,
     compactions_nanos: u128,
+}
+
+#[derive(Debug, Default, Clone, Serialize)]
+struct PerfDiagnostics {
+    operation_generation_nanos: u128,
+    read_lookup_nanos: u128,
+    write_apply_nanos: u128,
+    transaction_begin_nanos: u128,
+    table_open_nanos: u128,
+    commit_nanos: u128,
+    commit_count: u64,
+    transaction_count: u64,
+    borromean_io: Option<IoDiagnostics>,
+    memory: MemoryDiagnostics,
+    redb_cache_size_bytes: Option<usize>,
+    redb_stats: Option<RedbStorageStats>,
+}
+
+#[derive(Debug, Default, Clone, Copy, Serialize)]
+struct IoDiagnostics {
+    metadata_reads: u64,
+    metadata_writes: u64,
+    region_reads: u64,
+    region_writes: u64,
+    region_erases: u64,
+    syncs: u64,
+    bytes_read: u64,
+    bytes_written: u64,
+    bytes_erased: u64,
+    read_region_nanos: u128,
+    write_region_nanos: u128,
+    erase_region_nanos: u128,
+    sync_nanos: u128,
+    mmap_flush_nanos: u128,
+    file_sync_nanos: u128,
+    dirty_sync_bytes: u64,
+    dirty_sync_regions: u64,
+    dirty_sync_metadata_regions: u64,
+}
+
+#[derive(Debug, Default, Clone, Copy, Serialize)]
+struct MemoryDiagnostics {
+    rss_start_bytes: Option<u64>,
+    rss_peak_bytes: Option<u64>,
+    rss_end_bytes: Option<u64>,
+    rss_delta_bytes: Option<i64>,
+}
+
+#[derive(Debug, Default, Clone, Copy, Serialize)]
+struct RedbStorageStats {
+    tree_height: u32,
+    allocated_pages: u64,
+    leaf_pages: u64,
+    branch_pages: u64,
+    stored_bytes: u64,
+    metadata_bytes: u64,
+    fragmented_bytes: u64,
+    page_size: usize,
+}
+
+#[derive(Debug, Default, Clone, Serialize)]
+struct OperationLatencySummaries {
+    reads: Option<LatencySummary>,
+    sets: Option<LatencySummary>,
+    deletes: Option<LatencySummary>,
+}
+
+#[derive(Debug, Default, Clone, Copy, Serialize)]
+struct MaintenanceReport {
+    ran: bool,
+    nanos: u128,
+    compactions: u64,
+    file_len_after_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -312,6 +438,22 @@ struct PerfReport {
     config: PerfConfig,
     geometry: EffectiveGeometry,
     engine_reports: Vec<EngineReport>,
+    comparison_reports: Vec<EngineComparisonReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct EngineComparisonReport {
+    left_engine: EngineKind,
+    right_engine: EngineKind,
+    throughput_ratio: Option<f64>,
+    p50_latency_ratio: Option<f64>,
+    p95_latency_ratio: Option<f64>,
+    p99_latency_ratio: Option<f64>,
+    sync_time_ratio: Option<f64>,
+    compaction_time_ratio: Option<f64>,
+    average_read_time_ratio: Option<f64>,
+    average_write_time_ratio: Option<f64>,
+    logical_size_ratio: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -320,13 +462,19 @@ struct EngineReport {
     path: PathBuf,
     create_format_nanos: u128,
     setup_nanos: u128,
+    preload_nanos: u128,
+    preload_counters: WorkloadCounters,
     warmup_nanos: u128,
     workload_nanos: u128,
     operations_per_second: f64,
     counters: WorkloadCounters,
     workload_timings: WorkloadTimings,
     sampled_latency: Option<LatencySummary>,
+    sampled_latency_by_op: OperationLatencySummaries,
+    diagnostics: PerfDiagnostics,
+    maintenance: MaintenanceReport,
     file_len_bytes: u64,
+    logical_len_bytes: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -335,6 +483,505 @@ struct WorkloadStep<const VALUE_BYTES: usize> {
     key: u64,
     operation: WorkloadOp,
     value: Option<HeaplessVec<u8, VALUE_BYTES>>,
+    expected_presence: ExpectedPresence,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ExecutedOperation {
+    operation: WorkloadOp,
+}
+
+#[derive(Default)]
+struct OperationLatencySamples {
+    reads: Vec<u128>,
+    sets: Vec<u128>,
+    deletes: Vec<u128>,
+}
+
+struct MemoryTracker {
+    start: Option<u64>,
+    peak: Option<u64>,
+}
+
+impl MemoryTracker {
+    fn start() -> Self {
+        let start = current_rss_bytes();
+        Self { start, peak: start }
+    }
+
+    fn sample(&mut self) {
+        if let Some(current) = current_rss_bytes() {
+            self.peak = Some(self.peak.map_or(current, |peak| peak.max(current)));
+        }
+    }
+
+    fn finish(mut self) -> MemoryDiagnostics {
+        self.sample();
+        let end = current_rss_bytes();
+        let peak = match (self.peak, end) {
+            (Some(peak), Some(end)) => Some(peak.max(end)),
+            (Some(peak), None) => Some(peak),
+            (None, Some(end)) => Some(end),
+            (None, None) => None,
+        };
+        let rss_delta_bytes = match (self.start, end) {
+            (Some(start), Some(end)) => Some(end as i64 - start as i64),
+            _ => None,
+        };
+        MemoryDiagnostics {
+            rss_start_bytes: self.start,
+            rss_peak_bytes: peak,
+            rss_end_bytes: end,
+            rss_delta_bytes,
+        }
+    }
+}
+
+struct SyncDetails {
+    mmap_flush_nanos: u128,
+    file_sync_nanos: u128,
+}
+
+trait PerfBacking: FlashIo {
+    fn sync_for_perf(&mut self) -> Result<SyncDetails, StorageIoError>;
+}
+
+impl<const REGION_SIZE: usize, const REGION_COUNT: usize> PerfBacking
+    for FileBacking<REGION_SIZE, REGION_COUNT>
+{
+    fn sync_for_perf(&mut self) -> Result<SyncDetails, StorageIoError> {
+        let report = self.sync_with_report().map_err(StorageIoError::from)?;
+        Ok(SyncDetails {
+            mmap_flush_nanos: report.mmap_flush_nanos,
+            file_sync_nanos: report.file_sync_nanos,
+        })
+    }
+}
+
+struct MemoryBacking<const REGION_SIZE: usize, const REGION_COUNT: usize> {
+    storage: Vec<u8>,
+    erased_byte: u8,
+}
+
+impl<const REGION_SIZE: usize, const REGION_COUNT: usize> MemoryBacking<REGION_SIZE, REGION_COUNT> {
+    fn new(erased_byte: u8) -> PerfResult<Self> {
+        let len = Self::logical_len_bytes()
+            .ok_or_else(|| "memory backing length overflowed".to_owned())?;
+        Ok(Self {
+            storage: vec![erased_byte; len],
+            erased_byte,
+        })
+    }
+
+    fn logical_len_bytes() -> Option<usize> {
+        REGION_SIZE.checked_mul(REGION_COUNT.checked_add(1)?)
+    }
+
+    fn metadata_range(&self) -> Result<std::ops::Range<usize>, MockError> {
+        checked_memory_range(0, REGION_SIZE, self.storage.len())
+    }
+
+    fn region_range(
+        &self,
+        region_index: u32,
+        offset: usize,
+        len: usize,
+    ) -> Result<std::ops::Range<usize>, MockError> {
+        let index = usize::try_from(region_index)
+            .map_err(|_| MockError::InvalidRegionIndex(region_index))?;
+        if index >= REGION_COUNT {
+            return Err(MockError::InvalidRegionIndex(region_index));
+        }
+        let region_offset = checked_memory_range(offset, len, REGION_SIZE)?;
+        let region_start = REGION_SIZE
+            .checked_mul(index.checked_add(1).ok_or(MockError::OutOfBounds)?)
+            .ok_or(MockError::OutOfBounds)?;
+        let start = region_start
+            .checked_add(region_offset.start)
+            .ok_or(MockError::OutOfBounds)?;
+        let end = region_start
+            .checked_add(region_offset.end)
+            .ok_or(MockError::OutOfBounds)?;
+        Ok(start..end)
+    }
+}
+
+impl<const REGION_SIZE: usize, const REGION_COUNT: usize> FlashIo
+    for MemoryBacking<REGION_SIZE, REGION_COUNT>
+{
+    fn read_metadata(&mut self) -> Result<Option<StorageMetadata>, StorageIoError> {
+        let range = self.metadata_range().map_err(StorageIoError::from)?;
+        let metadata_region = &self.storage[range];
+        if metadata_region.iter().all(|byte| *byte == self.erased_byte) {
+            return Ok(None);
+        }
+        StorageMetadata::decode(metadata_region)
+            .map(Some)
+            .map_err(|_| StorageIoError::from(MockError::OutOfBounds))
+    }
+
+    fn write_metadata(&mut self, metadata: StorageMetadata) -> Result<(), StorageIoError> {
+        let range = self.metadata_range().map_err(StorageIoError::from)?;
+        let metadata_region = &mut self.storage[range];
+        metadata_region.fill(self.erased_byte);
+        metadata
+            .encode_into(metadata_region)
+            .map(|_| ())
+            .map_err(|_| StorageIoError::from(MockError::OutOfBounds))
+    }
+
+    fn read_region(
+        &mut self,
+        region_index: u32,
+        offset: usize,
+        buffer: &mut [u8],
+    ) -> Result<(), StorageIoError> {
+        let range = self
+            .region_range(region_index, offset, buffer.len())
+            .map_err(StorageIoError::from)?;
+        buffer.copy_from_slice(&self.storage[range]);
+        Ok(())
+    }
+
+    fn write_region(
+        &mut self,
+        region_index: u32,
+        offset: usize,
+        data: &[u8],
+    ) -> Result<(), StorageIoError> {
+        let range = self
+            .region_range(region_index, offset, data.len())
+            .map_err(StorageIoError::from)?;
+        self.storage[range].copy_from_slice(data);
+        Ok(())
+    }
+
+    fn erase_region(&mut self, region_index: u32) -> Result<(), StorageIoError> {
+        let range = self
+            .region_range(region_index, 0, REGION_SIZE)
+            .map_err(StorageIoError::from)?;
+        self.storage[range].fill(self.erased_byte);
+        Ok(())
+    }
+
+    fn sync(&mut self) -> Result<(), StorageIoError> {
+        Ok(())
+    }
+
+    fn format_empty_store(
+        &mut self,
+        min_free_regions: u32,
+        wal_write_granule: u32,
+        wal_record_magic: u8,
+    ) -> Result<StorageMetadata, StorageFormatError> {
+        let region_size =
+            u32::try_from(REGION_SIZE).map_err(|_| MockFormatError::RegionSizeTooLarge)?;
+        let region_count =
+            u32::try_from(REGION_COUNT).map_err(|_| MockFormatError::RegionCountTooLarge)?;
+
+        if region_count < 2 + min_free_regions {
+            return Err(StorageFormatError::from(
+                MockFormatError::InsufficientRegions {
+                    region_count,
+                    min_free_regions,
+                },
+            ));
+        }
+
+        let metadata = StorageMetadata::new(
+            region_size,
+            region_count,
+            min_free_regions,
+            wal_write_granule,
+            self.erased_byte,
+            wal_record_magic,
+        )
+        .map_err(|error| StorageFormatError::from(MockFormatError::from(error)))?;
+
+        self.write_metadata(metadata).map_err(|error| match error {
+            StorageIoError::Mock(error) => StorageFormatError::from(MockFormatError::from(error)),
+            StorageIoError::FileBacking(_) => unreachable_storage_format_error(),
+        })?;
+
+        for region_index in 0..region_count {
+            self.erase_region(region_index)
+                .map_err(|error| match error {
+                    StorageIoError::Mock(error) => {
+                        StorageFormatError::from(MockFormatError::from(error))
+                    }
+                    StorageIoError::FileBacking(_) => unreachable_storage_format_error(),
+                })?;
+        }
+
+        let header = Header {
+            sequence: 0,
+            collection_id: CollectionId::new(0),
+            collection_format: WAL_V1_FORMAT,
+        };
+        let mut header_bytes = [0u8; Header::ENCODED_LEN];
+        header
+            .encode_into(&mut header_bytes)
+            .map_err(|error| StorageFormatError::from(MockFormatError::from(error)))?;
+        self.write_region(0, 0, &header_bytes)
+            .map_err(|error| match error {
+                StorageIoError::Mock(error) => {
+                    StorageFormatError::from(MockFormatError::from(error))
+                }
+                StorageIoError::FileBacking(_) => unreachable_storage_format_error(),
+            })?;
+
+        let prologue = WalRegionPrologue {
+            wal_head_region_index: 0,
+        };
+        let mut prologue_bytes = [0u8; WalRegionPrologue::ENCODED_LEN];
+        prologue
+            .encode_into(&mut prologue_bytes, region_count)
+            .map_err(|error| StorageFormatError::from(MockFormatError::from(error)))?;
+        self.write_region(0, Header::ENCODED_LEN, &prologue_bytes)
+            .map_err(|error| match error {
+                StorageIoError::Mock(error) => {
+                    StorageFormatError::from(MockFormatError::from(error))
+                }
+                StorageIoError::FileBacking(_) => unreachable_storage_format_error(),
+            })?;
+
+        let footer_offset = REGION_SIZE
+            .checked_sub(FreePointerFooter::ENCODED_LEN)
+            .ok_or_else(|| {
+                StorageFormatError::from(MockFormatError::from(MockError::OutOfBounds))
+            })?;
+        for region_index in 1..region_count {
+            let next_tail = if region_index + 1 < region_count {
+                Some(region_index + 1)
+            } else {
+                None
+            };
+            let footer = FreePointerFooter { next_tail };
+            let mut footer_bytes = [0u8; FreePointerFooter::ENCODED_LEN];
+            footer
+                .encode_into(&mut footer_bytes, self.erased_byte)
+                .map_err(|error| StorageFormatError::from(MockFormatError::from(error)))?;
+            self.write_region(region_index, footer_offset, &footer_bytes)
+                .map_err(|error| match error {
+                    StorageIoError::Mock(error) => {
+                        StorageFormatError::from(MockFormatError::from(error))
+                    }
+                    StorageIoError::FileBacking(_) => unreachable_storage_format_error(),
+                })?;
+        }
+
+        self.sync().map_err(|error| match error {
+            StorageIoError::Mock(error) => StorageFormatError::from(MockFormatError::from(error)),
+            StorageIoError::FileBacking(_) => unreachable_storage_format_error(),
+        })?;
+        Ok(metadata)
+    }
+}
+
+impl<const REGION_SIZE: usize, const REGION_COUNT: usize> PerfBacking
+    for MemoryBacking<REGION_SIZE, REGION_COUNT>
+{
+    fn sync_for_perf(&mut self) -> Result<SyncDetails, StorageIoError> {
+        self.sync()?;
+        Ok(SyncDetails {
+            mmap_flush_nanos: 0,
+            file_sync_nanos: 0,
+        })
+    }
+}
+
+fn checked_memory_range(
+    offset: usize,
+    len: usize,
+    total_len: usize,
+) -> Result<std::ops::Range<usize>, MockError> {
+    let end = offset.checked_add(len).ok_or(MockError::OutOfBounds)?;
+    if end > total_len {
+        return Err(MockError::OutOfBounds);
+    }
+    Ok(offset..end)
+}
+
+fn unreachable_storage_format_error() -> StorageFormatError {
+    StorageFormatError::from(MockFormatError::from(MockError::OutOfBounds))
+}
+
+struct InstrumentedBacking<IO, const REGION_SIZE: usize, const REGION_COUNT: usize> {
+    inner: IO,
+    diagnostics: IoDiagnostics,
+    metadata_dirty: bool,
+    dirty_regions: Vec<bool>,
+}
+
+impl<IO, const REGION_SIZE: usize, const REGION_COUNT: usize>
+    InstrumentedBacking<IO, REGION_SIZE, REGION_COUNT>
+{
+    fn new(inner: IO) -> Self {
+        Self {
+            inner,
+            diagnostics: IoDiagnostics::default(),
+            metadata_dirty: false,
+            dirty_regions: vec![false; REGION_COUNT],
+        }
+    }
+
+    fn diagnostics(&self) -> IoDiagnostics {
+        self.diagnostics
+    }
+
+    fn mark_region_dirty(&mut self, region_index: u32) {
+        let Ok(index) = usize::try_from(region_index) else {
+            return;
+        };
+        if let Some(dirty) = self.dirty_regions.get_mut(index) {
+            *dirty = true;
+        }
+    }
+
+    fn dirty_state(&self) -> (u64, u64, u64) {
+        let dirty_regions = self.dirty_regions.iter().filter(|dirty| **dirty).count() as u64;
+        let dirty_metadata_regions = u64::from(self.metadata_dirty);
+        let dirty_bytes = dirty_regions
+            .saturating_mul(REGION_SIZE as u64)
+            .saturating_add(dirty_metadata_regions.saturating_mul(REGION_SIZE as u64));
+        (dirty_regions, dirty_metadata_regions, dirty_bytes)
+    }
+
+    fn clear_dirty_state(&mut self) {
+        self.metadata_dirty = false;
+        for dirty in &mut self.dirty_regions {
+            *dirty = false;
+        }
+    }
+}
+
+impl<IO, const REGION_SIZE: usize, const REGION_COUNT: usize> FlashIo
+    for InstrumentedBacking<IO, REGION_SIZE, REGION_COUNT>
+where
+    IO: PerfBacking,
+{
+    fn read_metadata(&mut self) -> Result<Option<StorageMetadata>, StorageIoError> {
+        self.diagnostics.metadata_reads = self.diagnostics.metadata_reads.saturating_add(1);
+        self.inner.read_metadata().map_err(StorageIoError::from)
+    }
+
+    fn write_metadata(&mut self, metadata: StorageMetadata) -> Result<(), StorageIoError> {
+        let result = self.inner.write_metadata(metadata);
+        self.diagnostics.metadata_writes = self.diagnostics.metadata_writes.saturating_add(1);
+        if result.is_ok() {
+            self.metadata_dirty = true;
+        }
+        result
+    }
+
+    fn read_region(
+        &mut self,
+        region_index: u32,
+        offset: usize,
+        buffer: &mut [u8],
+    ) -> Result<(), StorageIoError> {
+        let start = Instant::now();
+        let result = self.inner.read_region(region_index, offset, buffer);
+        self.diagnostics.region_reads = self.diagnostics.region_reads.saturating_add(1);
+        self.diagnostics.bytes_read = self
+            .diagnostics
+            .bytes_read
+            .saturating_add(buffer.len() as u64);
+        self.diagnostics.read_region_nanos = self
+            .diagnostics
+            .read_region_nanos
+            .saturating_add(start.elapsed().as_nanos());
+        result
+    }
+
+    fn write_region(
+        &mut self,
+        region_index: u32,
+        offset: usize,
+        data: &[u8],
+    ) -> Result<(), StorageIoError> {
+        let start = Instant::now();
+        let result = self.inner.write_region(region_index, offset, data);
+        self.diagnostics.region_writes = self.diagnostics.region_writes.saturating_add(1);
+        self.diagnostics.bytes_written = self
+            .diagnostics
+            .bytes_written
+            .saturating_add(data.len() as u64);
+        self.diagnostics.write_region_nanos = self
+            .diagnostics
+            .write_region_nanos
+            .saturating_add(start.elapsed().as_nanos());
+        if result.is_ok() {
+            self.mark_region_dirty(region_index);
+        }
+        result
+    }
+
+    fn erase_region(&mut self, region_index: u32) -> Result<(), StorageIoError> {
+        let start = Instant::now();
+        let result = self.inner.erase_region(region_index);
+        self.diagnostics.region_erases = self.diagnostics.region_erases.saturating_add(1);
+        self.diagnostics.bytes_erased = self
+            .diagnostics
+            .bytes_erased
+            .saturating_add(REGION_SIZE as u64);
+        self.diagnostics.erase_region_nanos = self
+            .diagnostics
+            .erase_region_nanos
+            .saturating_add(start.elapsed().as_nanos());
+        if result.is_ok() {
+            self.mark_region_dirty(region_index);
+        }
+        result
+    }
+
+    fn sync(&mut self) -> Result<(), StorageIoError> {
+        let start = Instant::now();
+        let (dirty_regions, dirty_metadata_regions, dirty_bytes) = self.dirty_state();
+        let result = self.inner.sync_for_perf();
+        self.diagnostics.syncs = self.diagnostics.syncs.saturating_add(1);
+        self.diagnostics.sync_nanos = self
+            .diagnostics
+            .sync_nanos
+            .saturating_add(start.elapsed().as_nanos());
+        match result {
+            Ok(details) => {
+                self.diagnostics.mmap_flush_nanos = self
+                    .diagnostics
+                    .mmap_flush_nanos
+                    .saturating_add(details.mmap_flush_nanos);
+                self.diagnostics.file_sync_nanos = self
+                    .diagnostics
+                    .file_sync_nanos
+                    .saturating_add(details.file_sync_nanos);
+                self.diagnostics.dirty_sync_regions = self
+                    .diagnostics
+                    .dirty_sync_regions
+                    .saturating_add(dirty_regions);
+                self.diagnostics.dirty_sync_metadata_regions = self
+                    .diagnostics
+                    .dirty_sync_metadata_regions
+                    .saturating_add(dirty_metadata_regions);
+                self.diagnostics.dirty_sync_bytes = self
+                    .diagnostics
+                    .dirty_sync_bytes
+                    .saturating_add(dirty_bytes);
+                self.clear_dirty_state();
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn format_empty_store(
+        &mut self,
+        min_free_regions: u32,
+        wal_write_granule: u32,
+        wal_record_magic: u8,
+    ) -> Result<StorageMetadata, StorageFormatError> {
+        self.inner
+            .format_empty_store(min_free_regions, wal_write_granule, wal_record_magic)
+    }
 }
 
 struct ProgressReporter {
@@ -422,6 +1069,13 @@ enum WorkloadOp {
     Read,
     Set,
     Delete,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum ExpectedPresence {
+    Unknown,
+    Present,
+    Missing,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -515,6 +1169,32 @@ fn validate_config(config: &PerfConfig, region_count: usize) -> PerfResult<()> {
     }
     if config.workload.key_space == 0 {
         return Err("workload.key_space must be greater than zero".to_owned());
+    }
+    if config.preload.count > config.workload.key_space {
+        return Err("preload.count must not exceed workload.key_space".to_owned());
+    }
+    if matches!(
+        config.workload.key_mode,
+        WorkloadKeyMode::Preloaded | WorkloadKeyMode::SingleKey
+    ) && config.preload.count == 0
+    {
+        return Err("workload.key_mode requires preload.count > 0".to_owned());
+    }
+    if matches!(config.workload.key_mode, WorkloadKeyMode::Missing)
+        && config.preload.count >= config.workload.key_space
+    {
+        return Err(
+            "workload.key_mode = \"missing\" requires preload.count < workload.key_space"
+                .to_owned(),
+        );
+    }
+    if matches!(config.workload.key_mode, WorkloadKeyMode::InsertRange)
+        && config.preload.count >= config.workload.key_space
+    {
+        return Err(
+            "workload.key_mode = \"insert-range\" requires preload.count < workload.key_space"
+                .to_owned(),
+        );
     }
     let ratio_total = ratio_total(config.workload)?;
     if ratio_total == 0 {
@@ -625,15 +1305,20 @@ where
             EngineKind::Borromean => {
                 run_borromean_engine::<REGION_SIZE, REGION_COUNT, VALUE_BYTES>(config)?
             }
-            EngineKind::Redb => run_redb_engine::<VALUE_BYTES>(config)?,
+            EngineKind::BorromeanMemory => {
+                run_borromean_memory_engine::<REGION_SIZE, REGION_COUNT, VALUE_BYTES>(config)?
+            }
+            EngineKind::Redb => run_redb_engine::<VALUE_BYTES>(config, geometry.file_len_bytes)?,
         };
         engine_reports.push(engine_report);
     }
+    let comparison_reports = build_comparison_reports(&engine_reports);
 
     Ok(PerfReport {
         config: config.clone(),
         geometry,
         engine_reports,
+        comparison_reports,
     })
 }
 
@@ -647,21 +1332,24 @@ fn run_borromean_engine<
 where
     HeaplessVec<u8, VALUE_BYTES>: Debug + Serialize + for<'de> Deserialize<'de>,
 {
+    let mut memory = MemoryTracker::start();
     prepare_db_path(&config.backing)?;
     let options = file_backing_options(&config.backing);
 
     eprintln!(
-        "[file-backing-perf] preparing borromean {} with region_size={} region_count={} value_size={} operations={}",
+        "[file-backing-perf] preparing borromean {} with region_size={} region_count={} value_size={} preload={} operations={}",
         config.backing.path.display(),
         REGION_SIZE,
         REGION_COUNT,
         VALUE_BYTES,
+        config.preload.count,
         config.workload.operation_count
     );
     let create_format_start = Instant::now();
-    let mut backing =
+    let backing =
         FileBacking::<REGION_SIZE, REGION_COUNT>::create_new(&config.backing.path, options)
             .map_err(|error| format!("failed to create file backing: {error:?}"))?;
+    let mut backing = InstrumentedBacking::new(backing);
     let mut storage =
         Storage::<_, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>::format(
             &mut backing,
@@ -696,6 +1384,27 @@ where
         "[file-backing-perf] borromean map setup complete in {}",
         format_duration(map_setup)
     );
+    memory.sample();
+
+    let preload_start = Instant::now();
+    let mut preload_counters = WorkloadCounters::default();
+    let mut preload_timings = WorkloadTimings::default();
+    run_borromean_preload::<_, REGION_SIZE, REGION_COUNT, VALUE_BYTES>(
+        config,
+        "borromean preload",
+        &mut maps,
+        &mut storage,
+        &mut preload_counters,
+        &mut preload_timings,
+    )?;
+    let preload = preload_start.elapsed();
+    if config.preload.count != 0 {
+        eprintln!(
+            "[file-backing-perf] borromean preload complete in {}",
+            format_duration(preload)
+        );
+    }
+    memory.sample();
 
     let mut rng = XorShift64::new(config.workload.seed);
     let warmup_start = Instant::now();
@@ -729,6 +1438,7 @@ where
     let mut counters = WorkloadCounters::default();
     let mut workload_timings = WorkloadTimings::default();
     let mut latency_samples = Vec::new();
+    let mut latency_samples_by_op = OperationLatencySamples::default();
     let workload_start = Instant::now();
     let mut workload_progress = ProgressReporter::new(
         config.output.progress_interval,
@@ -737,7 +1447,7 @@ where
     for index in 0..config.workload.operation_count {
         let sample = should_sample_latency(config.output.latency_sample_interval, index);
         let operation_start = sample.then(Instant::now);
-        execute_one_borromean_operation(
+        let executed = execute_one_borromean_operation(
             config,
             &mut rng,
             &mut maps,
@@ -748,7 +1458,9 @@ where
         )
         .map_err(|error| format!("workload operation {index} failed: {error}"))?;
         if let Some(start) = operation_start {
-            latency_samples.push(start.elapsed().as_nanos());
+            let elapsed = start.elapsed().as_nanos();
+            latency_samples.push(elapsed);
+            push_latency_sample(&mut latency_samples_by_op, executed.operation, elapsed);
         }
         workload_progress.maybe_report(
             "borromean workload",
@@ -756,6 +1468,7 @@ where
             Some(&counters),
             latency_samples.len(),
         );
+        maybe_sample_memory(&mut memory, config.output.progress_interval, index);
     }
     let workload = workload_start.elapsed();
     workload_progress.report(
@@ -765,40 +1478,271 @@ where
         latency_samples.len(),
     );
 
+    let maintenance = run_borromean_post_workload_maintenance::<
+        _,
+        REGION_SIZE,
+        REGION_COUNT,
+        VALUE_BYTES,
+    >(config, &mut maps, &mut storage, Some(&config.backing.path))?;
+
     drop(maps);
     drop(storage);
-    drop(backing);
+    let io_diagnostics = backing.diagnostics();
     let file_len_bytes = current_file_len(&config.backing.path)?;
+    drop(backing);
     if config.backing.remove_after {
         remove_file_if_present(&config.backing.path)?;
     }
+    let memory = memory.finish();
+    let diagnostics = PerfDiagnostics {
+        operation_generation_nanos: workload_timings.operation_generation_nanos,
+        read_lookup_nanos: workload_timings.reads_nanos,
+        write_apply_nanos: workload_timings.writes_nanos,
+        borromean_io: Some(io_diagnostics),
+        memory,
+        ..PerfDiagnostics::default()
+    };
 
     Ok(EngineReport {
         engine: EngineKind::Borromean,
         path: config.backing.path.clone(),
         create_format_nanos: create_format.as_nanos(),
         setup_nanos: map_setup.as_nanos(),
+        preload_nanos: preload.as_nanos(),
+        preload_counters,
         warmup_nanos: warmup.as_nanos(),
         workload_nanos: workload.as_nanos(),
         operations_per_second: operations_per_second(config.workload.operation_count, workload),
         counters,
         workload_timings,
         sampled_latency: summarize_latency(latency_samples),
+        sampled_latency_by_op: summarize_operation_latency(latency_samples_by_op),
+        diagnostics,
+        maintenance,
         file_len_bytes,
+        logical_len_bytes: file_len_bytes,
     })
 }
 
-fn run_redb_engine<const VALUE_BYTES: usize>(config: &PerfConfig) -> PerfResult<EngineReport> {
-    prepare_path(&config.redb.path, config.redb.remove_existing)?;
+fn run_borromean_memory_engine<
+    const REGION_SIZE: usize,
+    const REGION_COUNT: usize,
+    const VALUE_BYTES: usize,
+>(
+    config: &PerfConfig,
+) -> PerfResult<EngineReport>
+where
+    HeaplessVec<u8, VALUE_BYTES>: Debug + Serialize + for<'de> Deserialize<'de>,
+{
+    let mut memory = MemoryTracker::start();
+    let logical_len_bytes = MemoryBacking::<REGION_SIZE, REGION_COUNT>::logical_len_bytes()
+        .ok_or_else(|| "memory backing length overflowed".to_owned())?
+        as u64;
 
     eprintln!(
-        "[file-backing-perf] preparing redb {} with value_size={} operations={}",
-        config.redb.path.display(),
+        "[file-backing-perf] preparing borromean-memory with region_size={} region_count={} value_size={} preload={} operations={}",
+        REGION_SIZE,
+        REGION_COUNT,
         VALUE_BYTES,
+        config.preload.count,
         config.workload.operation_count
     );
     let create_format_start = Instant::now();
-    let mut db = Database::create(&config.redb.path)
+    let backing = MemoryBacking::<REGION_SIZE, REGION_COUNT>::new(config.backing.erased_byte)?;
+    let mut backing = InstrumentedBacking::new(backing);
+    let mut storage =
+        Storage::<_, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>::format(
+            &mut backing,
+            StorageFormatConfig::new(
+                config.storage.min_free_regions,
+                config.storage.wal_write_granule,
+                config.storage.wal_record_magic,
+            ),
+        )
+        .map_err(|error| format!("failed to format memory storage: {error:?}"))?;
+    let create_format = create_format_start.elapsed();
+    eprintln!(
+        "[file-backing-perf] borromean-memory create+format complete in {}",
+        format_duration(create_format)
+    );
+
+    let map_setup_start = Instant::now();
+    let mut maps = Vec::with_capacity(config.workload.map_count);
+    for _ in 0..config.workload.map_count {
+        let mut map =
+            LsmMap::<u64, HeaplessVec<u8, VALUE_BYTES>, MAX_INDEXES, MAX_RUNS>::new(&mut storage)
+                .map_err(|error| format!("failed to create memory map: {error:?}"))?;
+        if let Some(target) = config.workload.compaction_region_target {
+            map = map
+                .with_compaction_region_target(target)
+                .map_err(|error| format!("failed to set compaction target: {error:?}"))?;
+        }
+        maps.push(map);
+    }
+    let map_setup = map_setup_start.elapsed();
+    eprintln!(
+        "[file-backing-perf] borromean-memory map setup complete in {}",
+        format_duration(map_setup)
+    );
+    memory.sample();
+
+    let preload_start = Instant::now();
+    let mut preload_counters = WorkloadCounters::default();
+    let mut preload_timings = WorkloadTimings::default();
+    run_borromean_preload::<_, REGION_SIZE, REGION_COUNT, VALUE_BYTES>(
+        config,
+        "borromean-memory preload",
+        &mut maps,
+        &mut storage,
+        &mut preload_counters,
+        &mut preload_timings,
+    )?;
+    let preload = preload_start.elapsed();
+    if config.preload.count != 0 {
+        eprintln!(
+            "[file-backing-perf] borromean-memory preload complete in {}",
+            format_duration(preload)
+        );
+    }
+    memory.sample();
+
+    let mut rng = XorShift64::new(config.workload.seed);
+    let warmup_start = Instant::now();
+    let mut warmup_progress = ProgressReporter::new(
+        config.output.progress_interval,
+        config.workload.warmup_count,
+    );
+    for index in 0..config.workload.warmup_count {
+        execute_one_borromean_operation(
+            config,
+            &mut rng,
+            &mut maps,
+            &mut storage,
+            None,
+            None,
+            Some(index),
+        )
+        .map_err(|error| format!("warmup operation {index} failed: {error}"))?;
+        warmup_progress.maybe_report("borromean-memory warmup", index + 1, None, 0);
+    }
+    let warmup = warmup_start.elapsed();
+    if config.workload.warmup_count != 0 {
+        warmup_progress.report(
+            "borromean-memory warmup complete",
+            config.workload.warmup_count,
+            None,
+            0,
+        );
+    }
+
+    let mut counters = WorkloadCounters::default();
+    let mut workload_timings = WorkloadTimings::default();
+    let mut latency_samples = Vec::new();
+    let mut latency_samples_by_op = OperationLatencySamples::default();
+    let workload_start = Instant::now();
+    let mut workload_progress = ProgressReporter::new(
+        config.output.progress_interval,
+        config.workload.operation_count,
+    );
+    for index in 0..config.workload.operation_count {
+        let sample = should_sample_latency(config.output.latency_sample_interval, index);
+        let operation_start = sample.then(Instant::now);
+        let executed = execute_one_borromean_operation(
+            config,
+            &mut rng,
+            &mut maps,
+            &mut storage,
+            Some(&mut counters),
+            Some(&mut workload_timings),
+            Some(index),
+        )
+        .map_err(|error| format!("workload operation {index} failed: {error}"))?;
+        if let Some(start) = operation_start {
+            let elapsed = start.elapsed().as_nanos();
+            latency_samples.push(elapsed);
+            push_latency_sample(&mut latency_samples_by_op, executed.operation, elapsed);
+        }
+        workload_progress.maybe_report(
+            "borromean-memory workload",
+            index + 1,
+            Some(&counters),
+            latency_samples.len(),
+        );
+        maybe_sample_memory(&mut memory, config.output.progress_interval, index);
+    }
+    let workload = workload_start.elapsed();
+    workload_progress.report(
+        "borromean-memory workload complete",
+        config.workload.operation_count,
+        Some(&counters),
+        latency_samples.len(),
+    );
+
+    let maintenance = run_borromean_post_workload_maintenance::<
+        _,
+        REGION_SIZE,
+        REGION_COUNT,
+        VALUE_BYTES,
+    >(config, &mut maps, &mut storage, None)?;
+
+    drop(maps);
+    drop(storage);
+    let io_diagnostics = backing.diagnostics();
+    drop(backing);
+    let memory = memory.finish();
+    let diagnostics = PerfDiagnostics {
+        operation_generation_nanos: workload_timings.operation_generation_nanos,
+        read_lookup_nanos: workload_timings.reads_nanos,
+        write_apply_nanos: workload_timings.writes_nanos,
+        borromean_io: Some(io_diagnostics),
+        memory,
+        ..PerfDiagnostics::default()
+    };
+
+    Ok(EngineReport {
+        engine: EngineKind::BorromeanMemory,
+        path: PathBuf::from("<memory>"),
+        create_format_nanos: create_format.as_nanos(),
+        setup_nanos: map_setup.as_nanos(),
+        preload_nanos: preload.as_nanos(),
+        preload_counters,
+        warmup_nanos: warmup.as_nanos(),
+        workload_nanos: workload.as_nanos(),
+        operations_per_second: operations_per_second(config.workload.operation_count, workload),
+        counters,
+        workload_timings,
+        sampled_latency: summarize_latency(latency_samples),
+        sampled_latency_by_op: summarize_operation_latency(latency_samples_by_op),
+        diagnostics,
+        maintenance,
+        file_len_bytes: 0,
+        logical_len_bytes,
+    })
+}
+
+fn run_redb_engine<const VALUE_BYTES: usize>(
+    config: &PerfConfig,
+    borromean_file_len_bytes: usize,
+) -> PerfResult<EngineReport> {
+    let mut memory = MemoryTracker::start();
+    prepare_path(&config.redb.path, config.redb.remove_existing)?;
+    let cache_size_bytes = config
+        .redb
+        .cache_size_bytes
+        .unwrap_or(borromean_file_len_bytes);
+
+    eprintln!(
+        "[file-backing-perf] preparing redb {} with value_size={} cache_size={} preload={} operations={}",
+        config.redb.path.display(),
+        VALUE_BYTES,
+        cache_size_bytes,
+        config.preload.count,
+        config.workload.operation_count
+    );
+    let create_format_start = Instant::now();
+    let mut db = RedbBuilder::new()
+        .set_cache_size(cache_size_bytes)
+        .create(&config.redb.path)
         .map_err(|error| format!("failed to create redb database: {error}"))?;
     let create_format = create_format_start.elapsed();
     eprintln!(
@@ -826,6 +1770,31 @@ fn run_redb_engine<const VALUE_BYTES: usize>(config: &PerfConfig) -> PerfResult<
         "[file-backing-perf] redb table setup complete in {}",
         format_duration(setup)
     );
+    memory.sample();
+
+    let mut diagnostics = PerfDiagnostics {
+        redb_cache_size_bytes: Some(cache_size_bytes),
+        ..PerfDiagnostics::default()
+    };
+
+    let preload_start = Instant::now();
+    let mut preload_counters = WorkloadCounters::default();
+    let mut preload_timings = WorkloadTimings::default();
+    run_redb_preload::<VALUE_BYTES>(
+        config,
+        &mut db,
+        &mut preload_counters,
+        &mut preload_timings,
+        &mut diagnostics,
+    )?;
+    let preload = preload_start.elapsed();
+    if config.preload.count != 0 {
+        eprintln!(
+            "[file-backing-perf] redb preload complete in {}",
+            format_duration(preload)
+        );
+    }
+    memory.sample();
 
     let mut rng = XorShift64::new(config.workload.seed);
     let warmup_start = Instant::now();
@@ -840,6 +1809,7 @@ fn run_redb_engine<const VALUE_BYTES: usize>(config: &PerfConfig) -> PerfResult<
             &mut db,
             None,
             None,
+            Some(&mut diagnostics),
             Some(index),
         )
         .map_err(|error| format!("warmup operation {index} failed: {error}"))?;
@@ -858,6 +1828,7 @@ fn run_redb_engine<const VALUE_BYTES: usize>(config: &PerfConfig) -> PerfResult<
     let mut counters = WorkloadCounters::default();
     let mut workload_timings = WorkloadTimings::default();
     let mut latency_samples = Vec::new();
+    let mut latency_samples_by_op = OperationLatencySamples::default();
     let workload_start = Instant::now();
     let mut workload_progress = ProgressReporter::new(
         config.output.progress_interval,
@@ -866,17 +1837,20 @@ fn run_redb_engine<const VALUE_BYTES: usize>(config: &PerfConfig) -> PerfResult<
     for index in 0..config.workload.operation_count {
         let sample = should_sample_latency(config.output.latency_sample_interval, index);
         let operation_start = sample.then(Instant::now);
-        execute_one_redb_operation::<VALUE_BYTES>(
+        let executed = execute_one_redb_operation::<VALUE_BYTES>(
             config,
             &mut rng,
             &mut db,
             Some(&mut counters),
             Some(&mut workload_timings),
+            Some(&mut diagnostics),
             Some(index),
         )
         .map_err(|error| format!("workload operation {index} failed: {error}"))?;
         if let Some(start) = operation_start {
-            latency_samples.push(start.elapsed().as_nanos());
+            let elapsed = start.elapsed().as_nanos();
+            latency_samples.push(elapsed);
+            push_latency_sample(&mut latency_samples_by_op, executed.operation, elapsed);
         }
         workload_progress.maybe_report(
             "redb workload",
@@ -884,6 +1858,7 @@ fn run_redb_engine<const VALUE_BYTES: usize>(config: &PerfConfig) -> PerfResult<
             Some(&counters),
             latency_samples.len(),
         );
+        maybe_sample_memory(&mut memory, config.output.progress_interval, index);
     }
     if config.redb.compact_after_workload {
         compact_redb(&mut db, Some(&mut counters), Some(&mut workload_timings))?;
@@ -896,24 +1871,34 @@ fn run_redb_engine<const VALUE_BYTES: usize>(config: &PerfConfig) -> PerfResult<
         latency_samples.len(),
     );
 
+    let maintenance = run_redb_post_workload_maintenance(config, &mut db, &config.redb.path)?;
+    diagnostics.redb_stats = collect_redb_stats(&db)?;
     let file_len_bytes = current_file_len(&config.redb.path)?;
     drop(db);
     if config.redb.remove_after {
         remove_file_if_present(&config.redb.path)?;
     }
+    diagnostics.operation_generation_nanos = workload_timings.operation_generation_nanos;
+    diagnostics.memory = memory.finish();
 
     Ok(EngineReport {
         engine: EngineKind::Redb,
         path: config.redb.path.clone(),
         create_format_nanos: create_format.as_nanos(),
         setup_nanos: setup.as_nanos(),
+        preload_nanos: preload.as_nanos(),
+        preload_counters,
         warmup_nanos: warmup.as_nanos(),
         workload_nanos: workload.as_nanos(),
         operations_per_second: operations_per_second(config.workload.operation_count, workload),
         counters,
         workload_timings,
         sampled_latency: summarize_latency(latency_samples),
+        sampled_latency_by_op: summarize_operation_latency(latency_samples_by_op),
+        diagnostics,
+        maintenance,
         file_len_bytes,
+        logical_len_bytes: file_len_bytes,
     })
 }
 
@@ -959,7 +1944,156 @@ fn file_backing_options(config: &BackingConfig) -> FileBackingOptions {
     options
 }
 
+fn run_borromean_preload<
+    IO,
+    const REGION_SIZE: usize,
+    const REGION_COUNT: usize,
+    const VALUE_BYTES: usize,
+>(
+    config: &PerfConfig,
+    progress_label: &str,
+    maps: &mut [LsmMap<u64, HeaplessVec<u8, VALUE_BYTES>, MAX_INDEXES, MAX_RUNS>],
+    storage: &mut Storage<
+        '_,
+        InstrumentedBacking<IO, REGION_SIZE, REGION_COUNT>,
+        REGION_SIZE,
+        REGION_COUNT,
+        MAX_COLLECTIONS,
+        MAX_PENDING_RECLAIMS,
+    >,
+    counters: &mut WorkloadCounters,
+    timings: &mut WorkloadTimings,
+) -> PerfResult<()>
+where
+    IO: PerfBacking,
+    HeaplessVec<u8, VALUE_BYTES>: Debug + Serialize + for<'de> Deserialize<'de>,
+{
+    if config.preload.count == 0 {
+        return Ok(());
+    }
+    let mut rng = XorShift64::new(config.workload.seed ^ 0xa076_1d64_78bd_642f);
+    let mut operation_index = 0;
+    let preload_total = config
+        .preload
+        .count
+        .checked_mul(
+            u64::try_from(maps.len()).map_err(|_| "map count does not fit in u64".to_owned())?,
+        )
+        .ok_or_else(|| "preload operation count overflowed".to_owned())?;
+    let mut preload_progress =
+        ProgressReporter::new(config.output.progress_interval, preload_total);
+    for map in maps.iter_mut() {
+        for key in 0..config.preload.count {
+            counters.sets = counters.sets.saturating_add(1);
+            counters.set_inserts_expected = counters.set_inserts_expected.saturating_add(1);
+            let value = next_value::<VALUE_BYTES>(&mut rng);
+            let write_start = Instant::now();
+            let compact_needed = map
+                .set(storage, key, value)
+                .map_err(|error| format!("preload set failed: {error:?}"))?;
+            timings.writes_nanos = timings
+                .writes_nanos
+                .saturating_add(write_start.elapsed().as_nanos());
+            maybe_compact(
+                config,
+                map,
+                storage,
+                Some(counters),
+                Some(timings),
+                compact_needed,
+                Some(operation_index),
+            )?;
+            operation_index += 1;
+            preload_progress.maybe_report(progress_label, operation_index, Some(counters), 0);
+        }
+    }
+    preload_progress.report(
+        &format!("{progress_label} complete"),
+        preload_total,
+        Some(counters),
+        0,
+    );
+    Ok(())
+}
+
+fn run_redb_preload<const VALUE_BYTES: usize>(
+    config: &PerfConfig,
+    db: &mut Database,
+    counters: &mut WorkloadCounters,
+    timings: &mut WorkloadTimings,
+    diagnostics: &mut PerfDiagnostics,
+) -> PerfResult<()> {
+    if config.preload.count == 0 {
+        return Ok(());
+    }
+    let mut rng = XorShift64::new(config.workload.seed ^ 0xa076_1d64_78bd_642f);
+    let preload_total = config
+        .preload
+        .count
+        .checked_mul(
+            u64::try_from(config.workload.map_count)
+                .map_err(|_| "map count does not fit in u64".to_owned())?,
+        )
+        .ok_or_else(|| "preload operation count overflowed".to_owned())?;
+    let mut operation_index = 0u64;
+    let mut preload_progress =
+        ProgressReporter::new(config.output.progress_interval, preload_total);
+    for map_index in 0..config.workload.map_count {
+        for key in 0..config.preload.count {
+            counters.sets = counters.sets.saturating_add(1);
+            counters.set_inserts_expected = counters.set_inserts_expected.saturating_add(1);
+            let value = next_value::<VALUE_BYTES>(&mut rng);
+            let redb_key = encode_redb_key(config.workload, map_index, key)?;
+
+            let write_start = Instant::now();
+            let begin_start = Instant::now();
+            let mut write_txn = db
+                .begin_write()
+                .map_err(|error| format!("redb preload write transaction failed: {error}"))?;
+            diagnostics.transaction_count = diagnostics.transaction_count.saturating_add(1);
+            diagnostics.transaction_begin_nanos = diagnostics
+                .transaction_begin_nanos
+                .saturating_add(begin_start.elapsed().as_nanos());
+            write_txn
+                .set_durability(config.redb.durability.into())
+                .map_err(|error| format!("redb preload set durability failed: {error}"))?;
+            {
+                let table_open_start = Instant::now();
+                let mut table = write_txn
+                    .open_table(REDB_TABLE)
+                    .map_err(|error| format!("redb preload open table failed: {error}"))?;
+                diagnostics.table_open_nanos = diagnostics
+                    .table_open_nanos
+                    .saturating_add(table_open_start.elapsed().as_nanos());
+                let apply_start = Instant::now();
+                table
+                    .insert(&redb_key, value.as_slice())
+                    .map_err(|error| format!("redb preload insert failed: {error}"))?;
+                diagnostics.write_apply_nanos = diagnostics
+                    .write_apply_nanos
+                    .saturating_add(apply_start.elapsed().as_nanos());
+            }
+            let commit_start = Instant::now();
+            write_txn
+                .commit()
+                .map_err(|error| format!("redb preload commit failed: {error}"))?;
+            diagnostics.commit_count = diagnostics.commit_count.saturating_add(1);
+            diagnostics.commit_nanos = diagnostics
+                .commit_nanos
+                .saturating_add(commit_start.elapsed().as_nanos());
+            timings.writes_nanos = timings
+                .writes_nanos
+                .saturating_add(write_start.elapsed().as_nanos());
+            operation_index = operation_index.saturating_add(1);
+            preload_progress.maybe_report("redb preload", operation_index, Some(counters), 0);
+        }
+    }
+    preload_progress.report("redb preload complete", preload_total, Some(counters), 0);
+    Ok(())
+}
+
 fn execute_one_borromean_operation<
+    IO,
     const REGION_SIZE: usize,
     const REGION_COUNT: usize,
     const VALUE_BYTES: usize,
@@ -969,7 +2103,7 @@ fn execute_one_borromean_operation<
     maps: &mut [LsmMap<u64, HeaplessVec<u8, VALUE_BYTES>, MAX_INDEXES, MAX_RUNS>],
     storage: &mut Storage<
         '_,
-        FileBacking<REGION_SIZE, REGION_COUNT>,
+        InstrumentedBacking<IO, REGION_SIZE, REGION_COUNT>,
         REGION_SIZE,
         REGION_COUNT,
         MAX_COLLECTIONS,
@@ -978,18 +2112,26 @@ fn execute_one_borromean_operation<
     counters: Option<&mut WorkloadCounters>,
     timings: Option<&mut WorkloadTimings>,
     operation_index: Option<u64>,
-) -> PerfResult<()>
+) -> PerfResult<ExecutedOperation>
 where
+    IO: PerfBacking,
     HeaplessVec<u8, VALUE_BYTES>: Debug + Serialize + for<'de> Deserialize<'de>,
 {
-    let step = next_workload_step::<VALUE_BYTES>(config.workload, rng)?;
+    let generation_start = Instant::now();
+    let step = next_workload_step::<VALUE_BYTES>(config, rng)?;
     let mut counters = counters;
     let mut timings = timings;
+    if let Some(timings) = timings.as_deref_mut() {
+        timings.operation_generation_nanos = timings
+            .operation_generation_nanos
+            .saturating_add(generation_start.elapsed().as_nanos());
+    }
 
     match step.operation {
         WorkloadOp::Read => {
             if let Some(counters) = counters.as_deref_mut() {
                 counters.reads += 1;
+                count_expected_read(counters, step.expected_presence);
             }
             let read_start = Instant::now();
             let result = maps[step.map_index]
@@ -1004,11 +2146,14 @@ where
                 if let Some(counters) = counters.as_deref_mut() {
                     counters.misses += 1;
                 }
+            } else if let Some(counters) = counters.as_deref_mut() {
+                counters.hits += 1;
             }
         }
         WorkloadOp::Set => {
             if let Some(counters) = counters.as_deref_mut() {
                 counters.sets += 1;
+                count_expected_set(counters, step.expected_presence);
             }
             let value = step
                 .value
@@ -1057,7 +2202,9 @@ where
         }
     }
 
-    Ok(())
+    Ok(ExecutedOperation {
+        operation: step.operation,
+    })
 }
 
 fn execute_one_redb_operation<const VALUE_BYTES: usize>(
@@ -1066,28 +2213,62 @@ fn execute_one_redb_operation<const VALUE_BYTES: usize>(
     db: &mut Database,
     counters: Option<&mut WorkloadCounters>,
     timings: Option<&mut WorkloadTimings>,
+    diagnostics: Option<&mut PerfDiagnostics>,
     operation_index: Option<u64>,
-) -> PerfResult<()> {
-    let step = next_workload_step::<VALUE_BYTES>(config.workload, rng)?;
+) -> PerfResult<ExecutedOperation> {
+    let generation_start = Instant::now();
+    let step = next_workload_step::<VALUE_BYTES>(config, rng)?;
+    let generation_nanos = generation_start.elapsed().as_nanos();
     let redb_key = encode_redb_key(config.workload, step.map_index, step.key)?;
     let mut counters = counters;
     let mut timings = timings;
+    let mut diagnostics = diagnostics;
+    if let Some(timings) = timings.as_deref_mut() {
+        timings.operation_generation_nanos = timings
+            .operation_generation_nanos
+            .saturating_add(generation_nanos);
+    }
+    if let Some(diagnostics) = diagnostics.as_deref_mut() {
+        diagnostics.operation_generation_nanos = diagnostics
+            .operation_generation_nanos
+            .saturating_add(generation_nanos);
+    }
 
     match step.operation {
         WorkloadOp::Read => {
             if let Some(counters) = counters.as_deref_mut() {
                 counters.reads += 1;
+                count_expected_read(counters, step.expected_presence);
             }
             let read_start = Instant::now();
+            let begin_start = Instant::now();
             let read_txn = db
                 .begin_read()
                 .map_err(|error| format!("redb read transaction failed: {error}"))?;
+            if let Some(diagnostics) = diagnostics.as_deref_mut() {
+                diagnostics.transaction_count = diagnostics.transaction_count.saturating_add(1);
+                diagnostics.transaction_begin_nanos = diagnostics
+                    .transaction_begin_nanos
+                    .saturating_add(begin_start.elapsed().as_nanos());
+            }
+            let table_open_start = Instant::now();
             let table = read_txn
                 .open_table(REDB_TABLE)
                 .map_err(|error| format!("redb open table for read failed: {error}"))?;
+            if let Some(diagnostics) = diagnostics.as_deref_mut() {
+                diagnostics.table_open_nanos = diagnostics
+                    .table_open_nanos
+                    .saturating_add(table_open_start.elapsed().as_nanos());
+            }
+            let lookup_start = Instant::now();
             let result = table
                 .get(&redb_key)
                 .map_err(|error| format!("redb get failed: {error}"))?;
+            if let Some(diagnostics) = diagnostics.as_deref_mut() {
+                diagnostics.read_lookup_nanos = diagnostics
+                    .read_lookup_nanos
+                    .saturating_add(lookup_start.elapsed().as_nanos());
+            }
             if let Some(timings) = timings.as_deref_mut() {
                 timings.reads_nanos = timings
                     .reads_nanos
@@ -1097,33 +2278,62 @@ fn execute_one_redb_operation<const VALUE_BYTES: usize>(
                 if let Some(counters) = counters.as_deref_mut() {
                     counters.misses += 1;
                 }
+            } else if let Some(counters) = counters.as_deref_mut() {
+                counters.hits += 1;
             }
         }
         WorkloadOp::Set => {
             if let Some(counters) = counters.as_deref_mut() {
                 counters.sets += 1;
+                count_expected_set(counters, step.expected_presence);
             }
             let value = step
                 .value
                 .ok_or_else(|| "set operation missing generated value".to_owned())?;
             let write_start = Instant::now();
+            let begin_start = Instant::now();
             let mut write_txn = db
                 .begin_write()
                 .map_err(|error| format!("redb write transaction failed: {error}"))?;
+            if let Some(diagnostics) = diagnostics.as_deref_mut() {
+                diagnostics.transaction_count = diagnostics.transaction_count.saturating_add(1);
+                diagnostics.transaction_begin_nanos = diagnostics
+                    .transaction_begin_nanos
+                    .saturating_add(begin_start.elapsed().as_nanos());
+            }
             write_txn
                 .set_durability(config.redb.durability.into())
                 .map_err(|error| format!("redb set durability failed: {error}"))?;
             {
+                let table_open_start = Instant::now();
                 let mut table = write_txn
                     .open_table(REDB_TABLE)
                     .map_err(|error| format!("redb open table for set failed: {error}"))?;
+                if let Some(diagnostics) = diagnostics.as_deref_mut() {
+                    diagnostics.table_open_nanos = diagnostics
+                        .table_open_nanos
+                        .saturating_add(table_open_start.elapsed().as_nanos());
+                }
+                let apply_start = Instant::now();
                 table
                     .insert(&redb_key, value.as_slice())
                     .map_err(|error| format!("redb insert failed: {error}"))?;
+                if let Some(diagnostics) = diagnostics.as_deref_mut() {
+                    diagnostics.write_apply_nanos = diagnostics
+                        .write_apply_nanos
+                        .saturating_add(apply_start.elapsed().as_nanos());
+                }
             }
+            let commit_start = Instant::now();
             write_txn
                 .commit()
                 .map_err(|error| format!("redb commit after set failed: {error}"))?;
+            if let Some(diagnostics) = diagnostics.as_deref_mut() {
+                diagnostics.commit_count = diagnostics.commit_count.saturating_add(1);
+                diagnostics.commit_nanos = diagnostics
+                    .commit_nanos
+                    .saturating_add(commit_start.elapsed().as_nanos());
+            }
             if let Some(timings) = timings.as_deref_mut() {
                 timings.writes_nanos = timings
                     .writes_nanos
@@ -1135,23 +2345,49 @@ fn execute_one_redb_operation<const VALUE_BYTES: usize>(
                 counters.deletes += 1;
             }
             let write_start = Instant::now();
+            let begin_start = Instant::now();
             let mut write_txn = db
                 .begin_write()
                 .map_err(|error| format!("redb write transaction failed: {error}"))?;
+            if let Some(diagnostics) = diagnostics.as_deref_mut() {
+                diagnostics.transaction_count = diagnostics.transaction_count.saturating_add(1);
+                diagnostics.transaction_begin_nanos = diagnostics
+                    .transaction_begin_nanos
+                    .saturating_add(begin_start.elapsed().as_nanos());
+            }
             write_txn
                 .set_durability(config.redb.durability.into())
                 .map_err(|error| format!("redb set durability failed: {error}"))?;
             {
+                let table_open_start = Instant::now();
                 let mut table = write_txn
                     .open_table(REDB_TABLE)
                     .map_err(|error| format!("redb open table for delete failed: {error}"))?;
+                if let Some(diagnostics) = diagnostics.as_deref_mut() {
+                    diagnostics.table_open_nanos = diagnostics
+                        .table_open_nanos
+                        .saturating_add(table_open_start.elapsed().as_nanos());
+                }
+                let apply_start = Instant::now();
                 table
                     .remove(&redb_key)
                     .map_err(|error| format!("redb remove failed: {error}"))?;
+                if let Some(diagnostics) = diagnostics.as_deref_mut() {
+                    diagnostics.write_apply_nanos = diagnostics
+                        .write_apply_nanos
+                        .saturating_add(apply_start.elapsed().as_nanos());
+                }
             }
+            let commit_start = Instant::now();
             write_txn
                 .commit()
                 .map_err(|error| format!("redb commit after delete failed: {error}"))?;
+            if let Some(diagnostics) = diagnostics.as_deref_mut() {
+                diagnostics.commit_count = diagnostics.commit_count.saturating_add(1);
+                diagnostics.commit_nanos = diagnostics
+                    .commit_nanos
+                    .saturating_add(commit_start.elapsed().as_nanos());
+            }
             if let Some(timings) = timings.as_deref_mut() {
                 timings.writes_nanos = timings
                     .writes_nanos
@@ -1162,18 +2398,21 @@ fn execute_one_redb_operation<const VALUE_BYTES: usize>(
 
     maybe_compact_redb(config, db, counters, timings, operation_index)?;
 
-    Ok(())
+    Ok(ExecutedOperation {
+        operation: step.operation,
+    })
 }
 
 fn next_workload_step<const VALUE_BYTES: usize>(
-    workload: WorkloadConfig,
+    config: &PerfConfig,
     rng: &mut XorShift64,
 ) -> PerfResult<WorkloadStep<VALUE_BYTES>> {
+    let workload = config.workload;
     let map_bound = u64::try_from(workload.map_count)
         .map_err(|_| "workload.map_count does not fit in u64".to_owned())?;
     let map_index = usize::try_from(rng.next_bounded(map_bound))
         .map_err(|_| "map index conversion failed".to_owned())?;
-    let key = rng.next_bounded(workload.key_space);
+    let (key, expected_presence) = next_key(config, rng)?;
     let operation = next_operation(workload, rng)?;
     let value = match operation {
         WorkloadOp::Set => Some(next_value::<VALUE_BYTES>(rng)),
@@ -1184,7 +2423,74 @@ fn next_workload_step<const VALUE_BYTES: usize>(
         key,
         operation,
         value,
+        expected_presence,
     })
+}
+
+fn next_key(config: &PerfConfig, rng: &mut XorShift64) -> PerfResult<(u64, ExpectedPresence)> {
+    match config.workload.key_mode {
+        WorkloadKeyMode::Random => Ok((
+            rng.next_bounded(config.workload.key_space),
+            ExpectedPresence::Unknown,
+        )),
+        WorkloadKeyMode::Preloaded => Ok((
+            rng.next_bounded(config.preload.count),
+            ExpectedPresence::Present,
+        )),
+        WorkloadKeyMode::Missing => {
+            let missing_space = config
+                .workload
+                .key_space
+                .saturating_sub(config.preload.count);
+            Ok((
+                config
+                    .preload
+                    .count
+                    .checked_add(rng.next_bounded(missing_space))
+                    .ok_or_else(|| "missing key generation overflowed".to_owned())?,
+                ExpectedPresence::Missing,
+            ))
+        }
+        WorkloadKeyMode::SingleKey => Ok((0, ExpectedPresence::Present)),
+        WorkloadKeyMode::InsertRange => {
+            let insert_space = config
+                .workload
+                .key_space
+                .saturating_sub(config.preload.count);
+            Ok((
+                config
+                    .preload
+                    .count
+                    .checked_add(rng.next_bounded(insert_space))
+                    .ok_or_else(|| "insert-range key generation overflowed".to_owned())?,
+                ExpectedPresence::Missing,
+            ))
+        }
+    }
+}
+
+fn count_expected_read(counters: &mut WorkloadCounters, expected_presence: ExpectedPresence) {
+    match expected_presence {
+        ExpectedPresence::Present => {
+            counters.read_hits_expected = counters.read_hits_expected.saturating_add(1);
+        }
+        ExpectedPresence::Missing => {
+            counters.read_misses_expected = counters.read_misses_expected.saturating_add(1);
+        }
+        ExpectedPresence::Unknown => {}
+    }
+}
+
+fn count_expected_set(counters: &mut WorkloadCounters, expected_presence: ExpectedPresence) {
+    match expected_presence {
+        ExpectedPresence::Present => {
+            counters.set_updates_expected = counters.set_updates_expected.saturating_add(1);
+        }
+        ExpectedPresence::Missing => {
+            counters.set_inserts_expected = counters.set_inserts_expected.saturating_add(1);
+        }
+        ExpectedPresence::Unknown => {}
+    }
 }
 
 fn encode_redb_key(workload: WorkloadConfig, map_index: usize, key: u64) -> PerfResult<u64> {
@@ -1222,12 +2528,17 @@ fn next_value<const VALUE_BYTES: usize>(rng: &mut XorShift64) -> HeaplessVec<u8,
     value
 }
 
-fn maybe_compact<const REGION_SIZE: usize, const REGION_COUNT: usize, const VALUE_BYTES: usize>(
+fn maybe_compact<
+    IO,
+    const REGION_SIZE: usize,
+    const REGION_COUNT: usize,
+    const VALUE_BYTES: usize,
+>(
     config: &PerfConfig,
     map: &mut LsmMap<u64, HeaplessVec<u8, VALUE_BYTES>, MAX_INDEXES, MAX_RUNS>,
     storage: &mut Storage<
         '_,
-        FileBacking<REGION_SIZE, REGION_COUNT>,
+        InstrumentedBacking<IO, REGION_SIZE, REGION_COUNT>,
         REGION_SIZE,
         REGION_COUNT,
         MAX_COLLECTIONS,
@@ -1239,6 +2550,7 @@ fn maybe_compact<const REGION_SIZE: usize, const REGION_COUNT: usize, const VALU
     operation_index: Option<u64>,
 ) -> PerfResult<()>
 where
+    IO: PerfBacking,
     HeaplessVec<u8, VALUE_BYTES>: Debug + Serialize + for<'de> Deserialize<'de>,
 {
     let interval_compact = config.workload.compact_interval != 0
@@ -1304,8 +2616,135 @@ fn compact_redb(
     Ok(())
 }
 
+fn run_borromean_post_workload_maintenance<
+    IO,
+    const REGION_SIZE: usize,
+    const REGION_COUNT: usize,
+    const VALUE_BYTES: usize,
+>(
+    config: &PerfConfig,
+    maps: &mut [LsmMap<u64, HeaplessVec<u8, VALUE_BYTES>, MAX_INDEXES, MAX_RUNS>],
+    storage: &mut Storage<
+        '_,
+        InstrumentedBacking<IO, REGION_SIZE, REGION_COUNT>,
+        REGION_SIZE,
+        REGION_COUNT,
+        MAX_COLLECTIONS,
+        MAX_PENDING_RECLAIMS,
+    >,
+    path: Option<&Path>,
+) -> PerfResult<MaintenanceReport>
+where
+    IO: PerfBacking,
+    HeaplessVec<u8, VALUE_BYTES>: Debug + Serialize + for<'de> Deserialize<'de>,
+{
+    if !config.maintenance.optimize_after_workload {
+        return Ok(MaintenanceReport::default());
+    }
+    let start = Instant::now();
+    let mut compactions = 0u64;
+    for map in maps.iter_mut() {
+        loop {
+            let did_compact = map
+                .compact_and_report(storage)
+                .map_err(|error| format!("post-workload compaction failed: {error:?}"))?;
+            if !did_compact {
+                break;
+            }
+            compactions = compactions.saturating_add(1);
+        }
+    }
+    Ok(MaintenanceReport {
+        ran: true,
+        nanos: start.elapsed().as_nanos(),
+        compactions,
+        file_len_after_bytes: path.and_then(|path| current_file_len(path).ok()),
+    })
+}
+
+fn run_redb_post_workload_maintenance(
+    config: &PerfConfig,
+    db: &mut Database,
+    path: &Path,
+) -> PerfResult<MaintenanceReport> {
+    if !config.maintenance.optimize_after_workload {
+        return Ok(MaintenanceReport::default());
+    }
+    let start = Instant::now();
+    let did_compact = db
+        .compact()
+        .map_err(|error| format!("redb post-workload compaction failed: {error}"))?;
+    Ok(MaintenanceReport {
+        ran: true,
+        nanos: start.elapsed().as_nanos(),
+        compactions: if did_compact { 1 } else { 0 },
+        file_len_after_bytes: current_file_len(path).ok(),
+    })
+}
+
+fn collect_redb_stats(db: &Database) -> PerfResult<Option<RedbStorageStats>> {
+    let txn = db
+        .begin_write()
+        .map_err(|error| format!("failed to begin redb stats transaction: {error}"))?;
+    let stats = txn
+        .stats()
+        .map_err(|error| format!("failed to collect redb stats: {error}"))?;
+    let report = RedbStorageStats {
+        tree_height: stats.tree_height(),
+        allocated_pages: stats.allocated_pages(),
+        leaf_pages: stats.leaf_pages(),
+        branch_pages: stats.branch_pages(),
+        stored_bytes: stats.stored_bytes(),
+        metadata_bytes: stats.metadata_bytes(),
+        fragmented_bytes: stats.fragmented_bytes(),
+        page_size: stats.page_size(),
+    };
+    txn.abort()
+        .map_err(|error| format!("failed to abort redb stats transaction: {error}"))?;
+    Ok(Some(report))
+}
+
 fn should_sample_latency(sample_interval: u64, operation_index: u64) -> bool {
     sample_interval != 0 && operation_index.is_multiple_of(sample_interval)
+}
+
+fn maybe_sample_memory(memory: &mut MemoryTracker, interval: u64, operation_index: u64) {
+    if interval != 0 && operation_index.is_multiple_of(interval) {
+        memory.sample();
+    }
+}
+
+fn push_latency_sample(
+    samples: &mut OperationLatencySamples,
+    operation: WorkloadOp,
+    elapsed_nanos: u128,
+) {
+    match operation {
+        WorkloadOp::Read => samples.reads.push(elapsed_nanos),
+        WorkloadOp::Set => samples.sets.push(elapsed_nanos),
+        WorkloadOp::Delete => samples.deletes.push(elapsed_nanos),
+    }
+}
+
+fn summarize_operation_latency(samples: OperationLatencySamples) -> OperationLatencySummaries {
+    OperationLatencySummaries {
+        reads: summarize_latency(samples.reads),
+        sets: summarize_latency(samples.sets),
+        deletes: summarize_latency(samples.deletes),
+    }
+}
+
+fn current_rss_bytes() -> Option<u64> {
+    let status = fs::read_to_string("/proc/self/status").ok()?;
+    for line in status.lines() {
+        let Some(rest) = line.strip_prefix("VmRSS:") else {
+            continue;
+        };
+        let mut parts = rest.split_whitespace();
+        let value_kib = parts.next()?.parse::<u64>().ok()?;
+        return value_kib.checked_mul(1024);
+    }
+    None
 }
 
 fn operations_per_second(operation_count: u64, elapsed: Duration) -> f64 {
@@ -1368,11 +2807,13 @@ fn print_report(report: &PerfReport) {
         report.geometry.region_size, report.geometry.region_count, report.geometry.file_len_bytes
     );
     println!(
-        "workload: maps={} warmup={} operations={} key_space={} value_size={} compact_interval={}",
+        "workload: maps={} preload={} warmup={} operations={} key_space={} key_mode={:?} value_size={} compact_interval={}",
         report.config.workload.map_count,
+        report.config.preload.count,
         report.config.workload.warmup_count,
         report.config.workload.operation_count,
         report.config.workload.key_space,
+        report.config.workload.key_mode,
         report.config.workload.value_size_bytes,
         report.config.workload.compact_interval
     );
@@ -1401,21 +2842,22 @@ fn print_engine_report(report: &EngineReport) {
         nanos_to_millis(report.create_format_nanos)
     );
     println!("  setup: {:.3} ms", nanos_to_millis(report.setup_nanos));
+    println!("  preload: {:.3} ms", nanos_to_millis(report.preload_nanos));
     println!("  warmup: {:.3} ms", nanos_to_millis(report.warmup_nanos));
     println!(
         "  workload: {:.3} ms",
         nanos_to_millis(report.workload_nanos)
     );
     println!("  throughput: {:.2} ops/s", report.operations_per_second);
-    println!("  file size: {} bytes", report.file_len_bytes);
-    println!(
-        "  counts: reads={} sets={} deletes={} compactions={} misses={}",
-        report.counters.reads,
-        report.counters.sets,
-        report.counters.deletes,
-        report.counters.compactions,
-        report.counters.misses
-    );
+    if report.engine == EngineKind::BorromeanMemory {
+        println!("  logical size: {} bytes", report.logical_len_bytes);
+    } else {
+        println!("  file size: {} bytes", report.file_len_bytes);
+    }
+    if report.preload_counters.sets != 0 {
+        print_counters("  preload counts", &report.preload_counters);
+    }
+    print_counters("  counts", &report.counters);
     print_workload_timing_split(report);
     if let Some(latency) = &report.sampled_latency {
         println!(
@@ -1428,17 +2870,135 @@ fn print_engine_report(report: &EngineReport) {
             format_nanos(latency.max_nanos)
         );
     }
+    print_operation_latency(
+        "  sampled read latency",
+        &report.sampled_latency_by_op.reads,
+    );
+    print_operation_latency("  sampled set latency", &report.sampled_latency_by_op.sets);
+    print_operation_latency(
+        "  sampled delete latency",
+        &report.sampled_latency_by_op.deletes,
+    );
+    print_diagnostics(report);
+    if report.maintenance.ran {
+        println!(
+            "  post-workload maintenance: {} compactions in {} file_len_after={}",
+            report.maintenance.compactions,
+            format_nanos(report.maintenance.nanos),
+            report
+                .maintenance
+                .file_len_after_bytes
+                .map_or_else(|| "unknown".to_owned(), |bytes| bytes.to_string())
+        );
+    }
+}
+
+fn print_counters(label: &str, counters: &WorkloadCounters) {
+    println!(
+        "{label}: reads={} hits={} misses={} expected_read_hits={} expected_read_misses={} sets={} expected_inserts={} expected_updates={} deletes={} compactions={}",
+        counters.reads,
+        counters.hits,
+        counters.misses,
+        counters.read_hits_expected,
+        counters.read_misses_expected,
+        counters.sets,
+        counters.set_inserts_expected,
+        counters.set_updates_expected,
+        counters.deletes,
+        counters.compactions
+    );
+}
+
+fn print_operation_latency(label: &str, latency: &Option<LatencySummary>) {
+    if let Some(latency) = latency {
+        println!(
+            "{label}: samples={} min={} p50={} p95={} p99={} max={}",
+            latency.samples,
+            format_nanos(latency.min_nanos),
+            format_nanos(latency.p50_nanos),
+            format_nanos(latency.p95_nanos),
+            format_nanos(latency.p99_nanos),
+            format_nanos(latency.max_nanos)
+        );
+    }
+}
+
+fn print_diagnostics(report: &EngineReport) {
+    let diagnostics = &report.diagnostics;
+    println!(
+        "  diagnostics: op_gen={} read_lookup={} write_apply={} tx_begin={} table_open={} commit={} commits={} transactions={}",
+        format_nanos(diagnostics.operation_generation_nanos),
+        format_nanos(diagnostics.read_lookup_nanos),
+        format_nanos(diagnostics.write_apply_nanos),
+        format_nanos(diagnostics.transaction_begin_nanos),
+        format_nanos(diagnostics.table_open_nanos),
+        format_nanos(diagnostics.commit_nanos),
+        diagnostics.commit_count,
+        diagnostics.transaction_count
+    );
+    println!(
+        "  memory: rss_start={} rss_peak={} rss_end={} rss_delta={}",
+        format_optional_bytes(diagnostics.memory.rss_start_bytes),
+        format_optional_bytes(diagnostics.memory.rss_peak_bytes),
+        format_optional_bytes(diagnostics.memory.rss_end_bytes),
+        diagnostics
+            .memory
+            .rss_delta_bytes
+            .map_or_else(|| "unknown".to_owned(), |bytes| bytes.to_string())
+    );
+    if let Some(io) = diagnostics.borromean_io {
+        println!(
+            "  io: metadata_reads={} metadata_writes={} region_reads={} region_writes={} region_erases={} syncs={} bytes_read={} bytes_written={} bytes_erased={} dirty_sync_bytes={} dirty_sync_regions={} dirty_sync_metadata_regions={} read_time={} write_time={} erase_time={} sync_time={} mmap_flush={} file_sync={}",
+            io.metadata_reads,
+            io.metadata_writes,
+            io.region_reads,
+            io.region_writes,
+            io.region_erases,
+            io.syncs,
+            io.bytes_read,
+            io.bytes_written,
+            io.bytes_erased,
+            io.dirty_sync_bytes,
+            io.dirty_sync_regions,
+            io.dirty_sync_metadata_regions,
+            format_nanos(io.read_region_nanos),
+            format_nanos(io.write_region_nanos),
+            format_nanos(io.erase_region_nanos),
+            format_nanos(io.sync_nanos),
+            format_nanos(io.mmap_flush_nanos),
+            format_nanos(io.file_sync_nanos)
+        );
+    }
+    if let Some(cache_size) = diagnostics.redb_cache_size_bytes {
+        println!("  redb cache_size: {cache_size} bytes");
+    }
+    if let Some(stats) = diagnostics.redb_stats {
+        println!(
+            "  redb stats: tree_height={} allocated_pages={} leaf_pages={} branch_pages={} stored_bytes={} metadata_bytes={} fragmented_bytes={} page_size={}",
+            stats.tree_height,
+            stats.allocated_pages,
+            stats.leaf_pages,
+            stats.branch_pages,
+            stats.stored_bytes,
+            stats.metadata_bytes,
+            stats.fragmented_bytes,
+            stats.page_size
+        );
+    }
 }
 
 fn print_workload_timing_split(report: &EngineReport) {
     let timings = &report.workload_timings;
     let measured_nanos = timings
-        .reads_nanos
+        .operation_generation_nanos
+        .saturating_add(timings.reads_nanos)
         .saturating_add(timings.writes_nanos)
         .saturating_add(timings.compactions_nanos);
     let other_nanos = report.workload_nanos.saturating_sub(measured_nanos);
     println!(
-        "  time split: reads={} ({:.1}%) writes={} ({:.1}%) compactions={} ({:.1}%) other={} ({:.1}%)",
+        "  time split: op_gen={} ({:.1}%) reads={} ({:.1}%) writes={} ({:.1}%) compactions={} ({:.1}%) other={} ({:.1}%)",
+        format_nanos(timings.operation_generation_nanos),
+        percent_of(timings.operation_generation_nanos, report.workload_nanos),
         format_nanos(timings.reads_nanos),
         percent_of(timings.reads_nanos, report.workload_nanos),
         format_nanos(timings.writes_nanos),
@@ -1451,76 +3011,170 @@ fn print_workload_timing_split(report: &EngineReport) {
 
     let write_count = report.counters.sets.saturating_add(report.counters.deletes);
     println!(
-        "  average timing: write={} compaction={}",
+        "  average timing: read={} write={} compaction={}",
+        format_average_nanos(timings.reads_nanos, report.counters.reads),
         format_average_nanos(timings.writes_nanos, write_count),
         format_average_nanos(timings.compactions_nanos, report.counters.compactions)
     );
 }
 
-fn print_comparison(report: &PerfReport) {
-    let Some(borromean) = find_engine_report(report, EngineKind::Borromean) else {
-        return;
-    };
-    let Some(redb) = find_engine_report(report, EngineKind::Redb) else {
-        return;
-    };
-
-    println!();
-    println!("comparison redb/borromean:");
-    print_ratio(
-        "  throughput",
-        redb.operations_per_second,
-        borromean.operations_per_second,
-        "x",
+fn build_comparison_reports(engine_reports: &[EngineReport]) -> Vec<EngineComparisonReport> {
+    let mut comparisons = Vec::new();
+    push_comparison_report(
+        engine_reports,
+        &mut comparisons,
+        EngineKind::Borromean,
+        EngineKind::BorromeanMemory,
     );
-    if let (Some(redb_latency), Some(borromean_latency)) =
-        (&redb.sampled_latency, &borromean.sampled_latency)
-    {
-        print_ratio_u128(
-            "  p50 latency",
-            redb_latency.p50_nanos,
-            borromean_latency.p50_nanos,
-        );
-        print_ratio_u128(
-            "  p95 latency",
-            redb_latency.p95_nanos,
-            borromean_latency.p95_nanos,
-        );
-        print_ratio_u128(
-            "  p99 latency",
-            redb_latency.p99_nanos,
-            borromean_latency.p99_nanos,
-        );
-    }
-    print_ratio(
-        "  file size",
-        redb.file_len_bytes as f64,
-        borromean.file_len_bytes as f64,
-        "x",
+    push_comparison_report(
+        engine_reports,
+        &mut comparisons,
+        EngineKind::BorromeanMemory,
+        EngineKind::Redb,
     );
+    push_comparison_report(
+        engine_reports,
+        &mut comparisons,
+        EngineKind::Borromean,
+        EngineKind::Redb,
+    );
+    comparisons
 }
 
-fn find_engine_report(report: &PerfReport, engine: EngineKind) -> Option<&EngineReport> {
-    report
-        .engine_reports
+fn push_comparison_report(
+    engine_reports: &[EngineReport],
+    comparisons: &mut Vec<EngineComparisonReport>,
+    left_engine: EngineKind,
+    right_engine: EngineKind,
+) {
+    let Some(left) = find_engine_report_in(engine_reports, left_engine) else {
+        return;
+    };
+    let Some(right) = find_engine_report_in(engine_reports, right_engine) else {
+        return;
+    };
+    comparisons.push(EngineComparisonReport {
+        left_engine,
+        right_engine,
+        throughput_ratio: ratio_f64(left.operations_per_second, right.operations_per_second),
+        p50_latency_ratio: latency_ratio(
+            left.sampled_latency.as_ref(),
+            right.sampled_latency.as_ref(),
+            |latency| latency.p50_nanos,
+        ),
+        p95_latency_ratio: latency_ratio(
+            left.sampled_latency.as_ref(),
+            right.sampled_latency.as_ref(),
+            |latency| latency.p95_nanos,
+        ),
+        p99_latency_ratio: latency_ratio(
+            left.sampled_latency.as_ref(),
+            right.sampled_latency.as_ref(),
+            |latency| latency.p99_nanos,
+        ),
+        sync_time_ratio: ratio_u128(sync_nanos(left), sync_nanos(right)),
+        compaction_time_ratio: ratio_u128(
+            left.workload_timings.compactions_nanos,
+            right.workload_timings.compactions_nanos,
+        ),
+        average_read_time_ratio: ratio_u128(
+            average_nanos(left.workload_timings.reads_nanos, left.counters.reads),
+            average_nanos(right.workload_timings.reads_nanos, right.counters.reads),
+        ),
+        average_write_time_ratio: ratio_u128(
+            average_nanos(left.workload_timings.writes_nanos, write_count(left)),
+            average_nanos(right.workload_timings.writes_nanos, write_count(right)),
+        ),
+        logical_size_ratio: ratio_f64(
+            left.logical_len_bytes as f64,
+            right.logical_len_bytes as f64,
+        ),
+    });
+}
+
+fn print_comparison(report: &PerfReport) {
+    for comparison in &report.comparison_reports {
+        println!();
+        println!(
+            "comparison {}/{}:",
+            comparison.left_engine.comparison_label(),
+            comparison.right_engine.comparison_label()
+        );
+        print_optional_ratio("  throughput", comparison.throughput_ratio, "x");
+        print_optional_ratio("  p50 latency", comparison.p50_latency_ratio, "x");
+        print_optional_ratio("  p95 latency", comparison.p95_latency_ratio, "x");
+        print_optional_ratio("  p99 latency", comparison.p99_latency_ratio, "x");
+        print_optional_ratio("  sync time", comparison.sync_time_ratio, "x");
+        print_optional_ratio("  compaction time", comparison.compaction_time_ratio, "x");
+        print_optional_ratio(
+            "  average read time",
+            comparison.average_read_time_ratio,
+            "x",
+        );
+        print_optional_ratio(
+            "  average write time",
+            comparison.average_write_time_ratio,
+            "x",
+        );
+        print_optional_ratio("  logical size", comparison.logical_size_ratio, "x");
+    }
+}
+
+fn find_engine_report_in(
+    engine_reports: &[EngineReport],
+    engine: EngineKind,
+) -> Option<&EngineReport> {
+    engine_reports
         .iter()
         .find(|candidate| candidate.engine == engine)
 }
 
-fn print_ratio(label: &str, numerator: f64, denominator: f64, suffix: &str) {
-    if denominator == 0.0 {
-        println!("{label}: n/a");
-        return;
+fn print_optional_ratio(label: &str, ratio: Option<f64>, suffix: &str) {
+    match ratio {
+        Some(ratio) if ratio.is_finite() => println!("{label}: {ratio:.3}{suffix}"),
+        _ => println!("{label}: n/a"),
     }
-    println!("{label}: {:.3}{suffix}", numerator / denominator);
 }
 
-fn print_ratio_u128(label: &str, numerator: u128, denominator: u128) {
-    if denominator == 0 {
-        println!("{label}: n/a");
-        return;
+fn ratio_f64(numerator: f64, denominator: f64) -> Option<f64> {
+    if denominator == 0.0 {
+        return None;
     }
-    println!("{label}: {:.3}x", numerator as f64 / denominator as f64);
+    let ratio = numerator / denominator;
+    ratio.is_finite().then_some(ratio)
+}
+
+fn ratio_u128(numerator: u128, denominator: u128) -> Option<f64> {
+    if denominator == 0 {
+        return None;
+    }
+    Some(numerator as f64 / denominator as f64)
+}
+
+fn latency_ratio(
+    left: Option<&LatencySummary>,
+    right: Option<&LatencySummary>,
+    accessor: fn(&LatencySummary) -> u128,
+) -> Option<f64> {
+    ratio_u128(accessor(left?), accessor(right?))
+}
+
+fn sync_nanos(report: &EngineReport) -> u128 {
+    report
+        .diagnostics
+        .borromean_io
+        .map_or(report.diagnostics.commit_nanos, |io| io.sync_nanos)
+}
+
+fn write_count(report: &EngineReport) -> u64 {
+    report.counters.sets.saturating_add(report.counters.deletes)
+}
+
+fn average_nanos(total_nanos: u128, count: u64) -> u128 {
+    if count == 0 {
+        return 0;
+    }
+    total_nanos / u128::from(count)
 }
 
 fn nanos_to_millis(nanos: u128) -> f64 {
@@ -1539,6 +3193,10 @@ fn format_average_nanos(total_nanos: u128, count: u64) -> String {
         return "n/a".to_owned();
     }
     format_nanos(total_nanos / u128::from(count))
+}
+
+fn format_optional_bytes(bytes: Option<u64>) -> String {
+    bytes.map_or_else(|| "unknown".to_owned(), |bytes| bytes.to_string())
 }
 
 fn format_nanos(nanos: u128) -> String {

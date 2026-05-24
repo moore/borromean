@@ -4,7 +4,7 @@ region_size = 65536
 db_size_bytes = 104857600
 
 [comparison]
-engines = ["borromean", "redb"]
+engines = ["borromean", "borromean-memory", "redb"]
 
 [backing]
 path = "target/perf/file_backing_smoke.db"
@@ -23,6 +23,9 @@ compact_interval = 0
 compact_after_workload = false
 durability = "immediate"
 
+[preload]
+count = 0
+
 [storage]
 min_free_regions = 2
 wal_write_granule = 8
@@ -37,8 +40,12 @@ seed = 0x123456789abcdef
 read_ratio = 0
 set_ratio = 100
 delete_ratio = 0
+key_mode = "insert-range"
 compact_on_signal = true
 compaction_region_target = 32
+
+[maintenance]
+optimize_after_workload = false
 
 [output]
 json_path = "target/perf/file_backing_smoke.json"

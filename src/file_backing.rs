@@ -5,6 +5,7 @@ use std::fs::{File, OpenOptions};
 use std::io;
 use std::os::fd::AsRawFd;
 use std::path::Path;
+use std::time::Instant;
 
 use crate::disk::{
     DiskError, FreePointerFooter, Header, StorageMetadata, WalRegionPrologue, WAL_V1_FORMAT,
@@ -89,6 +90,15 @@ pub struct FileBackingGeometry {
     pub alignment_unit: usize,
     /// Expected database file length in bytes.
     pub file_len: usize,
+}
+
+/// Timing split for a [`FileBacking`] durability barrier.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FileBackingSyncReport {
+    /// Time spent flushing dirty mmap pages.
+    pub mmap_flush_nanos: u128,
+    /// Time spent syncing the underlying file.
+    pub file_sync_nanos: u128,
 }
 
 /// File-backed storage geometry errors.
@@ -533,6 +543,12 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize> FileBacking<REGION_SIZ
         self.sync_with_os(&mut os)
     }
 
+    /// Flushes the mmap, syncs the underlying file, and returns a timing split.
+    pub fn sync_with_report(&mut self) -> Result<FileBackingSyncReport, FileBackingError> {
+        let mut os = LinuxFileBackingOs;
+        self.sync_with_os_report(&mut os)
+    }
+
     /// Formats the file backing as an empty Borromean store.
     pub fn format_empty_store(
         &mut self,
@@ -682,10 +698,24 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize> FileBacking<REGION_SIZ
     }
 
     fn sync_with_os<OS: FileBackingOs>(&mut self, os: &mut OS) -> Result<(), FileBackingError> {
+        self.sync_with_os_report(os).map(|_| ())
+    }
+
+    fn sync_with_os_report<OS: FileBackingOs>(
+        &mut self,
+        os: &mut OS,
+    ) -> Result<FileBackingSyncReport, FileBackingError> {
+        let flush_start = Instant::now();
         self.map
             .flush()
             .map_err(|error| FileBackingError::from_io_error(FileBackingOperation::Flush, error))?;
-        os.sync_file(&self.file)
+        let mmap_flush_nanos = flush_start.elapsed().as_nanos();
+        let file_sync_start = Instant::now();
+        os.sync_file(&self.file)?;
+        Ok(FileBackingSyncReport {
+            mmap_flush_nanos,
+            file_sync_nanos: file_sync_start.elapsed().as_nanos(),
+        })
     }
 
     fn metadata_region(&self) -> &[u8] {
