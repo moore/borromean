@@ -281,6 +281,23 @@ where
                     this.phase = 3;
                     return Poll::Ready(Err(error.into()));
                 }
+                if let Some(region_index) = this.storage.state.last_free_list_head() {
+                    if let Err(error) = this
+                        .storage
+                        .state
+                        .ensure_head_append_room_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
+                            this.storage.backing,
+                            &mut this.storage.workspace,
+                            this.map.id(),
+                            CollectionType::MAP_CODE,
+                            region_index,
+                        )
+                    {
+                        this.storage.finish_mode();
+                        this.phase = 3;
+                        return Poll::Ready(Err(error.into()));
+                    }
+                }
                 if let Err(error) = this
                     .storage
                     .state
@@ -354,22 +371,37 @@ where
 }
 
 #[derive(Debug)]
-enum ReclaimWalHeadPhase<const MAX_COLLECTIONS: usize> {
+enum ReclaimWalHeadPhase<const REGION_COUNT: usize, const MAX_COLLECTIONS: usize> {
     Plan,
+    RotateToContinuation {
+        plan: WalHeadReclaimPlan<MAX_COLLECTIONS>,
+        source_regions: heapless::Vec<u32, REGION_COUNT>,
+        new_head: Option<u32>,
+    },
     BeginReclaim {
         plan: WalHeadReclaimPlan<MAX_COLLECTIONS>,
+        source_regions: heapless::Vec<u32, REGION_COUNT>,
+        next_index: usize,
+        new_head: u32,
     },
     PreserveFreeListHead {
         plan: WalHeadReclaimPlan<MAX_COLLECTIONS>,
+        source_regions: heapless::Vec<u32, REGION_COUNT>,
+        new_head: u32,
     },
     CopyLiveState {
         plan: WalHeadReclaimPlan<MAX_COLLECTIONS>,
+        source_regions: heapless::Vec<u32, REGION_COUNT>,
+        new_head: u32,
     },
     CommitHead {
-        plan: WalHeadReclaimPlan<MAX_COLLECTIONS>,
+        source_regions: heapless::Vec<u32, REGION_COUNT>,
+        new_head: u32,
     },
     CompleteReclaim {
-        plan: WalHeadReclaimPlan<MAX_COLLECTIONS>,
+        source_regions: heapless::Vec<u32, REGION_COUNT>,
+        next_index: usize,
+        new_head: u32,
     },
     Done,
 }
@@ -418,7 +450,7 @@ pub struct ReclaimWalHeadFuture<
 {
     storage:
         &'a mut Storage<'db, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
-    phase: ReclaimWalHeadPhase<MAX_COLLECTIONS>,
+    phase: ReclaimWalHeadPhase<REGION_COUNT, MAX_COLLECTIONS>,
 }
 
 /// Explicit phase-machine future for opening storage through replay.
@@ -570,7 +602,7 @@ where
                     this.phase = ReclaimWalHeadPhase::Done;
                     return Poll::Ready(Err(error));
                 }
-                let plan = match this
+                let mut plan = match this
                     .storage
                     .state
                     .prepare_wal_head_reclaim::<REGION_SIZE, IO>(
@@ -583,30 +615,118 @@ where
                         return Poll::Ready(Err(error));
                     }
                 };
-                this.phase = ReclaimWalHeadPhase::BeginReclaim { plan };
+                let mut source_regions = match this
+                    .storage
+                    .state
+                    .collect_wal_head_reclaim_regions::<REGION_SIZE, REGION_COUNT, IO>(
+                        this.storage.backing,
+                        &mut this.storage.workspace,
+                        &plan,
+                    ) {
+                    Ok(source_regions) => source_regions,
+                    Err(error) => {
+                        this.storage.finish_mode();
+                        return Poll::Ready(Err(error));
+                    }
+                };
+                let new_head = if source_regions.len() > MAX_PENDING_RECLAIMS {
+                    if MAX_PENDING_RECLAIMS == 0 {
+                        this.storage.finish_mode();
+                        return Poll::Ready(Err(StorageRuntimeError::TooManyPendingReclaims));
+                    }
+                    let new_head = source_regions[MAX_PENDING_RECLAIMS];
+                    plan.limit_to_source_tail(
+                        source_regions[MAX_PENDING_RECLAIMS - 1],
+                        REGION_SIZE,
+                    );
+                    source_regions.truncate(MAX_PENDING_RECLAIMS);
+                    Some(new_head)
+                } else {
+                    None
+                };
+                this.phase = ReclaimWalHeadPhase::RotateToContinuation {
+                    plan,
+                    source_regions,
+                    new_head,
+                };
                 Poll::Pending
             }
-            ReclaimWalHeadPhase::BeginReclaim { plan } => {
+            ReclaimWalHeadPhase::RotateToContinuation {
+                plan,
+                source_regions,
+                new_head,
+            } => {
                 this.storage
                     .set_mode_unchecked(StorageMode::ReclaimingWalHead(
                         WalHeadReclaimMode::BeginReclaim,
                     ));
+                let new_head = if let Some(new_head) = new_head {
+                    new_head
+                } else {
+                    if let Err(error) = this
+                        .storage
+                        .state
+                        .rotate_wal_tail::<REGION_SIZE, REGION_COUNT, IO>(
+                            this.storage.backing,
+                            &mut this.storage.workspace,
+                        )
+                    {
+                        this.storage.finish_mode();
+                        return Poll::Ready(Err(error));
+                    }
+                    this.storage.state.wal_tail()
+                };
+                this.phase = ReclaimWalHeadPhase::BeginReclaim {
+                    plan,
+                    source_regions,
+                    next_index: 0,
+                    new_head,
+                };
+                Poll::Pending
+            }
+            ReclaimWalHeadPhase::BeginReclaim {
+                plan,
+                source_regions,
+                next_index,
+                new_head,
+            } => {
+                this.storage
+                    .set_mode_unchecked(StorageMode::ReclaimingWalHead(
+                        WalHeadReclaimMode::BeginReclaim,
+                    ));
+                let Some(region_index) = source_regions.get(next_index).copied() else {
+                    this.phase = ReclaimWalHeadPhase::PreserveFreeListHead {
+                        plan,
+                        source_regions,
+                        new_head,
+                    };
+                    return Poll::Pending;
+                };
                 if let Err(error) = this
                     .storage
                     .state
                     .begin_wal_head_reclaim::<REGION_SIZE, REGION_COUNT, IO>(
                         this.storage.backing,
                         &mut this.storage.workspace,
-                        plan.old_head,
+                        region_index,
                     )
                 {
                     this.storage.finish_mode();
                     return Poll::Ready(Err(error));
                 }
-                this.phase = ReclaimWalHeadPhase::PreserveFreeListHead { plan };
+                this.phase = ReclaimWalHeadPhase::BeginReclaim {
+                    plan,
+                    source_regions,
+                    next_index: next_index + 1,
+                    new_head,
+                };
                 Poll::Pending
             }
-            ReclaimWalHeadPhase::PreserveFreeListHead { plan } => {
+            ReclaimWalHeadPhase::PreserveFreeListHead {
+                plan,
+                source_regions,
+                new_head,
+            } => {
                 this.storage
                     .set_mode_unchecked(StorageMode::ReclaimingWalHead(
                         WalHeadReclaimMode::PreserveFreeListHead,
@@ -622,10 +742,18 @@ where
                     this.storage.finish_mode();
                     return Poll::Ready(Err(error));
                 }
-                this.phase = ReclaimWalHeadPhase::CopyLiveState { plan };
+                this.phase = ReclaimWalHeadPhase::CopyLiveState {
+                    plan,
+                    source_regions,
+                    new_head,
+                };
                 Poll::Pending
             }
-            ReclaimWalHeadPhase::CopyLiveState { plan } => {
+            ReclaimWalHeadPhase::CopyLiveState {
+                plan,
+                source_regions,
+                new_head,
+            } => {
                 this.storage
                     .set_mode_unchecked(StorageMode::ReclaimingWalHead(
                         WalHeadReclaimMode::CopyLiveState,
@@ -642,10 +770,16 @@ where
                     this.storage.finish_mode();
                     return Poll::Ready(Err(error));
                 }
-                this.phase = ReclaimWalHeadPhase::CommitHead { plan };
+                this.phase = ReclaimWalHeadPhase::CommitHead {
+                    source_regions,
+                    new_head,
+                };
                 Poll::Pending
             }
-            ReclaimWalHeadPhase::CommitHead { plan } => {
+            ReclaimWalHeadPhase::CommitHead {
+                source_regions,
+                new_head,
+            } => {
                 this.storage
                     .set_mode_unchecked(StorageMode::ReclaimingWalHead(
                         WalHeadReclaimMode::CommitHead,
@@ -656,32 +790,51 @@ where
                     .commit_wal_head_reclaim::<REGION_SIZE, REGION_COUNT, IO>(
                         this.storage.backing,
                         &mut this.storage.workspace,
-                        plan.new_head,
+                        new_head,
                     )
                 {
                     this.storage.finish_mode();
                     return Poll::Ready(Err(error));
                 }
-                this.phase = ReclaimWalHeadPhase::CompleteReclaim { plan };
+                this.phase = ReclaimWalHeadPhase::CompleteReclaim {
+                    source_regions,
+                    next_index: 0,
+                    new_head,
+                };
                 Poll::Pending
             }
-            ReclaimWalHeadPhase::CompleteReclaim { plan } => {
+            ReclaimWalHeadPhase::CompleteReclaim {
+                source_regions,
+                next_index,
+                new_head,
+            } => {
                 this.storage
                     .set_mode_unchecked(StorageMode::ReclaimingWalHead(
                         WalHeadReclaimMode::CompleteReclaim,
                     ));
-                let result = this
+                let Some(region_index) = source_regions.get(next_index).copied() else {
+                    this.storage.finish_mode();
+                    this.phase = ReclaimWalHeadPhase::Done;
+                    return Poll::Ready(Ok(new_head));
+                };
+                if let Err(error) = this
                     .storage
                     .state
                     .complete_pending_reclaim::<REGION_SIZE, REGION_COUNT, IO>(
                         this.storage.backing,
                         &mut this.storage.workspace,
-                        plan.old_head,
+                        region_index,
                     )
-                    .map(|()| plan.new_head);
-                this.storage.finish_mode();
-                this.phase = ReclaimWalHeadPhase::Done;
-                Poll::Ready(result)
+                {
+                    this.storage.finish_mode();
+                    return Poll::Ready(Err(error));
+                }
+                this.phase = ReclaimWalHeadPhase::CompleteReclaim {
+                    source_regions,
+                    next_index: next_index + 1,
+                    new_head,
+                };
+                Poll::Pending
             }
             ReclaimWalHeadPhase::Done => Poll::Pending,
         }

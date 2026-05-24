@@ -1399,9 +1399,10 @@ unwritten space remaining in that WAL region.
 starts WAL rotation is invalid unless its aligned end offset leaves at
 least `wal_link_reserve` bytes of currently unwritten space remaining
 in that WAL region.
-15. `RING-WAL-VALID-015` For non-WAL collections (`collection_id != 0`), `update` is
-replay-valid only if replay has already seen a retained basis decision
-for that collection.
+15. `RING-WAL-VALID-015` For non-WAL collections (`collection_id != 0`), `update`
+records that appear before replay has seen a retained basis decision
+for that collection have no replay effect. Implementations MUST NOT
+count them as retained post-basis updates.
 16. `RING-WAL-VALID-016` For non-WAL collections (`collection_id != 0`), `snapshot`,
 `head(collection_id, collection_type, region_index)`, and
 `drop_collection(collection_id)` are invalid if replay has already seen
@@ -3091,7 +3092,17 @@ rotation, reclaim, and WAL/state facade helpers.
     boundaries and clear them after appending wal_recovery.
 35. `RING-IMPL-REGRESSION-104` Storage append operations MUST persist new collection and update
     records so reopening through flash restores the collection and pending update state.
-36. `RING-IMPL-REGRESSION-105` WAL-head reclaim MUST update runtime WAL head and tail to the next
-    region.
+36. `RING-IMPL-REGRESSION-105` WAL-head reclaim MUST update runtime WAL head and tail to a fresh
+    continuation region.
 37. `RING-IMPL-REGRESSION-106` WAL-head reclaim MUST rewrite a live `EmptyClean` map as a WAL
     snapshot basis while preserving pending updates.
+38. `RING-IMPL-REGRESSION-107` Internal WAL rotation with a large pending record MUST bridge an
+    early rotation-window gap without surfacing InvalidRotationWindow to the caller.
+39. `RING-IMPL-REGRESSION-108` A long mixed map workload MUST preserve collection identity across
+    writes, deletes, compactions, and storage reclamation.
+40. `RING-IMPL-REGRESSION-109` WAL lifecycle stress MUST rotate through every data region, reclaim
+    WAL prefixes, reuse reclaimed regions, and reopen with live collection state intact.
+41. `RING-IMPL-REGRESSION-110` Map lifecycle stress MUST preserve modeled key/value state across
+    writes, deletes, compactions, committed-region reclaims, WAL rollovers, and WAL-head reclaims.
+42. `RING-IMPL-REGRESSION-111` WAL-head reclaim capacity stress MUST reclaim a bounded WAL prefix
+    when the full chain is longer than `MAX_PENDING_RECLAIMS`.

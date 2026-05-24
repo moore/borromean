@@ -1573,13 +1573,15 @@ where
             return Ok(());
         }
 
-        if let Some(region_index) = storage.last_free_list_head() {
-            storage
-                .ensure_stage_region_append_room_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
-                    flash,
-                    workspace,
-                    region_index,
-                )?;
+        if storage.ready_region().is_none() {
+            if let Some(region_index) = storage.last_free_list_head() {
+                storage
+                    .ensure_stage_region_append_room_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
+                        flash,
+                        workspace,
+                        region_index,
+                    )?;
+            }
         }
         let region_index =
             storage.reserve_next_region::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace)?;
@@ -3066,13 +3068,14 @@ where
                 let payload = committed_payload_buffer::<REGION_SIZE>(payload)?;
                 self.largest_frontier_segment_ending_at(payload, generation, end_index)?
             };
-            if let Some(region_index) = storage.last_free_list_head() {
-                storage
-                    .ensure_stage_region_append_room_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
-                        flash,
-                        workspace,
-                        region_index,
-                    )?;
+            if storage.ready_region().is_none() {
+                if let Some(region_index) = storage.last_free_list_head() {
+                    storage.ensure_stage_region_append_room_with_rotation::<
+                        REGION_SIZE,
+                        REGION_COUNT,
+                        IO,
+                    >(flash, workspace, region_index)?;
+                }
             }
             let region_index =
                 storage.reserve_next_region::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace)?;
@@ -3155,13 +3158,14 @@ where
                 let payload = committed_payload_buffer::<REGION_SIZE>(payload)?;
                 Self::largest_snapshot_segment_ending_at(payload, generation, source, end_index)?
             };
-            if let Some(region_index) = storage.last_free_list_head() {
-                storage
-                    .ensure_stage_region_append_room_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
-                        flash,
-                        workspace,
-                        region_index,
-                    )?;
+            if storage.ready_region().is_none() {
+                if let Some(region_index) = storage.last_free_list_head() {
+                    storage.ensure_stage_region_append_room_with_rotation::<
+                        REGION_SIZE,
+                        REGION_COUNT,
+                        IO,
+                    >(flash, workspace, region_index)?;
+                }
             }
             let region_index =
                 storage.reserve_next_region::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace)?;
@@ -3238,14 +3242,16 @@ where
             .ok_or(MapStorageError::Map(MapError::SerializationError))?;
         ensure_manifest_run_capacity::<MAX_RUNS>(self.id, manifest_run_count)?;
 
-        if let Some(region_index) = storage.last_free_list_head() {
-            storage.ensure_head_append_room_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
-                flash,
-                workspace,
-                self.id,
-                CollectionType::MAP_CODE,
-                region_index,
-            )?;
+        if storage.ready_region().is_none() {
+            if let Some(region_index) = storage.last_free_list_head() {
+                storage.ensure_head_append_room_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
+                    flash,
+                    workspace,
+                    self.id,
+                    CollectionType::MAP_CODE,
+                    region_index,
+                )?;
+            }
         }
         let manifest_region =
             storage.reserve_next_region::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace)?;
@@ -3353,14 +3359,16 @@ where
             .ok_or(MapStorageError::Map(MapError::SerializationError))?;
         ensure_manifest_run_capacity::<MAX_RUNS>(self.id, manifest_run_count)?;
 
-        if let Some(region_index) = storage.last_free_list_head() {
-            storage.ensure_head_append_room_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
-                flash,
-                workspace,
-                self.id,
-                CollectionType::MAP_CODE,
-                region_index,
-            )?;
+        if storage.ready_region().is_none() {
+            if let Some(region_index) = storage.last_free_list_head() {
+                storage.ensure_head_append_room_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
+                    flash,
+                    workspace,
+                    self.id,
+                    CollectionType::MAP_CODE,
+                    region_index,
+                )?;
+            }
         }
         let manifest_region =
             storage.reserve_next_region::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace)?;

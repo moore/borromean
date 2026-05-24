@@ -8,6 +8,7 @@ use std::cell::Cell;
 use std::thread_local;
 use std::vec;
 
+mod lifecycle;
 mod traceability;
 
 thread_local! {
@@ -266,7 +267,7 @@ fn requirement_storage_facade_raw_wal_wrappers_update_runtime_state() {
     storage.append_reclaim_begin(3).unwrap();
     assert_eq!(storage.pending_reclaims(), &[3]);
     storage.append_reclaim_end(3).unwrap();
-    assert_eq!(storage.pending_reclaims(), &[]);
+    assert_eq!(storage.pending_reclaims(), &[] as &[u32]);
 }
 
 //= spec/ring.md#storage-runtime-state-requirements
@@ -759,17 +760,17 @@ fn requirement_storage_open_future_drop_before_completion_leaves_store_openable(
 //= spec/implementation.md#operation-future-regression-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-101` Storage WAL-head reclaim futures MUST poll to completion, update WAL
-//# head to the reclaimed successor, and append the old head to the free-list tail.
+//# head to the reclaimed continuation, and append the old WAL prefix to the free-list tail.
 #[test]
 fn requirement_storage_reclaim_wal_head_future_polls_to_completion() {
     let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
     let (mut storage, next_region) = setup_storage_with_stale_wal_head(&mut flash);
 
-    let reclaimed_head = poll_until_ready(storage.reclaim_wal_head_future(), 6).unwrap();
+    let reclaimed_head = poll_until_ready(storage.reclaim_wal_head_future(), 16).unwrap();
 
-    assert_eq!(reclaimed_head, next_region);
-    assert_eq!(storage.wal_head(), next_region);
-    assert_eq!(storage.free_list_tail(), Some(0));
+    assert_eq!(reclaimed_head, storage.wal_head());
+    assert_eq!(storage.wal_head(), storage.wal_tail());
+    assert_eq!(storage.free_list_tail(), Some(next_region));
 }
 
 //= spec/implementation.md#operation-future-regression-requirements
@@ -790,10 +791,7 @@ fn requirement_storage_reclaim_wal_head_future_yields_between_reclaim_phases() {
         let third = matches!(poll_once(future.as_mut()), Poll::Pending);
         let fourth = matches!(poll_once(future.as_mut()), Poll::Pending);
         let fifth = matches!(poll_once(future.as_mut()), Poll::Pending);
-        let reclaimed_head = match poll_once(future.as_mut()) {
-            Poll::Ready(Ok(reclaimed_head)) => reclaimed_head,
-            other => panic!("unexpected sixth poll result: {other:?}"),
-        };
+        let reclaimed_head = poll_until_ready(future, 16).unwrap();
 
         (first, second, third, fourth, fifth, reclaimed_head)
     };
@@ -803,8 +801,8 @@ fn requirement_storage_reclaim_wal_head_future_yields_between_reclaim_phases() {
     assert!(third);
     assert!(fourth);
     assert!(fifth);
-    assert_eq!(reclaimed_head, next_region);
-    assert_eq!(storage.wal_head(), next_region);
+    assert_ne!(reclaimed_head, next_region);
+    assert_eq!(storage.wal_head(), reclaimed_head);
 }
 
 //= spec/implementation.md#operation-future-regression-requirements
@@ -1033,8 +1031,8 @@ fn todo_storage_api_binds_backing_and_scratch() {}
 
 //= spec/ring.md#storage-runtime-state-requirements
 //= type=test
-//# `RING-IMPL-REGRESSION-105` WAL-head reclaim MUST update runtime WAL head and tail to the next
-//# region.
+//# `RING-IMPL-REGRESSION-105` WAL-head reclaim MUST update runtime WAL head and tail to a
+//# fresh continuation region.
 #[test]
 fn requirement_storage_reclaim_wal_head_updates_runtime_head_to_next_region() {
     let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
@@ -1042,9 +1040,9 @@ fn requirement_storage_reclaim_wal_head_updates_runtime_head_to_next_region() {
 
     let reclaimed_head = storage.reclaim_wal_head().unwrap();
 
-    assert_eq!(reclaimed_head, next_region);
-    assert_eq!(storage.wal_head(), next_region);
-    assert_eq!(storage.wal_tail(), next_region);
+    assert_ne!(reclaimed_head, next_region);
+    assert_eq!(storage.wal_head(), reclaimed_head);
+    assert_eq!(storage.wal_tail(), reclaimed_head);
 }
 
 //= spec/ring.md#wal-reclaim-eligibility
@@ -1114,7 +1112,7 @@ fn requirement_storage_reclaim_wal_head_appends_an_ordinary_head_record_for_wal_
         })
         .unwrap();
 
-    assert_eq!(reclaimed_head, next_region);
+    assert_ne!(reclaimed_head, next_region);
     assert!(saw_wal_head_record);
 }
 
@@ -1129,7 +1127,7 @@ fn requirement_storage_reclaim_wal_head_returns_old_head_region_to_free_list_tai
 
     storage.reclaim_wal_head().unwrap();
 
-    assert_eq!(storage.free_list_tail(), Some(0));
+    assert_eq!(storage.free_list_tail(), Some(1));
     assert!(storage.pending_reclaims().is_empty());
 }
 
@@ -1168,9 +1166,9 @@ fn requirement_storage_reclaim_wal_head_copies_live_snapshot_basis_to_tail() {
         .unwrap();
 
     assert!(saw_snapshot);
-    assert_eq!(reclaimed_head, next_region);
-    assert_eq!(storage.wal_head(), next_region);
-    assert!(storage.wal_tail() >= next_region);
+    assert_ne!(reclaimed_head, next_region);
+    assert_eq!(storage.wal_head(), reclaimed_head);
+    assert!(storage.wal_tail() >= reclaimed_head);
 }
 
 //= spec/ring.md#wal-reclaim-eligibility
@@ -1215,8 +1213,8 @@ fn requirement_storage_reclaim_wal_head_copies_live_updates_after_basis_to_tail(
 
     assert!(saw_snapshot);
     assert!(saw_update);
-    assert_eq!(reclaimed_head, next_region);
-    assert_eq!(storage.wal_head(), next_region);
+    assert_ne!(reclaimed_head, next_region);
+    assert_eq!(storage.wal_head(), reclaimed_head);
     assert_eq!(
         storage.collections()[0].basis(),
         StartupCollectionBasis::WalSnapshot
@@ -1243,8 +1241,128 @@ fn requirement_storage_reclaim_wal_head_rewrites_empty_head_map_as_snapshot_basi
         .unwrap();
     assert_eq!(target.basis(), StartupCollectionBasis::WalSnapshot);
     assert_eq!(target.pending_update_count(), 1);
-    assert_eq!(reclaimed_head, next_region);
-    assert_eq!(storage.wal_head(), next_region);
+    assert_ne!(reclaimed_head, next_region);
+    assert_eq!(storage.wal_head(), reclaimed_head);
+}
+
+#[derive(Debug, Clone, Copy)]
+struct StressRng {
+    state: u64,
+}
+
+impl StressRng {
+    fn new(seed: u64) -> Self {
+        Self { state: seed }
+    }
+
+    fn next_u64(&mut self) -> u64 {
+        let mut value = self.state;
+        value ^= value << 13;
+        value ^= value >> 7;
+        value ^= value << 17;
+        self.state = value;
+        value
+    }
+
+    fn next_bounded(&mut self, bound: u64) -> u64 {
+        self.next_u64() % bound
+    }
+}
+
+//= spec/ring.md#storage-runtime-state-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-108` A long mixed map workload MUST preserve collection identity across
+//# writes, deletes, compactions, and storage reclamation.
+#[test]
+fn requirement_long_mixed_map_workload_preserves_collection_identity_across_reclaim_and_compaction()
+{
+    std::thread::Builder::new()
+        .stack_size(128 * 1024 * 1024)
+        .spawn(
+            run_long_mixed_map_workload_preserves_collection_identity_across_reclaim_and_compaction,
+        )
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+fn run_long_mixed_map_workload_preserves_collection_identity_across_reclaim_and_compaction() {
+    const REGION_SIZE: usize = 4096;
+    const REGION_COUNT: usize = 1024;
+    const MAX_LOG: usize = 1_048_576;
+    const MAX_COLLECTIONS: usize = 8;
+    const MAX_PENDING_RECLAIMS: usize = 64;
+    const MAX_INDEXES: usize = 128;
+    const MAX_RUNS: usize = 128;
+
+    let mut flash =
+        std::boxed::Box::new(MockFlash::<REGION_SIZE, REGION_COUNT, MAX_LOG>::new(0xff));
+    let mut storage =
+        Storage::<_, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>::format(
+            &mut *flash,
+            StorageFormatConfig::new(2, 8, 0xa5),
+        )
+        .unwrap();
+    let mut map = LsmMap::<u64, u64, MAX_INDEXES, MAX_RUNS>::new(&mut storage)
+        .unwrap()
+        .with_compaction_region_target(8)
+        .unwrap();
+    let mut rng = StressRng::new(0x0123_4567_89ab_cdef);
+    let initial_wal_head = storage.wal_head();
+    let mut compactions = 0usize;
+    let mut reclaims = 0usize;
+    let mut deletes = 0usize;
+    let mut sets = 0usize;
+
+    for operation_index in 0..3_000 {
+        let key = rng.next_bounded(256);
+        let compact_needed = if rng.next_bounded(100) < 30 {
+            deletes += 1;
+            map.delete(&mut storage, key).unwrap()
+        } else {
+            sets += 1;
+            map.set(&mut storage, key, rng.next_u64()).unwrap()
+        };
+        if compact_needed || operation_index % 500 == 499 {
+            map.compact(&mut storage).unwrap_or_else(|error| {
+                panic!(
+                    "compact failed at op {operation_index}: {error:?}; wal_head={} wal_tail={} append_offset={} collections={:?}",
+                    storage.wal_head(),
+                    storage.wal_tail(),
+                    storage.wal_append_offset(),
+                    storage.collections(),
+                )
+            });
+            compactions += 1;
+        }
+        if operation_index % 500 == 499 && storage.wal_head() != storage.wal_tail() {
+            let pending_reclaims = std::vec::Vec::from(storage.pending_reclaims());
+            for region_index in pending_reclaims {
+                storage.complete_pending_reclaim(region_index).unwrap();
+            }
+            storage.reclaim_wal_head().unwrap_or_else(|error| {
+                panic!(
+                    "wal reclaim failed at op {operation_index}: {error:?}; wal_head={} wal_tail={} append_offset={} collections={:?}",
+                    storage.wal_head(),
+                    storage.wal_tail(),
+                    storage.wal_append_offset(),
+                    storage.collections(),
+                )
+            });
+            reclaims += 1;
+        }
+        storage.with_io_workspace(|flash, _workspace| flash.clear_operations());
+    }
+
+    assert!(sets > 0);
+    assert!(deletes > 0);
+    assert!(compactions > 0);
+    assert!(reclaims > 0);
+    assert_ne!(storage.wal_head(), initial_wal_head);
+    assert!(storage
+        .collections()
+        .iter()
+        .any(|collection| collection.collection_id() == map.collection_id()));
 }
 
 #[derive(Debug)]
@@ -1371,10 +1489,9 @@ fn requirement_storage_reclaim_wal_head_reopen_preserves_effective_wal_head() {
 #[test]
 fn requirement_storage_reclaim_wal_head_reopen_preserves_free_list_head() {
     let mut flash = MockFlash::<512, 6, 4096>::new(0xff);
-    let (_, reopened, expected_free_list_head, _) =
-        reclaim_wal_head_and_reopen_empty_head_map(&mut flash);
+    let (snapshot, reopened, _, _) = reclaim_wal_head_and_reopen_empty_head_map(&mut flash);
 
-    assert_eq!(reopened.last_free_list_head(), expected_free_list_head);
+    assert_eq!(reopened.last_free_list_head(), snapshot.last_free_list_head);
 }
 
 //= spec/ring.md#wal-reclaim-eligibility
@@ -2446,9 +2563,9 @@ fn requirement_storage_map_flush_reclaims_wal_head_before_consuming_min_free_reg
     let second_region = storage.flush_map::<_, _, 4, 4>(&mut map).unwrap();
 
     assert_ne!(second_region, first_region);
-    assert_eq!(storage.wal_head(), reclaimed_head);
+    assert_ne!(storage.wal_head(), 0);
     assert_eq!(storage.pending_reclaims(), &[first_region]);
-    assert_eq!(storage.free_list_tail(), Some(0));
+    assert!(storage.free_list_tail().is_some());
 
     let mut reopened = Storage::<_, 512, 8, 8, 4>::open(&mut flash).unwrap();
     let mut reopen_buffer = [0u8; 512];

@@ -1,0 +1,50 @@
+[geometry]
+# Supported region sizes: 4096, 8192, 16384, 65536.
+# Supported region counts: 64, 256, 1024, 1599, 4096.
+# 4096 regions at 4 KiB keeps the file small while forcing run flushes
+# and compactions during a short perf run.
+region_size = 4096
+region_count = 4096
+
+[comparison]
+engines = ["borromean", "redb"]
+
+[backing]
+path = "target/perf/file_backing.db"
+allocation_policy = "fallback-on-unsupported"
+madvise_policy = "normal"
+erased_byte = 0xff
+sync_on_create = false
+remove_existing = true
+remove_after = false
+
+[redb]
+path = "target/perf/redb.db"
+remove_existing = true
+remove_after = false
+compact_interval = 0
+compact_after_workload = false
+durability = "immediate"
+
+[storage]
+min_free_regions = 2
+wal_write_granule = 8
+wal_record_magic = 0xa5
+
+[workload]
+map_count = 1
+operation_count = 3000
+warmup_count = 0
+key_space = 100000
+seed = 0x123456789abcdef
+read_ratio = 0
+set_ratio = 100
+delete_ratio = 0
+value_size_bytes = 64
+compact_on_signal = true
+compaction_region_target = 64
+
+[output]
+json_path = "target/perf/file_backing.json"
+latency_sample_interval = 250
+progress_interval = 250

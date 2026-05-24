@@ -1775,6 +1775,33 @@ where
         result
     }
 
+    /// Compacts selected committed runs and reports whether a replacement manifest was committed.
+    pub fn compact_and_report<
+        'db,
+        IO: FlashIo,
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        const MAX_COLLECTIONS: usize,
+        const MAX_PENDING_RECLAIMS: usize,
+    >(
+        &mut self,
+        storage: &mut Storage<
+            'db,
+            IO,
+            REGION_SIZE,
+            REGION_COUNT,
+            MAX_COLLECTIONS,
+            MAX_PENDING_RECLAIMS,
+        >,
+    ) -> Result<bool, LsmMapError> {
+        Ok(storage
+            .compact_map_with_target::<K, V, MAX_INDEXES, MAX_RUNS>(
+                self.collection_id,
+                self.compaction_region_target,
+            )?
+            .is_some())
+    }
+
     /// Compacts selected committed runs. Having nothing to compact is success.
     pub fn compact<
         'db,
@@ -1794,9 +1821,8 @@ where
             MAX_PENDING_RECLAIMS,
         >,
     ) -> Result<(), LsmMapError> {
-        storage.compact_map_with_target::<K, V, MAX_INDEXES, MAX_RUNS>(
-            self.collection_id,
-            self.compaction_region_target,
+        let _ = self.compact_and_report::<IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>(
+            storage,
         )?;
         Ok(())
     }

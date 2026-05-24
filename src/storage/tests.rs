@@ -1430,6 +1430,55 @@ fn requirement_normal_append_rejects_when_it_would_consume_rotation_reserve() {
 
 //= spec/ring.md#storage-runtime-state-requirements
 //= type=test
+//# `RING-IMPL-REGRESSION-107` Internal WAL rotation with a large pending record MUST bridge an
+//# early rotation-window gap without surfacing InvalidRotationWindow to the caller.
+#[test]
+fn requirement_internal_rotation_bridges_early_window_gap_for_large_record() {
+    let mut flash = MockFlash::<256, 6, 4096>::new(0xff);
+    let mut workspace = StorageWorkspace::<256>::new();
+    let mut state = format::<256, 6, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+    state
+        .append_new_collection::<256, 6, _>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(7),
+            CollectionType::MAP_CODE,
+        )
+        .unwrap();
+
+    let payload = [0u8; 64];
+    let large_record = WalRecord::Snapshot {
+        collection_id: CollectionId(7),
+        collection_type: CollectionType::MAP_CODE,
+        payload: &payload,
+    };
+    fill_until_append_reserve_requires_rotation::<256, 6, _, 8, 4>(
+        &mut state,
+        &mut flash,
+        &mut workspace,
+        large_record,
+    );
+
+    let next_region = state.last_free_list_head().unwrap();
+    let free_list_head_after =
+        read_free_pointer_successor::<256, 6, _>(&mut flash, state.metadata(), next_region)
+            .unwrap();
+    let reserves = state
+        .rotation_reserves::<256, 6>(&mut workspace, next_region, free_list_head_after)
+        .unwrap();
+    let remaining_after_alloc_begin = 256 - (state.wal_append_offset() + reserves.alloc_begin_len);
+    assert!(remaining_after_alloc_begin >= reserves.rotation_reserve);
+
+    let previous_tail = state.wal_tail();
+    state
+        .append_record_with_rotation::<256, 6, _>(&mut flash, &mut workspace, large_record)
+        .unwrap();
+
+    assert_ne!(state.wal_tail(), previous_tail);
+}
+
+//= spec/ring.md#storage-runtime-state-requirements
+//= type=test
 //# `RING-IMPL-REGRESSION-078` WAL rotation start MUST reject calls made before the WAL tail has
 //# entered the rotation window.
 #[test]
@@ -1728,7 +1777,8 @@ fn requirement_copy_live_wal_head_reclaim_state_stops_when_a_record_ends_at_regi
     append_exact_fill_update_record(&mut flash, metadata, state.wal_head(), CollectionId(77));
     let plan = WalHeadReclaimPlan::<8> {
         old_head: state.wal_head(),
-        new_head: state.wal_tail(),
+        source_tail: state.wal_tail(),
+        source_tail_append_offset: 128,
         original_collections: Vec::new(),
     };
 

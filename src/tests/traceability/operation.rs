@@ -60,8 +60,8 @@ fn requirement_each_public_operation_future_completes_when_polled_directly() {
     let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
     let (mut storage, next_region) = super::super::setup_storage_with_stale_wal_head(&mut flash);
     let reclaimed_head =
-        super::super::poll_until_ready(storage.reclaim_wal_head_future(), 6).unwrap();
-    assert_eq!(reclaimed_head, next_region);
+        super::super::poll_until_ready(storage.reclaim_wal_head_future(), 16).unwrap();
+    assert_ne!(reclaimed_head, next_region);
 }
 
 //= spec/implementation.md#operation-requirements

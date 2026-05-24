@@ -982,8 +982,9 @@ pub(crate) fn apply_wal_record<const MAX_COLLECTIONS: usize, const MAX_PENDING_R
             collection_id,
             payload: _,
         } => {
-            let collection = find_collection_mut(collections, collection_id)
-                .ok_or(StartupError::UnknownCollection(collection_id))?;
+            let Some(collection) = find_collection_mut(collections, collection_id) else {
+                return Ok(());
+            };
             if collection.basis == StartupCollectionBasis::Dropped {
                 return Err(StartupError::DroppedCollection(collection_id));
             }

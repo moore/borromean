@@ -1,0 +1,46 @@
+[geometry]
+# Same 100 MiB geometry as file_backing.toml, with a short workload for smoke tests.
+region_size = 65536
+db_size_bytes = 104857600
+
+[comparison]
+engines = ["borromean", "redb"]
+
+[backing]
+path = "target/perf/file_backing_smoke.db"
+allocation_policy = "fallback-on-unsupported"
+madvise_policy = "normal"
+erased_byte = 0xff
+sync_on_create = false
+remove_existing = true
+remove_after = true
+
+[redb]
+path = "target/perf/redb_smoke.db"
+remove_existing = true
+remove_after = true
+compact_interval = 0
+compact_after_workload = false
+durability = "immediate"
+
+[storage]
+min_free_regions = 2
+wal_write_granule = 8
+wal_record_magic = 0xa5
+
+[workload]
+map_count = 1
+operation_count = 100
+warmup_count = 0
+key_space = 100000
+seed = 0x123456789abcdef
+read_ratio = 0
+set_ratio = 100
+delete_ratio = 0
+compact_on_signal = true
+compaction_region_target = 32
+
+[output]
+json_path = "target/perf/file_backing_smoke.json"
+latency_sample_interval = 10
+progress_interval = 10

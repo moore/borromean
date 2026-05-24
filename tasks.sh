@@ -14,8 +14,24 @@ run_test() {
 }
 
 run_clippy() {
-    echo "==> cargo clippy --all-targets --all-features -- -D warnings"
-    cargo clippy --all-targets --all-features -- -D warnings
+    echo "==> cargo clippy --all-targets --all-features -- -D warnings -A clippy::disallowed_methods -A clippy::disallowed_types -A clippy::disallowed_macros"
+    cargo clippy --all-targets --all-features -- \
+        -D warnings \
+        -A clippy::disallowed_methods \
+        -A clippy::disallowed_types \
+        -A clippy::disallowed_macros
+    echo "==> cargo clippy --lib --all-features -- -D warnings -D clippy::unwrap_used -D clippy::expect_used -D clippy::panic -D clippy::todo -D clippy::unimplemented -D clippy::unreachable -D clippy::disallowed_methods -D clippy::disallowed_types -D clippy::disallowed_macros"
+    cargo clippy --lib --all-features -- \
+        -D warnings \
+        -D clippy::unwrap_used \
+        -D clippy::expect_used \
+        -D clippy::panic \
+        -D clippy::todo \
+        -D clippy::unimplemented \
+        -D clippy::unreachable \
+        -D clippy::disallowed_methods \
+        -D clippy::disallowed_types \
+        -D clippy::disallowed_macros
 }
 
 run_cargo_format() {
@@ -47,6 +63,17 @@ run_mutants() {
     cargo mutants
 }
 
+run_perf() {
+    local config_path="${BORROMEAN_PERF_CONFIG:-perf/file_backing.toml}"
+    echo "==> cargo run --release --features perf-tools --bin file_backing_perf -- --config ${config_path}"
+    cargo run --release --features perf-tools --bin file_backing_perf -- --config "$config_path"
+}
+
+run_bench() {
+    echo "==> cargo bench --features file-backing --bench file_backing_mmap"
+    cargo bench --features file-backing --bench file_backing_mmap
+}
+
 usage() {
     cat <<'USAGE'
 Usage: ./tasks.sh [task...]
@@ -60,6 +87,10 @@ Tasks:
   md       Run markdown formatting
   duvet    Validate traceability annotations and generate the Duvet report
   mutants  Manually run cargo-mutants after validating annotations
+  perf     Run the FileBacking perf runner (override config with BORROMEAN_PERF_CONFIG)
+  perf-test
+           Alias for perf
+  bench    Run Criterion benchmarks for the FileBacking mmap backend
 USAGE
 }
 
@@ -85,6 +116,12 @@ run_task() {
             ;;
         mutants)
             run_mutants
+            ;;
+        perf|perf-test|perf-tests)
+            run_perf
+            ;;
+        bench)
+            run_bench
             ;;
         -h|--help|help)
             usage

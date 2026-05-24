@@ -37,7 +37,7 @@ fn requirement_slice_adapter_clear_removes_only_logical_items() {
     values.clear();
     assert!(values.is_empty());
     assert_eq!(values.len(), 0);
-    assert_eq!(values.as_slice(), &[]);
+    assert_eq!(values.as_slice(), &[] as &[u8]);
 
     values.push(4).unwrap();
     assert_eq!(values.as_slice(), &[4]);

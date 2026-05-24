@@ -1,0 +1,36 @@
+[geometry]
+# 100 MiB total DB file, including the metadata region.
+region_size = 65536
+db_size_bytes = 104857600
+
+[backing]
+path = "target/perf/file_backing_mixed.db"
+allocation_policy = "fallback-on-unsupported"
+madvise_policy = "normal"
+erased_byte = 0xff
+sync_on_create = false
+remove_existing = true
+remove_after = true
+
+[storage]
+min_free_regions = 2
+wal_write_granule = 8
+wal_record_magic = 0xa5
+
+[workload]
+map_count = 1
+operation_count = 3000
+warmup_count = 0
+key_space = 256
+seed = 0x123456789abcdef
+read_ratio = 10
+set_ratio = 65
+delete_ratio = 25
+compact_on_signal = true
+compact_interval = 500
+compaction_region_target = 8
+
+[output]
+json_path = "target/perf/file_backing_mixed.json"
+latency_sample_interval = 250
+progress_interval = 250

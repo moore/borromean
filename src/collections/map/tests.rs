@@ -688,7 +688,7 @@ fn requirement_committed_region_and_legacy_snapshot_helpers_accept_exact_boundar
     let mut region = [0u8; REGION_SIZE];
     let (header, payload) = read_committed_region(&mut flash, metadata, 0, &mut region).unwrap();
     assert_eq!(header.collection_id, CollectionId(95));
-    assert_eq!(payload, &[]);
+    assert_eq!(payload, &[] as &[u8]);
 
     const FULL_PAYLOAD_REGION_SIZE: usize = 64;
     let full_payload_metadata = StorageMetadata::new(
