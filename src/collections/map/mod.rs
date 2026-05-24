@@ -6,6 +6,7 @@ use crate::mock::MockError;
 use crate::storage::{StorageRuntime, StorageRuntimeError, StorageVisitError};
 use crate::workspace::StorageWorkspace;
 use crate::{CollectionId, CollectionType, StorageMetadata};
+use core::cell::RefCell;
 use core::fmt::Debug;
 use core::marker::PhantomData;
 use core::mem::size_of;
@@ -1131,17 +1132,24 @@ enum SearchResult {
 pub struct LsmMap<K, V, const MAX_INDEXES: usize, const MAX_RUNS: usize = MAX_INDEXES> {
     pub(crate) collection_id: CollectionId,
     pub(crate) compaction_region_target: usize,
+    pub(crate) cached_frontier: RefCell<Option<CachedMapFrontier<K, MAX_RUNS>>>,
     _phantom: PhantomData<(K, V)>,
 }
 
+pub(crate) struct CachedMapFrontier<K, const MAX_RUNS: usize> {
+    pub(crate) buffer_generation: u64,
+    pub(crate) state: MapFrontierState<K, MAX_RUNS>,
+}
+
 impl<K, V, const MAX_INDEXES: usize, const MAX_RUNS: usize> LsmMap<K, V, MAX_INDEXES, MAX_RUNS> {
-    pub(crate) const fn from_collection_id(
+    pub(crate) fn from_collection_id(
         collection_id: CollectionId,
         compaction_region_target: usize,
     ) -> Self {
         Self {
             collection_id,
             compaction_region_target,
+            cached_frontier: RefCell::new(None),
             _phantom: PhantomData,
         }
     }
@@ -1161,6 +1169,14 @@ pub struct MapFrontier<'a, K, V, const MAX_INDEXES: usize, const MAX_RUNS: usize
     map: &'a mut [u8],
     runs: Vec<MapRunDescriptor<K>, MAX_RUNS>,
     _phantom: PhantomData<(K, V)>,
+}
+
+pub(crate) struct MapFrontierState<K, const MAX_RUNS: usize> {
+    id: CollectionId,
+    record_count: EntryCount,
+    next_record_offset: RecordOffset,
+    next_record_index: RecordIndex,
+    runs: Vec<MapRunDescriptor<K>, MAX_RUNS>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1743,6 +1759,28 @@ where
             runs: Vec::new(),
             _phantom,
         })
+    }
+
+    pub(crate) fn from_state(state: MapFrontierState<K, MAX_RUNS>, buffer: &'a mut [u8]) -> Self {
+        Self {
+            id: state.id,
+            record_count: state.record_count,
+            next_record_index: state.next_record_index,
+            next_record_offset: state.next_record_offset,
+            map: buffer,
+            runs: state.runs,
+            _phantom: PhantomData,
+        }
+    }
+
+    pub(crate) fn into_state(self) -> MapFrontierState<K, MAX_RUNS> {
+        MapFrontierState {
+            id: self.id,
+            record_count: self.record_count,
+            next_record_offset: self.next_record_offset,
+            next_record_index: self.next_record_index,
+            runs: self.runs,
+        }
     }
 
     /// Returns the collection id represented by this frontier.

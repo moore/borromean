@@ -202,6 +202,30 @@ impl StorageFormatConfig {
     }
 }
 
+/// Collection kind currently occupying the storage-owned hot frontier buffer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FrontierBufferOwner {
+    /// The hot frontier buffer is available for reuse.
+    Empty { generation: u64 },
+    /// The hot frontier buffer contains a map frontier for a collection.
+    Map {
+        /// Collection currently represented in the buffer.
+        collection_id: CollectionId,
+        /// Generation used to invalidate stale typed capabilities.
+        generation: u64,
+        /// Whether the frontier has uncheckpointed updates.
+        dirty: bool,
+    },
+}
+
+impl FrontierBufferOwner {
+    fn generation(self) -> u64 {
+        match self {
+            Self::Empty { generation } | Self::Map { generation, .. } => generation,
+        }
+    }
+}
+
 /// Tier 1 storage facade for formatting, opening, and mutating a store.
 pub struct Storage<
     'db,
@@ -219,6 +243,7 @@ pub struct Storage<
     pub(crate) checkpoint_scratch: [u8; REGION_SIZE],
     pub(crate) collection_scratch: [u8; REGION_SIZE],
     pub(crate) open_scratch: [u8; REGION_SIZE],
+    pub(crate) frontier_buffer_owner: FrontierBufferOwner,
     pub(crate) mode: StorageMode,
 }
 
@@ -504,6 +529,7 @@ impl<
             checkpoint_scratch: [0; REGION_SIZE],
             collection_scratch: [0; REGION_SIZE],
             open_scratch: [0; REGION_SIZE],
+            frontier_buffer_owner: FrontierBufferOwner::Empty { generation: 0 },
             mode: StorageMode::Idle,
         }
     }
@@ -516,6 +542,115 @@ impl<
     /// Returns the current active storage mode.
     pub fn mode(&self) -> StorageMode {
         self.mode
+    }
+
+    /// Returns the current owner of the storage-owned hot frontier buffer.
+    pub fn frontier_buffer_owner(&self) -> FrontierBufferOwner {
+        self.frontier_buffer_owner
+    }
+
+    fn cached_map_frontier_generation(&self, collection_id: CollectionId) -> Option<u64> {
+        match self.frontier_buffer_owner {
+            FrontierBufferOwner::Map {
+                collection_id: active,
+                generation,
+                ..
+            } if active == collection_id => Some(generation),
+            _ => None,
+        }
+    }
+
+    fn assign_map_frontier_buffer(&mut self, collection_id: CollectionId) -> u64 {
+        let generation = match self.frontier_buffer_owner {
+            FrontierBufferOwner::Map {
+                collection_id: active,
+                generation,
+                ..
+            } if active == collection_id => generation,
+            other => other.generation().wrapping_add(1),
+        };
+        self.frontier_buffer_owner = FrontierBufferOwner::Map {
+            collection_id,
+            generation,
+            dirty: false,
+        };
+        generation
+    }
+
+    fn mark_map_frontier_dirty(&mut self, collection_id: CollectionId) {
+        if let FrontierBufferOwner::Map {
+            collection_id: active,
+            generation,
+            ..
+        } = self.frontier_buffer_owner
+        {
+            if active == collection_id {
+                self.frontier_buffer_owner = FrontierBufferOwner::Map {
+                    collection_id,
+                    generation,
+                    dirty: true,
+                };
+            }
+        }
+    }
+
+    fn invalidate_map_frontier_buffer(&mut self, collection_id: CollectionId) {
+        if let FrontierBufferOwner::Map {
+            collection_id: active,
+            generation,
+            ..
+        } = self.frontier_buffer_owner
+        {
+            if active == collection_id {
+                self.frontier_buffer_owner = FrontierBufferOwner::Empty {
+                    generation: generation.wrapping_add(1),
+                };
+            }
+        }
+    }
+
+    fn ensure_map_frontier_cached<K, V, const MAX_INDEXES: usize, const MAX_RUNS: usize>(
+        &mut self,
+        collection_id: CollectionId,
+        cache: &core::cell::RefCell<
+            Option<crate::collections::map::CachedMapFrontier<K, MAX_RUNS>>,
+        >,
+    ) -> Result<(), MapStorageError>
+    where
+        K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
+        V: Debug + Serialize + for<'de> Deserialize<'de>,
+    {
+        if let Some(generation) = self.cached_map_frontier_generation(collection_id) {
+            if cache
+                .borrow()
+                .as_ref()
+                .is_some_and(|cached| cached.buffer_generation == generation)
+            {
+                return Ok(());
+            }
+        }
+
+        cache.borrow_mut().take();
+        let generation = self.assign_map_frontier_buffer(collection_id);
+        let frontier = MapFrontier::<K, V, MAX_INDEXES, MAX_RUNS>::open_from_storage::<
+            REGION_SIZE,
+            REGION_COUNT,
+            IO,
+            MAX_COLLECTIONS,
+            MAX_PENDING_RECLAIMS,
+        >(
+            &self.state,
+            self.backing,
+            &mut self.workspace,
+            &mut self.collection_scratch,
+            collection_id,
+            &mut self.open_scratch,
+        )?;
+        *cache.borrow_mut() = Some(crate::collections::map::CachedMapFrontier {
+            buffer_generation: generation,
+            state: frontier.into_state(),
+        });
+        Ok(())
     }
 
     pub(crate) fn enter_mode(&mut self, next: StorageMode) -> Result<(), StorageRuntimeError> {
@@ -736,12 +871,16 @@ impl<
         self.run_storage_operation(
             StorageMode::UpdatingCollection(CollectionUpdateMode::Running),
             |this| {
-                this.state.append_update::<REGION_SIZE, REGION_COUNT, IO>(
+                let result = this.state.append_update::<REGION_SIZE, REGION_COUNT, IO>(
                     this.backing,
                     &mut this.workspace,
                     collection_id,
                     payload,
-                )
+                );
+                if result.is_ok() {
+                    this.invalidate_map_frontier_buffer(collection_id);
+                }
+                result
             },
         )
     }
@@ -756,13 +895,17 @@ impl<
         self.run_storage_operation(
             StorageMode::SnapshottingCollection(CollectionSnapshotMode::Running),
             |this| {
-                this.state.append_snapshot::<REGION_SIZE, REGION_COUNT, IO>(
+                let result = this.state.append_snapshot::<REGION_SIZE, REGION_COUNT, IO>(
                     this.backing,
                     &mut this.workspace,
                     collection_id,
                     collection_type,
                     payload,
-                )
+                );
+                if result.is_ok() {
+                    this.invalidate_map_frontier_buffer(collection_id);
+                }
+                result
             },
         )
     }
@@ -775,13 +918,17 @@ impl<
         region_index: u32,
     ) -> Result<(), StorageRuntimeError> {
         self.run_storage_operation(StorageMode::AppendingWal(WalAppendMode::Running), |this| {
-            this.state.append_head::<REGION_SIZE, REGION_COUNT, IO>(
+            let result = this.state.append_head::<REGION_SIZE, REGION_COUNT, IO>(
                 this.backing,
                 &mut this.workspace,
                 collection_id,
                 collection_type,
                 region_index,
-            )
+            );
+            if result.is_ok() {
+                this.invalidate_map_frontier_buffer(collection_id);
+            }
+            result
         })
     }
 
@@ -793,12 +940,17 @@ impl<
         self.run_storage_operation(
             StorageMode::DroppingCollection(CollectionDropMode::Running),
             |this| {
-                this.state
+                let result = this
+                    .state
                     .append_drop_collection::<REGION_SIZE, REGION_COUNT, IO>(
                         this.backing,
                         &mut this.workspace,
                         collection_id,
-                    )
+                    );
+                if result.is_ok() {
+                    this.invalidate_map_frontier_buffer(collection_id);
+                }
+                result
             },
         )
     }
@@ -1041,6 +1193,7 @@ impl<
             MAX_PENDING_RECLAIMS,
         >(&mut self.state, self.backing, &mut self.workspace)?;
         self.clear_dirty_frontier(map.id());
+        self.invalidate_map_frontier_buffer(map.id());
         Ok(region_index)
     }
 
@@ -1069,6 +1222,7 @@ impl<
                     &mut this.payload_scratch,
                 )?;
                 this.clear_dirty_frontier(map.id());
+                this.invalidate_map_frontier_buffer(map.id());
                 Ok(())
             },
         )
@@ -1135,14 +1289,19 @@ impl<
                     update,
                     &mut this.payload_scratch,
                 )?;
-                this.state
+                let result = this
+                    .state
                     .append_update::<REGION_SIZE, REGION_COUNT, IO>(
                         this.backing,
                         &mut this.workspace,
                         collection_id,
                         &this.payload_scratch[..used],
                     )
-                    .map_err(MapStorageError::from)
+                    .map_err(MapStorageError::from);
+                if result.is_ok() {
+                    this.invalidate_map_frontier_buffer(collection_id);
+                }
+                result
             },
         )
     }
@@ -1182,6 +1341,9 @@ impl<
             map,
             update,
         );
+        if result.is_ok() {
+            self.invalidate_map_frontier_buffer(map.id());
+        }
 
         self.finish_mode();
         result
@@ -1291,6 +1453,7 @@ impl<
         K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
         V: Debug + Serialize + for<'de> Deserialize<'de>,
     {
+        self.invalidate_map_frontier_buffer(collection_id);
         self.run_map_operation(
             StorageMode::CompactingCollection(CollectionCompactionMode::Running),
             |this| {
@@ -1406,6 +1569,7 @@ impl<
         self.run_map_operation(
             StorageMode::DroppingCollection(CollectionDropMode::Running),
             |this| {
+                this.invalidate_map_frontier_buffer(collection_id);
                 let Some(collection) = this
                     .state
                     .collections()
@@ -1472,7 +1636,7 @@ impl<
             &self.state,
             self.backing,
             &mut self.workspace,
-            &mut self.open_scratch,
+            &mut self.collection_scratch,
             collection_id,
             buffer,
         );
@@ -1612,21 +1776,26 @@ where
             .enter_mode(StorageMode::ReadingStorage(ReadMode::Running))
             .map_err(MapStorageError::from)?;
         let result = (|| {
-            let frontier = MapFrontier::<K, V, MAX_INDEXES, MAX_RUNS>::open_from_storage::<
-                REGION_SIZE,
-                REGION_COUNT,
-                IO,
-                MAX_COLLECTIONS,
-                MAX_PENDING_RECLAIMS,
-            >(
-                &storage.state,
-                storage.backing,
-                &mut storage.workspace,
-                &mut storage.collection_scratch,
+            storage.ensure_map_frontier_cached::<K, V, MAX_INDEXES, MAX_RUNS>(
                 self.collection_id,
-                &mut storage.open_scratch,
+                &self.cached_frontier,
             )?;
-            frontier.get::<REGION_SIZE, IO>(storage.backing, &mut storage.workspace, key)
+            let mut cached = self.cached_frontier.borrow_mut();
+            let cached_frontier = cached
+                .take()
+                .ok_or(MapStorageError::UnknownCollection(self.collection_id))?;
+            let buffer_generation = cached_frontier.buffer_generation;
+            let frontier = MapFrontier::<K, V, MAX_INDEXES, MAX_RUNS>::from_state(
+                cached_frontier.state,
+                &mut storage.open_scratch,
+            );
+            let result =
+                frontier.get::<REGION_SIZE, IO>(storage.backing, &mut storage.workspace, key);
+            *cached = Some(crate::collections::map::CachedMapFrontier {
+                buffer_generation,
+                state: frontier.into_state(),
+            });
+            result
         })();
         storage.finish_mode();
 
@@ -1663,22 +1832,21 @@ where
             ))
             .map_err(MapStorageError::from)?;
         let result = (|| {
-            let mut frontier = MapFrontier::<K, V, MAX_INDEXES, MAX_RUNS>::open_from_storage::<
-                REGION_SIZE,
-                REGION_COUNT,
-                IO,
-                MAX_COLLECTIONS,
-                MAX_PENDING_RECLAIMS,
-            >(
-                &storage.state,
-                storage.backing,
-                &mut storage.workspace,
-                &mut storage.collection_scratch,
+            storage.ensure_map_frontier_cached::<K, V, MAX_INDEXES, MAX_RUNS>(
                 self.collection_id,
-                &mut storage.open_scratch,
+                &self.cached_frontier,
             )?;
+            let mut cached = self.cached_frontier.borrow_mut();
+            let cached_frontier = cached
+                .take()
+                .ok_or(MapStorageError::UnknownCollection(self.collection_id))?;
+            let buffer_generation = cached_frontier.buffer_generation;
+            let mut frontier = MapFrontier::<K, V, MAX_INDEXES, MAX_RUNS>::from_state(
+                cached_frontier.state,
+                &mut storage.open_scratch,
+            );
             let update = MapUpdate::Set { key, value };
-            update_map_frontier_parts::<
+            let update_result = update_map_frontier_parts::<
                 K,
                 V,
                 IO,
@@ -1697,10 +1865,21 @@ where
                 &mut storage.checkpoint_scratch,
                 &mut frontier,
                 &update,
-            )?;
-            Ok(frontier
-                .selected_compaction_run_count(self.compaction_region_target)?
-                .is_some())
+            );
+            let update_applied = update_result.is_ok();
+            let result = update_result.and_then(|()| {
+                Ok(frontier
+                    .selected_compaction_run_count(self.compaction_region_target)?
+                    .is_some())
+            });
+            *cached = Some(crate::collections::map::CachedMapFrontier {
+                buffer_generation,
+                state: frontier.into_state(),
+            });
+            if update_applied {
+                storage.mark_map_frontier_dirty(self.collection_id);
+            }
+            result
         })();
         storage.finish_mode();
         result
@@ -1732,22 +1911,21 @@ where
             ))
             .map_err(MapStorageError::from)?;
         let result = (|| {
-            let mut frontier = MapFrontier::<K, V, MAX_INDEXES, MAX_RUNS>::open_from_storage::<
-                REGION_SIZE,
-                REGION_COUNT,
-                IO,
-                MAX_COLLECTIONS,
-                MAX_PENDING_RECLAIMS,
-            >(
-                &storage.state,
-                storage.backing,
-                &mut storage.workspace,
-                &mut storage.collection_scratch,
+            storage.ensure_map_frontier_cached::<K, V, MAX_INDEXES, MAX_RUNS>(
                 self.collection_id,
-                &mut storage.open_scratch,
+                &self.cached_frontier,
             )?;
+            let mut cached = self.cached_frontier.borrow_mut();
+            let cached_frontier = cached
+                .take()
+                .ok_or(MapStorageError::UnknownCollection(self.collection_id))?;
+            let buffer_generation = cached_frontier.buffer_generation;
+            let mut frontier = MapFrontier::<K, V, MAX_INDEXES, MAX_RUNS>::from_state(
+                cached_frontier.state,
+                &mut storage.open_scratch,
+            );
             let update = MapUpdate::Delete { key };
-            update_map_frontier_parts::<
+            let update_result = update_map_frontier_parts::<
                 K,
                 V,
                 IO,
@@ -1766,10 +1944,21 @@ where
                 &mut storage.checkpoint_scratch,
                 &mut frontier,
                 &update,
-            )?;
-            Ok(frontier
-                .selected_compaction_run_count(self.compaction_region_target)?
-                .is_some())
+            );
+            let update_applied = update_result.is_ok();
+            let result = update_result.and_then(|()| {
+                Ok(frontier
+                    .selected_compaction_run_count(self.compaction_region_target)?
+                    .is_some())
+            });
+            *cached = Some(crate::collections::map::CachedMapFrontier {
+                buffer_generation,
+                state: frontier.into_state(),
+            });
+            if update_applied {
+                storage.mark_map_frontier_dirty(self.collection_id);
+            }
+            result
         })();
         storage.finish_mode();
         result
@@ -1794,6 +1983,8 @@ where
             MAX_PENDING_RECLAIMS,
         >,
     ) -> Result<bool, LsmMapError> {
+        self.cached_frontier.borrow_mut().take();
+        storage.invalidate_map_frontier_buffer(self.collection_id);
         Ok(storage
             .compact_map_with_target::<K, V, MAX_INDEXES, MAX_RUNS>(
                 self.collection_id,

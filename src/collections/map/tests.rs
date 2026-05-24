@@ -154,6 +154,151 @@ fn requirement_object_lsm_map_new_open_get_set_delete_use_storage_owned_scratch(
     );
 }
 
+#[test]
+fn requirement_lsm_map_reuses_storage_owned_frontier_buffer_for_hot_reads() {
+    let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
+    let mut storage =
+        Storage::<_, 512, 8, 8, 4>::format(&mut flash, StorageFormatConfig::new(2, 8, 0xa5))
+            .unwrap();
+    let mut map = LsmMap::<u16, u16, 8>::new(&mut storage).unwrap();
+
+    assert!(matches!(
+        storage.frontier_buffer_owner(),
+        crate::FrontierBufferOwner::Empty { .. }
+    ));
+
+    map.set(&mut storage, 7, 70).unwrap();
+    let owner_after_write = storage.frontier_buffer_owner();
+    assert!(matches!(
+        owner_after_write,
+        crate::FrontierBufferOwner::Map {
+            collection_id,
+            dirty: true,
+            ..
+        } if collection_id == map.collection_id()
+    ));
+
+    assert_eq!(
+        map.get(&mut storage, &7, |_, value| *value).unwrap(),
+        Some(70)
+    );
+    assert_eq!(storage.frontier_buffer_owner(), owner_after_write);
+    assert_eq!(
+        map.get(&mut storage, &7, |_, value| *value).unwrap(),
+        Some(70)
+    );
+    assert_eq!(storage.frontier_buffer_owner(), owner_after_write);
+}
+
+#[test]
+fn requirement_lsm_map_raw_update_invalidates_cached_frontier() {
+    let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
+    let mut storage =
+        Storage::<_, 512, 8, 8, 4>::format(&mut flash, StorageFormatConfig::new(2, 8, 0xa5))
+            .unwrap();
+    let mut map = LsmMap::<u16, u16, 8>::new(&mut storage).unwrap();
+
+    map.set(&mut storage, 7, 70).unwrap();
+    assert_eq!(
+        map.get(&mut storage, &7, |_, value| *value).unwrap(),
+        Some(70)
+    );
+
+    storage
+        .append_map_update::<u16, u16, 8>(
+            map.collection_id(),
+            &MapUpdate::Set { key: 7, value: 71 },
+        )
+        .unwrap();
+
+    assert!(matches!(
+        storage.frontier_buffer_owner(),
+        crate::FrontierBufferOwner::Empty { .. }
+    ));
+    assert_eq!(
+        map.get(&mut storage, &7, |_, value| *value).unwrap(),
+        Some(71)
+    );
+}
+
+#[test]
+fn requirement_two_lsm_maps_reload_storage_owned_frontier_buffer() {
+    let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
+    let mut storage =
+        Storage::<_, 512, 8, 8, 4>::format(&mut flash, StorageFormatConfig::new(3, 8, 0xa5))
+            .unwrap();
+    let mut first = LsmMap::<u16, u16, 8>::new(&mut storage).unwrap();
+    let mut second = LsmMap::<u16, u16, 8>::new(&mut storage).unwrap();
+
+    first.set(&mut storage, 1, 10).unwrap();
+    assert!(matches!(
+        storage.frontier_buffer_owner(),
+        crate::FrontierBufferOwner::Map {
+            collection_id,
+            ..
+        } if collection_id == first.collection_id()
+    ));
+
+    second.set(&mut storage, 2, 20).unwrap();
+    assert!(matches!(
+        storage.frontier_buffer_owner(),
+        crate::FrontierBufferOwner::Map {
+            collection_id,
+            ..
+        } if collection_id == second.collection_id()
+    ));
+
+    assert_eq!(
+        first.get(&mut storage, &1, |_, value| *value).unwrap(),
+        Some(10)
+    );
+    assert!(matches!(
+        storage.frontier_buffer_owner(),
+        crate::FrontierBufferOwner::Map {
+            collection_id,
+            ..
+        } if collection_id == first.collection_id()
+    ));
+
+    assert_eq!(
+        second.get(&mut storage, &2, |_, value| *value).unwrap(),
+        Some(20)
+    );
+    assert!(matches!(
+        storage.frontier_buffer_owner(),
+        crate::FrontierBufferOwner::Map {
+            collection_id,
+            ..
+        } if collection_id == second.collection_id()
+    ));
+}
+
+#[test]
+fn requirement_lsm_map_writes_remain_durable_without_frontier_flush() {
+    let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
+    let mut storage =
+        Storage::<_, 512, 8, 8, 4>::format(&mut flash, StorageFormatConfig::new(2, 8, 0xa5))
+            .unwrap();
+    let mut map = LsmMap::<u16, u16, 8>::new(&mut storage).unwrap();
+    let collection_id = map.collection_id();
+
+    map.set(&mut storage, 7, 70).unwrap();
+    assert!(matches!(
+        storage.frontier_buffer_owner(),
+        crate::FrontierBufferOwner::Map { dirty: true, .. }
+    ));
+
+    drop(storage);
+    let mut reopened = Storage::<_, 512, 8, 8, 4>::open(&mut flash).unwrap();
+    let reopened_map = LsmMap::<u16, u16, 8>::open(collection_id, &mut reopened).unwrap();
+    assert_eq!(
+        reopened_map
+            .get(&mut reopened, &7, |_, value| *value)
+            .unwrap(),
+        Some(70)
+    );
+}
+
 //= spec/map.md#map-api-model
 //= type=test
 //# `compact`
