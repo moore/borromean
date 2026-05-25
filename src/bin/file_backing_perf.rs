@@ -1,14 +1,17 @@
+use std::cell::RefCell;
 use std::env;
 use std::fmt::Debug;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use borromean::{
     AllocationPolicy, CollectionId, FileBacking, FileBackingOptions, FlashIo, FreePointerFooter,
     Header, LsmMap, MadvisePolicy, MockError, MockFormatError, Storage, StorageFormatConfig,
-    StorageFormatError, StorageIoError, StorageMetadata, WalRegionPrologue, WAL_V1_FORMAT,
+    StorageFormatError, StorageIoError, StorageMetadata, StoragePerfMetrics, WalRegionPrologue,
+    WAL_V1_FORMAT,
 };
 use heapless::Vec as HeaplessVec;
 use redb::{Builder as RedbBuilder, Database, Durability, ReadableDatabase, TableDefinition};
@@ -472,6 +475,7 @@ struct EngineReport {
     sampled_latency: Option<LatencySummary>,
     sampled_latency_by_op: OperationLatencySummaries,
     diagnostics: PerfDiagnostics,
+    borromean_core_metrics: Option<StoragePerfMetrics>,
     maintenance: MaintenanceReport,
     file_len_bytes: u64,
     logical_len_bytes: u64,
@@ -806,29 +810,50 @@ fn unreachable_storage_format_error() -> StorageFormatError {
     StorageFormatError::from(MockFormatError::from(MockError::OutOfBounds))
 }
 
-struct InstrumentedBacking<IO, const REGION_SIZE: usize, const REGION_COUNT: usize> {
-    inner: IO,
+#[derive(Clone)]
+struct IoDiagnosticsHandle<const REGION_SIZE: usize, const REGION_COUNT: usize> {
+    state: Rc<RefCell<IoDiagnosticsState>>,
+}
+
+struct IoDiagnosticsState {
     diagnostics: IoDiagnostics,
     metadata_dirty: bool,
     dirty_regions: Vec<bool>,
 }
 
-impl<IO, const REGION_SIZE: usize, const REGION_COUNT: usize>
-    InstrumentedBacking<IO, REGION_SIZE, REGION_COUNT>
+impl<const REGION_SIZE: usize, const REGION_COUNT: usize>
+    IoDiagnosticsHandle<REGION_SIZE, REGION_COUNT>
 {
-    fn new(inner: IO) -> Self {
+    fn new() -> Self {
         Self {
-            inner,
-            diagnostics: IoDiagnostics::default(),
-            metadata_dirty: false,
-            dirty_regions: vec![false; REGION_COUNT],
+            state: Rc::new(RefCell::new(IoDiagnosticsState {
+                diagnostics: IoDiagnostics::default(),
+                metadata_dirty: false,
+                dirty_regions: vec![false; REGION_COUNT],
+            })),
         }
     }
 
     fn diagnostics(&self) -> IoDiagnostics {
-        self.diagnostics
+        self.state.borrow().diagnostics
     }
 
+    fn reset(&self) {
+        let mut state = self.state.borrow_mut();
+        state.diagnostics = IoDiagnostics::default();
+        state.clear_dirty_state();
+    }
+
+    fn update(&self, f: impl FnOnce(&mut IoDiagnosticsState)) {
+        f(&mut self.state.borrow_mut());
+    }
+
+    fn dirty_state(&self) -> (u64, u64, u64) {
+        self.state.borrow().dirty_state::<REGION_SIZE>()
+    }
+}
+
+impl IoDiagnosticsState {
     fn mark_region_dirty(&mut self, region_index: u32) {
         let Ok(index) = usize::try_from(region_index) else {
             return;
@@ -838,7 +863,7 @@ impl<IO, const REGION_SIZE: usize, const REGION_COUNT: usize>
         }
     }
 
-    fn dirty_state(&self) -> (u64, u64, u64) {
+    fn dirty_state<const REGION_SIZE: usize>(&self) -> (u64, u64, u64) {
         let dirty_regions = self.dirty_regions.iter().filter(|dirty| **dirty).count() as u64;
         let dirty_metadata_regions = u64::from(self.metadata_dirty);
         let dirty_bytes = dirty_regions
@@ -855,22 +880,58 @@ impl<IO, const REGION_SIZE: usize, const REGION_COUNT: usize>
     }
 }
 
+struct InstrumentedBacking<IO, const REGION_SIZE: usize, const REGION_COUNT: usize> {
+    inner: IO,
+    diagnostics: IoDiagnosticsHandle<REGION_SIZE, REGION_COUNT>,
+}
+
+impl<IO, const REGION_SIZE: usize, const REGION_COUNT: usize>
+    InstrumentedBacking<IO, REGION_SIZE, REGION_COUNT>
+{
+    fn new(inner: IO) -> Self {
+        Self {
+            inner,
+            diagnostics: IoDiagnosticsHandle::new(),
+        }
+    }
+
+    fn diagnostics_handle(&self) -> IoDiagnosticsHandle<REGION_SIZE, REGION_COUNT> {
+        self.diagnostics.clone()
+    }
+}
+
+fn merge_io_metrics_into_core(metrics: &mut StoragePerfMetrics, io: IoDiagnostics) {
+    metrics.mmap_flush_nanos = metrics.mmap_flush_nanos.saturating_add(io.mmap_flush_nanos);
+    metrics.file_sync_nanos = metrics.file_sync_nanos.saturating_add(io.file_sync_nanos);
+    metrics.dirty_sync_bytes = metrics.dirty_sync_bytes.saturating_add(io.dirty_sync_bytes);
+    metrics.dirty_sync_regions = metrics
+        .dirty_sync_regions
+        .saturating_add(io.dirty_sync_regions);
+    metrics.dirty_sync_metadata_regions = metrics
+        .dirty_sync_metadata_regions
+        .saturating_add(io.dirty_sync_metadata_regions);
+}
+
 impl<IO, const REGION_SIZE: usize, const REGION_COUNT: usize> FlashIo
     for InstrumentedBacking<IO, REGION_SIZE, REGION_COUNT>
 where
     IO: PerfBacking,
 {
     fn read_metadata(&mut self) -> Result<Option<StorageMetadata>, StorageIoError> {
-        self.diagnostics.metadata_reads = self.diagnostics.metadata_reads.saturating_add(1);
+        self.diagnostics.update(|state| {
+            state.diagnostics.metadata_reads = state.diagnostics.metadata_reads.saturating_add(1);
+        });
         self.inner.read_metadata().map_err(StorageIoError::from)
     }
 
     fn write_metadata(&mut self, metadata: StorageMetadata) -> Result<(), StorageIoError> {
         let result = self.inner.write_metadata(metadata);
-        self.diagnostics.metadata_writes = self.diagnostics.metadata_writes.saturating_add(1);
-        if result.is_ok() {
-            self.metadata_dirty = true;
-        }
+        self.diagnostics.update(|state| {
+            state.diagnostics.metadata_writes = state.diagnostics.metadata_writes.saturating_add(1);
+            if result.is_ok() {
+                state.metadata_dirty = true;
+            }
+        });
         result
     }
 
@@ -882,15 +943,16 @@ where
     ) -> Result<(), StorageIoError> {
         let start = Instant::now();
         let result = self.inner.read_region(region_index, offset, buffer);
-        self.diagnostics.region_reads = self.diagnostics.region_reads.saturating_add(1);
-        self.diagnostics.bytes_read = self
-            .diagnostics
-            .bytes_read
-            .saturating_add(buffer.len() as u64);
-        self.diagnostics.read_region_nanos = self
-            .diagnostics
-            .read_region_nanos
-            .saturating_add(start.elapsed().as_nanos());
+        let elapsed = start.elapsed().as_nanos();
+        self.diagnostics.update(|state| {
+            state.diagnostics.region_reads = state.diagnostics.region_reads.saturating_add(1);
+            state.diagnostics.bytes_read = state
+                .diagnostics
+                .bytes_read
+                .saturating_add(buffer.len() as u64);
+            state.diagnostics.read_region_nanos =
+                state.diagnostics.read_region_nanos.saturating_add(elapsed);
+        });
         result
     }
 
@@ -902,74 +964,84 @@ where
     ) -> Result<(), StorageIoError> {
         let start = Instant::now();
         let result = self.inner.write_region(region_index, offset, data);
-        self.diagnostics.region_writes = self.diagnostics.region_writes.saturating_add(1);
-        self.diagnostics.bytes_written = self
-            .diagnostics
-            .bytes_written
-            .saturating_add(data.len() as u64);
-        self.diagnostics.write_region_nanos = self
-            .diagnostics
-            .write_region_nanos
-            .saturating_add(start.elapsed().as_nanos());
-        if result.is_ok() {
-            self.mark_region_dirty(region_index);
-        }
+        let elapsed = start.elapsed().as_nanos();
+        self.diagnostics.update(|state| {
+            state.diagnostics.region_writes = state.diagnostics.region_writes.saturating_add(1);
+            state.diagnostics.bytes_written = state
+                .diagnostics
+                .bytes_written
+                .saturating_add(data.len() as u64);
+            state.diagnostics.write_region_nanos =
+                state.diagnostics.write_region_nanos.saturating_add(elapsed);
+            if result.is_ok() {
+                state.mark_region_dirty(region_index);
+            }
+        });
         result
     }
 
     fn erase_region(&mut self, region_index: u32) -> Result<(), StorageIoError> {
         let start = Instant::now();
         let result = self.inner.erase_region(region_index);
-        self.diagnostics.region_erases = self.diagnostics.region_erases.saturating_add(1);
-        self.diagnostics.bytes_erased = self
-            .diagnostics
-            .bytes_erased
-            .saturating_add(REGION_SIZE as u64);
-        self.diagnostics.erase_region_nanos = self
-            .diagnostics
-            .erase_region_nanos
-            .saturating_add(start.elapsed().as_nanos());
-        if result.is_ok() {
-            self.mark_region_dirty(region_index);
-        }
+        let elapsed = start.elapsed().as_nanos();
+        self.diagnostics.update(|state| {
+            state.diagnostics.region_erases = state.diagnostics.region_erases.saturating_add(1);
+            state.diagnostics.bytes_erased = state
+                .diagnostics
+                .bytes_erased
+                .saturating_add(REGION_SIZE as u64);
+            state.diagnostics.erase_region_nanos =
+                state.diagnostics.erase_region_nanos.saturating_add(elapsed);
+            if result.is_ok() {
+                state.mark_region_dirty(region_index);
+            }
+        });
         result
     }
 
     fn sync(&mut self) -> Result<(), StorageIoError> {
         let start = Instant::now();
-        let (dirty_regions, dirty_metadata_regions, dirty_bytes) = self.dirty_state();
+        let (dirty_regions, dirty_metadata_regions, dirty_bytes) = self.diagnostics.dirty_state();
         let result = self.inner.sync_for_perf();
-        self.diagnostics.syncs = self.diagnostics.syncs.saturating_add(1);
-        self.diagnostics.sync_nanos = self
-            .diagnostics
-            .sync_nanos
-            .saturating_add(start.elapsed().as_nanos());
+        let sync_nanos = start.elapsed().as_nanos();
         match result {
             Ok(details) => {
-                self.diagnostics.mmap_flush_nanos = self
-                    .diagnostics
-                    .mmap_flush_nanos
-                    .saturating_add(details.mmap_flush_nanos);
-                self.diagnostics.file_sync_nanos = self
-                    .diagnostics
-                    .file_sync_nanos
-                    .saturating_add(details.file_sync_nanos);
-                self.diagnostics.dirty_sync_regions = self
-                    .diagnostics
-                    .dirty_sync_regions
-                    .saturating_add(dirty_regions);
-                self.diagnostics.dirty_sync_metadata_regions = self
-                    .diagnostics
-                    .dirty_sync_metadata_regions
-                    .saturating_add(dirty_metadata_regions);
-                self.diagnostics.dirty_sync_bytes = self
-                    .diagnostics
-                    .dirty_sync_bytes
-                    .saturating_add(dirty_bytes);
-                self.clear_dirty_state();
+                self.diagnostics.update(|state| {
+                    state.diagnostics.syncs = state.diagnostics.syncs.saturating_add(1);
+                    state.diagnostics.sync_nanos =
+                        state.diagnostics.sync_nanos.saturating_add(sync_nanos);
+                    state.diagnostics.mmap_flush_nanos = state
+                        .diagnostics
+                        .mmap_flush_nanos
+                        .saturating_add(details.mmap_flush_nanos);
+                    state.diagnostics.file_sync_nanos = state
+                        .diagnostics
+                        .file_sync_nanos
+                        .saturating_add(details.file_sync_nanos);
+                    state.diagnostics.dirty_sync_regions = state
+                        .diagnostics
+                        .dirty_sync_regions
+                        .saturating_add(dirty_regions);
+                    state.diagnostics.dirty_sync_metadata_regions = state
+                        .diagnostics
+                        .dirty_sync_metadata_regions
+                        .saturating_add(dirty_metadata_regions);
+                    state.diagnostics.dirty_sync_bytes = state
+                        .diagnostics
+                        .dirty_sync_bytes
+                        .saturating_add(dirty_bytes);
+                    state.clear_dirty_state();
+                });
                 Ok(())
             }
-            Err(error) => Err(error),
+            Err(error) => {
+                self.diagnostics.update(|state| {
+                    state.diagnostics.syncs = state.diagnostics.syncs.saturating_add(1);
+                    state.diagnostics.sync_nanos =
+                        state.diagnostics.sync_nanos.saturating_add(sync_nanos);
+                });
+                Err(error)
+            }
         }
     }
 
@@ -1350,6 +1422,7 @@ where
         FileBacking::<REGION_SIZE, REGION_COUNT>::create_new(&config.backing.path, options)
             .map_err(|error| format!("failed to create file backing: {error:?}"))?;
     let mut backing = InstrumentedBacking::new(backing);
+    let diagnostics_handle = backing.diagnostics_handle();
     let mut storage =
         Storage::<_, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>::format(
             &mut backing,
@@ -1435,6 +1508,8 @@ where
         );
     }
 
+    storage.reset_perf_metrics();
+    diagnostics_handle.reset();
     let mut counters = WorkloadCounters::default();
     let mut workload_timings = WorkloadTimings::default();
     let mut latency_samples = Vec::new();
@@ -1478,6 +1553,9 @@ where
         latency_samples.len(),
     );
 
+    let mut borromean_core_metrics = storage.take_perf_metrics();
+    let io_diagnostics = diagnostics_handle.diagnostics();
+    merge_io_metrics_into_core(&mut borromean_core_metrics, io_diagnostics);
     let maintenance = run_borromean_post_workload_maintenance::<
         _,
         REGION_SIZE,
@@ -1487,7 +1565,6 @@ where
 
     drop(maps);
     drop(storage);
-    let io_diagnostics = backing.diagnostics();
     let file_len_bytes = current_file_len(&config.backing.path)?;
     drop(backing);
     if config.backing.remove_after {
@@ -1518,6 +1595,7 @@ where
         sampled_latency: summarize_latency(latency_samples),
         sampled_latency_by_op: summarize_operation_latency(latency_samples_by_op),
         diagnostics,
+        borromean_core_metrics: Some(borromean_core_metrics),
         maintenance,
         file_len_bytes,
         logical_len_bytes: file_len_bytes,
@@ -1550,6 +1628,7 @@ where
     let create_format_start = Instant::now();
     let backing = MemoryBacking::<REGION_SIZE, REGION_COUNT>::new(config.backing.erased_byte)?;
     let mut backing = InstrumentedBacking::new(backing);
+    let diagnostics_handle = backing.diagnostics_handle();
     let mut storage =
         Storage::<_, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>::format(
             &mut backing,
@@ -1635,6 +1714,8 @@ where
         );
     }
 
+    storage.reset_perf_metrics();
+    diagnostics_handle.reset();
     let mut counters = WorkloadCounters::default();
     let mut workload_timings = WorkloadTimings::default();
     let mut latency_samples = Vec::new();
@@ -1678,6 +1759,9 @@ where
         latency_samples.len(),
     );
 
+    let mut borromean_core_metrics = storage.take_perf_metrics();
+    let io_diagnostics = diagnostics_handle.diagnostics();
+    merge_io_metrics_into_core(&mut borromean_core_metrics, io_diagnostics);
     let maintenance = run_borromean_post_workload_maintenance::<
         _,
         REGION_SIZE,
@@ -1687,7 +1771,6 @@ where
 
     drop(maps);
     drop(storage);
-    let io_diagnostics = backing.diagnostics();
     drop(backing);
     let memory = memory.finish();
     let diagnostics = PerfDiagnostics {
@@ -1714,6 +1797,7 @@ where
         sampled_latency: summarize_latency(latency_samples),
         sampled_latency_by_op: summarize_operation_latency(latency_samples_by_op),
         diagnostics,
+        borromean_core_metrics: Some(borromean_core_metrics),
         maintenance,
         file_len_bytes: 0,
         logical_len_bytes,
@@ -1896,6 +1980,7 @@ fn run_redb_engine<const VALUE_BYTES: usize>(
         sampled_latency: summarize_latency(latency_samples),
         sampled_latency_by_op: summarize_operation_latency(latency_samples_by_op),
         diagnostics,
+        borromean_core_metrics: None,
         maintenance,
         file_len_bytes,
         logical_len_bytes: file_len_bytes,
@@ -2969,6 +3054,9 @@ fn print_diagnostics(report: &EngineReport) {
             format_nanos(io.file_sync_nanos)
         );
     }
+    if let Some(metrics) = report.borromean_core_metrics {
+        print_borromean_core_metrics(&metrics);
+    }
     if let Some(cache_size) = diagnostics.redb_cache_size_bytes {
         println!("  redb cache_size: {cache_size} bytes");
     }
@@ -2985,6 +3073,69 @@ fn print_diagnostics(report: &EngineReport) {
             stats.page_size
         );
     }
+}
+
+fn print_borromean_core_metrics(metrics: &StoragePerfMetrics) {
+    let write_ops = metrics.map_sets.saturating_add(metrics.map_deletes);
+    let map_ops = metrics
+        .map_reads
+        .saturating_add(metrics.map_sets)
+        .saturating_add(metrics.map_deletes);
+    let wal_bytes_per_op = if map_ops == 0 {
+        0.0
+    } else {
+        metrics.wal_bytes as f64 / map_ops as f64
+    };
+
+    println!(
+        "  borromean core: reads={} sets={} deletes={} cache_hits={} cache_misses={} reloads={}",
+        metrics.map_reads,
+        metrics.map_sets,
+        metrics.map_deletes,
+        metrics.frontier_cache_hits,
+        metrics.frontier_cache_misses,
+        metrics.frontier_reloads
+    );
+    println!(
+        "  borromean wal: records={} update_records={} bytes={} bytes/op={:.1} syncs={} avg_sync={} wal_encode={} wal_write={} wal_sync={} mmap_flush={} file_sync={}",
+        metrics.wal_records,
+        metrics.wal_update_records,
+        metrics.wal_bytes,
+        wal_bytes_per_op,
+        metrics.wal_syncs,
+        format_average_nanos(metrics.wal_sync_nanos, metrics.wal_syncs),
+        format_nanos(metrics.wal_encode_nanos),
+        format_nanos(metrics.wal_write_nanos),
+        format_nanos(metrics.wal_sync_nanos),
+        format_nanos(metrics.mmap_flush_nanos),
+        format_nanos(metrics.file_sync_nanos)
+    );
+    println!(
+        "  borromean write path: full={} avg_write={} update_encode={} frontier_checkpoint={} frontier_apply={} overflow_flushes={} overflow_flush_time={}",
+        format_nanos(metrics.full_write_path_nanos),
+        format_average_nanos(metrics.full_write_path_nanos, write_ops),
+        format_nanos(metrics.update_encode_nanos),
+        format_nanos(metrics.frontier_checkpoint_nanos),
+        format_nanos(metrics.frontier_apply_nanos),
+        metrics.overflow_flushes,
+        format_nanos(metrics.overflow_flush_nanos)
+    );
+    println!(
+        "  borromean maintenance core: compaction_checks={} compactions={} compaction_check_time={} compaction_time={} flushes={} reclaim_begin={} reclaim_end={} dirty_sync_bytes={} dirty_sync_regions={} dirty_sync_metadata_regions={} buffer_too_small={} wal_rotation_required={} append_failures={}",
+        metrics.compaction_checks,
+        metrics.compactions_run,
+        format_nanos(metrics.compaction_check_nanos),
+        format_nanos(metrics.compaction_nanos),
+        metrics.flushes,
+        metrics.reclaim_starts,
+        metrics.reclaim_ends,
+        metrics.dirty_sync_bytes,
+        metrics.dirty_sync_regions,
+        metrics.dirty_sync_metadata_regions,
+        metrics.buffer_too_small_errors,
+        metrics.wal_rotation_required,
+        metrics.append_failures
+    );
 }
 
 fn print_workload_timing_split(report: &EngineReport) {

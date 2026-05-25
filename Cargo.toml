@@ -15,7 +15,14 @@ keywords = ["embeded", "nostd", "storage", "flash", "collections"]
 default = []
 std = ["serde/std"]
 file-backing = ["std", "dep:libc", "dep:memmap2"]
-perf-tools = ["file-backing", "dep:redb", "dep:serde_json", "dep:toml"]
+perf-counters = ["std"]
+perf-tools = [
+    "file-backing",
+    "perf-counters",
+    "dep:redb",
+    "dep:serde_json",
+    "dep:toml",
+]
 
 [[bin]]
 name = "file_backing_perf"

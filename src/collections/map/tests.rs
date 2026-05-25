@@ -1,6 +1,8 @@
 use super::*;
 extern crate std;
 use crate::wal_record::encode_record_into;
+#[cfg(feature = "perf-counters")]
+use crate::StoragePerfMetrics;
 use crate::{MockFlash, Storage, StorageFormatConfig, StorageWorkspace};
 use postcard::to_slice;
 use proptest::prelude::*;
@@ -152,6 +154,105 @@ fn requirement_object_lsm_map_new_open_get_set_delete_use_storage_owned_scratch(
             .unwrap(),
         None
     );
+}
+
+#[cfg(feature = "perf-counters")]
+#[test]
+fn perf_metrics_first_read_records_frontier_miss_and_reload() {
+    let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
+    let mut storage =
+        Storage::<_, 512, 8, 8, 4>::format(&mut flash, StorageFormatConfig::new(2, 8, 0xa5))
+            .unwrap();
+    let map = LsmMap::<u16, u16, 8>::new(&mut storage).unwrap();
+
+    storage.reset_perf_metrics();
+    assert_eq!(map.get(&mut storage, &7, |_, value| *value).unwrap(), None);
+
+    let metrics = storage.perf_metrics();
+    assert_eq!(metrics.map_reads, 1);
+    assert_eq!(metrics.frontier_cache_misses, 1);
+    assert_eq!(metrics.frontier_reloads, 1);
+    assert_eq!(metrics.frontier_cache_hits, 0);
+    assert!(metrics.map_read_lookup_nanos > 0);
+}
+
+#[cfg(feature = "perf-counters")]
+#[test]
+fn perf_metrics_hot_reads_record_frontier_cache_hits() {
+    let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
+    let mut storage =
+        Storage::<_, 512, 8, 8, 4>::format(&mut flash, StorageFormatConfig::new(2, 8, 0xa5))
+            .unwrap();
+    let mut map = LsmMap::<u16, u16, 8>::new(&mut storage).unwrap();
+    assert!(!map.set(&mut storage, 7, 70).unwrap());
+
+    storage.reset_perf_metrics();
+    assert_eq!(
+        map.get(&mut storage, &7, |_, value| *value).unwrap(),
+        Some(70)
+    );
+    assert_eq!(
+        map.get(&mut storage, &7, |_, value| *value).unwrap(),
+        Some(70)
+    );
+
+    let metrics = storage.perf_metrics();
+    assert_eq!(metrics.map_reads, 2);
+    assert_eq!(metrics.frontier_cache_hits, 2);
+    assert_eq!(metrics.frontier_cache_misses, 0);
+    assert_eq!(metrics.frontier_reloads, 0);
+    assert!(metrics.map_read_lookup_nanos > 0);
+}
+
+#[cfg(feature = "perf-counters")]
+#[test]
+fn perf_metrics_set_delete_record_write_path() {
+    let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
+    let mut storage =
+        Storage::<_, 512, 8, 8, 4>::format(&mut flash, StorageFormatConfig::new(2, 8, 0xa5))
+            .unwrap();
+    let mut map = LsmMap::<u16, u16, 8>::new(&mut storage).unwrap();
+
+    storage.reset_perf_metrics();
+    assert!(!map.set(&mut storage, 7, 70).unwrap());
+    assert!(!map.delete(&mut storage, 7).unwrap());
+
+    let metrics = storage.perf_metrics();
+    assert_eq!(metrics.map_sets, 1);
+    assert_eq!(metrics.map_deletes, 1);
+    assert_eq!(metrics.update_encodes, 2);
+    assert!(metrics.encoded_update_bytes > 0);
+    assert_eq!(metrics.frontier_applies, 2);
+    assert_eq!(metrics.wal_update_records, 2);
+    assert_eq!(metrics.wal_records, 2);
+    assert_eq!(metrics.wal_syncs, 2);
+    assert!(metrics.full_write_path_nanos > 0);
+    assert!(metrics.update_encode_nanos > 0);
+    assert!(metrics.frontier_apply_nanos > 0);
+    assert!(metrics.wal_encode_nanos > 0);
+    assert!(metrics.wal_write_nanos > 0);
+    assert!(metrics.wal_sync_nanos > 0);
+}
+
+#[cfg(feature = "perf-counters")]
+#[test]
+fn perf_metrics_reset_and_take_clear_metrics() {
+    let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
+    let mut storage =
+        Storage::<_, 512, 8, 8, 4>::format(&mut flash, StorageFormatConfig::new(2, 8, 0xa5))
+            .unwrap();
+    let mut map = LsmMap::<u16, u16, 8>::new(&mut storage).unwrap();
+
+    assert!(!map.set(&mut storage, 7, 70).unwrap());
+    assert!(storage.perf_metrics().map_sets > 0);
+
+    storage.reset_perf_metrics();
+    assert_eq!(storage.perf_metrics(), StoragePerfMetrics::default());
+
+    assert!(!map.set(&mut storage, 8, 80).unwrap());
+    let taken = storage.take_perf_metrics();
+    assert_eq!(taken.map_sets, 1);
+    assert_eq!(storage.perf_metrics(), StoragePerfMetrics::default());
 }
 
 #[test]

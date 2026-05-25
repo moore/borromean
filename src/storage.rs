@@ -14,6 +14,11 @@ use crate::workspace::StorageWorkspace;
 use crate::StorageMetadata;
 use crate::{CollectionId, CollectionType, StartupCollectionBasis};
 
+#[cfg(feature = "perf-counters")]
+use crate::perf_metrics::{
+    StoragePerfCounter, StoragePerfMetrics, StoragePerfTimer, StoragePerfTimerGuard,
+};
+
 /// Errors returned by low-level shared storage operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StorageRuntimeError {
@@ -496,6 +501,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         )
     }
 
+    #[cfg_attr(feature = "perf-counters", allow(dead_code))]
     pub(crate) fn append_update_with_rotation<
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
@@ -521,6 +527,38 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
                 collection_id,
                 payload,
             },
+        )
+    }
+
+    #[cfg(feature = "perf-counters")]
+    pub(crate) fn append_update_with_rotation_metered<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        collection_id: CollectionId,
+        payload: &[u8],
+        metrics: &mut StoragePerfMetrics,
+    ) -> Result<(), StorageRuntimeError> {
+        let collection = self
+            .find_collection(collection_id)
+            .ok_or(StorageRuntimeError::UnknownCollection(collection_id))?;
+        if collection.basis() == StartupCollectionBasis::Dropped {
+            return Err(StorageRuntimeError::DroppedCollection(collection_id));
+        }
+
+        metrics.increment(StoragePerfCounter::WalUpdateRecords);
+        self.append_record_with_rotation_metered::<REGION_SIZE, REGION_COUNT, IO>(
+            flash,
+            workspace,
+            WalRecord::Update {
+                collection_id,
+                payload,
+            },
+            metrics,
         )
     }
 
@@ -1266,6 +1304,92 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         }
     }
 
+    #[cfg(feature = "perf-counters")]
+    fn append_record_with_rotation_metered<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        record: WalRecord<'_>,
+        metrics: &mut StoragePerfMetrics,
+    ) -> Result<(), StorageRuntimeError> {
+        loop {
+            match self.append_record_metered::<REGION_SIZE, REGION_COUNT, IO>(
+                flash, workspace, record, metrics,
+            ) {
+                Ok(()) => return Ok(()),
+                Err(StorageRuntimeError::WalRotationRequired) => {
+                    metrics.increment(StoragePerfCounter::WalRotationRequired);
+                    metrics.increment(StoragePerfCounter::WalRotationsAttempted);
+                    let rotation_timer = StoragePerfTimerGuard::start();
+                    self.rotate_wal_tail::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace)?;
+                    metrics.add_nanos(
+                        StoragePerfTimer::WalRotation,
+                        rotation_timer.elapsed_nanos(),
+                    );
+                    metrics.increment(StoragePerfCounter::WalRotationsCompleted);
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    #[cfg(feature = "perf-counters")]
+    fn append_record_metered<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        record: WalRecord<'_>,
+        metrics: &mut StoragePerfMetrics,
+    ) -> Result<(), StorageRuntimeError> {
+        match self.ensure_append_reserve::<REGION_SIZE, REGION_COUNT, IO>(workspace, flash, record)
+        {
+            Ok(()) => {}
+            Err(StorageRuntimeError::WalRotationRequired) => {
+                return Err(StorageRuntimeError::WalRotationRequired);
+            }
+            Err(error) => return Err(error),
+        }
+        self.write_record_and_apply_metered::<REGION_SIZE, REGION_COUNT, IO>(
+            flash, workspace, record, metrics,
+        )
+    }
+
+    #[cfg(feature = "perf-counters")]
+    fn write_record_and_apply_metered<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        record: WalRecord<'_>,
+        metrics: &mut StoragePerfMetrics,
+    ) -> Result<(), StorageRuntimeError> {
+        let encoded_len = self.write_record_raw_metered::<REGION_SIZE, REGION_COUNT, IO>(
+            flash, workspace, record, metrics,
+        )?;
+        if matches!(
+            record,
+            WalRecord::Head { .. } | WalRecord::FreeListHead { .. } | WalRecord::ReclaimEnd { .. }
+        ) {
+            *self = reopen_without_reclaim_recovery::<
+                REGION_SIZE,
+                REGION_COUNT,
+                IO,
+                MAX_COLLECTIONS,
+                MAX_PENDING_RECLAIMS,
+            >(flash, workspace)?;
+        } else {
+            self.apply_synced_record(record, encoded_len)?;
+        }
+        Ok(())
+    }
+
     fn write_record_and_apply<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
         &mut self,
         flash: &mut IO,
@@ -1337,6 +1461,64 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
             &physical[..encoded_len],
         )?;
         flash.sync()?;
+        Ok(encoded_len)
+    }
+
+    #[cfg(feature = "perf-counters")]
+    fn write_record_raw_metered<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        record: WalRecord<'_>,
+        metrics: &mut StoragePerfMetrics,
+    ) -> Result<usize, StorageRuntimeError> {
+        let (physical, logical) = workspace.encode_buffers();
+        let encode_timer = StoragePerfTimerGuard::start();
+        let encoded = encode_record_into(record, self.metadata, physical, logical);
+        metrics.add_nanos(StoragePerfTimer::WalEncode, encode_timer.elapsed_nanos());
+        let encoded_len = match encoded {
+            Ok(encoded_len) => encoded_len,
+            Err(error) => {
+                metrics.increment(StoragePerfCounter::AppendFailures);
+                return Err(error.into());
+            }
+        };
+        if self
+            .wal_append_offset
+            .checked_add(encoded_len)
+            .is_none_or(|end| end > REGION_SIZE)
+        {
+            metrics.increment(StoragePerfCounter::WalRotationRequired);
+            return Err(StorageRuntimeError::WalRotationRequired);
+        }
+
+        let write_timer = StoragePerfTimerGuard::start();
+        if let Err(error) = flash.write_region(
+            self.wal_tail,
+            self.wal_append_offset,
+            &physical[..encoded_len],
+        ) {
+            metrics.add_nanos(StoragePerfTimer::WalWrite, write_timer.elapsed_nanos());
+            metrics.increment(StoragePerfCounter::AppendFailures);
+            return Err(error.into());
+        }
+        metrics.add_nanos(StoragePerfTimer::WalWrite, write_timer.elapsed_nanos());
+
+        let sync_timer = StoragePerfTimerGuard::start();
+        let sync_result = flash.sync();
+        metrics.add_nanos(StoragePerfTimer::WalSync, sync_timer.elapsed_nanos());
+        metrics.increment(StoragePerfCounter::WalSyncs);
+        if let Err(error) = sync_result {
+            metrics.increment(StoragePerfCounter::AppendFailures);
+            return Err(error.into());
+        }
+
+        metrics.increment(StoragePerfCounter::WalRecords);
+        metrics.add(StoragePerfCounter::WalBytes, encoded_len as u64);
         Ok(encoded_len)
     }
 

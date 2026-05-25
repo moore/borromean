@@ -102,6 +102,11 @@ pub use wal_record::*;
 pub mod op_future;
 pub use op_future::*;
 
+#[cfg(feature = "perf-counters")]
+pub mod perf_metrics;
+#[cfg(feature = "perf-counters")]
+pub use perf_metrics::*;
+
 mod collections;
 pub use collections::*;
 
@@ -113,6 +118,9 @@ use core::fmt::Debug;
 use core::future::Future;
 use heapless::Vec;
 use serde::{Deserialize, Serialize};
+
+#[cfg(feature = "perf-counters")]
+use crate::perf_metrics::{StoragePerfCounter, StoragePerfTimer, StoragePerfTimerGuard};
 
 type CollectionIdCounter = u64;
 
@@ -244,6 +252,8 @@ pub struct Storage<
     pub(crate) collection_scratch: [u8; REGION_SIZE],
     pub(crate) open_scratch: [u8; REGION_SIZE],
     pub(crate) frontier_buffer_owner: FrontierBufferOwner,
+    #[cfg(feature = "perf-counters")]
+    pub(crate) perf_metrics: StoragePerfMetrics,
     pub(crate) mode: StorageMode,
 }
 
@@ -357,6 +367,7 @@ fn update_map_frontier_parts<
     dirty_frontiers: &mut Vec<CollectionId, MAX_COLLECTIONS>,
     payload_scratch: &mut [u8; REGION_SIZE],
     checkpoint_scratch: &mut [u8; REGION_SIZE],
+    #[cfg(feature = "perf-counters")] perf_metrics: &mut StoragePerfMetrics,
     map: &mut MapFrontier<'_, K, V, MAX_INDEXES, MAX_RUNS>,
     update: &MapUpdate<K, V>,
 ) -> Result<(), MapStorageError>
@@ -386,26 +397,94 @@ where
     ensure_dirty_frontier_budget_for(state, dirty_frontiers, collection_id)
         .map_err(MapStorageError::from)?;
 
-    let used = MapFrontier::<K, V, MAX_INDEXES>::encode_update_into(update, payload_scratch)?;
-    let mut checkpoint = map.checkpoint_into(checkpoint_scratch)?;
+    #[cfg(feature = "perf-counters")]
+    let encode_timer = StoragePerfTimerGuard::start();
+    let encoded_update =
+        MapFrontier::<K, V, MAX_INDEXES>::encode_update_into(update, payload_scratch);
+    #[cfg(feature = "perf-counters")]
+    {
+        perf_metrics.add_nanos(StoragePerfTimer::UpdateEncode, encode_timer.elapsed_nanos());
+        if let Ok(used) = encoded_update {
+            perf_metrics.increment(StoragePerfCounter::UpdateEncodes);
+            perf_metrics.add(StoragePerfCounter::EncodedUpdateBytes, used as u64);
+        }
+    }
+    let used = encoded_update?;
 
-    match map.apply_update_payload(&payload_scratch[..used]) {
+    #[cfg(feature = "perf-counters")]
+    let checkpoint_timer = StoragePerfTimerGuard::start();
+    let mut checkpoint = map.checkpoint_into(checkpoint_scratch)?;
+    #[cfg(feature = "perf-counters")]
+    {
+        perf_metrics.increment(StoragePerfCounter::FrontierCheckpoints);
+        perf_metrics.add_nanos(
+            StoragePerfTimer::FrontierCheckpoint,
+            checkpoint_timer.elapsed_nanos(),
+        );
+    }
+
+    #[cfg(feature = "perf-counters")]
+    let apply_timer = StoragePerfTimerGuard::start();
+    let apply_result = map.apply_update_payload(&payload_scratch[..used]);
+    #[cfg(feature = "perf-counters")]
+    {
+        perf_metrics.add_nanos(StoragePerfTimer::FrontierApply, apply_timer.elapsed_nanos());
+        if apply_result.is_ok() {
+            perf_metrics.increment(StoragePerfCounter::FrontierApplies);
+        }
+    }
+
+    match apply_result {
         Ok(()) => {}
         Err(MapError::BufferTooSmall) => {
+            #[cfg(feature = "perf-counters")]
+            perf_metrics.increment(StoragePerfCounter::BufferTooSmallErrors);
             map.restore_from_checkpoint(checkpoint, checkpoint_scratch)?;
 
-            map.flush_to_storage::<
+            #[cfg(feature = "perf-counters")]
+            let flush_timer = StoragePerfTimerGuard::start();
+            let flush_result = map.flush_to_storage::<
                 REGION_SIZE,
                 REGION_COUNT,
                 IO,
                 MAX_COLLECTIONS,
                 MAX_PENDING_RECLAIMS,
-            >(state, backing, workspace)?;
+            >(state, backing, workspace);
+            #[cfg(feature = "perf-counters")]
+            {
+                let flush_nanos = flush_timer.elapsed_nanos();
+                perf_metrics.increment(StoragePerfCounter::OverflowFlushes);
+                perf_metrics.increment(StoragePerfCounter::Flushes);
+                perf_metrics.add_nanos(StoragePerfTimer::OverflowFlush, flush_nanos);
+                perf_metrics.add_nanos(StoragePerfTimer::Flush, flush_nanos);
+            }
+            flush_result?;
             clear_dirty_frontier_in(dirty_frontiers, collection_id);
 
+            #[cfg(feature = "perf-counters")]
+            let checkpoint_timer = StoragePerfTimerGuard::start();
             checkpoint = map.checkpoint_into(checkpoint_scratch)?;
+            #[cfg(feature = "perf-counters")]
+            {
+                perf_metrics.increment(StoragePerfCounter::FrontierCheckpoints);
+                perf_metrics.add_nanos(
+                    StoragePerfTimer::FrontierCheckpoint,
+                    checkpoint_timer.elapsed_nanos(),
+                );
+            }
 
-            if let Err(error) = map.apply_update_payload(&payload_scratch[..used]) {
+            #[cfg(feature = "perf-counters")]
+            let apply_timer = StoragePerfTimerGuard::start();
+            let retry_apply_result = map.apply_update_payload(&payload_scratch[..used]);
+            #[cfg(feature = "perf-counters")]
+            {
+                perf_metrics
+                    .add_nanos(StoragePerfTimer::FrontierApply, apply_timer.elapsed_nanos());
+                if retry_apply_result.is_ok() {
+                    perf_metrics.increment(StoragePerfCounter::FrontierApplies);
+                }
+            }
+            if let Err(error) = retry_apply_result {
                 map.restore_from_checkpoint(checkpoint, checkpoint_scratch)?;
                 return Err(error.into());
             }
@@ -416,12 +495,24 @@ where
         }
     }
 
-    if let Err(error) = state.append_update_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
+    #[cfg(feature = "perf-counters")]
+    let append_result = state.append_update_with_rotation_metered::<REGION_SIZE, REGION_COUNT, IO>(
         backing,
         workspace,
         collection_id,
         &payload_scratch[..used],
-    ) {
+        perf_metrics,
+    );
+    #[cfg(not(feature = "perf-counters"))]
+    let append_result = state.append_update_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
+        backing,
+        workspace,
+        collection_id,
+        &payload_scratch[..used],
+    );
+    if let Err(error) = append_result {
+        #[cfg(feature = "perf-counters")]
+        perf_metrics.increment(StoragePerfCounter::AppendFailures);
         map.restore_from_checkpoint(checkpoint, checkpoint_scratch)?;
         return Err(error.into());
     }
@@ -530,6 +621,8 @@ impl<
             collection_scratch: [0; REGION_SIZE],
             open_scratch: [0; REGION_SIZE],
             frontier_buffer_owner: FrontierBufferOwner::Empty { generation: 0 },
+            #[cfg(feature = "perf-counters")]
+            perf_metrics: StoragePerfMetrics::default(),
             mode: StorageMode::Idle,
         }
     }
@@ -542,6 +635,24 @@ impl<
     /// Returns the current active storage mode.
     pub fn mode(&self) -> StorageMode {
         self.mode
+    }
+
+    /// Returns current performance metrics for this storage context.
+    #[cfg(feature = "perf-counters")]
+    pub fn perf_metrics(&self) -> StoragePerfMetrics {
+        self.perf_metrics
+    }
+
+    /// Resets performance metrics for this storage context.
+    #[cfg(feature = "perf-counters")]
+    pub fn reset_perf_metrics(&mut self) {
+        self.perf_metrics = StoragePerfMetrics::default();
+    }
+
+    /// Returns current performance metrics and resets this storage context.
+    #[cfg(feature = "perf-counters")]
+    pub fn take_perf_metrics(&mut self) -> StoragePerfMetrics {
+        core::mem::take(&mut self.perf_metrics)
     }
 
     /// Returns the current owner of the storage-owned hot frontier buffer.
@@ -626,8 +737,19 @@ impl<
                 .as_ref()
                 .is_some_and(|cached| cached.buffer_generation == generation)
             {
+                #[cfg(feature = "perf-counters")]
+                self.perf_metrics
+                    .increment(StoragePerfCounter::FrontierCacheHits);
                 return Ok(());
             }
+        }
+
+        #[cfg(feature = "perf-counters")]
+        {
+            self.perf_metrics
+                .increment(StoragePerfCounter::FrontierCacheMisses);
+            self.perf_metrics
+                .increment(StoragePerfCounter::FrontierReloads);
         }
 
         cache.borrow_mut().take();
@@ -1041,7 +1163,14 @@ impl<
 
     /// Appends a `reclaim_begin` WAL record for a detached region.
     pub fn append_reclaim_begin(&mut self, region_index: u32) -> Result<(), StorageRuntimeError> {
-        self.run_storage_operation(
+        #[cfg(feature = "perf-counters")]
+        {
+            self.perf_metrics
+                .increment(StoragePerfCounter::ReclaimStarts);
+        }
+        #[cfg(feature = "perf-counters")]
+        let reclaim_timer = StoragePerfTimerGuard::start();
+        let result = self.run_storage_operation(
             StorageMode::ReclaimingRegion(RegionReclaimMode::Running),
             |this| {
                 this.state
@@ -1051,12 +1180,22 @@ impl<
                         region_index,
                     )
             },
-        )
+        );
+        #[cfg(feature = "perf-counters")]
+        self.perf_metrics
+            .add_nanos(StoragePerfTimer::Reclaim, reclaim_timer.elapsed_nanos());
+        result
     }
 
     /// Appends a `reclaim_end` WAL record for a previously detached region.
     pub fn append_reclaim_end(&mut self, region_index: u32) -> Result<(), StorageRuntimeError> {
-        self.run_storage_operation(
+        #[cfg(feature = "perf-counters")]
+        {
+            self.perf_metrics.increment(StoragePerfCounter::ReclaimEnds);
+        }
+        #[cfg(feature = "perf-counters")]
+        let reclaim_timer = StoragePerfTimerGuard::start();
+        let result = self.run_storage_operation(
             StorageMode::ReclaimingRegion(RegionReclaimMode::Running),
             |this| {
                 this.state
@@ -1066,12 +1205,18 @@ impl<
                         region_index,
                     )
             },
-        )
+        );
+        #[cfg(feature = "perf-counters")]
+        self.perf_metrics
+            .add_nanos(StoragePerfTimer::Reclaim, reclaim_timer.elapsed_nanos());
+        result
     }
 
     /// Reclaims the current WAL head region and returns the new head.
     pub fn reclaim_wal_head(&mut self) -> Result<u32, StorageRuntimeError> {
-        self.run_storage_operation(
+        #[cfg(feature = "perf-counters")]
+        let reclaim_timer = StoragePerfTimerGuard::start();
+        let result = self.run_storage_operation(
             StorageMode::ReclaimingWalHead(WalHeadReclaimMode::Plan),
             |this| {
                 this.state
@@ -1080,7 +1225,11 @@ impl<
                         &mut this.workspace,
                     )
             },
-        )
+        );
+        #[cfg(feature = "perf-counters")]
+        self.perf_metrics
+            .add_nanos(StoragePerfTimer::Reclaim, reclaim_timer.elapsed_nanos());
+        result
     }
 
     /// Reclaims the current WAL head region as a caller-driven future.
@@ -1111,7 +1260,13 @@ impl<
         &mut self,
         region_index: u32,
     ) -> Result<(), StorageRuntimeError> {
-        self.run_storage_operation(
+        #[cfg(feature = "perf-counters")]
+        {
+            self.perf_metrics.increment(StoragePerfCounter::ReclaimEnds);
+        }
+        #[cfg(feature = "perf-counters")]
+        let reclaim_timer = StoragePerfTimerGuard::start();
+        let result = self.run_storage_operation(
             StorageMode::ReclaimingRegion(RegionReclaimMode::Running),
             |this| {
                 this.state
@@ -1121,7 +1276,11 @@ impl<
                         region_index,
                     )
             },
-        )
+        );
+        #[cfg(feature = "perf-counters")]
+        self.perf_metrics
+            .add_nanos(StoragePerfTimer::Reclaim, reclaim_timer.elapsed_nanos());
+        result
     }
 
     /// Appends a `wal_recovery` record when replay requires one.
@@ -1338,6 +1497,8 @@ impl<
             &mut self.dirty_frontiers,
             &mut self.payload_scratch,
             &mut self.checkpoint_scratch,
+            #[cfg(feature = "perf-counters")]
+            &mut self.perf_metrics,
             map,
             update,
         );
@@ -1454,7 +1615,9 @@ impl<
         V: Debug + Serialize + for<'de> Deserialize<'de>,
     {
         self.invalidate_map_frontier_buffer(collection_id);
-        self.run_map_operation(
+        #[cfg(feature = "perf-counters")]
+        let compaction_timer = StoragePerfTimerGuard::start();
+        let result = self.run_map_operation(
             StorageMode::CompactingCollection(CollectionCompactionMode::Running),
             |this| {
                 if region_target == 0 {
@@ -1558,7 +1721,19 @@ impl<
                 this.clear_dirty_frontier(collection_id);
                 Ok(Some(manifest_region))
             },
-        )
+        );
+        #[cfg(feature = "perf-counters")]
+        {
+            self.perf_metrics.add_nanos(
+                StoragePerfTimer::Compaction,
+                compaction_timer.elapsed_nanos(),
+            );
+            if matches!(result, Ok(Some(_))) {
+                self.perf_metrics
+                    .increment(StoragePerfCounter::CompactionsRun);
+            }
+        }
+        result
     }
 
     /// Drops a live map collection and begins reclaim for its last region basis.
@@ -1775,6 +1950,8 @@ where
         storage
             .enter_mode(StorageMode::ReadingStorage(ReadMode::Running))
             .map_err(MapStorageError::from)?;
+        #[cfg(feature = "perf-counters")]
+        storage.perf_metrics.increment(StoragePerfCounter::MapReads);
         let result = (|| {
             storage.ensure_map_frontier_cached::<K, V, MAX_INDEXES, MAX_RUNS>(
                 self.collection_id,
@@ -1789,8 +1966,14 @@ where
                 cached_frontier.state,
                 &mut storage.open_scratch,
             );
+            #[cfg(feature = "perf-counters")]
+            let read_timer = StoragePerfTimerGuard::start();
             let result =
                 frontier.get::<REGION_SIZE, IO>(storage.backing, &mut storage.workspace, key);
+            #[cfg(feature = "perf-counters")]
+            storage
+                .perf_metrics
+                .add_nanos(StoragePerfTimer::MapReadLookup, read_timer.elapsed_nanos());
             *cached = Some(crate::collections::map::CachedMapFrontier {
                 buffer_generation,
                 state: frontier.into_state(),
@@ -1831,6 +2014,12 @@ where
                 CollectionUpdateMode::Running,
             ))
             .map_err(MapStorageError::from)?;
+        #[cfg(feature = "perf-counters")]
+        {
+            storage.perf_metrics.increment(StoragePerfCounter::MapSets);
+        }
+        #[cfg(feature = "perf-counters")]
+        let write_timer = StoragePerfTimerGuard::start();
         let result = (|| {
             storage.ensure_map_frontier_cached::<K, V, MAX_INDEXES, MAX_RUNS>(
                 self.collection_id,
@@ -1863,14 +2052,29 @@ where
                 &mut storage.dirty_frontiers,
                 &mut storage.payload_scratch,
                 &mut storage.checkpoint_scratch,
+                #[cfg(feature = "perf-counters")]
+                &mut storage.perf_metrics,
                 &mut frontier,
                 &update,
             );
             let update_applied = update_result.is_ok();
             let result = update_result.and_then(|()| {
-                Ok(frontier
-                    .selected_compaction_run_count(self.compaction_region_target)?
-                    .is_some())
+                #[cfg(feature = "perf-counters")]
+                let check_timer = StoragePerfTimerGuard::start();
+                let check_result =
+                    frontier.selected_compaction_run_count(self.compaction_region_target);
+                #[cfg(feature = "perf-counters")]
+                let check_nanos = check_timer.elapsed_nanos();
+                #[cfg(feature = "perf-counters")]
+                {
+                    storage
+                        .perf_metrics
+                        .increment(StoragePerfCounter::CompactionChecks);
+                    storage
+                        .perf_metrics
+                        .add_nanos(StoragePerfTimer::CompactionCheck, check_nanos);
+                }
+                Ok(check_result?.is_some())
             });
             *cached = Some(crate::collections::map::CachedMapFrontier {
                 buffer_generation,
@@ -1881,6 +2085,10 @@ where
             }
             result
         })();
+        #[cfg(feature = "perf-counters")]
+        storage
+            .perf_metrics
+            .add_nanos(StoragePerfTimer::FullWritePath, write_timer.elapsed_nanos());
         storage.finish_mode();
         result
     }
@@ -1910,6 +2118,14 @@ where
                 CollectionUpdateMode::Running,
             ))
             .map_err(MapStorageError::from)?;
+        #[cfg(feature = "perf-counters")]
+        {
+            storage
+                .perf_metrics
+                .increment(StoragePerfCounter::MapDeletes);
+        }
+        #[cfg(feature = "perf-counters")]
+        let write_timer = StoragePerfTimerGuard::start();
         let result = (|| {
             storage.ensure_map_frontier_cached::<K, V, MAX_INDEXES, MAX_RUNS>(
                 self.collection_id,
@@ -1942,14 +2158,29 @@ where
                 &mut storage.dirty_frontiers,
                 &mut storage.payload_scratch,
                 &mut storage.checkpoint_scratch,
+                #[cfg(feature = "perf-counters")]
+                &mut storage.perf_metrics,
                 &mut frontier,
                 &update,
             );
             let update_applied = update_result.is_ok();
             let result = update_result.and_then(|()| {
-                Ok(frontier
-                    .selected_compaction_run_count(self.compaction_region_target)?
-                    .is_some())
+                #[cfg(feature = "perf-counters")]
+                let check_timer = StoragePerfTimerGuard::start();
+                let check_result =
+                    frontier.selected_compaction_run_count(self.compaction_region_target);
+                #[cfg(feature = "perf-counters")]
+                let check_nanos = check_timer.elapsed_nanos();
+                #[cfg(feature = "perf-counters")]
+                {
+                    storage
+                        .perf_metrics
+                        .increment(StoragePerfCounter::CompactionChecks);
+                    storage
+                        .perf_metrics
+                        .add_nanos(StoragePerfTimer::CompactionCheck, check_nanos);
+                }
+                Ok(check_result?.is_some())
             });
             *cached = Some(crate::collections::map::CachedMapFrontier {
                 buffer_generation,
@@ -1960,6 +2191,10 @@ where
             }
             result
         })();
+        #[cfg(feature = "perf-counters")]
+        storage
+            .perf_metrics
+            .add_nanos(StoragePerfTimer::FullWritePath, write_timer.elapsed_nanos());
         storage.finish_mode();
         result
     }
