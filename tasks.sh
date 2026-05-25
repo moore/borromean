@@ -11,6 +11,14 @@ MEMORY_PROFILE_CONFIGS=(
     perf/profile_memory_mixed_update.toml
 )
 
+PERF_MATRIX_CONFIGS=(
+    perf/file_backing.toml
+    perf/file_backing_update_hot.toml
+    perf/file_backing_read_hits.toml
+    perf/file_backing_read_misses.toml
+    perf/file_backing_mixed_update.toml
+)
+
 run_verify() {
     echo "==> ./scripts/verify.sh"
     ./scripts/verify.sh
@@ -78,18 +86,12 @@ run_perf() {
 }
 
 run_perf_matrix() {
-    local configs=(
-        perf/file_backing.toml
-        perf/file_backing_update_hot.toml
-        perf/file_backing_read_hits.toml
-        perf/file_backing_read_misses.toml
-        perf/file_backing_mixed_update.toml
-    )
     local config_path
-    for config_path in "${configs[@]}"; do
+    for config_path in "${PERF_MATRIX_CONFIGS[@]}"; do
         echo "==> cargo run --release --features perf-tools --bin file_backing_perf -- --config ${config_path}"
         cargo run --release --features perf-tools --bin file_backing_perf -- --config "$config_path"
     done
+    run_perf_matrix_summary
 }
 
 require_perf() {
@@ -178,6 +180,30 @@ summarize_memory_profile_jsons() {
     python3 scripts/summarize_memory_profile_jsons.py "$@"
 }
 
+perf_matrix_json_paths() {
+    local config_path
+    for config_path in "${PERF_MATRIX_CONFIGS[@]}"; do
+        printf 'target/perf/%s.json\n' "$(basename "$config_path" .toml)"
+    done
+}
+
+summarize_perf_matrix_jsons() {
+    python3 scripts/summarize_perf_matrix_jsons.py "$@"
+}
+
+run_perf_matrix_summary() {
+    local json_paths=()
+    local json_path
+
+    while IFS= read -r json_path; do
+        json_paths+=("$json_path")
+    done < <(perf_matrix_json_paths)
+
+    summarize_perf_matrix_jsons \
+        --output target/perf/perf_matrix_summary.md \
+        "${json_paths[@]}"
+}
+
 run_bench() {
     echo "==> cargo bench --features file-backing --bench file_backing_mmap"
     cargo bench --features file-backing --bench file_backing_mmap
@@ -200,7 +226,9 @@ Tasks:
   perf-test
            Alias for perf
   perf-matrix
-           Run insert, update, read-hit, read-miss, and mixed perf comparison configs
+           Run insert, update, read-hit, read-miss, and mixed perf comparison configs, then summarize them
+  perf-matrix-summary
+           Summarize generated perf matrix JSON reports as Markdown
   perf-profile
            Profile a release perf run with frame pointers (override config with BORROMEAN_PERF_PROFILE_CONFIG)
   perf-profile-memory
@@ -241,6 +269,9 @@ run_task() {
             ;;
         perf-matrix)
             run_perf_matrix
+            ;;
+        perf-matrix-summary)
+            run_perf_matrix_summary
             ;;
         perf-profile)
             run_perf_profile

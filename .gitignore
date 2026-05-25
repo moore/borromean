@@ -2,3 +2,4 @@
 Cargo.lock
 .duvet/reports/
 .mutants.out/
+__pycache__/

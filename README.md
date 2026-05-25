@@ -1,9 +1,42 @@
 # Borromean
 
 Borromean is a `no_std` flash-storage engine built around an append-only ring and durable collection
-heads. The repository currently contains a working storage core, a durable map collection, a mock
-flash backend for tests and examples, and a traceability setup that links code and tests back to
-local specifications.
+heads. It is designed for durable, wear-leveling storage directly on MCU flash, with caller-provided
+device I/O and bounded operation scratch. The long-term goal is to host many collection instances
+and support multiple collection types; durable maps are implemented today, while channel, queue, and
+log-style collections remain experimental or planned.
+
+This repository is alpha-quality engineering code. It contains a working storage core, a durable map
+collection, a mock flash backend for tests and examples, a Linux file-backed backend for host
+testing and benchmarking, and a traceability setup that links code and tests back to local
+specifications.
+
+The main remaining work is a deeper review of the durability state machines, continued cleanup of
+the specs for readability, and simplification of implementation code where the design has become
+clearer.
+
+## Performance
+
+Borromean aims to offer competitive performance for its durability model and target devices. The
+current perf matrix compares file-backed Borromean with [redb](https://github.com/cberner/redb) and
+[Fjall](https://github.com/fjall-rs/fjall), using the same deterministic workloads for each engine.
+The full generated summary lives in [BENCHMARKS.md](BENCHMARKS.md).
+
+### Relative Throughput
+
+| scenario | borromean | redb | fjall |
+| --- | --- | --- | --- |
+| insert | 1.00x | 0.73x | **1.02x** |
+| update_hot | **1.00x** | 0.78x | 0.99x |
+| read_hits | **1.00x** | 0.49x | 0.84x |
+| read_misses | 1.00x | 0.53x | **3.57x** |
+| mixed_update | 1.00x | 0.82x | **1.04x** |
+
+In the current local results, Borromean is close to Fjall on durable insert, hot-update, and mixed
+read/update throughput; faster than redb on those write-heavy scenarios; and fastest on read-hit
+throughput. Fjall is substantially faster on read misses. The IO tables show Borromean and Fjall
+write similar byte counts in the write workloads, so the current write-side optimization focus is
+durability sync cost rather than raw write volume.
 
 ## Supported Today
 
