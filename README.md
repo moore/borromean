@@ -41,8 +41,9 @@ durability sync cost rather than raw write volume.
 ## Supported Today
 
 - The durable storage engine is implemented by [`Storage`](src/lib.rs).
-- The caller supplies device access through [`FlashIo`](src/flash_io.rs); `Storage` binds that
-  backing by exclusive mutable reference and owns the bounded scratch used by normal operations.
+- The caller supplies device access through [`FlashIo`](src/flash_io.rs) and caller-owned
+  [`StorageMemory`](src/lib.rs); `Storage` is a small handle that borrows both while normal
+  operations run.
 - The only user collection type that is supported durably today is the map collection implemented by
   [`LsmMap`](src/collections/map/mod.rs).
 - The exported channel module is still experimental. It is documented as a public API surface, but
@@ -50,20 +51,24 @@ durability sync cost rather than raw write volume.
 
 ## Operating Model
 
-Borromean keeps logical storage state and bounded operation scratch in `Storage`, while the concrete
-device driver remains caller-provided through the `FlashIo` trait.
+Borromean keeps logical storage state and bounded operation scratch in caller-owned memory structs,
+while the concrete device driver remains caller-provided through the `FlashIo` trait.
 Callers can drive the same operations in two styles:
 
-- Blocking entry points such as `Storage::format`, `Storage::open`, `Storage::create_map`, and
-  `Storage::flush_map`.
-- Future-returning entry points such as `Storage::format_future`, `Storage::open_future`,
-  `Storage::create_map_future`, and `Storage::flush_map_future`.
+- Blocking entry points such as `Storage::format(backing, config, &mut storage_memory)`,
+  `Storage::open(backing, &mut storage_memory)`, `Storage::create_map`, and `Storage::flush_map`.
+- Future-returning entry points such as
+  `Storage::format_future(backing, config, &mut storage_memory)`,
+  `Storage::open_future(backing, &mut storage_memory)`, `Storage::create_map_future`,
+  and `Storage::flush_map_future`.
 
 In both styles the ownership model stays the same:
 
 - Borromean owns storage invariants and on-disk ordering rules.
-- The caller owns the flash driver and executor; `Storage` owns reusable operation scratch while it
-  holds the backing reference.
+- The caller owns the flash driver, executor, and reusable memory; `Storage` borrows that memory
+  while it holds the backing reference.
+- Durable map handles borrow caller-owned `LsmMapMemory`, and low-level frontiers borrow
+  `MapFrontierMemory`.
 - Map values are materialized in caller-owned buffers and serialized without heap allocation inside
   the core crate.
 

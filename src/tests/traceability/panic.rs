@@ -1,5 +1,5 @@
 use super::*;
-use crate::{StorageOpenError, StorageRuntime};
+use crate::{MapFrontierMemory, StorageMemory, StorageOpenError, StorageRuntime};
 
 //= spec/implementation.md#panic-requirements
 //= type=test
@@ -66,15 +66,20 @@ fn requirement_corrupt_storage_inputs_return_errors_instead_of_panicking() {
 fn requirement_public_decode_and_open_paths_expose_explicit_error_results() {
     type Flash = MockFlash<256, 5, 2048>;
     type Workspace = StorageWorkspace<256>;
-    type Store<'db> = Storage<'db, Flash, 256, 5, 8, 4>;
+    type Store<'db, 'mem> = Storage<'db, 'mem, Flash, 256, 5, 8, 4>;
     type Map<'a> = MapFrontier<'a, u16, u16, 8>;
     type Update = MapUpdate<u16, u16>;
     type Runtime = StorageRuntime<8, 4>;
-    type CreateMapFn<'db> = fn(&mut Store<'db>, CollectionId) -> Result<(), StorageRuntimeError>;
-    type AppendMapUpdateFn<'db> =
-        fn(&mut Store<'db>, CollectionId, &Update) -> Result<(), MapStorageError>;
-    type OpenMapFn<'db, 'a> =
-        fn(&mut Store<'db>, CollectionId, &'a mut [u8]) -> Result<Map<'a>, MapStorageError>;
+    type CreateMapFn<'db, 'mem> =
+        fn(&mut Store<'db, 'mem>, CollectionId) -> Result<(), StorageRuntimeError>;
+    type AppendMapUpdateFn<'db, 'mem> =
+        fn(&mut Store<'db, 'mem>, CollectionId, &Update) -> Result<(), MapStorageError>;
+    type OpenMapFn<'db, 'mem, 'a> = fn(
+        &mut Store<'db, 'mem>,
+        CollectionId,
+        &'a mut [u8],
+        &'a mut MapFrontierMemory<u16, 8>,
+    ) -> Result<Map<'a>, MapStorageError>;
     type OpenFromStorageFn<'a> = fn(
         &Runtime,
         &mut Flash,
@@ -82,6 +87,7 @@ fn requirement_public_decode_and_open_paths_expose_explicit_error_results() {
         &mut [u8],
         CollectionId,
         &'a mut [u8],
+        &'a mut MapFrontierMemory<u16, 8>,
     ) -> Result<Map<'a>, MapStorageError>;
 
     // This is an API-shape test. It does not exercise runtime behavior;
@@ -98,26 +104,34 @@ fn requirement_public_decode_and_open_paths_expose_explicit_error_results() {
     let _: fn(&StorageMetadata) -> Result<(), DiskError> = StorageMetadata::validate;
     let _: fn(&[u8]) -> Result<StorageMetadata, DiskError> = StorageMetadata::decode;
 
-    fn assert_storage_open_signature<'db>(
-        _: fn(&'db mut Flash) -> Result<Store<'db>, StorageOpenError>,
+    fn assert_storage_open_signature<'db, 'mem>(
+        _: fn(
+            &'db mut Flash,
+            &'mem mut StorageMemory<256, 5, 8, 4>,
+        ) -> Result<Store<'db, 'mem>, StorageOpenError>,
     ) {
     }
-    fn assert_storage_flush_signature<'db, 'map>(
-        _: fn(&mut Store<'db>, &mut Map<'map>) -> Result<u32, MapStorageError>,
+    fn assert_storage_flush_signature<'db, 'mem, 'map>(
+        _: fn(&mut Store<'db, 'mem>, &mut Map<'map>) -> Result<u32, MapStorageError>,
     ) {
     }
     assert_storage_open_signature(Storage::<Flash, 256, 5, 8, 4>::open);
-    let _: CreateMapFn<'_> = Storage::<Flash, 256, 5, 8, 4>::create_map;
-    let _: AppendMapUpdateFn<'_> = Storage::<Flash, 256, 5, 8, 4>::append_map_update::<u16, u16, 8>;
+    let _: CreateMapFn<'_, '_> = Storage::<Flash, 256, 5, 8, 4>::create_map;
+    let _: AppendMapUpdateFn<'_, '_> =
+        Storage::<Flash, 256, 5, 8, 4>::append_map_update::<u16, u16, 8>;
     assert_storage_flush_signature(Storage::<Flash, 256, 5, 8, 4>::flush_map::<u16, u16, 8, 8>);
 
     // Borrow-returning map APIs need named helpers so the compiler can
     // also verify the lifetime relationship between the caller's buffer
     // and the returned map value while still checking that the return
     // type is `Result<..., ...>`.
-    fn assert_open_map_signature<'db, 'a>(_: OpenMapFn<'db, 'a>) {}
+    fn assert_open_map_signature<'db, 'mem, 'a>(_: OpenMapFn<'db, 'mem, 'a>) {}
     fn assert_map_new_signature<'a>(
-        _: fn(CollectionId, &'a mut [u8]) -> Result<Map<'a>, MapError>,
+        _: fn(
+            CollectionId,
+            &'a mut [u8],
+            &'a mut MapFrontierMemory<u16, 8>,
+        ) -> Result<Map<'a>, MapError>,
     ) {
     }
     fn assert_map_set_signature<'a>(_: fn(&mut Map<'a>, u16, u16) -> Result<(), MapError>) {}

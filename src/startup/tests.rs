@@ -1,3 +1,5 @@
+#![allow(clippy::drop_non_drop)]
+
 use super::*;
 use crate::disk::{FreePointerFooter, Header};
 use crate::wal_record::{encode_record_into, encoded_record_len, WalRecord};
@@ -16,9 +18,11 @@ fn open_formatted_store<
     flash: &mut MockFlash<REGION_SIZE, REGION_COUNT, MAX_LOG>,
 ) -> Result<StartupState<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>, StartupError> {
     let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
+    let mut plan = StartupOpenPlan::<REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>::empty();
     super::open_formatted_store::<REGION_SIZE, REGION_COUNT, _, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>(
         flash,
         &mut workspace,
+        &mut plan,
     )
 }
 
@@ -1420,15 +1424,25 @@ fn requirement_storage_open_path_rejects_invalid_retained_map_region_snapshot_an
     {
         let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
         let mut workspace = StorageWorkspace::<512>::new();
-        let mut storage =
-            Storage::<_, 512, 5, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
-                .unwrap();
+        let mut storage = Storage::<_, 512, 5, 8, 4>::format(
+            &mut flash,
+            StorageFormatConfig::new(1, 8, 0xa5),
+            crate::test_storage_memory(),
+        )
+        .unwrap();
 
         storage.create_map(CollectionId(43)).unwrap();
 
         let region_index = storage
             .with_runtime_io_workspace(|runtime, flash, workspace| {
-                runtime.reserve_next_region::<512, 5, _>(flash, workspace)
+                runtime.reserve_next_region::<512, 5, _>(
+                    flash,
+                    workspace,
+                    &mut heapless::Vec::new(),
+                    &mut heapless::Vec::new(),
+                    &mut crate::storage::WalHeadReclaimPlan::empty(),
+                    &mut crate::startup::StartupOpenPlan::empty(),
+                )
             })
             .unwrap();
         storage
@@ -1447,9 +1461,14 @@ fn requirement_storage_open_path_rejects_invalid_retained_map_region_snapshot_an
             .unwrap();
 
         drop(storage);
-        let mut reopened = Storage::<_, 512, 5, 8, 4>::open(&mut flash).unwrap();
+        let mut reopened =
+            Storage::<_, 512, 5, 8, 4>::open(&mut flash, crate::test_storage_memory()).unwrap();
         let mut reopen_buffer = [0u8; 512];
-        let result = reopened.open_map::<i32, i32, 4, 4>(CollectionId(43), &mut reopen_buffer);
+        let result = reopened.open_map::<i32, i32, 4, 4>(
+            CollectionId(43),
+            &mut reopen_buffer,
+            crate::test_map_frontier_memory(),
+        );
         assert!(matches!(
             result,
             Err(MapStorageError::UnsupportedRegionFormat {
@@ -1463,9 +1482,12 @@ fn requirement_storage_open_path_rejects_invalid_retained_map_region_snapshot_an
     {
         let mut flash = MockFlash::<512, 4, 1024>::new(0xff);
         let mut workspace = StorageWorkspace::<512>::new();
-        let mut storage =
-            Storage::<_, 512, 4, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
-                .unwrap();
+        let mut storage = Storage::<_, 512, 4, 8, 4>::format(
+            &mut flash,
+            StorageFormatConfig::new(1, 8, 0xa5),
+            crate::test_storage_memory(),
+        )
+        .unwrap();
 
         storage.create_map(CollectionId(44)).unwrap();
         storage
@@ -1473,9 +1495,14 @@ fn requirement_storage_open_path_rejects_invalid_retained_map_region_snapshot_an
             .unwrap();
 
         drop(storage);
-        let mut reopened = Storage::<_, 512, 4, 8, 4>::open(&mut flash).unwrap();
+        let mut reopened =
+            Storage::<_, 512, 4, 8, 4>::open(&mut flash, crate::test_storage_memory()).unwrap();
         let mut reopen_buffer = [0u8; 512];
-        let result = reopened.open_map::<i32, i32, 4, 4>(CollectionId(44), &mut reopen_buffer);
+        let result = reopened.open_map::<i32, i32, 4, 4>(
+            CollectionId(44),
+            &mut reopen_buffer,
+            crate::test_map_frontier_memory(),
+        );
         assert!(matches!(
             result,
             Err(MapStorageError::Map(MapError::SerializationError))
@@ -1485,17 +1512,25 @@ fn requirement_storage_open_path_rejects_invalid_retained_map_region_snapshot_an
     {
         let mut flash = MockFlash::<512, 4, 1024>::new(0xff);
         let mut workspace = StorageWorkspace::<512>::new();
-        let mut storage =
-            Storage::<_, 512, 4, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
-                .unwrap();
+        let mut storage = Storage::<_, 512, 4, 8, 4>::format(
+            &mut flash,
+            StorageFormatConfig::new(1, 8, 0xa5),
+            crate::test_storage_memory(),
+        )
+        .unwrap();
 
         storage.create_map(CollectionId(45)).unwrap();
         storage.append_update(CollectionId(45), &[0xff]).unwrap();
 
         drop(storage);
-        let mut reopened = Storage::<_, 512, 4, 8, 4>::open(&mut flash).unwrap();
+        let mut reopened =
+            Storage::<_, 512, 4, 8, 4>::open(&mut flash, crate::test_storage_memory()).unwrap();
         let mut reopen_buffer = [0u8; 512];
-        let result = reopened.open_map::<i32, i32, 4, 4>(CollectionId(45), &mut reopen_buffer);
+        let result = reopened.open_map::<i32, i32, 4, 4>(
+            CollectionId(45),
+            &mut reopen_buffer,
+            crate::test_map_frontier_memory(),
+        );
         assert!(matches!(
             result,
             Err(MapStorageError::Map(MapError::SerializationError))

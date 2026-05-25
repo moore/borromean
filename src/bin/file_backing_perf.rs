@@ -1,3 +1,5 @@
+#![allow(clippy::drop_non_drop)]
+
 use std::cell::RefCell;
 use std::env;
 use std::fmt::Debug;
@@ -9,9 +11,9 @@ use std::time::{Duration, Instant};
 
 use borromean::{
     AllocationPolicy, CollectionId, FileBacking, FileBackingFileSyncKind, FileBackingOptions,
-    FlashIo, FreePointerFooter, Header, LsmMap, MadvisePolicy, MockError, MockFormatError, Storage,
-    StorageFormatConfig, StorageFormatError, StorageIoError, StorageMetadata, StoragePerfMetrics,
-    WalRegionPrologue, WAL_V1_FORMAT,
+    FileBackingScratch, FlashIo, FreePointerFooter, Header, LsmMap, LsmMapMemory, MadvisePolicy,
+    MockError, MockFormatError, Storage, StorageFormatConfig, StorageFormatError, StorageIoError,
+    StorageMemory, StorageMetadata, StoragePerfMetrics, WalRegionPrologue, WAL_V1_FORMAT,
 };
 use fjall::{Database as FjallDatabase, Keyspace as FjallKeyspace, KeyspaceCreateOptions};
 use heapless::Vec as HeaplessVec;
@@ -1339,6 +1341,7 @@ fn merge_io_metrics_into_core(metrics: &mut StoragePerfMetrics, io: IoDiagnostic
 fn capture_sync_audit_snapshot<IO, const REGION_SIZE: usize, const REGION_COUNT: usize>(
     storage: &Storage<
         '_,
+        '_,
         InstrumentedBacking<IO, REGION_SIZE, REGION_COUNT>,
         REGION_SIZE,
         REGION_COUNT,
@@ -1906,11 +1909,17 @@ where
         config.workload.operation_count
     );
     let create_format_start = Instant::now();
-    let backing =
-        FileBacking::<REGION_SIZE, REGION_COUNT>::create_new(&config.backing.path, options)
-            .map_err(|error| format!("failed to create file backing: {error:?}"))?;
+    let mut file_scratch = FileBackingScratch::new();
+    let backing = FileBacking::<REGION_SIZE, REGION_COUNT>::create_new(
+        &config.backing.path,
+        options,
+        &mut file_scratch,
+    )
+    .map_err(|error| format!("failed to create file backing: {error:?}"))?;
     let mut backing = InstrumentedBacking::new(backing);
     let diagnostics_handle = backing.diagnostics_handle();
+    let mut storage_memory =
+        StorageMemory::<REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>::new();
     let mut storage =
         Storage::<_, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>::format(
             &mut backing,
@@ -1919,6 +1928,7 @@ where
                 config.storage.wal_write_granule,
                 config.storage.wal_record_magic,
             ),
+            &mut storage_memory,
         )
         .map_err(|error| format!("failed to format storage: {error:?}"))?;
     let create_format = create_format_start.elapsed();
@@ -1930,9 +1940,17 @@ where
     let map_setup_start = Instant::now();
     let mut maps = Vec::with_capacity(config.workload.map_count);
     for _ in 0..config.workload.map_count {
-        let mut map =
-            LsmMap::<u64, HeaplessVec<u8, VALUE_BYTES>, MAX_INDEXES, MAX_RUNS>::new(&mut storage)
-                .map_err(|error| format!("failed to create map: {error:?}"))?;
+        let map_memory = Box::leak(Box::new(LsmMapMemory::<
+            u64,
+            HeaplessVec<u8, VALUE_BYTES>,
+            MAX_INDEXES,
+            MAX_RUNS,
+        >::new()));
+        let mut map = LsmMap::<u64, HeaplessVec<u8, VALUE_BYTES>, MAX_INDEXES, MAX_RUNS>::new(
+            &mut storage,
+            map_memory,
+        )
+        .map_err(|error| format!("failed to create map: {error:?}"))?;
         if let Some(target) = config.workload.compaction_run_target {
             map = map
                 .with_compaction_run_target(target)
@@ -2130,6 +2148,8 @@ where
     let backing = MemoryBacking::<REGION_SIZE, REGION_COUNT>::new(config.backing.erased_byte)?;
     let mut backing = InstrumentedBacking::new(backing);
     let diagnostics_handle = backing.diagnostics_handle();
+    let mut storage_memory =
+        StorageMemory::<REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>::new();
     let mut storage =
         Storage::<_, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>::format(
             &mut backing,
@@ -2138,6 +2158,7 @@ where
                 config.storage.wal_write_granule,
                 config.storage.wal_record_magic,
             ),
+            &mut storage_memory,
         )
         .map_err(|error| format!("failed to format memory storage: {error:?}"))?;
     let create_format = create_format_start.elapsed();
@@ -2149,9 +2170,17 @@ where
     let map_setup_start = Instant::now();
     let mut maps = Vec::with_capacity(config.workload.map_count);
     for _ in 0..config.workload.map_count {
-        let mut map =
-            LsmMap::<u64, HeaplessVec<u8, VALUE_BYTES>, MAX_INDEXES, MAX_RUNS>::new(&mut storage)
-                .map_err(|error| format!("failed to create memory map: {error:?}"))?;
+        let map_memory = Box::leak(Box::new(LsmMapMemory::<
+            u64,
+            HeaplessVec<u8, VALUE_BYTES>,
+            MAX_INDEXES,
+            MAX_RUNS,
+        >::new()));
+        let mut map = LsmMap::<u64, HeaplessVec<u8, VALUE_BYTES>, MAX_INDEXES, MAX_RUNS>::new(
+            &mut storage,
+            map_memory,
+        )
+        .map_err(|error| format!("failed to create memory map: {error:?}"))?;
         if let Some(target) = config.workload.compaction_run_target {
             map = map
                 .with_compaction_run_target(target)
@@ -2794,6 +2823,7 @@ fn run_borromean_preload<
     maps: &mut [LsmMap<u64, HeaplessVec<u8, VALUE_BYTES>, MAX_INDEXES, MAX_RUNS>],
     storage: &mut Storage<
         '_,
+        '_,
         InstrumentedBacking<IO, REGION_SIZE, REGION_COUNT>,
         REGION_SIZE,
         REGION_COUNT,
@@ -3007,6 +3037,7 @@ fn execute_one_borromean_operation<
     rng: &mut XorShift64,
     maps: &mut [LsmMap<u64, HeaplessVec<u8, VALUE_BYTES>, MAX_INDEXES, MAX_RUNS>],
     storage: &mut Storage<
+        '_,
         '_,
         InstrumentedBacking<IO, REGION_SIZE, REGION_COUNT>,
         REGION_SIZE,
@@ -3580,6 +3611,7 @@ fn maybe_compact<
     map: &mut LsmMap<u64, HeaplessVec<u8, VALUE_BYTES>, MAX_INDEXES, MAX_RUNS>,
     storage: &mut Storage<
         '_,
+        '_,
         InstrumentedBacking<IO, REGION_SIZE, REGION_COUNT>,
         REGION_SIZE,
         REGION_COUNT,
@@ -3667,6 +3699,7 @@ fn run_borromean_post_workload_maintenance<
     config: &PerfConfig,
     maps: &mut [LsmMap<u64, HeaplessVec<u8, VALUE_BYTES>, MAX_INDEXES, MAX_RUNS>],
     storage: &mut Storage<
+        '_,
         '_,
         InstrumentedBacking<IO, REGION_SIZE, REGION_COUNT>,
         REGION_SIZE,

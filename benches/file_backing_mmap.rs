@@ -5,7 +5,9 @@ use std::process;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use borromean::{AllocationPolicy, FileBacking, FileBackingOptions, MadvisePolicy};
+use borromean::{
+    AllocationPolicy, FileBacking, FileBackingOptions, FileBackingScratch, MadvisePolicy,
+};
 use criterion::{criterion_group, criterion_main, BatchSize, Criterion, Throughput};
 
 const REGION_SIZE: usize = 65_536;
@@ -59,9 +61,13 @@ fn create_db_at_path<const REGION_SIZE: usize, const REGION_COUNT: usize>(
     path: PathBuf,
 ) -> BenchDb<REGION_SIZE, REGION_COUNT> {
     prepare_path(&path);
-    let backing =
-        FileBacking::<REGION_SIZE, REGION_COUNT>::create_new(&path, file_backing_options())
-            .expect("create FileBacking benchmark DB");
+    let mut scratch = FileBackingScratch::new();
+    let backing = FileBacking::<REGION_SIZE, REGION_COUNT>::create_new(
+        &path,
+        file_backing_options(),
+        &mut scratch,
+    )
+    .expect("create FileBacking benchmark DB");
     BenchDb { path, backing }
 }
 

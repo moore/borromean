@@ -9,19 +9,31 @@ use super::*;
 fn requirement_map_durability_and_recovery_only_change_when_the_shared_storage_engine_is_used() {
     let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
-    let mut storage =
-        Storage::<_, 512, 5, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
-            .unwrap();
+    let mut storage = Storage::<_, 512, 5, 8, 4>::format(
+        &mut flash,
+        StorageFormatConfig::new(1, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
 
     storage.create_map(CollectionId(84)).unwrap();
 
     let mut source_buffer = [0u8; 512];
-    let mut source = MapFrontier::<u16, u16, 8>::new(CollectionId(84), &mut source_buffer).unwrap();
+    let mut source = MapFrontier::<u16, u16, 8>::new(
+        CollectionId(84),
+        &mut source_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     source.set(1, 10).unwrap();
 
     let mut before_snapshot_buffer = [0u8; 512];
     let before_snapshot = storage
-        .open_map::<u16, u16, 8, 8>(CollectionId(84), &mut before_snapshot_buffer)
+        .open_map::<u16, u16, 8, 8>(
+            CollectionId(84),
+            &mut before_snapshot_buffer,
+            crate::test_map_frontier_memory(),
+        )
         .unwrap();
     assert_eq!(before_snapshot.get_frontier(&1).unwrap(), None);
 
@@ -29,14 +41,22 @@ fn requirement_map_durability_and_recovery_only_change_when_the_shared_storage_e
 
     let mut after_snapshot_buffer = [0u8; 512];
     let after_snapshot = storage
-        .open_map::<u16, u16, 8, 8>(CollectionId(84), &mut after_snapshot_buffer)
+        .open_map::<u16, u16, 8, 8>(
+            CollectionId(84),
+            &mut after_snapshot_buffer,
+            crate::test_map_frontier_memory(),
+        )
         .unwrap();
     assert_eq!(after_snapshot.get_frontier(&1).unwrap(), Some(10));
 
     source.set(2, 20).unwrap();
     let mut before_update_buffer = [0u8; 512];
     let before_update = storage
-        .open_map::<u16, u16, 8, 8>(CollectionId(84), &mut before_update_buffer)
+        .open_map::<u16, u16, 8, 8>(
+            CollectionId(84),
+            &mut before_update_buffer,
+            crate::test_map_frontier_memory(),
+        )
         .unwrap();
     assert_eq!(before_update.get_frontier(&2).unwrap(), None);
 
@@ -46,9 +66,14 @@ fn requirement_map_durability_and_recovery_only_change_when_the_shared_storage_e
         .unwrap();
 
     let mut reopened_buffer = [0u8; 512];
-    let mut reopened = Storage::<_, 512, 5, 8, 4>::open(&mut flash).unwrap();
+    let mut reopened =
+        Storage::<_, 512, 5, 8, 4>::open(&mut flash, crate::test_storage_memory()).unwrap();
     let reopened_map = reopened
-        .open_map::<u16, u16, 8, 8>(CollectionId(84), &mut reopened_buffer)
+        .open_map::<u16, u16, 8, 8>(
+            CollectionId(84),
+            &mut reopened_buffer,
+            crate::test_map_frontier_memory(),
+        )
         .unwrap();
     assert_eq!(reopened_map.get_frontier(&1).unwrap(), Some(10));
     assert_eq!(reopened_map.get_frontier(&2).unwrap(), Some(20));
@@ -63,14 +88,22 @@ fn requirement_map_durability_and_recovery_only_change_when_the_shared_storage_e
 fn requirement_collection_operations_with_io_are_drivable_as_runtime_agnostic_futures() {
     let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
-    let mut storage =
-        Storage::<_, 512, 5, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
-            .unwrap();
+    let mut storage = Storage::<_, 512, 5, 8, 4>::format(
+        &mut flash,
+        StorageFormatConfig::new(1, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
 
     super::super::poll_ready(storage.create_map_future(CollectionId(84))).unwrap();
 
     let mut source_buffer = [0u8; 512];
-    let mut source = MapFrontier::<u16, u16, 8>::new(CollectionId(84), &mut source_buffer).unwrap();
+    let mut source = MapFrontier::<u16, u16, 8>::new(
+        CollectionId(84),
+        &mut source_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     source.set(1, 10).unwrap();
     super::super::poll_ready(storage.snapshot_map_future::<_, _, 8>(&source)).unwrap();
 

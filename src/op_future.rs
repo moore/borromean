@@ -4,12 +4,10 @@ use core::pin::Pin;
 use core::task::{Context, Poll};
 
 use crate::mode::{CollectionFlushMode, OpenMode, StorageMode, WalHeadReclaimMode};
-use crate::startup::StartupOpenPlan;
-use crate::storage::WalHeadReclaimPlan;
 use crate::{
     CollectionType, FlashIo, LsmKey, LsmValue, MapFrontier, MapStorageError,
-    StartupCollectionBasis, Storage, StorageFormatConfig, StorageOpenError, StorageRuntimeError,
-    StorageWorkspace,
+    StartupCollectionBasis, Storage, StorageFormatConfig, StorageMemory, StorageOpenError,
+    StorageRuntimeError,
 };
 
 /// Minimal future wrapper that executes a closure exactly once when first polled.
@@ -44,6 +42,7 @@ where
 /// Caller-driven future for formatting storage and binding the backing object.
 pub struct FormatStorageFuture<
     'db,
+    'mem,
     IO,
     const REGION_SIZE: usize,
     const REGION_COUNT: usize,
@@ -53,23 +52,46 @@ pub struct FormatStorageFuture<
     IO: FlashIo,
 {
     backing: Option<&'db mut IO>,
+    memory: Option<
+        &'mem mut StorageMemory<REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+    >,
     config: StorageFormatConfig,
 }
 
 impl<
         'db,
+        'mem,
         IO,
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
         const MAX_COLLECTIONS: usize,
         const MAX_PENDING_RECLAIMS: usize,
-    > FormatStorageFuture<'db, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>
+    >
+    FormatStorageFuture<
+        'db,
+        'mem,
+        IO,
+        REGION_SIZE,
+        REGION_COUNT,
+        MAX_COLLECTIONS,
+        MAX_PENDING_RECLAIMS,
+    >
 where
     IO: FlashIo,
 {
-    pub(crate) fn new(backing: &'db mut IO, config: StorageFormatConfig) -> Self {
+    pub(crate) fn new(
+        backing: &'db mut IO,
+        config: StorageFormatConfig,
+        memory: &'mem mut StorageMemory<
+            REGION_SIZE,
+            REGION_COUNT,
+            MAX_COLLECTIONS,
+            MAX_PENDING_RECLAIMS,
+        >,
+    ) -> Self {
         Self {
             backing: Some(backing),
+            memory: Some(memory),
             config,
         }
     }
@@ -77,6 +99,7 @@ where
 
 impl<
         'db,
+        'mem,
         IO,
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
@@ -85,6 +108,7 @@ impl<
     > Unpin
     for FormatStorageFuture<
         'db,
+        'mem,
         IO,
         REGION_SIZE,
         REGION_COUNT,
@@ -98,6 +122,7 @@ where
 
 impl<
         'db,
+        'mem,
         IO,
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
@@ -106,6 +131,7 @@ impl<
     > Future
     for FormatStorageFuture<
         'db,
+        'mem,
         IO,
         REGION_SIZE,
         REGION_COUNT,
@@ -116,15 +142,17 @@ where
     IO: FlashIo,
 {
     type Output = Result<
-        Storage<'db, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+        Storage<'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
         StorageRuntimeError,
     >;
 
     fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
         let this = self.get_mut();
-        match this.backing.take() {
-            Some(backing) => Poll::Ready(Storage::format(backing, this.config)),
-            None => Poll::Pending,
+        match (this.backing.take(), this.memory.take()) {
+            (Some(backing), Some(memory)) => {
+                Poll::Ready(Storage::format(backing, this.config, memory))
+            }
+            _ => Poll::Pending,
         }
     }
 }
@@ -133,6 +161,7 @@ where
 pub struct YieldingFlushMapFuture<
     'a,
     'db,
+    'mem,
     IO,
     const REGION_SIZE: usize,
     const REGION_COUNT: usize,
@@ -147,8 +176,15 @@ pub struct YieldingFlushMapFuture<
     K: LsmKey,
     V: LsmValue,
 {
-    storage:
-        &'a mut Storage<'db, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+    storage: &'a mut Storage<
+        'db,
+        'mem,
+        IO,
+        REGION_SIZE,
+        REGION_COUNT,
+        MAX_COLLECTIONS,
+        MAX_PENDING_RECLAIMS,
+    >,
     map: &'a mut MapFrontier<'a, K, V, MAX_INDEXES, MAX_RUNS>,
     phase: u8,
 }
@@ -156,6 +192,7 @@ pub struct YieldingFlushMapFuture<
 impl<
         'a,
         'db,
+        'mem,
         IO,
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
@@ -169,6 +206,7 @@ impl<
     YieldingFlushMapFuture<
         'a,
         'db,
+        'mem,
         IO,
         REGION_SIZE,
         REGION_COUNT,
@@ -188,6 +226,7 @@ where
     pub fn new(
         storage: &'a mut Storage<
             'db,
+            'mem,
             IO,
             REGION_SIZE,
             REGION_COUNT,
@@ -207,6 +246,7 @@ where
 impl<
         'a,
         'db,
+        'mem,
         IO,
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
@@ -220,6 +260,7 @@ impl<
     for YieldingFlushMapFuture<
         'a,
         'db,
+        'mem,
         IO,
         REGION_SIZE,
         REGION_COUNT,
@@ -240,6 +281,7 @@ where
 impl<
         'a,
         'db,
+        'mem,
         IO,
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
@@ -253,6 +295,7 @@ impl<
     for YieldingFlushMapFuture<
         'a,
         'db,
+        'mem,
         IO,
         REGION_SIZE,
         REGION_COUNT,
@@ -280,13 +323,14 @@ where
                     this.phase = 3;
                     return Poll::Ready(Err(error.into()));
                 }
-                if let Some(region_index) = this.storage.state.last_free_list_head() {
+                if let Some(region_index) = this.storage.memory.state.last_free_list_head() {
                     if let Err(error) = this
                         .storage
+                        .memory
                         .state
                         .ensure_head_append_room_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
                             this.storage.backing,
-                            &mut this.storage.workspace,
+                            &mut this.storage.memory.workspace,
                             this.map.id(),
                             CollectionType::MAP_CODE,
                             region_index,
@@ -299,10 +343,15 @@ where
                 }
                 if let Err(error) = this
                     .storage
+                    .memory
                     .state
                     .reserve_next_region::<REGION_SIZE, REGION_COUNT, IO>(
                         this.storage.backing,
-                        &mut this.storage.workspace,
+                        &mut this.storage.memory.workspace,
+                        &mut this.storage.memory.reclaim_source_regions,
+                        &mut this.storage.memory.active_collections,
+                        &mut this.storage.memory.reclaim_plan,
+                        &mut this.storage.memory.open_plan,
                     )
                 {
                     this.storage.finish_mode();
@@ -336,6 +385,7 @@ where
 impl<
         'a,
         'db,
+        'mem,
         IO,
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
@@ -349,6 +399,7 @@ impl<
     for YieldingFlushMapFuture<
         'a,
         'db,
+        'mem,
         IO,
         REGION_SIZE,
         REGION_COUNT,
@@ -370,68 +421,30 @@ where
 }
 
 #[derive(Debug)]
-enum ReclaimWalHeadPhase<const REGION_COUNT: usize, const MAX_COLLECTIONS: usize> {
+pub(crate) enum ReclaimWalHeadPhase<const REGION_COUNT: usize, const MAX_COLLECTIONS: usize> {
     Plan,
-    RotateToContinuation {
-        plan: WalHeadReclaimPlan<MAX_COLLECTIONS>,
-        source_regions: heapless::Vec<u32, REGION_COUNT>,
-        new_head: Option<u32>,
-    },
-    BeginReclaim {
-        plan: WalHeadReclaimPlan<MAX_COLLECTIONS>,
-        source_regions: heapless::Vec<u32, REGION_COUNT>,
-        next_index: usize,
-        new_head: u32,
-    },
-    PreserveFreeListHead {
-        plan: WalHeadReclaimPlan<MAX_COLLECTIONS>,
-        source_regions: heapless::Vec<u32, REGION_COUNT>,
-        new_head: u32,
-    },
-    CopyLiveState {
-        plan: WalHeadReclaimPlan<MAX_COLLECTIONS>,
-        source_regions: heapless::Vec<u32, REGION_COUNT>,
-        new_head: u32,
-    },
-    CommitHead {
-        source_regions: heapless::Vec<u32, REGION_COUNT>,
-        new_head: u32,
-    },
-    CompleteReclaim {
-        source_regions: heapless::Vec<u32, REGION_COUNT>,
-        next_index: usize,
-        new_head: u32,
-    },
+    RotateToContinuation { new_head: Option<u32> },
+    BeginReclaim { next_index: usize, new_head: u32 },
+    PreserveFreeListHead { new_head: u32 },
+    CopyLiveState { new_head: u32 },
+    CommitHead { new_head: u32 },
+    CompleteReclaim { next_index: usize, new_head: u32 },
     Done,
 }
 
-enum OpenStoragePhase<
+pub(crate) enum OpenStoragePhase<
     const REGION_COUNT: usize,
     const MAX_COLLECTIONS: usize,
     const MAX_PENDING_RECLAIMS: usize,
 > {
     Begin,
-    RecoverRotation {
-        plan: StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
-    },
-    DiscoverWalChain {
-        plan: StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
-    },
-    ReplayWalChain {
-        plan: StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
-    },
-    FinishStartup {
-        plan: StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
-    },
-    ValidateCollections {
-        runtime: crate::StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
-    },
-    RecoverPendingReclaims {
-        runtime: crate::StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
-    },
-    RecoverStagedRegions {
-        runtime: crate::StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
-    },
+    RecoverRotation,
+    DiscoverWalChain,
+    ReplayWalChain,
+    FinishStartup,
+    ValidateCollections,
+    RecoverPendingReclaims,
+    RecoverStagedRegions,
     Done,
 }
 
@@ -439,6 +452,7 @@ enum OpenStoragePhase<
 pub struct ReclaimWalHeadFuture<
     'a,
     'db,
+    'mem,
     IO,
     const REGION_SIZE: usize,
     const REGION_COUNT: usize,
@@ -447,14 +461,22 @@ pub struct ReclaimWalHeadFuture<
 > where
     IO: FlashIo,
 {
-    storage:
-        &'a mut Storage<'db, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+    storage: &'a mut Storage<
+        'db,
+        'mem,
+        IO,
+        REGION_SIZE,
+        REGION_COUNT,
+        MAX_COLLECTIONS,
+        MAX_PENDING_RECLAIMS,
+    >,
     phase: ReclaimWalHeadPhase<REGION_COUNT, MAX_COLLECTIONS>,
 }
 
 /// Explicit phase-machine future for opening storage through replay.
 pub struct OpenStorageFuture<
     'db,
+    'mem,
     IO,
     const REGION_SIZE: usize,
     const REGION_COUNT: usize,
@@ -464,13 +486,16 @@ pub struct OpenStorageFuture<
     IO: FlashIo,
 {
     backing: Option<&'db mut IO>,
-    workspace: StorageWorkspace<REGION_SIZE>,
+    memory: Option<
+        &'mem mut StorageMemory<REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+    >,
     phase: OpenStoragePhase<REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
 }
 
 impl<
         'a,
         'db,
+        'mem,
         IO,
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
@@ -480,6 +505,7 @@ impl<
     ReclaimWalHeadFuture<
         'a,
         'db,
+        'mem,
         IO,
         REGION_SIZE,
         REGION_COUNT,
@@ -493,6 +519,7 @@ where
     pub fn new(
         storage: &'a mut Storage<
             'db,
+            'mem,
             IO,
             REGION_SIZE,
             REGION_COUNT,
@@ -509,20 +536,38 @@ where
 
 impl<
         'db,
+        'mem,
         IO,
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
         const MAX_COLLECTIONS: usize,
         const MAX_PENDING_RECLAIMS: usize,
-    > OpenStorageFuture<'db, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>
+    >
+    OpenStorageFuture<
+        'db,
+        'mem,
+        IO,
+        REGION_SIZE,
+        REGION_COUNT,
+        MAX_COLLECTIONS,
+        MAX_PENDING_RECLAIMS,
+    >
 where
     IO: FlashIo,
 {
     /// Creates a new open-storage future.
-    pub fn new(backing: &'db mut IO) -> Self {
+    pub fn new(
+        backing: &'db mut IO,
+        memory: &'mem mut StorageMemory<
+            REGION_SIZE,
+            REGION_COUNT,
+            MAX_COLLECTIONS,
+            MAX_PENDING_RECLAIMS,
+        >,
+    ) -> Self {
         Self {
             backing: Some(backing),
-            workspace: StorageWorkspace::new(),
+            memory: Some(memory),
             phase: OpenStoragePhase::Begin,
         }
     }
@@ -531,6 +576,7 @@ where
 impl<
         'a,
         'db,
+        'mem,
         IO,
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
@@ -540,6 +586,7 @@ impl<
     for ReclaimWalHeadFuture<
         'a,
         'db,
+        'mem,
         IO,
         REGION_SIZE,
         REGION_COUNT,
@@ -553,13 +600,22 @@ where
 
 impl<
         'db,
+        'mem,
         IO,
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
         const MAX_COLLECTIONS: usize,
         const MAX_PENDING_RECLAIMS: usize,
     > Unpin
-    for OpenStorageFuture<'db, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>
+    for OpenStorageFuture<
+        'db,
+        'mem,
+        IO,
+        REGION_SIZE,
+        REGION_COUNT,
+        MAX_COLLECTIONS,
+        MAX_PENDING_RECLAIMS,
+    >
 where
     IO: FlashIo,
 {
@@ -568,6 +624,7 @@ where
 impl<
         'a,
         'db,
+        'mem,
         IO,
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
@@ -577,6 +634,7 @@ impl<
     for ReclaimWalHeadFuture<
         'a,
         'db,
+        'mem,
         IO,
         REGION_SIZE,
         REGION_COUNT,
@@ -601,60 +659,61 @@ where
                     this.phase = ReclaimWalHeadPhase::Done;
                     return Poll::Ready(Err(error));
                 }
-                let mut plan = match this
+                if let Err(error) = this
                     .storage
+                    .memory
                     .state
                     .prepare_wal_head_reclaim::<REGION_SIZE, IO>(
                         this.storage.backing,
-                        &mut this.storage.workspace,
-                    ) {
-                    Ok(plan) => plan,
-                    Err(error) => {
-                        this.storage.finish_mode();
-                        return Poll::Ready(Err(error));
-                    }
-                };
-                let mut source_regions = match this
+                        &mut this.storage.memory.workspace,
+                        &mut this.storage.memory.reclaim_plan,
+                    )
+                {
+                    this.storage.finish_mode();
+                    return Poll::Ready(Err(error));
+                }
+                this.storage.memory.reclaim_source_regions.clear();
+                match this
                     .storage
+                    .memory
                     .state
                     .collect_wal_head_reclaim_regions::<REGION_SIZE, REGION_COUNT, IO>(
                         this.storage.backing,
-                        &mut this.storage.workspace,
-                        &plan,
+                        &mut this.storage.memory.workspace,
+                        &this.storage.memory.reclaim_plan,
+                        &mut this.storage.memory.reclaim_source_regions,
                     ) {
-                    Ok(source_regions) => source_regions,
+                    Ok(()) => {}
                     Err(error) => {
                         this.storage.finish_mode();
                         return Poll::Ready(Err(error));
                     }
                 };
-                let new_head = if source_regions.len() > MAX_PENDING_RECLAIMS {
+                let plan = &mut this.storage.memory.reclaim_plan;
+                let new_head = if this.storage.memory.reclaim_source_regions.len()
+                    > MAX_PENDING_RECLAIMS
+                {
                     if MAX_PENDING_RECLAIMS == 0 {
                         this.storage.finish_mode();
                         return Poll::Ready(Err(StorageRuntimeError::TooManyPendingReclaims));
                     }
-                    let new_head = source_regions[MAX_PENDING_RECLAIMS];
+                    let new_head = this.storage.memory.reclaim_source_regions[MAX_PENDING_RECLAIMS];
                     plan.limit_to_source_tail(
-                        source_regions[MAX_PENDING_RECLAIMS - 1],
+                        this.storage.memory.reclaim_source_regions[MAX_PENDING_RECLAIMS - 1],
                         REGION_SIZE,
                     );
-                    source_regions.truncate(MAX_PENDING_RECLAIMS);
+                    this.storage
+                        .memory
+                        .reclaim_source_regions
+                        .truncate(MAX_PENDING_RECLAIMS);
                     Some(new_head)
                 } else {
                     None
                 };
-                this.phase = ReclaimWalHeadPhase::RotateToContinuation {
-                    plan,
-                    source_regions,
-                    new_head,
-                };
+                this.phase = ReclaimWalHeadPhase::RotateToContinuation { new_head };
                 Poll::Pending
             }
-            ReclaimWalHeadPhase::RotateToContinuation {
-                plan,
-                source_regions,
-                new_head,
-            } => {
+            ReclaimWalHeadPhase::RotateToContinuation { new_head } => {
                 this.storage
                     .set_mode_unchecked(StorageMode::ReclaimingWalHead(
                         WalHeadReclaimMode::BeginReclaim,
@@ -664,28 +723,25 @@ where
                 } else {
                     if let Err(error) = this
                         .storage
+                        .memory
                         .state
                         .rotate_wal_tail::<REGION_SIZE, REGION_COUNT, IO>(
                             this.storage.backing,
-                            &mut this.storage.workspace,
+                            &mut this.storage.memory.workspace,
                         )
                     {
                         this.storage.finish_mode();
                         return Poll::Ready(Err(error));
                     }
-                    this.storage.state.wal_tail()
+                    this.storage.memory.state.wal_tail()
                 };
                 this.phase = ReclaimWalHeadPhase::BeginReclaim {
-                    plan,
-                    source_regions,
                     next_index: 0,
                     new_head,
                 };
                 Poll::Pending
             }
             ReclaimWalHeadPhase::BeginReclaim {
-                plan,
-                source_regions,
                 next_index,
                 new_head,
             } => {
@@ -693,20 +749,23 @@ where
                     .set_mode_unchecked(StorageMode::ReclaimingWalHead(
                         WalHeadReclaimMode::BeginReclaim,
                     ));
-                let Some(region_index) = source_regions.get(next_index).copied() else {
-                    this.phase = ReclaimWalHeadPhase::PreserveFreeListHead {
-                        plan,
-                        source_regions,
-                        new_head,
-                    };
+                let Some(region_index) = this
+                    .storage
+                    .memory
+                    .reclaim_source_regions
+                    .get(next_index)
+                    .copied()
+                else {
+                    this.phase = ReclaimWalHeadPhase::PreserveFreeListHead { new_head };
                     return Poll::Pending;
                 };
                 if let Err(error) = this
                     .storage
+                    .memory
                     .state
                     .begin_wal_head_reclaim::<REGION_SIZE, REGION_COUNT, IO>(
                         this.storage.backing,
-                        &mut this.storage.workspace,
+                        &mut this.storage.memory.workspace,
                         region_index,
                     )
                 {
@@ -714,56 +773,46 @@ where
                     return Poll::Ready(Err(error));
                 }
                 this.phase = ReclaimWalHeadPhase::BeginReclaim {
-                    plan,
-                    source_regions,
                     next_index: next_index + 1,
                     new_head,
                 };
                 Poll::Pending
             }
-            ReclaimWalHeadPhase::PreserveFreeListHead {
-                plan,
-                source_regions,
-                new_head,
-            } => {
+            ReclaimWalHeadPhase::PreserveFreeListHead { new_head } => {
                 this.storage
                     .set_mode_unchecked(StorageMode::ReclaimingWalHead(
                         WalHeadReclaimMode::PreserveFreeListHead,
                     ));
                 if let Err(error) = this
                     .storage
+                    .memory
                     .state
                     .preserve_free_list_head_for_wal_head_reclaim::<REGION_SIZE, REGION_COUNT, IO>(
                         this.storage.backing,
-                        &mut this.storage.workspace,
+                        &mut this.storage.memory.workspace,
                     )
                 {
                     this.storage.finish_mode();
                     return Poll::Ready(Err(error));
                 }
-                this.phase = ReclaimWalHeadPhase::CopyLiveState {
-                    plan,
-                    source_regions,
-                    new_head,
-                };
+                this.phase = ReclaimWalHeadPhase::CopyLiveState { new_head };
                 Poll::Pending
             }
-            ReclaimWalHeadPhase::CopyLiveState {
-                plan,
-                source_regions,
-                new_head,
-            } => {
+            ReclaimWalHeadPhase::CopyLiveState { new_head } => {
                 this.storage
                     .set_mode_unchecked(StorageMode::ReclaimingWalHead(
                         WalHeadReclaimMode::CopyLiveState,
                     ));
                 if let Err(error) = this
                     .storage
+                    .memory
                     .state
                     .copy_live_wal_head_reclaim_state::<REGION_SIZE, REGION_COUNT, IO>(
                         this.storage.backing,
-                        &mut this.storage.workspace,
-                        &plan,
+                        &mut this.storage.memory.workspace,
+                        &this.storage.memory.reclaim_plan,
+                        &mut this.storage.memory.active_collections,
+                        &mut this.storage.memory.open_plan,
                         #[cfg(feature = "perf-counters")]
                         None,
                     )
@@ -771,26 +820,21 @@ where
                     this.storage.finish_mode();
                     return Poll::Ready(Err(error));
                 }
-                this.phase = ReclaimWalHeadPhase::CommitHead {
-                    source_regions,
-                    new_head,
-                };
+                this.phase = ReclaimWalHeadPhase::CommitHead { new_head };
                 Poll::Pending
             }
-            ReclaimWalHeadPhase::CommitHead {
-                source_regions,
-                new_head,
-            } => {
+            ReclaimWalHeadPhase::CommitHead { new_head } => {
                 this.storage
                     .set_mode_unchecked(StorageMode::ReclaimingWalHead(
                         WalHeadReclaimMode::CommitHead,
                     ));
                 if let Err(error) = this
                     .storage
+                    .memory
                     .state
                     .commit_wal_head_reclaim::<REGION_SIZE, REGION_COUNT, IO>(
                         this.storage.backing,
-                        &mut this.storage.workspace,
+                        &mut this.storage.memory.workspace,
                         new_head,
                     )
                 {
@@ -798,14 +842,12 @@ where
                     return Poll::Ready(Err(error));
                 }
                 this.phase = ReclaimWalHeadPhase::CompleteReclaim {
-                    source_regions,
                     next_index: 0,
                     new_head,
                 };
                 Poll::Pending
             }
             ReclaimWalHeadPhase::CompleteReclaim {
-                source_regions,
                 next_index,
                 new_head,
             } => {
@@ -813,17 +855,24 @@ where
                     .set_mode_unchecked(StorageMode::ReclaimingWalHead(
                         WalHeadReclaimMode::CompleteReclaim,
                     ));
-                let Some(region_index) = source_regions.get(next_index).copied() else {
+                let Some(region_index) = this
+                    .storage
+                    .memory
+                    .reclaim_source_regions
+                    .get(next_index)
+                    .copied()
+                else {
                     this.storage.finish_mode();
                     this.phase = ReclaimWalHeadPhase::Done;
                     return Poll::Ready(Ok(new_head));
                 };
                 if let Err(error) = this
                     .storage
+                    .memory
                     .state
                     .complete_pending_reclaim::<REGION_SIZE, REGION_COUNT, IO>(
                         this.storage.backing,
-                        &mut this.storage.workspace,
+                        &mut this.storage.memory.workspace,
                         region_index,
                     )
                 {
@@ -831,7 +880,6 @@ where
                     return Poll::Ready(Err(error));
                 }
                 this.phase = ReclaimWalHeadPhase::CompleteReclaim {
-                    source_regions,
                     next_index: next_index + 1,
                     new_head,
                 };
@@ -845,6 +893,7 @@ where
 impl<
         'a,
         'db,
+        'mem,
         IO,
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
@@ -854,6 +903,7 @@ impl<
     for ReclaimWalHeadFuture<
         'a,
         'db,
+        'mem,
         IO,
         REGION_SIZE,
         REGION_COUNT,
@@ -870,18 +920,27 @@ where
 
 impl<
         'db,
+        'mem,
         IO,
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
         const MAX_COLLECTIONS: usize,
         const MAX_PENDING_RECLAIMS: usize,
     > Future
-    for OpenStorageFuture<'db, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>
+    for OpenStorageFuture<
+        'db,
+        'mem,
+        IO,
+        REGION_SIZE,
+        REGION_COUNT,
+        MAX_COLLECTIONS,
+        MAX_PENDING_RECLAIMS,
+    >
 where
     IO: FlashIo,
 {
     type Output = Result<
-        Storage<'db, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+        Storage<'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
         StorageOpenError,
     >;
 
@@ -895,19 +954,27 @@ where
                     Some(backing) => backing,
                     None => return Poll::Pending,
                 };
-                let plan = crate::startup::begin_open_formatted_store::<
+                let memory = match this.memory.as_deref_mut() {
+                    Some(memory) => memory,
+                    None => return Poll::Pending,
+                };
+                crate::startup::begin_open_formatted_store::<
                     REGION_SIZE,
                     REGION_COUNT,
                     IO,
                     MAX_COLLECTIONS,
                     MAX_PENDING_RECLAIMS,
-                >(backing, &mut this.workspace)?;
-                this.phase = OpenStoragePhase::RecoverRotation { plan };
+                >(backing, &mut memory.workspace, &mut memory.open_plan)?;
+                this.phase = OpenStoragePhase::RecoverRotation;
                 Poll::Pending
             }
-            OpenStoragePhase::RecoverRotation { mut plan } => {
+            OpenStoragePhase::RecoverRotation => {
                 let backing = match this.backing.as_deref_mut() {
                     Some(backing) => backing,
+                    None => return Poll::Pending,
+                };
+                let memory = match this.memory.as_deref_mut() {
+                    Some(memory) => memory,
                     None => return Poll::Pending,
                 };
                 crate::startup::recover_open_rotation::<
@@ -916,13 +983,17 @@ where
                     REGION_COUNT,
                     MAX_COLLECTIONS,
                     MAX_PENDING_RECLAIMS,
-                >(backing, &mut this.workspace, &mut plan)?;
-                this.phase = OpenStoragePhase::DiscoverWalChain { plan };
+                >(backing, &mut memory.workspace, &mut memory.open_plan)?;
+                this.phase = OpenStoragePhase::DiscoverWalChain;
                 Poll::Pending
             }
-            OpenStoragePhase::DiscoverWalChain { mut plan } => {
+            OpenStoragePhase::DiscoverWalChain => {
                 let backing = match this.backing.as_deref_mut() {
                     Some(backing) => backing,
+                    None => return Poll::Pending,
+                };
+                let memory = match this.memory.as_deref_mut() {
+                    Some(memory) => memory,
                     None => return Poll::Pending,
                 };
                 crate::startup::discover_open_wal_chain::<
@@ -931,13 +1002,17 @@ where
                     IO,
                     MAX_COLLECTIONS,
                     MAX_PENDING_RECLAIMS,
-                >(backing, &mut this.workspace, &mut plan)?;
-                this.phase = OpenStoragePhase::ReplayWalChain { plan };
+                >(backing, &mut memory.workspace, &mut memory.open_plan)?;
+                this.phase = OpenStoragePhase::ReplayWalChain;
                 Poll::Pending
             }
-            OpenStoragePhase::ReplayWalChain { mut plan } => {
+            OpenStoragePhase::ReplayWalChain => {
                 let backing = match this.backing.as_deref_mut() {
                     Some(backing) => backing,
+                    None => return Poll::Pending,
+                };
+                let memory = match this.memory.as_deref_mut() {
+                    Some(memory) => memory,
                     None => return Poll::Pending,
                 };
                 crate::startup::replay_open_wal_chain::<
@@ -946,27 +1021,35 @@ where
                     IO,
                     MAX_COLLECTIONS,
                     MAX_PENDING_RECLAIMS,
-                >(backing, &mut this.workspace, &mut plan)?;
-                this.phase = OpenStoragePhase::FinishStartup { plan };
+                >(backing, &mut memory.workspace, &mut memory.open_plan)?;
+                this.phase = OpenStoragePhase::FinishStartup;
                 Poll::Pending
             }
-            OpenStoragePhase::FinishStartup { mut plan } => {
+            OpenStoragePhase::FinishStartup => {
                 let backing = match this.backing.as_deref_mut() {
                     Some(backing) => backing,
                     None => return Poll::Pending,
                 };
-                let startup = crate::startup::finish_open_formatted_store::<
+                let memory = match this.memory.as_deref_mut() {
+                    Some(memory) => memory,
+                    None => return Poll::Pending,
+                };
+                crate::startup::finish_open_formatted_store_into_runtime::<
                     REGION_SIZE,
                     REGION_COUNT,
                     IO,
                     MAX_COLLECTIONS,
                     MAX_PENDING_RECLAIMS,
-                >(backing, &mut plan)?;
-                let runtime = crate::storage::from_startup_state(startup)?;
-                this.phase = OpenStoragePhase::ValidateCollections { runtime };
+                >(backing, &mut memory.open_plan, &mut memory.state)?;
+                this.phase = OpenStoragePhase::ValidateCollections;
                 Poll::Pending
             }
-            OpenStoragePhase::ValidateCollections { runtime } => {
+            OpenStoragePhase::ValidateCollections => {
+                let memory = match this.memory.as_deref_mut() {
+                    Some(memory) => memory,
+                    None => return Poll::Pending,
+                };
+                let runtime = &memory.state;
                 for collection in runtime.collections() {
                     if collection.basis() == StartupCollectionBasis::Dropped {
                         continue;
@@ -984,29 +1067,39 @@ where
                         )));
                     }
                 }
-                this.phase = OpenStoragePhase::RecoverPendingReclaims { runtime };
+                this.phase = OpenStoragePhase::RecoverPendingReclaims;
                 Poll::Pending
             }
-            OpenStoragePhase::RecoverPendingReclaims { mut runtime } => {
+            OpenStoragePhase::RecoverPendingReclaims => {
                 let backing = match this.backing.as_deref_mut() {
                     Some(backing) => backing,
                     None => return Poll::Pending,
                 };
+                let memory = match this.memory.as_deref_mut() {
+                    Some(memory) => memory,
+                    None => return Poll::Pending,
+                };
+                let runtime = &mut memory.state;
                 runtime.recover_pending_reclaims::<REGION_SIZE, REGION_COUNT, IO>(
                     backing,
-                    &mut this.workspace,
+                    &mut memory.workspace,
                 )?;
-                this.phase = OpenStoragePhase::RecoverStagedRegions { runtime };
+                this.phase = OpenStoragePhase::RecoverStagedRegions;
                 Poll::Pending
             }
-            OpenStoragePhase::RecoverStagedRegions { mut runtime } => {
+            OpenStoragePhase::RecoverStagedRegions => {
                 let backing = match this.backing.as_deref_mut() {
                     Some(backing) => backing,
                     None => return Poll::Pending,
                 };
+                let memory = match this.memory.as_deref_mut() {
+                    Some(memory) => memory,
+                    None => return Poll::Pending,
+                };
+                let runtime = &mut memory.state;
                 runtime.recover_abandoned_staged_regions::<REGION_SIZE, REGION_COUNT, IO>(
                     backing,
-                    &mut this.workspace,
+                    &mut memory.workspace,
                 )?;
                 let backing = this.backing.take().ok_or(StorageOpenError::Runtime(
                     StorageRuntimeError::InvalidStorageMode {
@@ -1014,9 +1107,11 @@ where
                         actual: StorageMode::Idle,
                     },
                 ))?;
-                let workspace = mem::take(&mut this.workspace);
+                let memory = this.memory.take().ok_or(StorageOpenError::Runtime(
+                    StorageRuntimeError::StorageMemoryUninitialized,
+                ))?;
                 this.phase = OpenStoragePhase::Done;
-                Poll::Ready(Ok(Storage::from_runtime(backing, workspace, runtime)))
+                Poll::Ready(Storage::from_initialized_memory(backing, memory).map_err(Into::into))
             }
             OpenStoragePhase::Done => Poll::Pending,
         }

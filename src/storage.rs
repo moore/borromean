@@ -1,12 +1,12 @@
+#![allow(clippy::too_many_arguments)]
+
 use heapless::Vec;
 
 use crate::disk::{FreePointerFooter, Header, WalRegionPrologue, WAL_V1_FORMAT};
 use crate::flash_io::{FlashIo, StorageFormatError, StorageIoError};
 use crate::mock::{MockError, MockFormatError};
 use crate::mode::StorageMode;
-use crate::startup::{
-    apply_wal_record, open_formatted_store, StartupCollection, StartupError, StartupState,
-};
+use crate::startup::{apply_wal_record, StartupCollection, StartupError, StartupOpenPlan};
 use crate::wal_record::{
     decode_record, encode_record_into, WalRecord, WalRecordError, WalRecordType,
 };
@@ -156,6 +156,8 @@ pub enum StorageRuntimeError {
         /// Maximum payload capacity in bytes.
         capacity: usize,
     },
+    /// Caller-owned storage memory did not contain an initialized runtime slot.
+    StorageMemoryUninitialized,
 }
 
 impl From<MockFormatError> for StorageRuntimeError {
@@ -221,6 +223,19 @@ pub(crate) struct WalHeadReclaimPlan<const MAX_COLLECTIONS: usize> {
 }
 
 impl<const MAX_COLLECTIONS: usize> WalHeadReclaimPlan<MAX_COLLECTIONS> {
+    pub(crate) fn empty() -> Self {
+        Self {
+            old_head: 0,
+            source_tail: 0,
+            source_tail_append_offset: 0,
+            original_collections: Vec::new(),
+        }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.original_collections.clear();
+    }
+
     pub(crate) fn limit_to_source_tail(
         &mut self,
         source_tail: u32,
@@ -251,6 +266,80 @@ pub struct StorageRuntime<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAI
 impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
     StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>
 {
+    pub(crate) fn empty() -> Self {
+        Self {
+            metadata: StorageMetadata {
+                storage_version: 0,
+                region_size: 0,
+                region_count: 0,
+                min_free_regions: 0,
+                wal_write_granule: 0,
+                erased_byte: 0,
+                wal_record_magic: 0,
+            },
+            wal_head: 0,
+            wal_tail: 0,
+            wal_append_offset: 0,
+            last_free_list_head: None,
+            free_list_tail: None,
+            ready_region: None,
+            max_seen_sequence: 0,
+            collections: Vec::new(),
+            staged_regions: Vec::new(),
+            pending_reclaims: Vec::new(),
+            pending_wal_recovery_boundary: false,
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn replace_from_startup_parts(
+        &mut self,
+        metadata: StorageMetadata,
+        wal_head: u32,
+        wal_tail: u32,
+        wal_append_offset: usize,
+        last_free_list_head: Option<u32>,
+        free_list_tail: Option<u32>,
+        ready_region: Option<u32>,
+        max_seen_sequence: u64,
+        collections: &[StartupCollection],
+        staged_regions: &[u32],
+        pending_reclaims: &[u32],
+        pending_wal_recovery_boundary: bool,
+    ) -> Result<(), StorageRuntimeError> {
+        self.collections.clear();
+        for collection in collections.iter().copied() {
+            self.collections
+                .push(collection)
+                .map_err(|_| StorageRuntimeError::TooManyTrackedCollections)?;
+        }
+
+        self.staged_regions.clear();
+        for region_index in staged_regions.iter().copied() {
+            self.staged_regions
+                .push(region_index)
+                .map_err(|_| StorageRuntimeError::TooManyStagedRegions)?;
+        }
+
+        self.pending_reclaims.clear();
+        for region_index in pending_reclaims.iter().copied() {
+            self.pending_reclaims
+                .push(region_index)
+                .map_err(|_| StorageRuntimeError::TooManyPendingReclaims)?;
+        }
+
+        self.metadata = metadata;
+        self.wal_head = wal_head;
+        self.wal_tail = wal_tail;
+        self.wal_append_offset = wal_append_offset;
+        self.last_free_list_head = last_free_list_head;
+        self.free_list_tail = free_list_tail;
+        self.ready_region = ready_region;
+        self.max_seen_sequence = max_seen_sequence;
+        self.pending_wal_recovery_boundary = pending_wal_recovery_boundary;
+        Ok(())
+    }
+
     fn validate_supported_user_collection_type(
         collection_id: CollectionId,
         collection_type: u16,
@@ -353,10 +442,18 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
     }
 
     /// Reserves a free region for a future committed-region write or WAL rotation.
-    pub fn reserve_next_region<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
+    pub(crate) fn reserve_next_region<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
         &mut self,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
+        reclaim_source_regions: &mut Vec<u32, REGION_COUNT>,
+        active_collections: &mut Vec<CollectionId, MAX_COLLECTIONS>,
+        reclaim_plan: &mut WalHeadReclaimPlan<MAX_COLLECTIONS>,
+        open_plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
     ) -> Result<u32, StorageRuntimeError> {
         if let Some(region_index) = self.ready_region {
             return Ok(region_index);
@@ -367,7 +464,12 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
                 flash, workspace,
             )?;
             self.ensure_foreground_allocation_headroom::<REGION_SIZE, REGION_COUNT, IO>(
-                flash, workspace,
+                flash,
+                workspace,
+                reclaim_source_regions,
+                active_collections,
+                reclaim_plan,
+                open_plan,
             )?;
         }
 
@@ -1024,14 +1126,26 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
     }
 
     /// Reclaims the current WAL prefix and returns the new head region.
-    pub fn reclaim_wal_head<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
+    pub(crate) fn reclaim_wal_head<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
         &mut self,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
+        source_regions: &mut Vec<u32, REGION_COUNT>,
+        active_collections: &mut Vec<CollectionId, MAX_COLLECTIONS>,
+        plan: &mut WalHeadReclaimPlan<MAX_COLLECTIONS>,
+        open_plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
     ) -> Result<u32, StorageRuntimeError> {
         self.reclaim_wal_head_inner::<REGION_SIZE, REGION_COUNT, IO>(
             flash,
             workspace,
+            source_regions,
+            active_collections,
+            plan,
+            open_plan,
             #[cfg(feature = "perf-counters")]
             None,
         )
@@ -1046,11 +1160,19 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         &mut self,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
+        source_regions: &mut Vec<u32, REGION_COUNT>,
+        active_collections: &mut Vec<CollectionId, MAX_COLLECTIONS>,
+        plan: &mut WalHeadReclaimPlan<MAX_COLLECTIONS>,
+        open_plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
         metrics: &mut StoragePerfMetrics,
     ) -> Result<u32, StorageRuntimeError> {
         self.reclaim_wal_head_inner::<REGION_SIZE, REGION_COUNT, IO>(
             flash,
             workspace,
+            source_regions,
+            active_collections,
+            plan,
+            open_plan,
             Some(metrics),
         )
     }
@@ -1059,13 +1181,20 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         &mut self,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
+        source_regions: &mut Vec<u32, REGION_COUNT>,
+        active_collections: &mut Vec<CollectionId, MAX_COLLECTIONS>,
+        plan: &mut WalHeadReclaimPlan<MAX_COLLECTIONS>,
+        open_plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
         #[cfg(feature = "perf-counters")] metrics: Option<&mut StoragePerfMetrics>,
     ) -> Result<u32, StorageRuntimeError> {
-        let mut plan = self.prepare_wal_head_reclaim::<REGION_SIZE, IO>(flash, workspace)?;
-        let mut source_regions = self
-            .collect_wal_head_reclaim_regions::<REGION_SIZE, REGION_COUNT, IO>(
-                flash, workspace, &plan,
-            )?;
+        self.prepare_wal_head_reclaim::<REGION_SIZE, IO>(flash, workspace, plan)?;
+        source_regions.clear();
+        self.collect_wal_head_reclaim_regions::<REGION_SIZE, REGION_COUNT, IO>(
+            flash,
+            workspace,
+            plan,
+            source_regions,
+        )?;
 
         let new_head = if source_regions.len() > MAX_PENDING_RECLAIMS {
             if MAX_PENDING_RECLAIMS == 0 {
@@ -1090,10 +1219,13 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         self.preserve_free_list_head_for_wal_head_reclaim::<REGION_SIZE, REGION_COUNT, IO>(
             flash, workspace,
         )?;
+        active_collections.clear();
         self.copy_live_wal_head_reclaim_state::<REGION_SIZE, REGION_COUNT, IO>(
             flash,
             workspace,
-            &plan,
+            plan,
+            active_collections,
+            open_plan,
             #[cfg(feature = "perf-counters")]
             metrics,
         )?;
@@ -1699,6 +1831,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         source_region: u32,
         source_offset: usize,
         encoded_len: usize,
+        open_plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
         #[cfg(feature = "perf-counters")] mut metrics: Option<&mut StoragePerfMetrics>,
     ) -> Result<(), StorageRuntimeError> {
         loop {
@@ -1721,13 +1854,13 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
                         )?;
                         flash.sync()?;
                     }
-                    *self = reopen_without_reclaim_recovery::<
+                    reopen_without_reclaim_recovery_into::<
                         REGION_SIZE,
                         REGION_COUNT,
                         IO,
                         MAX_COLLECTIONS,
                         MAX_PENDING_RECLAIMS,
-                    >(flash, workspace)?;
+                    >(flash, workspace, self, open_plan)?;
                     #[cfg(feature = "perf-counters")]
                     if let Some(metrics) = metrics.as_deref_mut() {
                         metrics.increment(StoragePerfCounter::RuntimeReopens);
@@ -2222,6 +2355,10 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         &mut self,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
+        reclaim_source_regions: &mut Vec<u32, REGION_COUNT>,
+        active_collections: &mut Vec<CollectionId, MAX_COLLECTIONS>,
+        reclaim_plan: &mut WalHeadReclaimPlan<MAX_COLLECTIONS>,
+        open_plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
     ) -> Result<(), StorageRuntimeError> {
         for _ in 0..self.metadata.region_count {
             let free_regions = self.free_region_count::<REGION_SIZE, REGION_COUNT, IO>(flash)?;
@@ -2229,7 +2366,14 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
                 return Ok(());
             }
 
-            match self.reclaim_wal_head::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace) {
+            match self.reclaim_wal_head::<REGION_SIZE, REGION_COUNT, IO>(
+                flash,
+                workspace,
+                reclaim_source_regions,
+                active_collections,
+                reclaim_plan,
+                open_plan,
+            ) {
                 Ok(_) => {}
                 Err(
                     StorageRuntimeError::WalHeadReclaimRequiresMultipleWalRegions
@@ -2264,6 +2408,10 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         &mut self,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
+        reclaim_source_regions: &mut Vec<u32, REGION_COUNT>,
+        active_collections: &mut Vec<CollectionId, MAX_COLLECTIONS>,
+        reclaim_plan: &mut WalHeadReclaimPlan<MAX_COLLECTIONS>,
+        open_plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
         allocations_needed: u32,
     ) -> Result<(), StorageRuntimeError> {
         if allocations_needed == 0 {
@@ -2288,7 +2436,14 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
                 return Ok(());
             }
 
-            match self.reclaim_wal_head::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace) {
+            match self.reclaim_wal_head::<REGION_SIZE, REGION_COUNT, IO>(
+                flash,
+                workspace,
+                reclaim_source_regions,
+                active_collections,
+                reclaim_plan,
+                open_plan,
+            ) {
                 Ok(_) => {}
                 Err(
                     StorageRuntimeError::WalHeadReclaimRequiresMultipleWalRegions
@@ -2318,7 +2473,8 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         &self,
         _flash: &mut IO,
         _workspace: &mut StorageWorkspace<REGION_SIZE>,
-    ) -> Result<WalHeadReclaimPlan<MAX_COLLECTIONS>, StorageRuntimeError> {
+        plan: &mut WalHeadReclaimPlan<MAX_COLLECTIONS>,
+    ) -> Result<(), StorageRuntimeError> {
         if self.wal_head == self.wal_tail {
             return Err(StorageRuntimeError::WalHeadReclaimRequiresMultipleWalRegions);
         }
@@ -2337,13 +2493,16 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
             return Err(StorageRuntimeError::WalHeadReclaimBlockedByPendingReclaims);
         }
 
-        let old_head = self.wal_head;
-        Ok(WalHeadReclaimPlan {
-            old_head,
-            source_tail: self.wal_tail,
-            source_tail_append_offset: self.wal_append_offset,
-            original_collections: self.collections.clone(),
-        })
+        plan.old_head = self.wal_head;
+        plan.source_tail = self.wal_tail;
+        plan.source_tail_append_offset = self.wal_append_offset;
+        plan.original_collections.clear();
+        for collection in self.collections.iter().copied() {
+            plan.original_collections
+                .push(collection)
+                .map_err(|_| StorageRuntimeError::TooManyTrackedCollections)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn collect_wal_head_reclaim_regions<
@@ -2355,8 +2514,9 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
         plan: &WalHeadReclaimPlan<MAX_COLLECTIONS>,
-    ) -> Result<Vec<u32, REGION_COUNT>, StorageRuntimeError> {
-        let mut regions = Vec::<u32, REGION_COUNT>::new();
+        regions: &mut Vec<u32, REGION_COUNT>,
+    ) -> Result<(), StorageRuntimeError> {
+        regions.clear();
         let mut current_region = plan.old_head;
 
         for _ in 0..self.metadata.region_count {
@@ -2365,7 +2525,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
                 .map_err(|_| StorageRuntimeError::WalRotationRequired)?;
 
             if current_region == plan.source_tail {
-                return Ok(regions);
+                return Ok(());
             }
 
             current_region = find_link_target_in_wal_region::<REGION_SIZE, IO>(
@@ -2438,9 +2598,11 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
         plan: &WalHeadReclaimPlan<MAX_COLLECTIONS>,
+        active_collections: &mut Vec<CollectionId, MAX_COLLECTIONS>,
+        open_plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
         #[cfg(feature = "perf-counters")] mut metrics: Option<&mut StoragePerfMetrics>,
     ) -> Result<(), StorageRuntimeError> {
-        let mut active_collections = Vec::<CollectionId, MAX_COLLECTIONS>::new();
+        active_collections.clear();
         let metadata = self.metadata;
         let mut current_region = plan.old_head;
 
@@ -2450,7 +2612,8 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
                     flash,
                     workspace,
                     plan,
-                    &mut active_collections,
+                    active_collections,
+                    open_plan,
                     current_region,
                     #[cfg(feature = "perf-counters")]
                     metrics.as_deref_mut(),
@@ -2481,6 +2644,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         workspace: &mut StorageWorkspace<REGION_SIZE>,
         plan: &WalHeadReclaimPlan<MAX_COLLECTIONS>,
         active_collections: &mut Vec<CollectionId, MAX_COLLECTIONS>,
+        open_plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
         source_region: u32,
         #[cfg(feature = "perf-counters")] mut metrics: Option<&mut StoragePerfMetrics>,
     ) -> Result<Option<u32>, StorageRuntimeError> {
@@ -2544,6 +2708,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
                         source_region,
                         offset,
                         encoded_len,
+                        open_plan,
                         #[cfg(feature = "perf-counters")]
                         metrics.as_deref_mut(),
                     )?;
@@ -2908,6 +3073,7 @@ struct RotationReserves {
 }
 
 /// Formats an empty store and reopens it as runtime state.
+#[cfg(test)]
 pub fn format<
     const REGION_SIZE: usize,
     const REGION_COUNT: usize,
@@ -2921,11 +3087,43 @@ pub fn format<
     wal_write_granule: u32,
     wal_record_magic: u8,
 ) -> Result<StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>, StorageRuntimeError> {
+    let mut runtime = StorageRuntime::empty();
+    let mut open_plan = StartupOpenPlan::empty();
+    format_into::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>(
+        flash,
+        workspace,
+        &mut runtime,
+        &mut open_plan,
+        min_free_regions,
+        wal_write_granule,
+        wal_record_magic,
+    )?;
+    Ok(runtime)
+}
+
+pub(crate) fn format_into<
+    const REGION_SIZE: usize,
+    const REGION_COUNT: usize,
+    IO: FlashIo,
+    const MAX_COLLECTIONS: usize,
+    const MAX_PENDING_RECLAIMS: usize,
+>(
+    flash: &mut IO,
+    workspace: &mut StorageWorkspace<REGION_SIZE>,
+    runtime: &mut StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+    open_plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+    min_free_regions: u32,
+    wal_write_granule: u32,
+    wal_record_magic: u8,
+) -> Result<(), StorageRuntimeError> {
     flash.format_empty_store(min_free_regions, wal_write_granule, wal_record_magic)?;
-    open::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>(flash, workspace)
+    open_into::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>(
+        flash, workspace, runtime, open_plan,
+    )
 }
 
 /// Opens a formatted store into runtime state and completes pending reclaims.
+#[cfg(test)]
 pub fn open<
     const REGION_SIZE: usize,
     const REGION_COUNT: usize,
@@ -2936,19 +3134,18 @@ pub fn open<
     flash: &mut IO,
     workspace: &mut StorageWorkspace<REGION_SIZE>,
 ) -> Result<StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>, StorageRuntimeError> {
-    let mut state = reopen_without_reclaim_recovery::<
-        REGION_SIZE,
-        REGION_COUNT,
-        IO,
-        MAX_COLLECTIONS,
-        MAX_PENDING_RECLAIMS,
-    >(flash, workspace)?;
-    state.recover_pending_reclaims::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace)?;
-    state.recover_abandoned_staged_regions::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace)?;
-    Ok(state)
+    let mut runtime = StorageRuntime::empty();
+    let mut open_plan = StartupOpenPlan::empty();
+    open_into::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>(
+        flash,
+        workspace,
+        &mut runtime,
+        &mut open_plan,
+    )?;
+    Ok(runtime)
 }
 
-pub(crate) fn reopen_without_reclaim_recovery<
+pub(crate) fn open_into<
     const REGION_SIZE: usize,
     const REGION_COUNT: usize,
     IO: FlashIo,
@@ -2957,58 +3154,68 @@ pub(crate) fn reopen_without_reclaim_recovery<
 >(
     flash: &mut IO,
     workspace: &mut StorageWorkspace<REGION_SIZE>,
-) -> Result<StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>, StorageRuntimeError> {
-    let startup = open_formatted_store::<
+    runtime: &mut StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+    open_plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+) -> Result<(), StorageRuntimeError> {
+    reopen_without_reclaim_recovery_into::<
         REGION_SIZE,
         REGION_COUNT,
         IO,
         MAX_COLLECTIONS,
         MAX_PENDING_RECLAIMS,
-    >(flash, workspace)?;
-    from_startup_state(startup)
+    >(flash, workspace, runtime, open_plan)?;
+    runtime.recover_pending_reclaims::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace)?;
+    runtime.recover_abandoned_staged_regions::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace)?;
+    Ok(())
 }
 
-pub(crate) fn from_startup_state<
+pub(crate) fn reopen_without_reclaim_recovery_into<
+    const REGION_SIZE: usize,
+    const REGION_COUNT: usize,
+    IO: FlashIo,
     const MAX_COLLECTIONS: usize,
     const MAX_PENDING_RECLAIMS: usize,
 >(
-    startup: StartupState<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
-) -> Result<StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>, StorageRuntimeError> {
-    let mut collections = Vec::new();
-    for collection in startup.collections().iter().copied() {
-        collections
-            .push(collection)
-            .map_err(|_| StorageRuntimeError::TooManyTrackedCollections)?;
-    }
-
-    let mut pending_reclaims = Vec::new();
-    for region_index in startup.pending_reclaims().iter().copied() {
-        pending_reclaims
-            .push(region_index)
-            .map_err(|_| StorageRuntimeError::TooManyPendingReclaims)?;
-    }
-
-    let mut staged_regions = Vec::new();
-    for region_index in startup.staged_regions().iter().copied() {
-        staged_regions
-            .push(region_index)
-            .map_err(|_| StorageRuntimeError::TooManyStagedRegions)?;
-    }
-
-    Ok(StorageRuntime {
-        metadata: startup.metadata(),
-        wal_head: startup.wal_head(),
-        wal_tail: startup.wal_tail(),
-        wal_append_offset: startup.wal_append_offset(),
-        last_free_list_head: startup.last_free_list_head(),
-        free_list_tail: startup.free_list_tail(),
-        ready_region: startup.ready_region(),
-        max_seen_sequence: startup.max_seen_sequence(),
-        collections,
-        staged_regions,
-        pending_reclaims,
-        pending_wal_recovery_boundary: startup.pending_wal_recovery_boundary(),
-    })
+    flash: &mut IO,
+    workspace: &mut StorageWorkspace<REGION_SIZE>,
+    runtime: &mut StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+    open_plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+) -> Result<(), StorageRuntimeError> {
+    crate::startup::begin_open_formatted_store::<
+        REGION_SIZE,
+        REGION_COUNT,
+        IO,
+        MAX_COLLECTIONS,
+        MAX_PENDING_RECLAIMS,
+    >(flash, workspace, open_plan)?;
+    crate::startup::recover_open_rotation::<
+        REGION_SIZE,
+        IO,
+        REGION_COUNT,
+        MAX_COLLECTIONS,
+        MAX_PENDING_RECLAIMS,
+    >(flash, workspace, open_plan)?;
+    crate::startup::discover_open_wal_chain::<
+        REGION_SIZE,
+        REGION_COUNT,
+        IO,
+        MAX_COLLECTIONS,
+        MAX_PENDING_RECLAIMS,
+    >(flash, workspace, open_plan)?;
+    crate::startup::replay_open_wal_chain::<
+        REGION_SIZE,
+        REGION_COUNT,
+        IO,
+        MAX_COLLECTIONS,
+        MAX_PENDING_RECLAIMS,
+    >(flash, workspace, open_plan)?;
+    crate::startup::finish_open_formatted_store_into_runtime::<
+        REGION_SIZE,
+        REGION_COUNT,
+        IO,
+        MAX_COLLECTIONS,
+        MAX_PENDING_RECLAIMS,
+    >(flash, open_plan, runtime)
 }
 
 fn read_header_from_flash<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(

@@ -2,6 +2,36 @@ use super::*;
 use heapless::Vec as HeaplessVec;
 use std::mem::size_of;
 
+fn assert_stack_handle_size<T>(label: &str) {
+    assert!(
+        size_of::<T>() <= 64,
+        "{label} is {} bytes, expected <= 64",
+        size_of::<T>()
+    );
+}
+
+//= spec/implementation.md#memory-requirements
+//= type=test
+//# Core handles and operation futures MUST remain small stack values;
+//# caller-owned memory structs carry bounded scratch and runtime state.
+#[test]
+fn requirement_core_handles_and_futures_fit_small_stack_frames() {
+    type Flash = MockFlash<256, 6, 1024>;
+
+    assert_stack_handle_size::<Storage<'_, '_, Flash, 256, 6, 8, 4>>("Storage");
+    assert_stack_handle_size::<FormatStorageFuture<'_, '_, Flash, 256, 6, 8, 4>>(
+        "FormatStorageFuture",
+    );
+    assert_stack_handle_size::<OpenStorageFuture<'_, '_, Flash, 256, 6, 8, 4>>("OpenStorageFuture");
+    assert_stack_handle_size::<ReclaimWalHeadFuture<'_, '_, '_, Flash, 256, 6, 8, 4>>(
+        "ReclaimWalHeadFuture",
+    );
+    assert_stack_handle_size::<LsmMap<'_, u16, u16, 8, 8>>("LsmMap");
+    assert_stack_handle_size::<MapFrontier<'_, u16, u16, 8, 8>>("MapFrontier");
+    assert_stack_handle_size::<crate::op_future::ReclaimWalHeadPhase<6, 8>>("ReclaimWalHeadPhase");
+    assert_stack_handle_size::<crate::op_future::OpenStoragePhase<6, 8, 4>>("OpenStoragePhase");
+}
+
 //= spec/implementation.md#core-requirements
 //= type=test
 //# `RING-IMPL-CORE-005` All memory required for normal operation MUST
@@ -12,11 +42,17 @@ use std::mem::size_of;
 fn requirement_normal_operation_uses_caller_owned_buffers_without_heap_allocation() {
     let mut flash = MockFlash::<256, 5, 1024>::new(0xff);
     let mut map_buffer = [0u8; 256];
+    let mut format_memory = StorageMemory::<256, 5, 8, 4>::new();
+    let mut open_memory = StorageMemory::<256, 5, 8, 4>::new();
+    let mut frontier_memory = MapFrontierMemory::<u16, 8>::new();
 
     assert_no_alloc("format/create/update/open", || {
-        let mut storage =
-            Storage::<_, 256, 5, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
-                .unwrap();
+        let mut storage = Storage::<_, 256, 5, 8, 4>::format(
+            &mut flash,
+            StorageFormatConfig::new(1, 8, 0xa5),
+            &mut format_memory,
+        )
+        .unwrap();
         storage.create_map(CollectionId(90)).unwrap();
         storage
             .append_map_update::<u16, u16, 8>(
@@ -25,9 +61,10 @@ fn requirement_normal_operation_uses_caller_owned_buffers_without_heap_allocatio
             )
             .unwrap();
 
-        let mut reopened = Storage::<_, 256, 5, 8, 4>::open(&mut flash).unwrap();
+        drop(storage);
+        let mut reopened = Storage::<_, 256, 5, 8, 4>::open(&mut flash, &mut open_memory).unwrap();
         let map = reopened
-            .open_map::<u16, u16, 8, 8>(CollectionId(90), &mut map_buffer)
+            .open_map::<u16, u16, 8, 8>(CollectionId(90), &mut map_buffer, &mut frontier_memory)
             .unwrap();
         assert_eq!(map.get_frontier(&7).unwrap(), Some(70));
     });
@@ -41,9 +78,12 @@ fn requirement_normal_operation_uses_caller_owned_buffers_without_heap_allocatio
 #[test]
 fn requirement_explicit_collection_and_reclaim_capacities_fail_when_exhausted() {
     let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
-    let mut storage =
-        Storage::<_, 512, 5, 1, 1>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
-            .unwrap();
+    let mut storage = Storage::<_, 512, 5, 1, 1>::format(
+        &mut flash,
+        StorageFormatConfig::new(1, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
 
     storage.create_map(CollectionId(1)).unwrap();
     assert!(matches!(
@@ -55,7 +95,12 @@ fn requirement_explicit_collection_and_reclaim_capacities_fail_when_exhausted() 
     ));
 
     let mut tiny_buffer = [0u8; 32];
-    let mut tiny_map = MapFrontier::<u16, u16, 8>::new(CollectionId(3), &mut tiny_buffer).unwrap();
+    let mut tiny_map = MapFrontier::<u16, u16, 8>::new(
+        CollectionId(3),
+        &mut tiny_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     tiny_map.set(1, 10).unwrap();
     assert!(matches!(tiny_map.set(2, 20), Err(MapError::BufferTooSmall)));
 }
@@ -63,14 +108,17 @@ fn requirement_explicit_collection_and_reclaim_capacities_fail_when_exhausted() 
 //= spec/implementation.md#memory-requirements
 //= type=test
 //# `RING-IMPL-MEM-002` Any operation that needs scratch space for
-//# encoding, decoding, or staging MUST use bounded storage owned by the
-//# `Storage` context or supplied when that context is constructed.
+//# encoding, decoding, or staging MUST use bounded caller-owned storage
+//# borrowed by the `Storage` context or supplied to the collection handle.
 #[test]
 fn requirement_scratch_space_is_owned_by_storage_context() {
     let mut flash = MockFlash::<256, 6, 1024>::new(0xff);
-    let mut storage =
-        Storage::<_, 256, 6, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
-            .unwrap();
+    let mut storage = Storage::<_, 256, 6, 8, 4>::format(
+        &mut flash,
+        StorageFormatConfig::new(1, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
 
     storage.create_map(CollectionId(91)).unwrap();
     for key in 0..2 {
@@ -95,9 +143,12 @@ fn requirement_scratch_space_is_owned_by_storage_context() {
 #[test]
 fn requirement_map_round_trips_large_snapshots_using_only_borrowed_buffers() {
     let mut source_buffer = [0u8; 512];
-    let mut source =
-        MapFrontier::<u16, HeaplessVec<u8, 96>, 8>::new(CollectionId(6), &mut source_buffer)
-            .unwrap();
+    let mut source = MapFrontier::<u16, HeaplessVec<u8, 96>, 8>::new(
+        CollectionId(6),
+        &mut source_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     source
         .set(1, HeaplessVec::<u8, 96>::from_slice(&[0x11; 96]).unwrap())
         .unwrap();
@@ -111,9 +162,12 @@ fn requirement_map_round_trips_large_snapshots_using_only_borrowed_buffers() {
     });
 
     let mut reopened_buffer = [0u8; 512];
-    let mut reopened =
-        MapFrontier::<u16, HeaplessVec<u8, 96>, 8>::new(CollectionId(6), &mut reopened_buffer)
-            .unwrap();
+    let mut reopened = MapFrontier::<u16, HeaplessVec<u8, 96>, 8>::new(
+        CollectionId(6),
+        &mut reopened_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     assert_no_alloc("load_snapshot", || {
         reopened.load_snapshot(&snapshot[..snapshot_len]).unwrap();
     });
@@ -167,7 +221,12 @@ fn requirement_disk_format_buffer_sizes_are_exposed_by_constants_or_workspace_co
 #[test]
 fn requirement_map_in_memory_state_runs_inside_a_borrowed_buffer_without_allocating() {
     let mut map_buffer = [0u8; 128];
-    let mut map = MapFrontier::<u16, u16, 8>::new(CollectionId(7), &mut map_buffer).unwrap();
+    let mut map = MapFrontier::<u16, u16, 8>::new(
+        CollectionId(7),
+        &mut map_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
 
     assert_no_alloc("map set/get", || {
         map.set(1, 10).unwrap();
@@ -177,7 +236,12 @@ fn requirement_map_in_memory_state_runs_inside_a_borrowed_buffer_without_allocat
     });
 
     let mut tiny_buffer = [0u8; 32];
-    let mut tiny_map = MapFrontier::<u16, u16, 8>::new(CollectionId(8), &mut tiny_buffer).unwrap();
+    let mut tiny_map = MapFrontier::<u16, u16, 8>::new(
+        CollectionId(8),
+        &mut tiny_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     tiny_map.set(1, 10).unwrap();
     assert!(matches!(tiny_map.set(2, 20), Err(MapError::BufferTooSmall)));
 }
@@ -190,16 +254,24 @@ fn requirement_map_in_memory_state_runs_inside_a_borrowed_buffer_without_allocat
 #[test]
 fn requirement_collection_api_uses_storage_owned_operation_buffers() {
     let mut flash = MockFlash::<256, 6, 1024>::new(0xff);
-    let mut storage =
-        Storage::<_, 256, 6, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
-            .unwrap();
+    let mut storage = Storage::<_, 256, 6, 8, 4>::format(
+        &mut flash,
+        StorageFormatConfig::new(1, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
 
     storage.create_map(CollectionId(92)).unwrap();
     storage
         .append_map_update::<u16, u16, 8>(CollectionId(92), &MapUpdate::Set { key: 9, value: 90 })
         .unwrap();
     let mut map_buffer = [0u8; 256];
-    let mut map = MapFrontier::<u16, u16, 8>::new(CollectionId(92), &mut map_buffer).unwrap();
+    let mut map = MapFrontier::<u16, u16, 8>::new(
+        CollectionId(92),
+        &mut map_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     map.set(9, 90).unwrap();
     storage.snapshot_map(&map).unwrap();
 }

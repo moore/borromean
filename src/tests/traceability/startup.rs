@@ -11,9 +11,13 @@ use std::task::Poll;
 fn requirement_open_future_preserves_replay_context_across_pending_polls() {
     let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
-    let mut storage =
-        Storage::<_, 512, 5, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
-            .unwrap();
+    let mut format_memory = StorageMemory::<512, 5, 8, 4>::new();
+    let mut storage = Storage::<_, 512, 5, 8, 4>::format(
+        &mut flash,
+        StorageFormatConfig::new(1, 8, 0xa5),
+        &mut format_memory,
+    )
+    .unwrap();
 
     storage.create_map(CollectionId(83)).unwrap();
     let mut payload_buffer = [0u8; 64];
@@ -23,7 +27,8 @@ fn requirement_open_future_preserves_replay_context_across_pending_polls() {
     drop(storage);
 
     let mut reopened = {
-        let future = Storage::<_, 512, 5, 8, 4>::open_future(&mut flash);
+        let future =
+            Storage::<_, 512, 5, 8, 4>::open_future(&mut flash, crate::test_storage_memory());
         let mut future = pin!(future);
 
         assert!(matches!(
@@ -39,7 +44,11 @@ fn requirement_open_future_preserves_replay_context_across_pending_polls() {
     };
     let mut map_buffer = [0u8; 512];
     let map = reopened
-        .open_map::<u16, u16, 8, 8>(CollectionId(83), &mut map_buffer)
+        .open_map::<u16, u16, 8, 8>(
+            CollectionId(83),
+            &mut map_buffer,
+            crate::test_map_frontier_memory(),
+        )
         .unwrap();
     assert_eq!(map.get_frontier(&7).unwrap(), Some(70));
 }
@@ -52,23 +61,31 @@ fn requirement_open_future_preserves_replay_context_across_pending_polls() {
 fn requirement_startup_open_paths_complete_without_heap_allocation() {
     let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
-    let mut storage =
-        Storage::<_, 512, 5, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
-            .unwrap();
+    let mut storage = Storage::<_, 512, 5, 8, 4>::format(
+        &mut flash,
+        StorageFormatConfig::new(1, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
 
     storage.create_map(CollectionId(84)).unwrap();
     storage.append_update(CollectionId(84), &[1, 2, 3]).unwrap();
     drop(storage);
 
+    let mut blocking_memory = StorageMemory::<512, 5, 8, 4>::new();
     assert_no_alloc("blocking open", || {
-        let mut reopened = Storage::<_, 512, 5, 8, 4>::open(&mut flash).unwrap();
+        let mut reopened =
+            Storage::<_, 512, 5, 8, 4>::open(&mut flash, &mut blocking_memory).unwrap();
         assert_eq!(reopened.collections()[0].collection_id(), CollectionId(84));
     });
 
+    let mut future_memory = StorageMemory::<512, 5, 8, 4>::new();
     assert_no_alloc("future open", || {
-        let reopened =
-            super::super::poll_until_ready(Storage::<_, 512, 5, 8, 4>::open_future(&mut flash), 8)
-                .unwrap();
+        let reopened = super::super::poll_until_ready(
+            Storage::<_, 512, 5, 8, 4>::open_future(&mut flash, &mut future_memory),
+            8,
+        )
+        .unwrap();
         assert_eq!(reopened.collections()[0].collection_id(), CollectionId(84));
     });
 }
@@ -107,14 +124,16 @@ fn requirement_blocking_and_future_open_recover_the_same_pending_reclaim_state()
     let (storage, first_region, second_region) =
         super::super::replace_map_into_pending_reclaim_with_empty_free_list(&mut blocking_flash);
     drop(storage);
-    let reopened_blocking = Storage::<_, 512, 5, 8, 4>::open(&mut blocking_flash).unwrap();
+    let reopened_blocking =
+        Storage::<_, 512, 5, 8, 4>::open(&mut blocking_flash, crate::test_storage_memory())
+            .unwrap();
 
     let mut future_flash = MockFlash::<512, 5, 2048>::new(0xff);
     let (future_storage, _, _) =
         super::super::replace_map_into_pending_reclaim_with_empty_free_list(&mut future_flash);
     drop(future_storage);
     let reopened_future = super::super::poll_until_ready(
-        Storage::<_, 512, 5, 8, 4>::open_future(&mut future_flash),
+        Storage::<_, 512, 5, 8, 4>::open_future(&mut future_flash, crate::test_storage_memory()),
         8,
     )
     .unwrap();

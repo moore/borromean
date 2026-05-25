@@ -5,6 +5,7 @@ use crate::disk::{
 };
 use crate::flash_io::FlashIo;
 use crate::flash_io::StorageIoError;
+use crate::storage::{StorageRuntime, StorageRuntimeError};
 use crate::wal_record::{
     decode_record, encode_record_into, encoded_record_len, WalRecord, WalRecordError,
 };
@@ -336,8 +337,83 @@ pub(crate) struct StartupOpenPlan<
     pending_wal_recovery_boundary: bool,
 }
 
+impl<
+        const REGION_COUNT: usize,
+        const MAX_COLLECTIONS: usize,
+        const MAX_PENDING_RECLAIMS: usize,
+    > StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>
+{
+    pub(crate) fn empty() -> Self {
+        Self {
+            metadata: StorageMetadata {
+                storage_version: 0,
+                region_size: 0,
+                region_count: 0,
+                min_free_regions: 0,
+                wal_write_granule: 0,
+                erased_byte: 0,
+                wal_record_magic: 0,
+            },
+            wal_head_candidate: 0,
+            wal_tail: 0,
+            tail_scan: RegionScanResult {
+                append_offset: 0,
+                last_valid_record: None,
+                wal_head_override: None,
+                pending_boundary_open: false,
+            },
+            max_seen_sequence: 0,
+            wal_chain: Vec::new(),
+            collections: Vec::new(),
+            last_free_list_head: None,
+            ready_region: None,
+            staged_regions: Vec::new(),
+            pending_reclaims: Vec::new(),
+            wal_append_offset: 0,
+            pending_wal_recovery_boundary: false,
+        }
+    }
+
+    fn reset(
+        &mut self,
+        metadata: StorageMetadata,
+        wal_head_candidate: u32,
+        wal_tail: u32,
+        tail_scan: RegionScanResult,
+        max_seen_sequence: u64,
+    ) -> Result<(), StartupError> {
+        self.metadata = metadata;
+        self.wal_head_candidate = wal_head_candidate;
+        self.wal_tail = wal_tail;
+        self.tail_scan = tail_scan;
+        self.max_seen_sequence = max_seen_sequence;
+        self.wal_chain.clear();
+        self.collections.clear();
+        self.last_free_list_head = if metadata.region_count >= 2 {
+            Some(1)
+        } else {
+            None
+        };
+        self.ready_region = None;
+        self.staged_regions.clear();
+        self.pending_reclaims.clear();
+        self.wal_append_offset =
+            usize::try_from(metadata.region_size).map_err(|_| StartupError::LengthOverflow)?;
+        self.pending_wal_recovery_boundary = false;
+        Ok(())
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.wal_chain.clear();
+        self.collections.clear();
+        self.staged_regions.clear();
+        self.pending_reclaims.clear();
+    }
+}
+
 /// Replays a formatted store into bounded in-memory startup state.
-pub fn open_formatted_store<
+#[cfg(test)]
+pub(crate) fn open_formatted_store<
     const REGION_SIZE: usize,
     const REGION_COUNT: usize,
     IO: FlashIo,
@@ -346,22 +422,23 @@ pub fn open_formatted_store<
 >(
     flash: &mut IO,
     workspace: &mut StorageWorkspace<REGION_SIZE>,
+    plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
 ) -> Result<StartupState<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>, StartupError> {
-    let mut plan = begin_open_formatted_store::<
+    begin_open_formatted_store::<
         REGION_SIZE,
         REGION_COUNT,
         IO,
         MAX_COLLECTIONS,
         MAX_PENDING_RECLAIMS,
-    >(flash, workspace)?;
+    >(flash, workspace, plan)?;
     recover_open_rotation::<REGION_SIZE, IO, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>(
-        flash, workspace, &mut plan,
+        flash, workspace, plan,
     )?;
     discover_open_wal_chain::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>(
-        flash, workspace, &mut plan,
+        flash, workspace, plan,
     )?;
     replay_open_wal_chain::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>(
-        flash, workspace, &mut plan,
+        flash, workspace, plan,
     )?;
     finish_open_formatted_store::<
         REGION_SIZE,
@@ -369,7 +446,7 @@ pub fn open_formatted_store<
         IO,
         MAX_COLLECTIONS,
         MAX_PENDING_RECLAIMS,
-    >(flash, &mut plan)
+    >(flash, plan)
 }
 
 pub(crate) fn begin_open_formatted_store<
@@ -381,7 +458,8 @@ pub(crate) fn begin_open_formatted_store<
 >(
     flash: &mut IO,
     workspace: &mut StorageWorkspace<REGION_SIZE>,
-) -> Result<StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>, StartupError> {
+    plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+) -> Result<(), StartupError> {
     let metadata = flash
         .read_metadata()?
         .ok_or(StartupError::MissingMetadata)?;
@@ -415,26 +493,13 @@ pub(crate) fn begin_open_formatted_store<
         },
     )?;
 
-    Ok(StartupOpenPlan {
+    plan.reset(
         metadata,
         wal_head_candidate,
-        wal_tail: known_tail,
+        known_tail,
         tail_scan,
         max_seen_sequence,
-        wal_chain: Vec::new(),
-        collections: Vec::new(),
-        last_free_list_head: if metadata.region_count >= 2 {
-            Some(1)
-        } else {
-            None
-        },
-        ready_region: None,
-        staged_regions: Vec::new(),
-        pending_reclaims: Vec::new(),
-        wal_append_offset: usize::try_from(metadata.region_size)
-            .map_err(|_| StartupError::LengthOverflow)?,
-        pending_wal_recovery_boundary: false,
-    })
+    )
 }
 
 pub(crate) fn recover_open_rotation<
@@ -474,12 +539,13 @@ pub(crate) fn discover_open_wal_chain<
     workspace: &mut StorageWorkspace<REGION_SIZE>,
     plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
 ) -> Result<(), StartupError> {
-    plan.wal_chain = walk_wal_chain::<REGION_SIZE, REGION_COUNT, _>(
+    walk_wal_chain::<REGION_SIZE, REGION_COUNT, _>(
         flash,
         workspace,
         plan.metadata,
         plan.wal_head_candidate,
         plan.wal_tail,
+        &mut plan.wal_chain,
     )?;
     Ok(())
 }
@@ -547,6 +613,7 @@ pub(crate) fn replay_open_wal_chain<
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn finish_open_formatted_store<
     const REGION_SIZE: usize,
     const REGION_COUNT: usize,
@@ -575,6 +642,37 @@ pub(crate) fn finish_open_formatted_store<
         pending_reclaims: plan.pending_reclaims.clone(),
         pending_wal_recovery_boundary: plan.pending_wal_recovery_boundary,
     })
+}
+
+pub(crate) fn finish_open_formatted_store_into_runtime<
+    const REGION_SIZE: usize,
+    const REGION_COUNT: usize,
+    IO: FlashIo,
+    const MAX_COLLECTIONS: usize,
+    const MAX_PENDING_RECLAIMS: usize,
+>(
+    flash: &mut IO,
+    plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+    runtime: &mut StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+) -> Result<(), StorageRuntimeError> {
+    validate_live_collection_types(&plan.collections)?;
+    validate_live_region_bases(flash, &plan.collections)?;
+    let free_list_tail =
+        reconstruct_free_list_tail(flash, plan.metadata, plan.last_free_list_head)?;
+    runtime.replace_from_startup_parts(
+        plan.metadata,
+        plan.wal_head_candidate,
+        plan.wal_tail,
+        plan.wal_append_offset,
+        plan.last_free_list_head,
+        free_list_tail,
+        plan.ready_region,
+        plan.max_seen_sequence,
+        plan.collections.as_slice(),
+        plan.staged_regions.as_slice(),
+        plan.pending_reclaims.as_slice(),
+        plan.pending_wal_recovery_boundary,
+    )
 }
 
 fn locate_wal_tail<const REGION_SIZE: usize, IO: FlashIo>(
@@ -755,9 +853,11 @@ fn walk_wal_chain<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: Flash
     metadata: StorageMetadata,
     wal_head: u32,
     wal_tail: u32,
-) -> Result<Vec<u32, REGION_COUNT>, StartupError> {
-    let mut chain = Vec::<u32, REGION_COUNT>::new();
+    wal_chain: &mut Vec<u32, REGION_COUNT>,
+) -> Result<(), StartupError> {
     let mut current = wal_head;
+    let chain = wal_chain;
+    chain.clear();
 
     for _visited in 0..metadata.region_count {
         read_strict_wal_region(flash, current, metadata.region_count)?;
@@ -770,7 +870,7 @@ fn walk_wal_chain<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: Flash
         }
 
         if current == wal_tail {
-            return Ok(chain);
+            return Ok(());
         }
 
         let scan = scan_wal_region::<REGION_SIZE, _, _>(

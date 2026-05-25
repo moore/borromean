@@ -410,16 +410,18 @@ the caller's device, transport, emulator, or synchronized sharing
 adapter.
 
 At the design level, formatting and opening create a storage context
-by binding caller-provided backing media into `Storage`:
+by binding caller-provided backing media and caller-owned storage memory
+into `Storage`:
 
 ```rust
-Storage::format(backing, config) -> Result<Storage, StorageError>;
-Storage::open(backing, config) -> Result<Storage, StorageError>;
+let mut memory = StorageMemory::new();
+Storage::format(backing, config, &mut memory) -> Result<Storage, StorageError>;
+Storage::open(backing, &mut memory) -> Result<Storage, StorageError>;
 ```
 
-The `backing` argument in these examples may be owned by `Storage` or
-borrowed mutably by `Storage` for its lifetime. Normal storage
-operations then use the backing through `Storage`:
+The `backing` and `memory` arguments are borrowed mutably by `Storage`
+for its lifetime. Normal storage operations then use both through
+`Storage`:
 
 ```rust
 storage.operation(...);
@@ -463,7 +465,8 @@ separate backing argument on each operation.
 4. `RING-API-004` Public normal collection operations MUST NOT require
 callers to provide collection frontier buffers, payload serialization
 buffers, or a `StorageWorkspace`; that bounded memory MUST be supplied
-by the `Storage` context or storage-owned configuration.
+through caller-owned memory borrowed by `Storage` or the collection
+handle.
 5. `RING-API-005` Any shared-device synchronization required by a
 platform MUST be encapsulated by the backing implementation rather than
 by Borromean core requiring a specific mutex, executor, interrupt

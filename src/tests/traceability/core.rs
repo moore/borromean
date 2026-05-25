@@ -63,9 +63,12 @@ fn requirement_core_library_thread_and_worker_policy_is_enforced_by_clippy_verif
 fn requirement_storage_facade_preserves_ring_behavior_through_delegating_entry_points() {
     let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
-    let mut storage =
-        Storage::<_, 512, 5, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
-            .unwrap();
+    let mut storage = Storage::<_, 512, 5, 8, 4>::format(
+        &mut flash,
+        StorageFormatConfig::new(1, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
 
     storage.create_map(CollectionId(86)).unwrap();
 
@@ -74,10 +77,15 @@ fn requirement_storage_facade_preserves_ring_behavior_through_delegating_entry_p
         .append_map_update::<u16, u16, 8>(CollectionId(86), &MapUpdate::Set { key: 7, value: 70 })
         .unwrap();
 
-    let mut reopened = Storage::<_, 512, 5, 8, 4>::open(&mut flash).unwrap();
+    let mut reopened =
+        Storage::<_, 512, 5, 8, 4>::open(&mut flash, crate::test_storage_memory()).unwrap();
     let mut map_buffer = [0u8; 512];
     let map = reopened
-        .open_map::<u16, u16, 8, 8>(CollectionId(86), &mut map_buffer)
+        .open_map::<u16, u16, 8, 8>(
+            CollectionId(86),
+            &mut map_buffer,
+            crate::test_map_frontier_memory(),
+        )
         .unwrap();
     assert_eq!(map.get_frontier(&7).unwrap(), Some(70));
 }

@@ -105,10 +105,11 @@ The map collection is exposed as a typed partial function from `K` to
 storage. The API model is intentionally object-level: callers should not
 need to name WAL records, collection type codes, or committed-region
 formats in normal map use. Operation scratch buffers belong to the
-underlying Borromean database rather than to individual open map handles.
-This keeps each `LsmMap` handle small enough that many collections can
-be open at once; the handle primarily tracks the collection id and may
-cache small metadata for efficiency.
+caller-owned memory borrowed by the underlying Borromean database and
+map handle. This keeps each `LsmMap` handle small enough that many
+collections can be open at once; the handle primarily tracks the
+collection id and borrows `LsmMapMemory` for cached frontier state and
+compaction scratch.
 
 The design-level map API is:
 
@@ -118,11 +119,16 @@ where
     K: LsmKey,
     V: LsmValue,
 {
-    fn new(storage: &mut Storage) -> Result<Self, StorageError>;
-    fn open(collection_id: CollectionId, storage: &mut Storage)
+    fn new(storage: &mut Storage, memory: &mut LsmMapMemory<K, V>)
+        -> Result<Self, StorageError>;
+    fn open(
+        collection_id: CollectionId,
+        storage: &mut Storage,
+        memory: &mut LsmMapMemory<K, V>,
+    )
         -> Result<Self, StorageError>;
     fn collection_id(&self) -> CollectionId;
-    fn get<R, F>(&self, storage: &mut Storage, key: &K, f: F)
+    fn get<R, F>(&mut self, storage: &mut Storage, key: &K, f: F)
         -> Result<Option<R>, LsmMapError>
     where
         F: FnOnce(&K, &V) -> R;
@@ -134,17 +140,19 @@ where
 }
 ```
 
-The `Storage` value owns the bounded memory used for mutable frontiers,
-read/value materialization, serialization scratch, run descriptor
-capacity, and compaction scratch. Map operations borrow `&mut Storage`
-while they use that memory. `LsmMap::new(storage)` creates a durable map
-collection, assigns it a stable collection id, and returns an empty map
-handle. `collection_id` returns the stable id that can later be passed to
-`LsmMap::open`. `open` reconstructs the logical map from the retained
-durable basis and later retained updates using storage-owned buffers.
+The `StorageMemory` value borrowed by `Storage` owns storage runtime
+state and operation scratch. The `LsmMapMemory` value borrowed by
+`LsmMap` owns cached frontier descriptors and compaction temporaries.
+Map operations borrow `&mut Storage` while they use storage scratch.
+`LsmMap::new(storage, memory)` creates a durable map collection, assigns
+it a stable collection id, and returns an empty map handle. `collection_id`
+returns the stable id that can later be passed to `LsmMap::open` with
+fresh map memory. `open` reconstructs the logical map from the retained
+durable basis and later retained updates using buffers borrowed through
+`StorageMemory`.
 `get` observes newest-wins map visibility across the mutable frontier and
 retained durable layers. If the key is visible, `get` materializes the
-value using storage-owned buffers, calls `f(key, &V)` exactly once while
+value using buffers borrowed through `StorageMemory`, calls `f(key, &V)` exactly once while
 the value borrow is valid, and returns `Ok(Some(f_result))`. The `&K`
 passed to `f` is the same lookup key reference passed to `get`; it is not
 a separately materialized stored key.
@@ -157,7 +165,7 @@ capacity would otherwise be exceeded. On success, `set` and `delete`
 return `true` when the map's configured compaction policy says
 compaction is needed after that mutation and any required frontier flush.
 They return `false` when no compaction is currently needed. `compact`
-performs whole-run compaction for that map using storage-owned scratch
+performs whole-run compaction for that map using caller-owned scratch
 buffers; if no compaction is needed, it returns successfully without
 changing the logical map.
 
@@ -170,7 +178,8 @@ distinct from map committed-region format codes such as
 `MAP_MANIFEST_V2_FORMAT` and `MAP_RUN_V2_FORMAT`.
 
 The repository implementation also exposes lower-level storage bindings such
-as `Storage::create_map`, `Storage::open_map` with a frontier byte buffer,
+as `Storage::create_map`, `Storage::open_map` with a frontier byte buffer
+and `MapFrontierMemory`,
 `update_map_frontier`, `append_map_update`, `snapshot_map`, `flush_map`,
 `compact_map`, and `drop_map`. Those APIs are advanced plumbing around
 `MapFrontier` and the shared runtime; normal map use should prefer the

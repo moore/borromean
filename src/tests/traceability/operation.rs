@@ -16,6 +16,7 @@ fn requirement_each_public_operation_future_completes_when_polled_directly() {
         Storage::<_, REGION_SIZE, REGION_COUNT, 8, 4>::format_future(
             &mut flash,
             StorageFormatConfig::new(1, 8, 0xa5),
+            crate::test_storage_memory(),
         ),
     )
     .unwrap();
@@ -23,7 +24,12 @@ fn requirement_each_public_operation_future_completes_when_polled_directly() {
     super::super::poll_ready(storage.create_map_future(CollectionId(82))).unwrap();
 
     let mut source_buffer = [0u8; REGION_SIZE];
-    let mut source = MapFrontier::<u16, u16, 8>::new(CollectionId(82), &mut source_buffer).unwrap();
+    let mut source = MapFrontier::<u16, u16, 8>::new(
+        CollectionId(82),
+        &mut source_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     source.set(1, 10).unwrap();
     super::super::poll_ready(storage.snapshot_map_future::<_, _, 8>(&source)).unwrap();
 
@@ -48,7 +54,10 @@ fn requirement_each_public_operation_future_completes_when_polled_directly() {
 
     drop(storage);
     let reopened = super::super::poll_until_ready(
-        Storage::<_, REGION_SIZE, REGION_COUNT, 8, 4>::open_future(&mut flash),
+        Storage::<_, REGION_SIZE, REGION_COUNT, 8, 4>::open_future(
+            &mut flash,
+            crate::test_storage_memory(),
+        ),
         8,
     )
     .unwrap();
@@ -74,24 +83,35 @@ fn requirement_flush_future_keeps_collection_basis_on_previous_state_until_head_
     for pending_polls in 1..=2 {
         let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
         let mut workspace = StorageWorkspace::<512>::new();
-        let mut storage =
-            Storage::<_, 512, 5, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
-                .unwrap();
+        let mut storage = Storage::<_, 512, 5, 8, 4>::format(
+            &mut flash,
+            StorageFormatConfig::new(1, 8, 0xa5),
+            crate::test_storage_memory(),
+        )
+        .unwrap();
 
         storage.create_map(CollectionId(82)).unwrap();
 
         let previous_region = {
             let mut previous_buffer = [0u8; 512];
-            let mut previous =
-                MapFrontier::<u16, u16, 8>::new(CollectionId(82), &mut previous_buffer).unwrap();
+            let mut previous = MapFrontier::<u16, u16, 8>::new(
+                CollectionId(82),
+                &mut previous_buffer,
+                crate::test_map_frontier_memory(),
+            )
+            .unwrap();
             previous.set(1, 10).unwrap();
             storage.flush_map::<_, _, 8, 8>(&mut previous).unwrap()
         };
 
         {
             let mut replacement_buffer = [0u8; 512];
-            let mut replacement =
-                MapFrontier::<u16, u16, 8>::new(CollectionId(82), &mut replacement_buffer).unwrap();
+            let mut replacement = MapFrontier::<u16, u16, 8>::new(
+                CollectionId(82),
+                &mut replacement_buffer,
+                crate::test_map_frontier_memory(),
+            )
+            .unwrap();
             replacement.set(1, 11).unwrap();
             replacement.set(2, 22).unwrap();
 
@@ -114,24 +134,35 @@ fn requirement_flush_future_keeps_collection_basis_on_previous_state_until_head_
 
     let mut flash = MockFlash::<512, 6, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
-    let mut storage =
-        Storage::<_, 512, 6, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
-            .unwrap();
+    let mut storage = Storage::<_, 512, 6, 8, 4>::format(
+        &mut flash,
+        StorageFormatConfig::new(1, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
 
     storage.create_map(CollectionId(82)).unwrap();
 
     let previous_region = {
         let mut previous_buffer = [0u8; 512];
-        let mut previous =
-            MapFrontier::<u16, u16, 8>::new(CollectionId(82), &mut previous_buffer).unwrap();
+        let mut previous = MapFrontier::<u16, u16, 8>::new(
+            CollectionId(82),
+            &mut previous_buffer,
+            crate::test_map_frontier_memory(),
+        )
+        .unwrap();
         previous.set(1, 10).unwrap();
         storage.flush_map::<_, _, 8, 8>(&mut previous).unwrap()
     };
 
     let replacement_region = {
         let mut replacement_buffer = [0u8; 512];
-        let mut replacement =
-            MapFrontier::<u16, u16, 8>::new(CollectionId(82), &mut replacement_buffer).unwrap();
+        let mut replacement = MapFrontier::<u16, u16, 8>::new(
+            CollectionId(82),
+            &mut replacement_buffer,
+            crate::test_map_frontier_memory(),
+        )
+        .unwrap();
         replacement.set(1, 11).unwrap();
         replacement.set(2, 22).unwrap();
 
@@ -162,14 +193,17 @@ fn requirement_flush_future_keeps_collection_basis_on_previous_state_until_head_
 //= spec/implementation.md#operation-requirements
 //= type=test
 //# `RING-IMPL-OP-005` Public operations SHOULD keep borrows of
-//# storage-owned scratch internal to the operation so embedded callers can
+//# caller-owned scratch internal to the operation so embedded callers can
 //# reuse one `Storage` context across sequential operations.
 #[test]
 fn requirement_storage_owned_scratch_is_reusable_across_operations() {
     let mut flash = MockFlash::<512, 6, 2048>::new(0xff);
-    let mut storage =
-        Storage::<_, 512, 6, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
-            .unwrap();
+    let mut storage = Storage::<_, 512, 6, 8, 4>::format(
+        &mut flash,
+        StorageFormatConfig::new(1, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
 
     storage.create_map(CollectionId(83)).unwrap();
     storage
@@ -181,7 +215,11 @@ fn requirement_storage_owned_scratch_is_reusable_across_operations() {
 
     let mut map_buffer = [0u8; 512];
     let map = storage
-        .open_map::<u16, u16, 8, 8>(CollectionId(83), &mut map_buffer)
+        .open_map::<u16, u16, 8, 8>(
+            CollectionId(83),
+            &mut map_buffer,
+            crate::test_map_frontier_memory(),
+        )
         .unwrap();
     assert_eq!(map.get_frontier(&1).unwrap(), Some(10));
     assert_eq!(map.get_frontier(&2).unwrap(), Some(20));

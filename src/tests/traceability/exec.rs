@@ -108,6 +108,7 @@ fn requirement_each_fallible_storage_operation_is_drivable_as_one_future() {
         Storage::<_, REGION_SIZE, REGION_COUNT, 8, 4>::format_future(
             &mut flash,
             StorageFormatConfig::new(1, 8, 0xa5),
+            crate::test_storage_memory(),
         ),
     )
     .unwrap();
@@ -115,7 +116,12 @@ fn requirement_each_fallible_storage_operation_is_drivable_as_one_future() {
     super::super::poll_ready(storage.create_map_future(CollectionId(81))).unwrap();
 
     let mut source_buffer = [0u8; REGION_SIZE];
-    let mut source = MapFrontier::<u16, u16, 8>::new(CollectionId(81), &mut source_buffer).unwrap();
+    let mut source = MapFrontier::<u16, u16, 8>::new(
+        CollectionId(81),
+        &mut source_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     source.set(1, 10).unwrap();
     super::super::poll_ready(storage.snapshot_map_future::<_, _, 8>(&source)).unwrap();
 
@@ -140,7 +146,10 @@ fn requirement_each_fallible_storage_operation_is_drivable_as_one_future() {
 
     drop(storage);
     let reopened = super::super::poll_until_ready(
-        Storage::<_, REGION_SIZE, REGION_COUNT, 8, 4>::open_future(&mut flash),
+        Storage::<_, REGION_SIZE, REGION_COUNT, 8, 4>::open_future(
+            &mut flash,
+            crate::test_storage_memory(),
+        ),
         8,
     )
     .unwrap();
@@ -166,11 +175,15 @@ fn requirement_operation_futures_advance_only_when_the_caller_polls_them() {
     Storage::<_, REGION_SIZE, REGION_COUNT, 8, 4>::format(
         &mut flash,
         StorageFormatConfig::new(1, 8, 0xa5),
+        crate::test_storage_memory(),
     )
     .unwrap();
     call_count.set(0);
 
-    let future = Storage::<_, REGION_SIZE, REGION_COUNT, 8, 4>::open_future(&mut flash);
+    let future = Storage::<_, REGION_SIZE, REGION_COUNT, 8, 4>::open_future(
+        &mut flash,
+        crate::test_storage_memory(),
+    );
     let mut future = pin!(future);
 
     assert_eq!(call_count.get(), 0);
@@ -202,6 +215,7 @@ fn requirement_single_threaded_poll_loop_drives_operation_futures_to_completion(
         Storage::<_, REGION_SIZE, REGION_COUNT, 8, 4>::format_future(
             &mut flash,
             StorageFormatConfig::new(1, 8, 0xa5),
+            crate::test_storage_memory(),
         ),
     )
     .unwrap();
@@ -210,7 +224,12 @@ fn requirement_single_threaded_poll_loop_drives_operation_futures_to_completion(
 
     let committed_region = {
         let mut map_buffer = [0u8; REGION_SIZE];
-        let mut map = MapFrontier::<u16, u16, 8>::new(CollectionId(81), &mut map_buffer).unwrap();
+        let mut map = MapFrontier::<u16, u16, 8>::new(
+            CollectionId(81),
+            &mut map_buffer,
+            crate::test_map_frontier_memory(),
+        )
+        .unwrap();
         map.set(7, 70).unwrap();
         super::super::poll_until_ready(storage.flush_map_future::<_, _, 8, 8>(&mut map), 4).unwrap()
     };
@@ -222,7 +241,10 @@ fn requirement_single_threaded_poll_loop_drives_operation_futures_to_completion(
     drop(storage);
 
     let reopened = super::super::poll_until_ready(
-        Storage::<_, REGION_SIZE, REGION_COUNT, 8, 4>::open_future(&mut flash),
+        Storage::<_, REGION_SIZE, REGION_COUNT, 8, 4>::open_future(
+            &mut flash,
+            crate::test_storage_memory(),
+        ),
         8,
     )
     .unwrap();
@@ -230,7 +252,11 @@ fn requirement_single_threaded_poll_loop_drives_operation_futures_to_completion(
     let mut reopened_map_buffer = [0u8; REGION_SIZE];
     let mut reopened = reopened;
     let reopened_map = reopened
-        .open_map::<u16, u16, 8, 8>(CollectionId(81), &mut reopened_map_buffer)
+        .open_map::<u16, u16, 8, 8>(
+            CollectionId(81),
+            &mut reopened_map_buffer,
+            crate::test_map_frontier_memory(),
+        )
         .unwrap();
     let flash = reopened.into_backing();
     let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
@@ -252,13 +278,21 @@ fn requirement_single_threaded_poll_loop_drives_operation_futures_to_completion(
 fn requirement_storage_can_be_reused_only_after_an_operation_future_is_finished_or_dropped() {
     let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
-    let mut storage =
-        Storage::<_, 512, 5, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
-            .unwrap();
+    let mut storage = Storage::<_, 512, 5, 8, 4>::format(
+        &mut flash,
+        StorageFormatConfig::new(1, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
     storage.create_map(CollectionId(82)).unwrap();
 
     let mut map_buffer = [0u8; 512];
-    let mut map = MapFrontier::<u16, u16, 8>::new(CollectionId(82), &mut map_buffer).unwrap();
+    let mut map = MapFrontier::<u16, u16, 8>::new(
+        CollectionId(82),
+        &mut map_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     map.set(1, 10).unwrap();
 
     {

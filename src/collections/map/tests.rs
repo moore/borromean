@@ -1,3 +1,5 @@
+#![allow(clippy::drop_non_drop)]
+
 use super::*;
 extern crate std;
 use crate::wal_record::encode_record_into;
@@ -90,7 +92,12 @@ fn write_committed_payload<
 
 fn snapshot_for_entries(entries: &[(i32, Option<i32>)]) -> ([u8; 512], usize) {
     let mut buffer = [0u8; 512];
-    let mut map = MapFrontier::<i32, i32, 8>::new(CollectionId(90), &mut buffer).unwrap();
+    let mut map = MapFrontier::<i32, i32, 8>::new(
+        CollectionId(90),
+        &mut buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     for (key, value) in entries.iter().copied() {
         match value {
             Some(value) => map.set(key, value).unwrap(),
@@ -105,17 +112,20 @@ fn snapshot_for_entries(entries: &[(i32, Option<i32>)]) -> ([u8; 512], usize) {
 
 //= spec/map.md#map-api-model
 //= type=test
-//# `LsmMap::new(storage)` creates a durable map
+//# `LsmMap::new(storage, memory)` creates a durable map
 //# collection, assigns it a stable collection id, and returns an empty map
 //# handle.
 #[test]
 fn requirement_object_lsm_map_new_open_get_set_delete_use_storage_owned_scratch() {
     let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
-    let mut storage =
-        Storage::<_, 512, 8, 8, 4>::format(&mut flash, StorageFormatConfig::new(2, 8, 0xa5))
-            .unwrap();
+    let mut storage = Storage::<_, 512, 8, 8, 4>::format(
+        &mut flash,
+        StorageFormatConfig::new(2, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
 
-    let mut map = LsmMap::<u16, u16, 8>::new(&mut storage).unwrap();
+    let mut map = LsmMap::<u16, u16, 8>::new(&mut storage, crate::test_lsm_map_memory()).unwrap();
     assert_eq!(map.collection_id(), CollectionId(1));
     assert_eq!(map.get(&mut storage, &7, |_, value| *value).unwrap(), None);
 
@@ -143,13 +153,16 @@ fn requirement_object_lsm_map_new_open_get_set_delete_use_storage_owned_scratch(
     );
     assert_eq!(callback_calls, 0);
 
-    let second = LsmMap::<u16, u16, 8>::new(&mut storage).unwrap();
+    let second = LsmMap::<u16, u16, 8>::new(&mut storage, crate::test_lsm_map_memory()).unwrap();
     assert_eq!(second.collection_id(), CollectionId(2));
 
     let collection_id = map.collection_id();
     drop(storage);
-    let mut reopened = Storage::<_, 512, 8, 8, 4>::open(&mut flash).unwrap();
-    let reopened_map = LsmMap::<u16, u16, 8>::open(collection_id, &mut reopened).unwrap();
+    let mut reopened =
+        Storage::<_, 512, 8, 8, 4>::open(&mut flash, crate::test_storage_memory()).unwrap();
+    let mut reopened_map =
+        LsmMap::<u16, u16, 8>::open(collection_id, &mut reopened, crate::test_lsm_map_memory())
+            .unwrap();
     assert_eq!(
         reopened_map
             .get(&mut reopened, &7, |_, value| *value)
@@ -162,14 +175,18 @@ fn requirement_object_lsm_map_new_open_get_set_delete_use_storage_owned_scratch(
 //= spec/map.md#map-api-model
 //= type=test
 //# `open` reconstructs the logical map from the retained durable basis
-//# and later retained updates using storage-owned buffers.
+//# and later retained updates using buffers borrowed through
+//# `StorageMemory`.
 #[test]
 fn requirement_perf_metrics_first_read_records_frontier_miss_and_reload() {
     let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
-    let mut storage =
-        Storage::<_, 512, 8, 8, 4>::format(&mut flash, StorageFormatConfig::new(2, 8, 0xa5))
-            .unwrap();
-    let map = LsmMap::<u16, u16, 8>::new(&mut storage).unwrap();
+    let mut storage = Storage::<_, 512, 8, 8, 4>::format(
+        &mut flash,
+        StorageFormatConfig::new(2, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
+    let mut map = LsmMap::<u16, u16, 8>::new(&mut storage, crate::test_lsm_map_memory()).unwrap();
 
     storage.reset_perf_metrics();
     assert_eq!(map.get(&mut storage, &7, |_, value| *value).unwrap(), None);
@@ -187,14 +204,18 @@ fn requirement_perf_metrics_first_read_records_frontier_miss_and_reload() {
 //= type=test
 //# This keeps each `LsmMap` handle small enough that many collections
 //# can be open at once; the handle primarily tracks the collection id and
-//# may cache small metadata for efficiency.
+//# borrows `LsmMapMemory` for cached frontier state and compaction
+//# scratch.
 #[test]
 fn requirement_perf_metrics_hot_reads_record_frontier_cache_hits() {
     let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
-    let mut storage =
-        Storage::<_, 512, 8, 8, 4>::format(&mut flash, StorageFormatConfig::new(2, 8, 0xa5))
-            .unwrap();
-    let mut map = LsmMap::<u16, u16, 8>::new(&mut storage).unwrap();
+    let mut storage = Storage::<_, 512, 8, 8, 4>::format(
+        &mut flash,
+        StorageFormatConfig::new(2, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
+    let mut map = LsmMap::<u16, u16, 8>::new(&mut storage, crate::test_lsm_map_memory()).unwrap();
     assert!(!map.set(&mut storage, 7, 70).unwrap());
 
     storage.reset_perf_metrics();
@@ -245,10 +266,14 @@ impl LsmKey for DecodingTestKey {
 #[test]
 fn requirement_perf_metrics_custom_key_fallback_records_key_decodes() {
     let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
-    let mut storage =
-        Storage::<_, 512, 8, 8, 4>::format(&mut flash, StorageFormatConfig::new(2, 8, 0xa5))
-            .unwrap();
-    let mut map = LsmMap::<DecodingTestKey, u16, 8>::new(&mut storage).unwrap();
+    let mut storage = Storage::<_, 512, 8, 8, 4>::format(
+        &mut flash,
+        StorageFormatConfig::new(2, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
+    let mut map =
+        LsmMap::<DecodingTestKey, u16, 8>::new(&mut storage, crate::test_lsm_map_memory()).unwrap();
     assert!(!map.set(&mut storage, DecodingTestKey(7), 70).unwrap());
 
     storage.reset_perf_metrics();
@@ -342,10 +367,13 @@ fn requirement_primitive_encoded_key_bytes_sort_like_ord() {
 #[test]
 fn requirement_perf_metrics_set_delete_record_write_path() {
     let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
-    let mut storage =
-        Storage::<_, 512, 8, 8, 4>::format(&mut flash, StorageFormatConfig::new(2, 8, 0xa5))
-            .unwrap();
-    let mut map = LsmMap::<u16, u16, 8>::new(&mut storage).unwrap();
+    let mut storage = Storage::<_, 512, 8, 8, 4>::format(
+        &mut flash,
+        StorageFormatConfig::new(2, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
+    let mut map = LsmMap::<u16, u16, 8>::new(&mut storage, crate::test_lsm_map_memory()).unwrap();
 
     storage.reset_perf_metrics();
     assert!(!map.set(&mut storage, 7, 70).unwrap());
@@ -383,10 +411,13 @@ fn requirement_perf_metrics_set_delete_record_write_path() {
 #[test]
 fn requirement_perf_metrics_reset_and_take_clear_metrics() {
     let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
-    let mut storage =
-        Storage::<_, 512, 8, 8, 4>::format(&mut flash, StorageFormatConfig::new(2, 8, 0xa5))
-            .unwrap();
-    let mut map = LsmMap::<u16, u16, 8>::new(&mut storage).unwrap();
+    let mut storage = Storage::<_, 512, 8, 8, 4>::format(
+        &mut flash,
+        StorageFormatConfig::new(2, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
+    let mut map = LsmMap::<u16, u16, 8>::new(&mut storage, crate::test_lsm_map_memory()).unwrap();
 
     assert!(!map.set(&mut storage, 7, 70).unwrap());
     assert!(storage.perf_metrics().map_sets > 0);
@@ -422,10 +453,13 @@ fn count_mock_operations(
 fn requirement_sync_audit_hot_inserts_write_one_wal_record_and_sync_once() {
     const COUNT: u16 = 10;
     let mut flash = MockFlash::<4096, 16, 8192>::new(0xff);
-    let mut storage =
-        Storage::<_, 4096, 16, 8, 4>::format(&mut flash, StorageFormatConfig::new(2, 8, 0xa5))
-            .unwrap();
-    let mut map = LsmMap::<u16, u16, 8>::new(&mut storage).unwrap();
+    let mut storage = Storage::<_, 4096, 16, 8, 4>::format(
+        &mut flash,
+        StorageFormatConfig::new(2, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
+    let mut map = LsmMap::<u16, u16, 8>::new(&mut storage, crate::test_lsm_map_memory()).unwrap();
 
     storage.with_io_workspace(|flash, _| flash.clear_operations());
     storage.reset_perf_metrics();
@@ -477,10 +511,13 @@ fn requirement_sync_audit_hot_inserts_write_one_wal_record_and_sync_once() {
 fn requirement_sync_audit_hot_updates_exclude_preload_and_sync_once() {
     const COUNT: u16 = 10;
     let mut flash = MockFlash::<4096, 16, 8192>::new(0xff);
-    let mut storage =
-        Storage::<_, 4096, 16, 8, 4>::format(&mut flash, StorageFormatConfig::new(2, 8, 0xa5))
-            .unwrap();
-    let mut map = LsmMap::<u16, u16, 8>::new(&mut storage).unwrap();
+    let mut storage = Storage::<_, 4096, 16, 8, 4>::format(
+        &mut flash,
+        StorageFormatConfig::new(2, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
+    let mut map = LsmMap::<u16, u16, 8>::new(&mut storage, crate::test_lsm_map_memory()).unwrap();
     for key in 0..COUNT {
         assert!(!map.set(&mut storage, key, key + 100).unwrap());
     }
@@ -532,16 +569,19 @@ fn requirement_sync_audit_hot_updates_exclude_preload_and_sync_once() {
 
 //= spec/map.md#map-api-model
 //= type=test
-//# The `Storage` value owns the bounded memory used for mutable
-//# frontiers, read/value materialization, serialization scratch, run
-//# descriptor capacity, and compaction scratch.
+//# The `StorageMemory` value borrowed by `Storage` owns storage runtime
+//# state and operation scratch. The `LsmMapMemory` value borrowed by
+//# `LsmMap` owns cached frontier descriptors and compaction temporaries.
 #[test]
 fn requirement_lsm_map_reuses_storage_owned_frontier_buffer_for_hot_reads() {
     let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
-    let mut storage =
-        Storage::<_, 512, 8, 8, 4>::format(&mut flash, StorageFormatConfig::new(2, 8, 0xa5))
-            .unwrap();
-    let mut map = LsmMap::<u16, u16, 8>::new(&mut storage).unwrap();
+    let mut storage = Storage::<_, 512, 8, 8, 4>::format(
+        &mut flash,
+        StorageFormatConfig::new(2, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
+    let mut map = LsmMap::<u16, u16, 8>::new(&mut storage, crate::test_lsm_map_memory()).unwrap();
 
     assert!(matches!(
         storage.frontier_buffer_owner(),
@@ -578,10 +618,13 @@ fn requirement_lsm_map_reuses_storage_owned_frontier_buffer_for_hot_reads() {
 #[test]
 fn requirement_lsm_map_raw_update_invalidates_cached_frontier() {
     let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
-    let mut storage =
-        Storage::<_, 512, 8, 8, 4>::format(&mut flash, StorageFormatConfig::new(2, 8, 0xa5))
-            .unwrap();
-    let mut map = LsmMap::<u16, u16, 8>::new(&mut storage).unwrap();
+    let mut storage = Storage::<_, 512, 8, 8, 4>::format(
+        &mut flash,
+        StorageFormatConfig::new(2, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
+    let mut map = LsmMap::<u16, u16, 8>::new(&mut storage, crate::test_lsm_map_memory()).unwrap();
 
     map.set(&mut storage, 7, 70).unwrap();
     assert_eq!(
@@ -608,15 +651,19 @@ fn requirement_lsm_map_raw_update_invalidates_cached_frontier() {
 
 //= spec/map.md#map-api-model
 //= type=test
-//# Map operations borrow `&mut Storage` while they use that memory.
+//# Map operations borrow `&mut Storage` while they use storage scratch.
 #[test]
 fn requirement_two_lsm_maps_reload_storage_owned_frontier_buffer() {
     let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
-    let mut storage =
-        Storage::<_, 512, 8, 8, 4>::format(&mut flash, StorageFormatConfig::new(3, 8, 0xa5))
-            .unwrap();
-    let mut first = LsmMap::<u16, u16, 8>::new(&mut storage).unwrap();
-    let mut second = LsmMap::<u16, u16, 8>::new(&mut storage).unwrap();
+    let mut storage = Storage::<_, 512, 8, 8, 4>::format(
+        &mut flash,
+        StorageFormatConfig::new(3, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
+    let mut first = LsmMap::<u16, u16, 8>::new(&mut storage, crate::test_lsm_map_memory()).unwrap();
+    let mut second =
+        LsmMap::<u16, u16, 8>::new(&mut storage, crate::test_lsm_map_memory()).unwrap();
 
     first.set(&mut storage, 1, 10).unwrap();
     assert!(matches!(
@@ -667,10 +714,13 @@ fn requirement_two_lsm_maps_reload_storage_owned_frontier_buffer() {
 #[test]
 fn requirement_lsm_map_writes_remain_durable_without_frontier_flush() {
     let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
-    let mut storage =
-        Storage::<_, 512, 8, 8, 4>::format(&mut flash, StorageFormatConfig::new(2, 8, 0xa5))
-            .unwrap();
-    let mut map = LsmMap::<u16, u16, 8>::new(&mut storage).unwrap();
+    let mut storage = Storage::<_, 512, 8, 8, 4>::format(
+        &mut flash,
+        StorageFormatConfig::new(2, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
+    let mut map = LsmMap::<u16, u16, 8>::new(&mut storage, crate::test_lsm_map_memory()).unwrap();
     let collection_id = map.collection_id();
 
     map.set(&mut storage, 7, 70).unwrap();
@@ -680,8 +730,11 @@ fn requirement_lsm_map_writes_remain_durable_without_frontier_flush() {
     ));
 
     drop(storage);
-    let mut reopened = Storage::<_, 512, 8, 8, 4>::open(&mut flash).unwrap();
-    let reopened_map = LsmMap::<u16, u16, 8>::open(collection_id, &mut reopened).unwrap();
+    let mut reopened =
+        Storage::<_, 512, 8, 8, 4>::open(&mut flash, crate::test_storage_memory()).unwrap();
+    let mut reopened_map =
+        LsmMap::<u16, u16, 8>::open(collection_id, &mut reopened, crate::test_lsm_map_memory())
+            .unwrap();
     assert_eq!(
         reopened_map
             .get(&mut reopened, &7, |_, value| *value)
@@ -693,16 +746,19 @@ fn requirement_lsm_map_writes_remain_durable_without_frontier_flush() {
 //= spec/map.md#map-api-model
 //= type=test
 //# `compact`
-//# performs whole-run compaction for that map using storage-owned scratch
+//# performs whole-run compaction for that map using caller-owned scratch
 //# buffers; if no compaction is needed, it returns successfully without
 //# changing the logical map.
 #[test]
 fn requirement_object_lsm_map_compaction_signal_and_compact_preserve_visible_state() {
     let mut flash = MockFlash::<512, 12, 4096>::new(0xff);
-    let mut storage =
-        Storage::<_, 512, 12, 8, 4>::format(&mut flash, StorageFormatConfig::new(2, 8, 0xa5))
-            .unwrap();
-    let mut map = LsmMap::<i32, i32, 8, 4>::new(&mut storage)
+    let mut storage = Storage::<_, 512, 12, 8, 4>::format(
+        &mut flash,
+        StorageFormatConfig::new(2, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
+    let mut map = LsmMap::<i32, i32, 8, 4>::new(&mut storage, crate::test_lsm_map_memory())
         .unwrap()
         .with_compaction_run_target(1)
         .unwrap();
@@ -712,7 +768,11 @@ fn requirement_object_lsm_map_compaction_signal_and_compact_preserve_visible_sta
     {
         let mut buffer = [0u8; 512];
         let mut frontier = storage
-            .open_map::<i32, i32, 8, 4>(map.collection_id(), &mut buffer)
+            .open_map::<i32, i32, 8, 4>(
+                map.collection_id(),
+                &mut buffer,
+                crate::test_map_frontier_memory(),
+            )
             .unwrap();
         storage.flush_map(&mut frontier).unwrap();
     }
@@ -721,7 +781,11 @@ fn requirement_object_lsm_map_compaction_signal_and_compact_preserve_visible_sta
     {
         let mut buffer = [0u8; 512];
         let mut frontier = storage
-            .open_map::<i32, i32, 8, 4>(map.collection_id(), &mut buffer)
+            .open_map::<i32, i32, 8, 4>(
+                map.collection_id(),
+                &mut buffer,
+                crate::test_map_frontier_memory(),
+            )
             .unwrap();
         storage.flush_map(&mut frontier).unwrap();
     }
@@ -744,15 +808,18 @@ fn requirement_object_lsm_map_compaction_signal_and_compact_preserve_visible_sta
 #[cfg(feature = "perf-counters")]
 //= spec/map.md#map-api-model
 //= type=test
-//# `compact` performs whole-run compaction for that map using
-//# storage-owned scratch buffers.
+//# `compact` performs whole-run compaction for that map using caller-owned
+//# scratch buffers.
 #[test]
 fn requirement_object_lsm_map_compaction_reuses_cached_frontier() {
     let mut flash = MockFlash::<512, 12, 4096>::new(0xff);
-    let mut storage =
-        Storage::<_, 512, 12, 8, 4>::format(&mut flash, StorageFormatConfig::new(2, 8, 0xa5))
-            .unwrap();
-    let mut map = LsmMap::<i32, i32, 8, 4>::new(&mut storage)
+    let mut storage = Storage::<_, 512, 12, 8, 4>::format(
+        &mut flash,
+        StorageFormatConfig::new(2, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
+    let mut map = LsmMap::<i32, i32, 8, 4>::new(&mut storage, crate::test_lsm_map_memory())
         .unwrap()
         .with_compaction_run_target(1)
         .unwrap();
@@ -761,7 +828,11 @@ fn requirement_object_lsm_map_compaction_reuses_cached_frontier() {
     {
         let mut buffer = [0u8; 512];
         let mut frontier = storage
-            .open_map::<i32, i32, 8, 4>(map.collection_id(), &mut buffer)
+            .open_map::<i32, i32, 8, 4>(
+                map.collection_id(),
+                &mut buffer,
+                crate::test_map_frontier_memory(),
+            )
             .unwrap();
         storage.flush_map(&mut frontier).unwrap();
     }
@@ -769,7 +840,11 @@ fn requirement_object_lsm_map_compaction_reuses_cached_frontier() {
     {
         let mut buffer = [0u8; 512];
         let mut frontier = storage
-            .open_map::<i32, i32, 8, 4>(map.collection_id(), &mut buffer)
+            .open_map::<i32, i32, 8, 4>(
+                map.collection_id(),
+                &mut buffer,
+                crate::test_map_frontier_memory(),
+            )
             .unwrap();
         storage.flush_map(&mut frontier).unwrap();
     }
@@ -784,8 +859,14 @@ fn requirement_object_lsm_map_compaction_reuses_cached_frontier() {
     assert_eq!(metrics.frontier_open_wal_scans, 0);
 
     drop(storage);
-    let mut reopened = Storage::<_, 512, 12, 8, 4>::open(&mut flash).unwrap();
-    let reopened_map = LsmMap::<i32, i32, 8, 4>::open(map.collection_id(), &mut reopened).unwrap();
+    let mut reopened =
+        Storage::<_, 512, 12, 8, 4>::open(&mut flash, crate::test_storage_memory()).unwrap();
+    let mut reopened_map = LsmMap::<i32, i32, 8, 4>::open(
+        map.collection_id(),
+        &mut reopened,
+        crate::test_lsm_map_memory(),
+    )
+    .unwrap();
     assert_eq!(
         reopened_map
             .get(&mut reopened, &1, |_, value| *value)
@@ -982,7 +1063,12 @@ fn requirement_search_helpers_cover_even_windows_and_insert_positions() {
     );
 
     let mut buffer = [0u8; 512];
-    let mut map = MapFrontier::<i32, i32, 8>::new(CollectionId(92), &mut buffer).unwrap();
+    let mut map = MapFrontier::<i32, i32, 8>::new(
+        CollectionId(92),
+        &mut buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     for key in [1, 3, 5, 7, 9, 11] {
         map.set(key, key * 10).unwrap();
     }
@@ -1040,7 +1126,12 @@ fn requirement_load_snapshot_accepts_reversed_adjacent_entry_storage() {
         .copy_from_slice(&second_end.to_le_bytes());
 
     let mut buffer = [0u8; 128];
-    let mut map = MapFrontier::<i32, i32, 4>::new(CollectionId(93), &mut buffer).unwrap();
+    let mut map = MapFrontier::<i32, i32, 4>::new(
+        CollectionId(93),
+        &mut buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     map.load_snapshot(&snapshot[..snapshot_len]).unwrap();
     assert_eq!(map.get_frontier(&1).unwrap(), Some(10));
     assert_eq!(map.get_frontier(&2).unwrap(), Some(20));
@@ -1068,7 +1159,12 @@ fn requirement_snapshot_encoding_accepts_exact_empty_capacity_and_rejects_invali
     let mut start = start_ref.to_le_bytes();
     snapshot[refs_offset..refs_offset + ENTRY_REF_POINTER_SIZE].copy_from_slice(&start);
     let mut dest_buffer = [0u8; 512];
-    let mut dest = MapFrontier::<i32, i32, 8>::new(CollectionId(91), &mut dest_buffer).unwrap();
+    let mut dest = MapFrontier::<i32, i32, 8>::new(
+        CollectionId(91),
+        &mut dest_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     assert!(matches!(
         dest.load_snapshot(&snapshot[..snapshot_len]),
         Err(MapError::SerializationError)
@@ -1083,7 +1179,12 @@ fn requirement_snapshot_encoding_accepts_exact_empty_capacity_and_rejects_invali
     snapshot[refs_offset + ENTRY_REF_POINTER_SIZE..refs_offset + ENTRY_REF_SIZE]
         .copy_from_slice(&end);
     let mut dest_buffer = [0u8; 512];
-    let mut dest = MapFrontier::<i32, i32, 8>::new(CollectionId(92), &mut dest_buffer).unwrap();
+    let mut dest = MapFrontier::<i32, i32, 8>::new(
+        CollectionId(92),
+        &mut dest_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     assert!(matches!(
         dest.load_snapshot(&snapshot[..snapshot_len]),
         Err(MapError::SerializationError)
@@ -1131,7 +1232,8 @@ fn requirement_run_cursor_and_compaction_writer_helpers_cover_boundaries() {
     cursor.advance_segment_position().unwrap();
     assert_eq!(cursor.next_segment_position, Some(0));
 
-    let mut writer = CompactionRunWriter::<i32, LargeValue, 1>::new(3);
+    let mut segment_entries = heapless::Vec::<Entry<i32, LargeValue>, 1>::new();
+    let mut writer = CompactionRunWriter::<i32, LargeValue, 1>::new(3, &mut segment_entries);
     writer
         .segment_entries
         .push(Entry {
@@ -1190,7 +1292,12 @@ fn requirement_entry_refs_counts_and_checkpoints_preserve_exact_offsets() {
     );
 
     let mut buffer = [0u8; 128];
-    let mut map = MapFrontier::<i32, i32, 8>::new(CollectionId(93), &mut buffer).unwrap();
+    let mut map = MapFrontier::<i32, i32, 8>::new(
+        CollectionId(93),
+        &mut buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     map.set(1, 10).unwrap();
     map.set(2, 20).unwrap();
     let mut scratch = [0u8; 128];
@@ -1302,7 +1409,12 @@ fn requirement_committed_region_and_legacy_snapshot_helpers_accept_exact_boundar
         .copy_from_slice(&(EMPTY_MAP_SNAPSHOT.len() as u32).to_le_bytes());
     legacy_payload[REGION_SNAPSHOT_LEN_SIZE..].copy_from_slice(&EMPTY_MAP_SNAPSHOT);
     let mut map_buffer = [0u8; ENTRY_COUNT_SIZE];
-    let mut map = MapFrontier::<i32, i32, 0>::new(CollectionId(96), &mut map_buffer).unwrap();
+    let mut map = MapFrontier::<i32, i32, 0>::new(
+        CollectionId(96),
+        &mut map_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     map.load_region(&legacy_payload).unwrap();
     assert_eq!(map.get_frontier(&1).unwrap(), None);
 }
@@ -1314,7 +1426,12 @@ fn requirement_committed_region_and_legacy_snapshot_helpers_accept_exact_boundar
 #[test]
 fn requirement_loading_empty_snapshot_can_exactly_fill_frontier_header() {
     let mut buffer = [0u8; ENTRY_COUNT_SIZE];
-    let mut map = MapFrontier::<i32, i32, 0>::new(CollectionId(94), &mut buffer).unwrap();
+    let mut map = MapFrontier::<i32, i32, 0>::new(
+        CollectionId(94),
+        &mut buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
 
     map.load_snapshot(&EMPTY_MAP_SNAPSHOT).unwrap();
 
@@ -1330,7 +1447,12 @@ fn requirement_loading_empty_snapshot_can_exactly_fill_frontier_header() {
 #[test]
 fn requirement_run_descriptor_selection_and_generation_helpers_count_only_run_chains() {
     let mut buffer = [0u8; 128];
-    let mut map = MapFrontier::<i32, i32, 8, 4>::new(CollectionId(97), &mut buffer).unwrap();
+    let mut map = MapFrontier::<i32, i32, 8, 4>::new(
+        CollectionId(97),
+        &mut buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     map.runs
         .push(MapRunDescriptor {
             source: MapRunSource::RunChain,
@@ -1393,7 +1515,12 @@ fn push_test_run<const MAX_INDEXES: usize, const MAX_RUNS: usize>(
 #[test]
 fn requirement_compaction_selection_allows_one_run_spanning_many_regions() {
     let mut buffer = [0u8; 128];
-    let mut map = MapFrontier::<i32, i32, 8, 4>::new(CollectionId(98), &mut buffer).unwrap();
+    let mut map = MapFrontier::<i32, i32, 8, 4>::new(
+        CollectionId(98),
+        &mut buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     push_test_run(&mut map, 10, 128, 10_000);
 
     assert_eq!(map.live_run_region_count().unwrap(), 128);
@@ -1407,7 +1534,12 @@ fn requirement_compaction_selection_allows_one_run_spanning_many_regions() {
 #[test]
 fn requirement_compaction_selection_triggers_on_run_count_not_region_count() {
     let mut buffer = [0u8; 128];
-    let mut map = MapFrontier::<i32, i32, 8, 8>::new(CollectionId(99), &mut buffer).unwrap();
+    let mut map = MapFrontier::<i32, i32, 8, 8>::new(
+        CollectionId(99),
+        &mut buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     push_test_run(&mut map, 10, 1, 3);
     push_test_run(&mut map, 9, 1, 4);
     push_test_run(&mut map, 8, 1, 100);
@@ -1423,7 +1555,12 @@ fn requirement_compaction_selection_triggers_on_run_count_not_region_count() {
 #[test]
 fn requirement_compaction_selection_accounts_for_dirty_frontier_run() {
     let mut buffer = [0u8; 256];
-    let mut map = MapFrontier::<i32, i32, 8, 8>::new(CollectionId(100), &mut buffer).unwrap();
+    let mut map = MapFrontier::<i32, i32, 8, 8>::new(
+        CollectionId(100),
+        &mut buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     push_test_run(&mut map, 10, 1, 3);
     push_test_run(&mut map, 9, 1, 4);
     push_test_run(&mut map, 8, 1, 5);
@@ -1433,8 +1570,12 @@ fn requirement_compaction_selection_accounts_for_dirty_frontier_run() {
     assert_eq!(map.selected_compaction_run_count(3).unwrap(), Some(3));
 
     let mut exact_target_buffer = [0u8; 256];
-    let mut exact_target =
-        MapFrontier::<i32, i32, 8, 8>::new(CollectionId(103), &mut exact_target_buffer).unwrap();
+    let mut exact_target = MapFrontier::<i32, i32, 8, 8>::new(
+        CollectionId(103),
+        &mut exact_target_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     push_test_run(&mut exact_target, 12, 1, 3);
     push_test_run(&mut exact_target, 11, 1, 4);
     push_test_run(&mut exact_target, 10, 1, 100);
@@ -1453,7 +1594,12 @@ fn requirement_compaction_selection_accounts_for_dirty_frontier_run() {
 #[test]
 fn requirement_compaction_selection_stops_at_half_size_heuristic() {
     let mut buffer = [0u8; 128];
-    let mut map = MapFrontier::<i32, i32, 8, 8>::new(CollectionId(101), &mut buffer).unwrap();
+    let mut map = MapFrontier::<i32, i32, 8, 8>::new(
+        CollectionId(101),
+        &mut buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     push_test_run(&mut map, 10, 1, 5);
     push_test_run(&mut map, 9, 1, 5);
     push_test_run(&mut map, 8, 1, 20);
@@ -1469,7 +1615,12 @@ fn requirement_compaction_selection_stops_at_half_size_heuristic() {
 #[test]
 fn requirement_compaction_selection_merges_equal_sized_small_runs() {
     let mut buffer = [0u8; 128];
-    let mut map = MapFrontier::<i32, i32, 8, 8>::new(CollectionId(102), &mut buffer).unwrap();
+    let mut map = MapFrontier::<i32, i32, 8, 8>::new(
+        CollectionId(102),
+        &mut buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     for generation in (5..=10).rev() {
         push_test_run(&mut map, generation, 1, 10);
     }
@@ -1484,7 +1635,12 @@ fn requirement_compaction_selection_merges_equal_sized_small_runs() {
 #[test]
 fn requirement_frontier_range_region_and_checkpoint_helpers_accept_exact_buffers() {
     let mut buffer = [0u8; 256];
-    let mut map = MapFrontier::<i32, i32, 8>::new(CollectionId(98), &mut buffer).unwrap();
+    let mut map = MapFrontier::<i32, i32, 8>::new(
+        CollectionId(98),
+        &mut buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     for key in 1..=4 {
         map.set(key, key * 10).unwrap();
     }
@@ -1524,8 +1680,12 @@ fn requirement_frontier_range_region_and_checkpoint_helpers_accept_exact_buffers
         region_len
     );
     let mut restored_buffer = [0u8; 256];
-    let mut restored =
-        MapFrontier::<i32, i32, 8>::new(CollectionId(98), &mut restored_buffer).unwrap();
+    let mut restored = MapFrontier::<i32, i32, 8>::new(
+        CollectionId(98),
+        &mut restored_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     restored.load_region(&region).unwrap();
     assert_eq!(restored.get_frontier(&1).unwrap(), Some(10));
     assert_eq!(restored.get_frontier(&4).unwrap(), Some(40));
@@ -1541,7 +1701,11 @@ fn requirement_frontier_range_region_and_checkpoint_helpers_accept_exact_buffers
 
     let mut undersized_buffer = [0u8; ENTRY_COUNT_SIZE - 1];
     assert!(matches!(
-        MapFrontier::<i32, i32, 0>::new(CollectionId(98), &mut undersized_buffer),
+        MapFrontier::<i32, i32, 0>::new(
+            CollectionId(98),
+            &mut undersized_buffer,
+            crate::test_map_frontier_memory()
+        ),
         Err(MapError::BufferTooSmall)
     ));
 }
@@ -1553,8 +1717,12 @@ fn requirement_frontier_range_region_and_checkpoint_helpers_accept_exact_buffers
 #[test]
 fn requirement_manifest_descriptor_loading_validates_counts_bounds_and_lengths() {
     let mut source_buffer = [0u8; 128];
-    let mut source =
-        MapFrontier::<i32, i32, 8, 2>::new(CollectionId(99), &mut source_buffer).unwrap();
+    let mut source = MapFrontier::<i32, i32, 8, 2>::new(
+        CollectionId(99),
+        &mut source_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     source
         .runs
         .push(MapRunDescriptor {
@@ -1574,7 +1742,12 @@ fn requirement_manifest_descriptor_loading_validates_counts_bounds_and_lengths()
         .unwrap();
 
     let mut dest_buffer = [0u8; 128];
-    let mut dest = MapFrontier::<i32, i32, 8, 1>::new(CollectionId(99), &mut dest_buffer).unwrap();
+    let mut dest = MapFrontier::<i32, i32, 8, 1>::new(
+        CollectionId(99),
+        &mut dest_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     dest.load_manifest_descriptors(&manifest[..used], CollectionId(99), 4)
         .unwrap();
     assert_eq!(dest.run_count(), 1);
@@ -1665,9 +1838,12 @@ fn requirement_snapshot_run_planning_and_storage_write_cover_multi_region_snapsh
     const MAX_INDEXES: usize = 16;
 
     let mut source_buffer = [0u8; 2048];
-    let mut source =
-        MapFrontier::<i32, LargeValue, MAX_INDEXES>::new(CollectionId(102), &mut source_buffer)
-            .unwrap();
+    let mut source = MapFrontier::<i32, LargeValue, MAX_INDEXES>::new(
+        CollectionId(102),
+        &mut source_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     for key in 0..10 {
         source.set(key, large_value(key as u8)).unwrap();
     }
@@ -1691,18 +1867,30 @@ fn requirement_snapshot_run_planning_and_storage_write_cover_multi_region_snapsh
     let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT, 8, 4>::format(
         &mut flash,
         StorageFormatConfig::new(1, 8, 0xa5),
+        crate::test_storage_memory(),
     )
     .unwrap();
     storage.create_map(CollectionId(102)).unwrap();
 
     let mut target_buffer = [0u8; 128];
-    let target =
-        MapFrontier::<i32, LargeValue, MAX_INDEXES>::new(CollectionId(102), &mut target_buffer)
-            .unwrap();
+    let target = MapFrontier::<i32, LargeValue, MAX_INDEXES>::new(
+        CollectionId(102),
+        &mut target_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     let written = storage
         .with_runtime_io_workspace(|runtime, flash, workspace| {
             target.write_snapshot_run_to_storage::<REGION_SIZE, REGION_COUNT, _, 8, 4>(
-                runtime, flash, workspace, snapshot, 17,
+                runtime,
+                flash,
+                workspace,
+                &mut heapless::Vec::new(),
+                &mut heapless::Vec::new(),
+                &mut crate::storage::WalHeadReclaimPlan::empty(),
+                &mut crate::startup::StartupOpenPlan::empty(),
+                snapshot,
+                17,
             )
         })
         .unwrap()
@@ -1720,6 +1908,10 @@ fn requirement_snapshot_run_planning_and_storage_write_cover_multi_region_snapsh
                 runtime,
                 flash,
                 workspace,
+                &mut heapless::Vec::new(),
+                &mut heapless::Vec::new(),
+                &mut crate::storage::WalHeadReclaimPlan::empty(),
+                &mut crate::startup::StartupOpenPlan::empty(),
                 &empty[..empty_len],
                 18,
             )
@@ -1737,8 +1929,12 @@ fn requirement_frontier_run_planning_counts_all_committed_payload_segments() {
     const MAX_INDEXES: usize = 16;
 
     let mut buffer = [0u8; 2048];
-    let mut map =
-        MapFrontier::<i32, LargeValue, MAX_INDEXES>::new(CollectionId(105), &mut buffer).unwrap();
+    let mut map = MapFrontier::<i32, LargeValue, MAX_INDEXES>::new(
+        CollectionId(105),
+        &mut buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     for key in 0..10 {
         map.set(key, large_value(key as u8)).unwrap();
     }
@@ -1767,19 +1963,29 @@ fn requirement_reclaim_run_regions_moves_run_segments_to_free_list_tail() {
     let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT, 8, 4>::format(
         &mut flash,
         StorageFormatConfig::new(1, 8, 0xa5),
+        crate::test_storage_memory(),
     )
     .unwrap();
     storage.create_map(collection_id).unwrap();
 
     let (snapshot, snapshot_len) = snapshot_for_entries(&[(1, Some(10))]);
     let mut buffer = [0u8; REGION_SIZE];
-    let mut map = MapFrontier::<i32, i32, MAX_INDEXES>::new(collection_id, &mut buffer).unwrap();
+    let mut map = MapFrontier::<i32, i32, MAX_INDEXES>::new(
+        collection_id,
+        &mut buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     let run = storage
         .with_runtime_io_workspace(|runtime, flash, workspace| {
             map.write_snapshot_run_to_storage::<REGION_SIZE, REGION_COUNT, _, 8, 4>(
                 runtime,
                 flash,
                 workspace,
+                &mut heapless::Vec::new(),
+                &mut heapless::Vec::new(),
+                &mut crate::storage::WalHeadReclaimPlan::empty(),
+                &mut crate::startup::StartupOpenPlan::empty(),
                 &snapshot[..snapshot_len],
                 1,
             )
@@ -1817,23 +2023,43 @@ fn requirement_commit_manifest_reclaims_previous_manifest_and_retains_only_run_c
     let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT, 8, 4>::format(
         &mut flash,
         StorageFormatConfig::new(1, 8, 0xa5),
+        crate::test_storage_memory(),
     )
     .unwrap();
     storage.create_map(collection_id).unwrap();
 
     let mut buffer = [0u8; REGION_SIZE];
-    let mut map =
-        MapFrontier::<i32, i32, MAX_INDEXES, MAX_RUNS>::new(collection_id, &mut buffer).unwrap();
+    let mut map = MapFrontier::<i32, i32, MAX_INDEXES, MAX_RUNS>::new(
+        collection_id,
+        &mut buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     map.set(1, 10).unwrap();
     let first_manifest = storage
         .with_runtime_io_workspace(|runtime, flash, workspace| {
-            map.flush_to_storage::<REGION_SIZE, REGION_COUNT, _, 8, 4>(runtime, flash, workspace)
+            map.flush_to_storage::<REGION_SIZE, REGION_COUNT, _, 8, 4>(
+                runtime,
+                flash,
+                workspace,
+                &mut heapless::Vec::new(),
+                &mut heapless::Vec::new(),
+                &mut crate::storage::WalHeadReclaimPlan::empty(),
+                &mut crate::startup::StartupOpenPlan::empty(),
+            )
         })
         .unwrap();
     let second_manifest = storage
         .with_runtime_io_workspace(|runtime, flash, workspace| {
             map.commit_manifest_to_storage::<REGION_SIZE, REGION_COUNT, _, 8, 4>(
-                runtime, flash, workspace, None,
+                runtime,
+                flash,
+                workspace,
+                &mut heapless::Vec::new(),
+                &mut heapless::Vec::new(),
+                &mut crate::storage::WalHeadReclaimPlan::empty(),
+                &mut crate::startup::StartupOpenPlan::empty(),
+                None,
             )
         })
         .unwrap();
@@ -1863,23 +2089,41 @@ fn requirement_flush_to_storage_commits_manifest_and_enforces_run_capacity() {
     let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT, 8, 4>::format(
         &mut flash,
         StorageFormatConfig::new(1, 8, 0xa5),
+        crate::test_storage_memory(),
     )
     .unwrap();
     storage.create_map(collection_id).unwrap();
 
     let mut buffer = [0u8; REGION_SIZE];
-    let mut map = MapFrontier::<i32, i32, 4, 2>::new(collection_id, &mut buffer).unwrap();
+    let mut map = MapFrontier::<i32, i32, 4, 2>::new(
+        collection_id,
+        &mut buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     map.set(2, 20).unwrap();
     storage
         .with_runtime_io_workspace(|runtime, flash, workspace| {
-            map.flush_to_storage::<REGION_SIZE, REGION_COUNT, _, 8, 4>(runtime, flash, workspace)
+            map.flush_to_storage::<REGION_SIZE, REGION_COUNT, _, 8, 4>(
+                runtime,
+                flash,
+                workspace,
+                &mut heapless::Vec::new(),
+                &mut heapless::Vec::new(),
+                &mut crate::storage::WalHeadReclaimPlan::empty(),
+                &mut crate::startup::StartupOpenPlan::empty(),
+            )
         })
         .unwrap();
     assert_eq!(map.runs.len(), 1);
 
     let mut too_many_buffer = [0u8; REGION_SIZE];
-    let mut too_many =
-        MapFrontier::<i32, i32, 4, 1>::new(collection_id, &mut too_many_buffer).unwrap();
+    let mut too_many = MapFrontier::<i32, i32, 4, 1>::new(
+        collection_id,
+        &mut too_many_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     too_many
         .runs
         .push(MapRunDescriptor {
@@ -1896,7 +2140,13 @@ fn requirement_flush_to_storage_commits_manifest_and_enforces_run_capacity() {
     assert!(matches!(
         storage.with_runtime_io_workspace(|runtime, flash, workspace| {
             too_many.flush_to_storage::<REGION_SIZE, REGION_COUNT, _, 8, 4>(
-                runtime, flash, workspace,
+                runtime,
+                flash,
+                workspace,
+                &mut heapless::Vec::new(),
+                &mut heapless::Vec::new(),
+                &mut crate::storage::WalHeadReclaimPlan::empty(),
+                &mut crate::startup::StartupOpenPlan::empty(),
             )
         }),
         Err(MapStorageError::TooManyRuns {
@@ -1991,7 +2241,12 @@ fn requirement_lookup_and_head_reference_helpers_follow_manifest_runs() {
     let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
 
     let mut map_buffer = [0u8; REGION_SIZE];
-    let map = MapFrontier::<i32, i32, 8>::new(collection_id, &mut map_buffer).unwrap();
+    let map = MapFrontier::<i32, i32, 8>::new(
+        collection_id,
+        &mut map_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
 
     let run_entries = [
         Entry {
@@ -2055,8 +2310,12 @@ fn requirement_lookup_and_head_reference_helpers_follow_manifest_runs() {
     );
 
     let mut manifest_map_buffer = [0u8; REGION_SIZE];
-    let mut manifest_map =
-        MapFrontier::<i32, i32, 8>::new(collection_id, &mut manifest_map_buffer).unwrap();
+    let mut manifest_map = MapFrontier::<i32, i32, 8>::new(
+        collection_id,
+        &mut manifest_map_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     manifest_map.runs.push(run).unwrap();
     let mut manifest_payload = [0u8; REGION_SIZE];
     let manifest_used = manifest_map
@@ -2117,6 +2376,7 @@ fn requirement_open_from_storage_uses_only_target_collection_wal_records() {
     let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT, 8, 4>::format(
         &mut flash,
         StorageFormatConfig::new(1, 8, 0xa5),
+        crate::test_storage_memory(),
     )
     .unwrap();
     storage.create_map(target_id).unwrap();
@@ -2133,7 +2393,11 @@ fn requirement_open_from_storage_uses_only_target_collection_wal_records() {
 
     let mut target_buffer = [0u8; REGION_SIZE];
     let opened = storage
-        .open_map::<i32, i32, 8, 8>(target_id, &mut target_buffer)
+        .open_map::<i32, i32, 8, 8>(
+            target_id,
+            &mut target_buffer,
+            crate::test_map_frontier_memory(),
+        )
         .unwrap();
     assert_eq!(opened.get_frontier(&1).unwrap(), Some(10));
 }
@@ -2190,7 +2454,12 @@ fn requirement_set_returns_buffer_too_small_when_map_storage_is_exhausted() {
     const MAX_INDEXES: usize = 4;
 
     let mut buffer = [0u8; 8];
-    let mut map = MapFrontier::<i32, i32, MAX_INDEXES>::new(CollectionId(27), &mut buffer).unwrap();
+    let mut map = MapFrontier::<i32, i32, MAX_INDEXES>::new(
+        CollectionId(27),
+        &mut buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
 
     assert!(matches!(map.set(1, 10), Err(MapError::BufferTooSmall)));
 }
@@ -2206,8 +2475,12 @@ fn requirement_encode_snapshot_returns_buffer_too_small_when_output_capacity_is_
     const MAX_INDEXES: usize = 4;
 
     let mut map_buffer = [0u8; BUFFER_SIZE];
-    let mut map =
-        MapFrontier::<i32, i32, MAX_INDEXES>::new(CollectionId(28), &mut map_buffer).unwrap();
+    let mut map = MapFrontier::<i32, i32, MAX_INDEXES>::new(
+        CollectionId(28),
+        &mut map_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     map.set(1, 10).unwrap();
     map.set(2, 20).unwrap();
 
@@ -2229,7 +2502,12 @@ fn requirement_snapshot_round_trip_restores_logical_state() {
     let id = CollectionId(7);
 
     let mut source_buffer = [0u8; BUFFER_SIZE];
-    let mut source = MapFrontier::<i32, i32, MAX_INDEXES>::new(id, &mut source_buffer).unwrap();
+    let mut source = MapFrontier::<i32, i32, MAX_INDEXES>::new(
+        id,
+        &mut source_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     source.set(1, 10).unwrap();
     source.set(2, 20).unwrap();
     source.delete(1).unwrap();
@@ -2238,7 +2516,12 @@ fn requirement_snapshot_round_trip_restores_logical_state() {
     let snapshot_len = source.encode_snapshot_into(&mut snapshot).unwrap();
 
     let mut dest_buffer = [0u8; BUFFER_SIZE];
-    let mut restored = MapFrontier::<i32, i32, MAX_INDEXES>::new(id, &mut dest_buffer).unwrap();
+    let mut restored = MapFrontier::<i32, i32, MAX_INDEXES>::new(
+        id,
+        &mut dest_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     restored.load_snapshot(&snapshot[..snapshot_len]).unwrap();
 
     assert_eq!(restored.get_frontier(&1).unwrap(), None);
@@ -2280,7 +2563,12 @@ fn requirement_update_payload_round_trip_applies_frontier_change() {
     let id = CollectionId(9);
 
     let mut buffer = [0u8; BUFFER_SIZE];
-    let mut map = MapFrontier::<i32, i32, MAX_INDEXES>::new(id, &mut buffer).unwrap();
+    let mut map = MapFrontier::<i32, i32, MAX_INDEXES>::new(
+        id,
+        &mut buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
 
     let mut set_payload = [0u8; 64];
     let set_len = MapFrontier::<i32, i32, MAX_INDEXES>::encode_update_into(
@@ -2313,7 +2601,12 @@ fn requirement_update_payload_undo_restores_found_update_and_delete() {
     let id = CollectionId(91);
 
     let mut buffer = [0u8; BUFFER_SIZE];
-    let mut map = MapFrontier::<i32, i32, MAX_INDEXES>::new(id, &mut buffer).unwrap();
+    let mut map = MapFrontier::<i32, i32, MAX_INDEXES>::new(
+        id,
+        &mut buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     map.set(1, 10).unwrap();
     map.set(2, 20).unwrap();
 
@@ -2358,7 +2651,12 @@ fn requirement_update_payload_undo_restores_end_and_middle_insert() {
     let id = CollectionId(92);
 
     let mut buffer = [0u8; BUFFER_SIZE];
-    let mut map = MapFrontier::<i32, i32, MAX_INDEXES>::new(id, &mut buffer).unwrap();
+    let mut map = MapFrontier::<i32, i32, MAX_INDEXES>::new(
+        id,
+        &mut buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     map.set(1, 10).unwrap();
 
     let mut payload = [0u8; 64];
@@ -2411,7 +2709,12 @@ fn assert_empty_map_open_matches_new_map_state() {
     let id = CollectionId(70);
 
     let mut empty_buffer = [0u8; REGION_SIZE];
-    let empty = MapFrontier::<i32, i32, MAX_INDEXES>::new(id, &mut empty_buffer).unwrap();
+    let empty = MapFrontier::<i32, i32, MAX_INDEXES>::new(
+        id,
+        &mut empty_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     assert_eq!(empty.get_frontier(&1).unwrap(), None);
 
     let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 1024>::new(0xff);
@@ -2419,15 +2722,24 @@ fn assert_empty_map_open_matches_new_map_state() {
     let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT, 8, 4>::format(
         &mut flash,
         StorageFormatConfig::new(1, 8, 0xa5),
+        crate::test_storage_memory(),
     )
     .unwrap();
     storage.create_map(id).unwrap();
 
     drop(storage);
-    let mut reopened = Storage::<_, REGION_SIZE, REGION_COUNT, 8, 4>::open(&mut flash).unwrap();
+    let mut reopened = Storage::<_, REGION_SIZE, REGION_COUNT, 8, 4>::open(
+        &mut flash,
+        crate::test_storage_memory(),
+    )
+    .unwrap();
     let mut reopen_buffer = [0u8; REGION_SIZE];
     let reopened_map = reopened
-        .open_map::<i32, i32, MAX_INDEXES, MAX_INDEXES>(id, &mut reopen_buffer)
+        .open_map::<i32, i32, MAX_INDEXES, MAX_INDEXES>(
+            id,
+            &mut reopen_buffer,
+            crate::test_map_frontier_memory(),
+        )
         .unwrap();
 
     assert_eq!(reopened_map.get_frontier(&1).unwrap(), None);
@@ -2458,7 +2770,12 @@ fn assert_snapshot_encoding_stores_header_compact_entries_and_refs() {
     let id = CollectionId(71);
 
     let mut source_buffer = [0u8; BUFFER_SIZE];
-    let mut source = MapFrontier::<i32, i32, MAX_INDEXES>::new(id, &mut source_buffer).unwrap();
+    let mut source = MapFrontier::<i32, i32, MAX_INDEXES>::new(
+        id,
+        &mut source_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     source.set(5, 50).unwrap();
     source.set(2, 20).unwrap();
 
@@ -2556,12 +2873,22 @@ fn requirement_map_collection_format_covers_empty_state_snapshot_update_region_a
 
     {
         let mut empty_buffer = [0u8; BUFFER_SIZE];
-        let empty = MapFrontier::<i32, i32, MAX_INDEXES>::new(id, &mut empty_buffer).unwrap();
+        let empty = MapFrontier::<i32, i32, MAX_INDEXES>::new(
+            id,
+            &mut empty_buffer,
+            crate::test_map_frontier_memory(),
+        )
+        .unwrap();
         assert_eq!(empty.get_frontier(&1).unwrap(), None);
     }
 
     let mut source_buffer = [0u8; BUFFER_SIZE];
-    let mut source = MapFrontier::<i32, i32, MAX_INDEXES>::new(id, &mut source_buffer).unwrap();
+    let mut source = MapFrontier::<i32, i32, MAX_INDEXES>::new(
+        id,
+        &mut source_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     source.set(1, 10).unwrap();
     source.set(2, 20).unwrap();
 
@@ -2575,8 +2902,12 @@ fn requirement_map_collection_format_covers_empty_state_snapshot_update_region_a
     let mut snapshot = [0u8; BUFFER_SIZE];
     let snapshot_len = source.encode_snapshot_into(&mut snapshot).unwrap();
     let mut from_snapshot_buffer = [0u8; BUFFER_SIZE];
-    let mut from_snapshot =
-        MapFrontier::<i32, i32, MAX_INDEXES>::new(id, &mut from_snapshot_buffer).unwrap();
+    let mut from_snapshot = MapFrontier::<i32, i32, MAX_INDEXES>::new(
+        id,
+        &mut from_snapshot_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     from_snapshot
         .load_snapshot(&snapshot[..snapshot_len])
         .unwrap();
@@ -2596,8 +2927,12 @@ fn requirement_map_collection_format_covers_empty_state_snapshot_update_region_a
         snapshot_len
     );
     let mut from_region_buffer = [0u8; BUFFER_SIZE];
-    let mut from_region =
-        MapFrontier::<i32, i32, MAX_INDEXES>::new(id, &mut from_region_buffer).unwrap();
+    let mut from_region = MapFrontier::<i32, i32, MAX_INDEXES>::new(
+        id,
+        &mut from_region_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     from_region.load_region(&region[..region_len]).unwrap();
     assert_eq!(from_region.get_frontier(&1).unwrap(), Some(10));
     assert_eq!(from_region.get_frontier(&2).unwrap(), Some(20));
@@ -2615,7 +2950,12 @@ fn requirement_map_collection_format_covers_empty_state_snapshot_update_region_a
         .copy_from_slice(&first_ref);
 
     let mut invalid_buffer = [0u8; BUFFER_SIZE];
-    let mut invalid = MapFrontier::<i32, i32, MAX_INDEXES>::new(id, &mut invalid_buffer).unwrap();
+    let mut invalid = MapFrontier::<i32, i32, MAX_INDEXES>::new(
+        id,
+        &mut invalid_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     assert!(matches!(
         invalid.load_snapshot(&invalid_snapshot[..snapshot_len]),
         Err(MapError::SerializationError)
@@ -2641,18 +2981,32 @@ fn assert_region_round_trip_restores_logical_state() {
     let mut storage = Storage::<_, BUFFER_SIZE, 8, 8, 4>::format(
         &mut flash,
         StorageFormatConfig::new(1, 8, 0xa5),
+        crate::test_storage_memory(),
     )
     .unwrap();
     storage.create_map(id).unwrap();
 
     let mut source_buffer = [0u8; BUFFER_SIZE];
-    let mut source = MapFrontier::<i32, i32, MAX_INDEXES>::new(id, &mut source_buffer).unwrap();
+    let mut source = MapFrontier::<i32, i32, MAX_INDEXES>::new(
+        id,
+        &mut source_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     source.set(3, 30).unwrap();
     source.set(4, 40).unwrap();
 
     let manifest_region = storage
         .with_runtime_io_workspace(|runtime, flash, workspace| {
-            source.flush_to_storage::<BUFFER_SIZE, 8, _, 8, 4>(runtime, flash, workspace)
+            source.flush_to_storage::<BUFFER_SIZE, 8, _, 8, 4>(
+                runtime,
+                flash,
+                workspace,
+                &mut heapless::Vec::new(),
+                &mut heapless::Vec::new(),
+                &mut crate::storage::WalHeadReclaimPlan::empty(),
+                &mut crate::startup::StartupOpenPlan::empty(),
+            )
         })
         .unwrap();
 
@@ -2670,18 +3024,22 @@ fn assert_region_round_trip_restores_logical_state() {
 
     let mut dest_buffer = [0u8; BUFFER_SIZE];
     let restored = storage
-        .open_map::<i32, i32, MAX_INDEXES, MAX_INDEXES>(id, &mut dest_buffer)
+        .open_map::<i32, i32, MAX_INDEXES, MAX_INDEXES>(
+            id,
+            &mut dest_buffer,
+            crate::test_map_frontier_memory(),
+        )
         .unwrap();
 
     assert_eq!(
         restored
-            .get::<BUFFER_SIZE, _>(storage.backing, &mut storage.workspace, &3)
+            .get::<BUFFER_SIZE, _>(storage.backing, &mut storage.memory.workspace, &3)
             .unwrap(),
         Some(30)
     );
     assert_eq!(
         restored
-            .get::<BUFFER_SIZE, _>(storage.backing, &mut storage.workspace, &4)
+            .get::<BUFFER_SIZE, _>(storage.backing, &mut storage.memory.workspace, &4)
             .unwrap(),
         Some(40)
     );
@@ -2704,14 +3062,24 @@ fn requirement_non_wal_collection_format_pair_identifies_map_region_payloads() {
 #[test]
 fn requirement_region_payload_prefix_matches_embedded_snapshot_len() {
     let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
-    let mut storage =
-        Storage::<_, 512, 5, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
-            .unwrap();
+    let mut storage = Storage::<_, 512, 5, 8, 4>::format(
+        &mut flash,
+        StorageFormatConfig::new(1, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
 
     storage.create_map(CollectionId(60)).unwrap();
     let region_index = storage
         .with_runtime_io_workspace(|runtime, flash, workspace| {
-            runtime.reserve_next_region::<512, 5, _>(flash, workspace)
+            runtime.reserve_next_region::<512, 5, _>(
+                flash,
+                workspace,
+                &mut heapless::Vec::new(),
+                &mut heapless::Vec::new(),
+                &mut crate::storage::WalHeadReclaimPlan::empty(),
+                &mut crate::startup::StartupOpenPlan::empty(),
+            )
         })
         .unwrap();
     storage
@@ -2730,7 +3098,11 @@ fn requirement_region_payload_prefix_matches_embedded_snapshot_len() {
         .unwrap();
 
     let mut buffer = [0u8; 512];
-    let result = storage.open_map::<i32, i32, 4, 4>(CollectionId(60), &mut buffer);
+    let result = storage.open_map::<i32, i32, 4, 4>(
+        CollectionId(60),
+        &mut buffer,
+        crate::test_map_frontier_memory(),
+    );
     assert!(matches!(
         result,
         Err(MapStorageError::UnsupportedRegionFormat {
@@ -2762,7 +3134,12 @@ fn requirement_map_updates_append_new_head_records_and_replacement_reclaims_the_
     const MAX_INDEXES: usize = 4;
 
     let mut buffer = [0u8; REGION_SIZE];
-    let mut map = MapFrontier::<i32, i32, MAX_INDEXES>::new(CollectionId(60), &mut buffer).unwrap();
+    let mut map = MapFrontier::<i32, i32, MAX_INDEXES>::new(
+        CollectionId(60),
+        &mut buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     map.set(1, 10).unwrap();
     let first_end = map.next_record_offset.0;
     let first_prefix = map.map[..first_end].to_vec();
@@ -2777,20 +3154,37 @@ fn requirement_map_updates_append_new_head_records_and_replacement_reclaims_the_
     let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT, 8, 4>::format(
         &mut flash,
         StorageFormatConfig::new(1, 8, 0xa5),
+        crate::test_storage_memory(),
     )
     .unwrap();
     storage.create_map(map.id()).unwrap();
 
     let first_region = storage
         .with_runtime_io_workspace(|runtime, flash, workspace| {
-            map.flush_to_storage::<REGION_SIZE, REGION_COUNT, _, 8, 4>(runtime, flash, workspace)
+            map.flush_to_storage::<REGION_SIZE, REGION_COUNT, _, 8, 4>(
+                runtime,
+                flash,
+                workspace,
+                &mut heapless::Vec::new(),
+                &mut heapless::Vec::new(),
+                &mut crate::storage::WalHeadReclaimPlan::empty(),
+                &mut crate::startup::StartupOpenPlan::empty(),
+            )
         })
         .unwrap();
 
     map.delete(1).unwrap();
     let second_region = storage
         .with_runtime_io_workspace(|runtime, flash, workspace| {
-            map.flush_to_storage::<REGION_SIZE, REGION_COUNT, _, 8, 4>(runtime, flash, workspace)
+            map.flush_to_storage::<REGION_SIZE, REGION_COUNT, _, 8, 4>(
+                runtime,
+                flash,
+                workspace,
+                &mut heapless::Vec::new(),
+                &mut heapless::Vec::new(),
+                &mut crate::storage::WalHeadReclaimPlan::empty(),
+                &mut crate::startup::StartupOpenPlan::empty(),
+            )
         })
         .unwrap();
 
@@ -2840,6 +3234,7 @@ fn assert_open_from_storage_rejects_live_collections_with_a_non_map_collection_t
         &mut basis_scratch,
         CollectionId(61),
         &mut reopen_buffer,
+        crate::test_map_frontier_memory(),
     );
 
     assert!(matches!(
@@ -2873,7 +3268,12 @@ fn requirement_load_snapshot_rejects_unsorted_entry_refs() {
     let id = CollectionId(12);
 
     let mut source_buffer = [0u8; BUFFER_SIZE];
-    let mut source = MapFrontier::<i32, i32, MAX_INDEXES>::new(id, &mut source_buffer).unwrap();
+    let mut source = MapFrontier::<i32, i32, MAX_INDEXES>::new(
+        id,
+        &mut source_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     source.set(1, 10).unwrap();
     source.set(2, 20).unwrap();
 
@@ -2891,7 +3291,12 @@ fn requirement_load_snapshot_rejects_unsorted_entry_refs() {
         .copy_from_slice(&first_ref);
 
     let mut dest_buffer = [0u8; BUFFER_SIZE];
-    let mut restored = MapFrontier::<i32, i32, MAX_INDEXES>::new(id, &mut dest_buffer).unwrap();
+    let mut restored = MapFrontier::<i32, i32, MAX_INDEXES>::new(
+        id,
+        &mut dest_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     assert!(matches!(
         restored.load_snapshot(&snapshot[..snapshot_len]),
         Err(MapError::SerializationError)
@@ -2909,7 +3314,12 @@ fn requirement_load_snapshot_rejects_overlapping_entry_refs() {
     let id = CollectionId(13);
 
     let mut source_buffer = [0u8; BUFFER_SIZE];
-    let mut source = MapFrontier::<i32, i32, MAX_INDEXES>::new(id, &mut source_buffer).unwrap();
+    let mut source = MapFrontier::<i32, i32, MAX_INDEXES>::new(
+        id,
+        &mut source_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     source.set(1, 10).unwrap();
     source.set(2, 20).unwrap();
 
@@ -2929,7 +3339,12 @@ fn requirement_load_snapshot_rejects_overlapping_entry_refs() {
         .copy_from_slice(&second_end_bytes);
 
     let mut dest_buffer = [0u8; BUFFER_SIZE];
-    let mut restored = MapFrontier::<i32, i32, MAX_INDEXES>::new(id, &mut dest_buffer).unwrap();
+    let mut restored = MapFrontier::<i32, i32, MAX_INDEXES>::new(
+        id,
+        &mut dest_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     assert!(matches!(
         restored.load_snapshot(&snapshot[..snapshot_len]),
         Err(MapError::SerializationError)
@@ -2945,14 +3360,23 @@ fn requirement_mutable_map_frontier_capacity_is_bounded_by_its_configured_buffer
     let min_capacity_for_three_updates = (ENTRY_COUNT_SIZE..256)
         .find(|capacity| {
             let mut buffer = vec![0u8; *capacity];
-            let mut map = MapFrontier::<u16, u16, 8>::new(CollectionId(30), &mut buffer).unwrap();
+            let mut map = MapFrontier::<u16, u16, 8>::new(
+                CollectionId(30),
+                &mut buffer,
+                crate::test_map_frontier_memory(),
+            )
+            .unwrap();
             map.set(1, 10).is_ok() && map.set(1, 20).is_ok() && map.set(1, 30).is_ok()
         })
         .expect("expected a bounded capacity for three updates");
 
     let mut bounded_buffer = vec![0u8; min_capacity_for_three_updates];
-    let mut bounded_map =
-        MapFrontier::<u16, u16, 8>::new(CollectionId(31), &mut bounded_buffer).unwrap();
+    let mut bounded_map = MapFrontier::<u16, u16, 8>::new(
+        CollectionId(31),
+        &mut bounded_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     bounded_map.set(1, 10).unwrap();
     bounded_map.set(1, 20).unwrap();
     bounded_map.set(1, 30).unwrap();
@@ -2964,7 +3388,12 @@ fn requirement_mutable_map_frontier_capacity_is_bounded_by_its_configured_buffer
     let min_capacity_for_four_updates = (ENTRY_COUNT_SIZE..256)
         .find(|capacity| {
             let mut buffer = vec![0u8; *capacity];
-            let mut map = MapFrontier::<u16, u16, 8>::new(CollectionId(32), &mut buffer).unwrap();
+            let mut map = MapFrontier::<u16, u16, 8>::new(
+                CollectionId(32),
+                &mut buffer,
+                crate::test_map_frontier_memory(),
+            )
+            .unwrap();
             map.set(1, 10).is_ok()
                 && map.set(1, 20).is_ok()
                 && map.set(1, 30).is_ok()
@@ -2973,8 +3402,12 @@ fn requirement_mutable_map_frontier_capacity_is_bounded_by_its_configured_buffer
         .expect("expected a bounded capacity for four updates");
 
     let mut larger_buffer = vec![0u8; min_capacity_for_four_updates];
-    let mut larger_map =
-        MapFrontier::<u16, u16, 8>::new(CollectionId(32), &mut larger_buffer).unwrap();
+    let mut larger_map = MapFrontier::<u16, u16, 8>::new(
+        CollectionId(32),
+        &mut larger_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     larger_map.set(1, 10).unwrap();
     larger_map.set(1, 20).unwrap();
     larger_map.set(1, 30).unwrap();
@@ -3003,6 +3436,7 @@ fn assert_storage_snapshot_replay_restores_map_frontier() {
     let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT, 8, 4>::format(
         &mut flash,
         StorageFormatConfig::new(1, 8, 0xa5),
+        crate::test_storage_memory(),
     )
     .unwrap();
     storage
@@ -3010,8 +3444,12 @@ fn assert_storage_snapshot_replay_restores_map_frontier() {
         .unwrap();
 
     let mut snapshot_buffer = [0u8; REGION_SIZE];
-    let mut source =
-        MapFrontier::<i32, i32, MAX_INDEXES>::new(CollectionId(7), &mut snapshot_buffer).unwrap();
+    let mut source = MapFrontier::<i32, i32, MAX_INDEXES>::new(
+        CollectionId(7),
+        &mut snapshot_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     source.set(1, 10).unwrap();
     source.set(2, 20).unwrap();
     storage
@@ -3030,7 +3468,11 @@ fn assert_storage_snapshot_replay_restores_map_frontier() {
 
     let mut reopen_buffer = [0u8; REGION_SIZE];
     let reopened = storage
-        .open_map::<i32, i32, MAX_INDEXES, 8>(CollectionId(7), &mut reopen_buffer)
+        .open_map::<i32, i32, MAX_INDEXES, 8>(
+            CollectionId(7),
+            &mut reopen_buffer,
+            crate::test_map_frontier_memory(),
+        )
         .unwrap();
 
     assert_eq!(reopened.get_frontier(&1).unwrap(), Some(10));
@@ -3088,6 +3530,7 @@ fn requirement_open_from_storage_rejects_unsupported_committed_region_format() {
         &mut basis_scratch,
         CollectionId(72),
         &mut reopen_buffer,
+        crate::test_map_frontier_memory(),
     );
 
     assert!(matches!(
@@ -3108,15 +3551,25 @@ fn assert_open_rejects_invalid_retained_region_snapshot_and_update_payloads(
     {
         let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
         let mut workspace = StorageWorkspace::<512>::new();
-        let mut storage =
-            Storage::<_, 512, 5, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
-                .unwrap();
+        let mut storage = Storage::<_, 512, 5, 8, 4>::format(
+            &mut flash,
+            StorageFormatConfig::new(1, 8, 0xa5),
+            crate::test_storage_memory(),
+        )
+        .unwrap();
 
         storage.create_map(region_collection_id).unwrap();
 
         let region_index = storage
             .with_runtime_io_workspace(|runtime, flash, workspace| {
-                runtime.reserve_next_region::<512, 5, _>(flash, workspace)
+                runtime.reserve_next_region::<512, 5, _>(
+                    flash,
+                    workspace,
+                    &mut heapless::Vec::new(),
+                    &mut heapless::Vec::new(),
+                    &mut crate::storage::WalHeadReclaimPlan::empty(),
+                    &mut crate::startup::StartupOpenPlan::empty(),
+                )
             })
             .unwrap();
         storage
@@ -3135,9 +3588,14 @@ fn assert_open_rejects_invalid_retained_region_snapshot_and_update_payloads(
             .unwrap();
 
         drop(storage);
-        let mut reopened = Storage::<_, 512, 5, 8, 4>::open(&mut flash).unwrap();
+        let mut reopened =
+            Storage::<_, 512, 5, 8, 4>::open(&mut flash, crate::test_storage_memory()).unwrap();
         let mut reopen_buffer = [0u8; 512];
-        let result = reopened.open_map::<i32, i32, 4, 4>(region_collection_id, &mut reopen_buffer);
+        let result = reopened.open_map::<i32, i32, 4, 4>(
+            region_collection_id,
+            &mut reopen_buffer,
+            crate::test_map_frontier_memory(),
+        );
         assert!(matches!(
             result,
             Err(MapStorageError::UnsupportedRegionFormat {
@@ -3151,9 +3609,12 @@ fn assert_open_rejects_invalid_retained_region_snapshot_and_update_payloads(
     {
         let mut flash = MockFlash::<512, 4, 1024>::new(0xff);
         let mut workspace = StorageWorkspace::<512>::new();
-        let mut storage =
-            Storage::<_, 512, 4, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
-                .unwrap();
+        let mut storage = Storage::<_, 512, 4, 8, 4>::format(
+            &mut flash,
+            StorageFormatConfig::new(1, 8, 0xa5),
+            crate::test_storage_memory(),
+        )
+        .unwrap();
 
         storage.create_map(snapshot_collection_id).unwrap();
         storage
@@ -3161,10 +3622,14 @@ fn assert_open_rejects_invalid_retained_region_snapshot_and_update_payloads(
             .unwrap();
 
         drop(storage);
-        let mut reopened = Storage::<_, 512, 4, 8, 4>::open(&mut flash).unwrap();
+        let mut reopened =
+            Storage::<_, 512, 4, 8, 4>::open(&mut flash, crate::test_storage_memory()).unwrap();
         let mut reopen_buffer = [0u8; 512];
-        let result =
-            reopened.open_map::<i32, i32, 4, 4>(snapshot_collection_id, &mut reopen_buffer);
+        let result = reopened.open_map::<i32, i32, 4, 4>(
+            snapshot_collection_id,
+            &mut reopen_buffer,
+            crate::test_map_frontier_memory(),
+        );
         assert!(matches!(
             result,
             Err(MapStorageError::Map(MapError::SerializationError))
@@ -3174,9 +3639,12 @@ fn assert_open_rejects_invalid_retained_region_snapshot_and_update_payloads(
     {
         let mut flash = MockFlash::<512, 4, 1024>::new(0xff);
         let mut workspace = StorageWorkspace::<512>::new();
-        let mut storage =
-            Storage::<_, 512, 4, 8, 4>::format(&mut flash, StorageFormatConfig::new(1, 8, 0xa5))
-                .unwrap();
+        let mut storage = Storage::<_, 512, 4, 8, 4>::format(
+            &mut flash,
+            StorageFormatConfig::new(1, 8, 0xa5),
+            crate::test_storage_memory(),
+        )
+        .unwrap();
 
         storage.create_map(update_collection_id).unwrap();
         storage
@@ -3184,9 +3652,14 @@ fn assert_open_rejects_invalid_retained_region_snapshot_and_update_payloads(
             .unwrap();
 
         drop(storage);
-        let mut reopened = Storage::<_, 512, 4, 8, 4>::open(&mut flash).unwrap();
+        let mut reopened =
+            Storage::<_, 512, 4, 8, 4>::open(&mut flash, crate::test_storage_memory()).unwrap();
         let mut reopen_buffer = [0u8; 512];
-        let result = reopened.open_map::<i32, i32, 4, 4>(update_collection_id, &mut reopen_buffer);
+        let result = reopened.open_map::<i32, i32, 4, 4>(
+            update_collection_id,
+            &mut reopen_buffer,
+            crate::test_map_frontier_memory(),
+        );
         assert!(matches!(
             result,
             Err(MapStorageError::Map(MapError::SerializationError))
@@ -3239,6 +3712,7 @@ fn requirement_storage_visit_wal_records_exposes_map_collection_records() {
     let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT, 8, 4>::format(
         &mut flash,
         StorageFormatConfig::new(1, 8, 0xa5),
+        crate::test_storage_memory(),
     )
     .unwrap();
     storage
@@ -3246,8 +3720,12 @@ fn requirement_storage_visit_wal_records_exposes_map_collection_records() {
         .unwrap();
 
     let mut snapshot_buffer = [0u8; REGION_SIZE];
-    let mut source =
-        MapFrontier::<i32, i32, MAX_INDEXES>::new(CollectionId(7), &mut snapshot_buffer).unwrap();
+    let mut source = MapFrontier::<i32, i32, MAX_INDEXES>::new(
+        CollectionId(7),
+        &mut snapshot_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     source.set(1, 10).unwrap();
     storage
         .snapshot_map::<i32, i32, MAX_INDEXES>(&source)
@@ -3308,6 +3786,7 @@ fn assert_storage_region_flush_restores_map_basis() {
     let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT, 8, 4>::format(
         &mut flash,
         StorageFormatConfig::new(1, 8, 0xa5),
+        crate::test_storage_memory(),
     )
     .unwrap();
     storage
@@ -3315,14 +3794,26 @@ fn assert_storage_region_flush_restores_map_basis() {
         .unwrap();
 
     let mut map_buffer = [0u8; REGION_SIZE];
-    let mut map =
-        MapFrontier::<i32, i32, MAX_INDEXES>::new(CollectionId(9), &mut map_buffer).unwrap();
+    let mut map = MapFrontier::<i32, i32, MAX_INDEXES>::new(
+        CollectionId(9),
+        &mut map_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     map.set(5, 50).unwrap();
     map.set(7, 70).unwrap();
 
     let region_index = storage
         .with_runtime_io_workspace(|runtime, flash, workspace| {
-            map.flush_to_storage::<REGION_SIZE, REGION_COUNT, _, 8, 4>(runtime, flash, workspace)
+            map.flush_to_storage::<REGION_SIZE, REGION_COUNT, _, 8, 4>(
+                runtime,
+                flash,
+                workspace,
+                &mut heapless::Vec::new(),
+                &mut heapless::Vec::new(),
+                &mut crate::storage::WalHeadReclaimPlan::empty(),
+                &mut crate::startup::StartupOpenPlan::empty(),
+            )
         })
         .unwrap();
     assert_eq!(
@@ -3333,7 +3824,11 @@ fn assert_storage_region_flush_restores_map_basis() {
 
     let mut reopen_buffer = [0u8; REGION_SIZE];
     let reopened = storage
-        .open_map::<i32, i32, MAX_INDEXES, 8>(CollectionId(9), &mut reopen_buffer)
+        .open_map::<i32, i32, MAX_INDEXES, 8>(
+            CollectionId(9),
+            &mut reopen_buffer,
+            crate::test_map_frontier_memory(),
+        )
         .unwrap();
 
     assert_eq!(
@@ -3383,7 +3878,7 @@ proptest! {
 
         const MAX_INDEXES: usize = 4;
 
-        let mut map = MapFrontier::<_, _, MAX_INDEXES>::new(id, buffer.as_mut_slice())
+        let mut map = MapFrontier::<_, _, MAX_INDEXES>::new(id, buffer.as_mut_slice(), crate::test_map_frontier_memory())
             .expect("Could not construct MapFrontier.");
 
         let (mut last_key, mut last_value) = entries[0];
@@ -3420,7 +3915,7 @@ proptest! {
 
         const MAX_INDEXES: usize = 4;
 
-        let mut map = MapFrontier::<_, _, MAX_INDEXES>::new(id, buffer.as_mut_slice())
+        let mut map = MapFrontier::<_, _, MAX_INDEXES>::new(id, buffer.as_mut_slice(), crate::test_map_frontier_memory())
             .expect("Could not construct MapFrontier.");
 
 

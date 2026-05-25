@@ -181,7 +181,14 @@ fn committed_region_sequence_progress() -> CommittedRegionSequenceProgress {
         .unwrap();
 
     let first_region = state
-        .reserve_next_region::<512, 6, _>(&mut flash, &mut workspace)
+        .reserve_next_region::<512, 6, _>(
+            &mut flash,
+            &mut workspace,
+            &mut heapless::Vec::new(),
+            &mut heapless::Vec::new(),
+            &mut crate::storage::WalHeadReclaimPlan::empty(),
+            &mut crate::startup::StartupOpenPlan::empty(),
+        )
         .unwrap();
     state
         .write_committed_region::<512, 6, _>(
@@ -207,7 +214,14 @@ fn committed_region_sequence_progress() -> CommittedRegionSequenceProgress {
     let max_seen_after_first = state.max_seen_sequence();
 
     let second_region = state
-        .reserve_next_region::<512, 6, _>(&mut flash, &mut workspace)
+        .reserve_next_region::<512, 6, _>(
+            &mut flash,
+            &mut workspace,
+            &mut heapless::Vec::new(),
+            &mut heapless::Vec::new(),
+            &mut crate::storage::WalHeadReclaimPlan::empty(),
+            &mut crate::startup::StartupOpenPlan::empty(),
+        )
         .unwrap();
     state
         .write_committed_region::<512, 6, _>(
@@ -311,7 +325,14 @@ fn requirement_committed_region_write_uses_a_region_previously_reserved_by_alloc
         )
         .unwrap();
     let region_index = state
-        .reserve_next_region::<512, 5, _>(&mut flash, &mut workspace)
+        .reserve_next_region::<512, 5, _>(
+            &mut flash,
+            &mut workspace,
+            &mut heapless::Vec::new(),
+            &mut heapless::Vec::new(),
+            &mut crate::storage::WalHeadReclaimPlan::empty(),
+            &mut crate::startup::StartupOpenPlan::empty(),
+        )
         .unwrap();
 
     let mut saw_alloc_begin = false;
@@ -359,7 +380,14 @@ fn requirement_write_committed_region_accepts_payload_that_exactly_fills_committ
     let payload = [0x5au8; PAYLOAD_CAPACITY];
 
     let region_index = state
-        .reserve_next_region::<REGION_SIZE, 5, _>(&mut flash, &mut workspace)
+        .reserve_next_region::<REGION_SIZE, 5, _>(
+            &mut flash,
+            &mut workspace,
+            &mut heapless::Vec::new(),
+            &mut heapless::Vec::new(),
+            &mut crate::storage::WalHeadReclaimPlan::empty(),
+            &mut crate::startup::StartupOpenPlan::empty(),
+        )
         .unwrap();
 
     state
@@ -403,7 +431,14 @@ fn requirement_committed_region_write_waits_for_alloc_begin_sync() {
 
     flash.clear_operations();
     let region_index = state
-        .reserve_next_region::<512, 5, _>(&mut flash, &mut workspace)
+        .reserve_next_region::<512, 5, _>(
+            &mut flash,
+            &mut workspace,
+            &mut heapless::Vec::new(),
+            &mut heapless::Vec::new(),
+            &mut crate::storage::WalHeadReclaimPlan::empty(),
+            &mut crate::startup::StartupOpenPlan::empty(),
+        )
         .unwrap();
     state
         .write_committed_region::<512, 5, _>(
@@ -451,7 +486,14 @@ fn requirement_reopen_after_alloc_begin_recovers_the_advanced_allocator_state() 
     let mut state = format::<512, 5, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
 
     let region_index = state
-        .reserve_next_region::<512, 5, _>(&mut flash, &mut workspace)
+        .reserve_next_region::<512, 5, _>(
+            &mut flash,
+            &mut workspace,
+            &mut heapless::Vec::new(),
+            &mut heapless::Vec::new(),
+            &mut crate::storage::WalHeadReclaimPlan::empty(),
+            &mut crate::startup::StartupOpenPlan::empty(),
+        )
         .unwrap();
     let reopened = open::<512, 5, _, 8, 4>(&mut flash).unwrap();
 
@@ -1085,7 +1127,14 @@ fn requirement_reclaim_end_refreshes_free_list_tail_without_reopen() {
     let mut state = format::<512, 6, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
 
     let reclaimed = state
-        .reserve_next_region::<512, 6, _>(&mut flash, &mut workspace)
+        .reserve_next_region::<512, 6, _>(
+            &mut flash,
+            &mut workspace,
+            &mut heapless::Vec::new(),
+            &mut heapless::Vec::new(),
+            &mut crate::storage::WalHeadReclaimPlan::empty(),
+            &mut crate::startup::StartupOpenPlan::empty(),
+        )
         .unwrap();
     state
         .append_reclaim_begin::<512, 6, _>(&mut flash, &mut workspace, reclaimed)
@@ -1215,7 +1264,14 @@ fn requirement_free_region_membership_is_defined_by_the_free_list_chain() {
     let mut state = format::<512, 5, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
 
     let reserved_region = state
-        .reserve_next_region::<512, 5, _>(&mut flash, &mut workspace)
+        .reserve_next_region::<512, 5, _>(
+            &mut flash,
+            &mut workspace,
+            &mut heapless::Vec::new(),
+            &mut heapless::Vec::new(),
+            &mut crate::storage::WalHeadReclaimPlan::empty(),
+            &mut crate::startup::StartupOpenPlan::empty(),
+        )
         .unwrap();
 
     assert_eq!(reserved_region, 1);
@@ -1239,7 +1295,14 @@ fn requirement_stale_footer_bytes_do_not_make_a_reserved_region_free() {
     let mut state = format::<512, 5, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
 
     let reserved_region = state
-        .reserve_next_region::<512, 5, _>(&mut flash, &mut workspace)
+        .reserve_next_region::<512, 5, _>(
+            &mut flash,
+            &mut workspace,
+            &mut heapless::Vec::new(),
+            &mut heapless::Vec::new(),
+            &mut crate::storage::WalHeadReclaimPlan::empty(),
+            &mut crate::startup::StartupOpenPlan::empty(),
+        )
         .unwrap();
     let stale_successor =
         read_free_pointer_successor::<512, 5, _>(&mut flash, state.metadata(), reserved_region)
@@ -1265,7 +1328,14 @@ fn requirement_stage_ready_region_detaches_ready_region_and_allows_next_allocati
     let mut state = format::<512, 5, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
 
     let first_region = state
-        .reserve_next_region::<512, 5, _>(&mut flash, &mut workspace)
+        .reserve_next_region::<512, 5, _>(
+            &mut flash,
+            &mut workspace,
+            &mut heapless::Vec::new(),
+            &mut heapless::Vec::new(),
+            &mut crate::storage::WalHeadReclaimPlan::empty(),
+            &mut crate::startup::StartupOpenPlan::empty(),
+        )
         .unwrap();
     state
         .write_committed_region::<512, 5, _>(
@@ -1284,7 +1354,14 @@ fn requirement_stage_ready_region_detaches_ready_region_and_allows_next_allocati
     assert_eq!(state.staged_regions(), &[first_region]);
 
     let second_region = state
-        .reserve_next_region::<512, 5, _>(&mut flash, &mut workspace)
+        .reserve_next_region::<512, 5, _>(
+            &mut flash,
+            &mut workspace,
+            &mut heapless::Vec::new(),
+            &mut heapless::Vec::new(),
+            &mut crate::storage::WalHeadReclaimPlan::empty(),
+            &mut crate::startup::StartupOpenPlan::empty(),
+        )
         .unwrap();
     assert_ne!(second_region, first_region);
     assert_eq!(state.ready_region(), Some(second_region));
@@ -1301,7 +1378,14 @@ fn requirement_staged_regions_are_reclaimed_on_reopen_when_uncommitted() {
     let mut state = format::<512, 5, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
 
     let region_index = state
-        .reserve_next_region::<512, 5, _>(&mut flash, &mut workspace)
+        .reserve_next_region::<512, 5, _>(
+            &mut flash,
+            &mut workspace,
+            &mut heapless::Vec::new(),
+            &mut heapless::Vec::new(),
+            &mut crate::storage::WalHeadReclaimPlan::empty(),
+            &mut crate::startup::StartupOpenPlan::empty(),
+        )
         .unwrap();
     state
         .write_committed_region::<512, 5, _>(
@@ -1359,7 +1443,14 @@ fn requirement_committed_region_writes_do_not_write_a_live_free_pointer_footer()
         )
         .unwrap();
     let region_index = state
-        .reserve_next_region::<512, 5, _>(&mut flash, &mut workspace)
+        .reserve_next_region::<512, 5, _>(
+            &mut flash,
+            &mut workspace,
+            &mut heapless::Vec::new(),
+            &mut heapless::Vec::new(),
+            &mut crate::storage::WalHeadReclaimPlan::empty(),
+            &mut crate::startup::StartupOpenPlan::empty(),
+        )
         .unwrap();
 
     flash.clear_operations();
@@ -1405,7 +1496,14 @@ fn requirement_free_regions_are_erased_only_when_reused() {
 
     flash.clear_operations();
     let region_index = state
-        .reserve_next_region::<512, 5, _>(&mut flash, &mut workspace)
+        .reserve_next_region::<512, 5, _>(
+            &mut flash,
+            &mut workspace,
+            &mut heapless::Vec::new(),
+            &mut heapless::Vec::new(),
+            &mut crate::storage::WalHeadReclaimPlan::empty(),
+            &mut crate::startup::StartupOpenPlan::empty(),
+        )
         .unwrap();
     assert!(!flash
         .operations()
@@ -1756,7 +1854,14 @@ fn requirement_classify_wal_head_reclaim_copies_only_the_retained_region_head() 
         )
         .unwrap();
     let retained_region = state
-        .reserve_next_region::<512, 5, _>(&mut flash, &mut workspace)
+        .reserve_next_region::<512, 5, _>(
+            &mut flash,
+            &mut workspace,
+            &mut heapless::Vec::new(),
+            &mut heapless::Vec::new(),
+            &mut crate::storage::WalHeadReclaimPlan::empty(),
+            &mut crate::startup::StartupOpenPlan::empty(),
+        )
         .unwrap();
     state
         .write_committed_region::<512, 5, _>(
@@ -1870,12 +1975,26 @@ fn requirement_ensure_foreground_allocation_headroom_rejects_using_the_minimum_f
     let mut workspace = StorageWorkspace::<256>::new();
     let mut state = format::<256, 5, _, 8, 4>(&mut flash, 3, 8, 0xa5).unwrap();
     let _reserved = state
-        .reserve_next_region::<256, 5, _>(&mut flash, &mut workspace)
+        .reserve_next_region::<256, 5, _>(
+            &mut flash,
+            &mut workspace,
+            &mut heapless::Vec::new(),
+            &mut heapless::Vec::new(),
+            &mut crate::storage::WalHeadReclaimPlan::empty(),
+            &mut crate::startup::StartupOpenPlan::empty(),
+        )
         .unwrap();
 
     assert_eq!(state.free_region_count::<256, 5, _>(&mut flash), Ok(3));
     assert_eq!(
-        state.ensure_foreground_allocation_headroom::<256, 5, _>(&mut flash, &mut workspace),
+        state.ensure_foreground_allocation_headroom::<256, 5, _>(
+            &mut flash,
+            &mut workspace,
+            &mut heapless::Vec::new(),
+            &mut heapless::Vec::new(),
+            &mut crate::storage::WalHeadReclaimPlan::empty(),
+            &mut crate::startup::StartupOpenPlan::empty(),
+        ),
         Err(StorageRuntimeError::InsufficientFreeRegions {
             free_regions: 3,
             min_free_regions: 3,
@@ -1901,11 +2020,14 @@ fn requirement_copy_live_wal_head_reclaim_state_stops_when_a_record_ends_at_regi
         original_collections: Vec::new(),
     };
 
+    let mut active_collections = Vec::<CollectionId, 8>::new();
     state
         .copy_live_wal_head_reclaim_state::<128, 4, _>(
             &mut flash,
             &mut workspace,
             &plan,
+            &mut active_collections,
+            &mut crate::startup::StartupOpenPlan::empty(),
             #[cfg(feature = "perf-counters")]
             None,
         )
@@ -1962,15 +2084,19 @@ fn requirement_region_reachable_from_live_state_follows_map_head_references_to_r
     let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT, 8, 8>::format(
         &mut flash,
         StorageFormatConfig::new(1, 8, 0xa5),
+        crate::test_storage_memory(),
     )
     .unwrap();
     let collection_id = CollectionId(707);
     storage.create_map(collection_id).unwrap();
 
     let mut map_buffer = [0u8; 8192];
-    let mut map =
-        MapFrontier::<i32, i32, MAX_INDEXES, MAX_RUNS>::new(collection_id, &mut map_buffer)
-            .unwrap();
+    let mut map = MapFrontier::<i32, i32, MAX_INDEXES, MAX_RUNS>::new(
+        collection_id,
+        &mut map_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
     for key in 0..100 {
         map.set(key, key * 10).unwrap();
     }

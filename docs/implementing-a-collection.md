@@ -60,7 +60,8 @@ If the collection is part of the public surface, also re-export its public types
 ## 3. Keep Durability In The Shared Runtime
 
 Do not invent a collection-specific device protocol. New public collection APIs should hang off the
-`Storage` facade and use its bound backing and storage-owned scratch. Internally, collection
+`Storage` facade and use its bound backing plus the `StorageMemory` borrowed by that handle.
+Internally, collection
 adapters can still build on the existing runtime helpers in [`src/storage.rs`](../src/storage.rs):
 
 - `append_new_collection`
@@ -173,8 +174,8 @@ Once the runtime and collection module exist, add the user-facing `Storage` help
 For a new collection, keep the same ownership model:
 
 - caller-provided `FlashIo` bound into `Storage`
-- storage-owned reusable operation scratch
-- caller-owned frontier buffers only for opened collection handles that need long-lived memory
+- caller-owned reusable operation scratch borrowed through `StorageMemory`
+- collection-owned memory structs for opened handles that need long-lived state
 - no repeated backing, `StorageWorkspace`, or payload staging arguments on normal public collection
   operations
 

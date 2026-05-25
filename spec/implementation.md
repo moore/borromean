@@ -180,15 +180,20 @@ The prototype already trends in this direction with `heapless::Vec`
 usage and explicit buffers in WAL and map code. The new design should
 make those capacities part of the `Storage` type or constructor
 contract rather than a repeated operation argument.
+Core handles and operation futures MUST remain small stack values;
+caller-owned memory structs carry bounded scratch and runtime state.
 
 ### Memory Requirements
+
+Core handles and operation futures MUST remain small stack values;
+caller-owned memory structs carry bounded scratch and runtime state.
 
 1. `RING-IMPL-MEM-001` The maximum number of tracked collections,
 heads, replay entries, and other bounded in-memory items MUST be an
 explicit compile-time or constructor-time capacity.
 2. `RING-IMPL-MEM-002` Any operation that needs scratch space for
-encoding, decoding, or staging MUST use bounded storage owned by the
-`Storage` context or supplied when that context is constructed.
+encoding, decoding, or staging MUST use bounded caller-owned storage
+borrowed by the `Storage` context or supplied to the collection handle.
 3. `RING-IMPL-MEM-003` If the configured capacities are insufficient to
 open the store or complete an operation, the implementation MUST fail
 explicitly with a capacity-related error rather than silently allocate
@@ -295,7 +300,7 @@ crash-safety rules from [spec/ring.md](ring.md).
 durable step mandatory MUST occur in an order that allows the same
 operation to be retried or reconstructed after reset.
 5. `RING-IMPL-OP-005` Public operations SHOULD keep borrows of
-storage-owned scratch internal to the operation so embedded callers can
+caller-owned scratch internal to the operation so embedded callers can
 reuse one `Storage` context across sequential operations.
 
 ### Operation Future Regression Requirements

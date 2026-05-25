@@ -109,6 +109,7 @@ fn requirement_flash_io_trait_accepts_caller_defined_driver_types() {
     let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT, 8, 4>::format(
         &mut flash,
         StorageFormatConfig::new(1, 8, 0xa5),
+        crate::test_storage_memory(),
     )
     .unwrap();
     storage.create_map(CollectionId(62)).unwrap();
@@ -124,12 +125,14 @@ fn requirement_flash_io_trait_supports_non_allocating_concrete_driver_usage() {
     const REGION_SIZE: usize = 256;
     const REGION_COUNT: usize = 5;
 
+    let mut storage_memory = StorageMemory::<REGION_SIZE, REGION_COUNT, 8, 4>::new();
     assert_no_alloc("FlashIo concrete-driver operation path", || {
         let mut flash = ForwardingFlash::<REGION_SIZE, REGION_COUNT, 2048>::new(0xff);
         let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
         let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT, 8, 4>::format(
             &mut flash,
             StorageFormatConfig::new(1, 8, 0xa5),
+            &mut storage_memory,
         )
         .unwrap();
         storage.create_map(CollectionId(63)).unwrap();

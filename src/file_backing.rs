@@ -92,6 +92,26 @@ pub struct FileBackingGeometry {
     pub file_len: usize,
 }
 
+/// Caller-owned scratch used while discovering host file geometry.
+pub struct FileBackingScratch {
+    statvfs: core::mem::MaybeUninit<libc::statvfs>,
+}
+
+impl FileBackingScratch {
+    /// Allocates caller-owned file-backing scratch.
+    pub fn new() -> Self {
+        Self {
+            statvfs: core::mem::MaybeUninit::uninit(),
+        }
+    }
+}
+
+impl Default for FileBackingScratch {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Timing split for a [`FileBacking`] durability barrier.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct FileBackingSyncReport {
@@ -291,7 +311,11 @@ impl From<FileBackingError> for FileBackingFormatError {
 
 trait FileBackingOs {
     fn page_size(&mut self) -> Result<usize, FileBackingError>;
-    fn filesystem_block_size(&mut self, file: &File) -> Result<usize, FileBackingError>;
+    fn filesystem_block_size(
+        &mut self,
+        file: &File,
+        scratch: &mut FileBackingScratch,
+    ) -> Result<usize, FileBackingError>;
     fn fallocate(&mut self, file: &File, len: usize) -> Result<(), FileBackingError>;
     fn set_len(&mut self, file: &File, len: usize) -> Result<(), FileBackingError>;
     fn madvise(
@@ -319,15 +343,18 @@ impl FileBackingOs for LinuxFileBackingOs {
             .map_err(|_| FileBackingError::Geometry(FileBackingGeometryError::LengthOverflow))
     }
 
-    fn filesystem_block_size(&mut self, file: &File) -> Result<usize, FileBackingError> {
-        let mut stat = core::mem::MaybeUninit::<libc::statvfs>::uninit();
-        let result = unsafe { libc::fstatvfs(file.as_raw_fd(), stat.as_mut_ptr()) };
+    fn filesystem_block_size(
+        &mut self,
+        file: &File,
+        scratch: &mut FileBackingScratch,
+    ) -> Result<usize, FileBackingError> {
+        let result = unsafe { libc::fstatvfs(file.as_raw_fd(), scratch.statvfs.as_mut_ptr()) };
         if result != 0 {
             return Err(FileBackingError::last_os_error(
                 FileBackingOperation::FileSystemBlockSize,
             ));
         }
-        let stat = unsafe { stat.assume_init() };
+        let stat = unsafe { scratch.statvfs.assume_init() };
         let block_size = if stat.f_frsize == 0 {
             stat.f_bsize
         } else {
@@ -381,9 +408,10 @@ impl FileBackingGeometry {
     fn discover<const REGION_SIZE: usize, const REGION_COUNT: usize, OS: FileBackingOs>(
         file: &File,
         os: &mut OS,
+        scratch: &mut FileBackingScratch,
     ) -> Result<Self, FileBackingError> {
         let page_size = os.page_size()?;
-        let filesystem_block_size = os.filesystem_block_size(file)?;
+        let filesystem_block_size = os.filesystem_block_size(file, scratch)?;
         Self::new::<REGION_SIZE, REGION_COUNT>(page_size, filesystem_block_size)
             .map_err(FileBackingError::Geometry)
     }
@@ -479,18 +507,20 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize> FileBacking<REGION_SIZ
     pub fn create_new(
         path: impl AsRef<Path>,
         options: FileBackingOptions,
+        scratch: &mut FileBackingScratch,
     ) -> Result<Self, FileBackingError> {
         let mut os = LinuxFileBackingOs;
-        Self::create_new_with_os(path.as_ref(), options, &mut os)
+        Self::create_new_with_os(path.as_ref(), options, scratch, &mut os)
     }
 
     /// Opens an existing database file and maps it into memory.
     pub fn open_existing(
         path: impl AsRef<Path>,
         options: FileBackingOptions,
+        scratch: &mut FileBackingScratch,
     ) -> Result<Self, FileBackingError> {
         let mut os = LinuxFileBackingOs;
-        Self::open_existing_with_os(path.as_ref(), options, &mut os)
+        Self::open_existing_with_os(path.as_ref(), options, scratch, &mut os)
     }
 
     /// Returns file geometry discovered at create/open time.
@@ -658,6 +688,7 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize> FileBacking<REGION_SIZ
     fn create_new_with_os<OS: FileBackingOs>(
         path: &Path,
         options: FileBackingOptions,
+        scratch: &mut FileBackingScratch,
         os: &mut OS,
     ) -> Result<Self, FileBackingError> {
         let file = OpenOptions::new()
@@ -666,7 +697,8 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize> FileBacking<REGION_SIZ
             .create_new(true)
             .open(path)
             .map_err(|error| FileBackingError::from_io_error(FileBackingOperation::Open, error))?;
-        let geometry = FileBackingGeometry::discover::<REGION_SIZE, REGION_COUNT, _>(&file, os)?;
+        let geometry =
+            FileBackingGeometry::discover::<REGION_SIZE, REGION_COUNT, _>(&file, os, scratch)?;
         let mut file_len_set_by_fallback = false;
         match os.fallocate(&file, geometry.file_len) {
             Ok(()) => {}
@@ -704,6 +736,7 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize> FileBacking<REGION_SIZ
     fn open_existing_with_os<OS: FileBackingOs>(
         path: &Path,
         options: FileBackingOptions,
+        scratch: &mut FileBackingScratch,
         os: &mut OS,
     ) -> Result<Self, FileBackingError> {
         let file = OpenOptions::new()
@@ -711,7 +744,8 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize> FileBacking<REGION_SIZ
             .write(true)
             .open(path)
             .map_err(|error| FileBackingError::from_io_error(FileBackingOperation::Open, error))?;
-        let geometry = FileBackingGeometry::discover::<REGION_SIZE, REGION_COUNT, _>(&file, os)?;
+        let geometry =
+            FileBackingGeometry::discover::<REGION_SIZE, REGION_COUNT, _>(&file, os, scratch)?;
         geometry.validate_existing_file_len(&file)?;
         let map = unsafe { MmapOptions::new().len(geometry.file_len).map_mut(&file) }
             .map_err(|error| FileBackingError::from_io_error(FileBackingOperation::Mmap, error))?;

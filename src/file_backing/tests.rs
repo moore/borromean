@@ -73,7 +73,11 @@ impl FileBackingOs for FakeOs {
         Ok(self.page_size)
     }
 
-    fn filesystem_block_size(&mut self, _file: &File) -> Result<usize, FileBackingError> {
+    fn filesystem_block_size(
+        &mut self,
+        _file: &File,
+        _scratch: &mut FileBackingScratch,
+    ) -> Result<usize, FileBackingError> {
         self.filesystem_block_size_calls += 1;
         Ok(self.filesystem_block_size)
     }
@@ -160,6 +164,7 @@ fn requirement_file_layout_places_data_after_metadata_region() {
     let mut backing = FileBacking::<512, 2>::create_new_with_os(
         &temp.path,
         FileBackingOptions::new(0xee),
+        crate::test_file_backing_scratch(),
         &mut os,
     )
     .unwrap();
@@ -180,6 +185,7 @@ fn requirement_file_layout_maps_region_index_to_expected_offset() {
     let mut backing = FileBacking::<512, 3>::create_new_with_os(
         &temp.path,
         FileBackingOptions::new(0xee),
+        crate::test_file_backing_scratch(),
         &mut os,
     )
     .unwrap();
@@ -201,6 +207,7 @@ fn requirement_file_backing_discovers_page_and_filesystem_block_sizes() {
     let _backing = FileBacking::<512, 2>::create_new_with_os(
         &temp.path,
         FileBackingOptions::new(0xff),
+        crate::test_file_backing_scratch(),
         &mut os,
     )
     .unwrap();
@@ -254,6 +261,7 @@ fn requirement_file_backing_open_rejects_unexpected_file_length() {
     let error = FileBacking::<512, 2>::open_existing_with_os(
         &temp.path,
         FileBackingOptions::new(0xff),
+        crate::test_file_backing_scratch(),
         &mut os,
     )
     .unwrap_err();
@@ -277,6 +285,7 @@ fn requirement_file_backing_create_new_is_exclusive() {
     let _first = FileBacking::<512, 2>::create_new_with_os(
         &temp.path,
         FileBackingOptions::new(0xff),
+        crate::test_file_backing_scratch(),
         &mut first_os,
     )
     .unwrap();
@@ -284,6 +293,7 @@ fn requirement_file_backing_create_new_is_exclusive() {
     let error = FileBacking::<512, 2>::create_new_with_os(
         &temp.path,
         FileBackingOptions::new(0xff),
+        crate::test_file_backing_scratch(),
         &mut second_os,
     )
     .unwrap_err();
@@ -307,6 +317,7 @@ fn requirement_file_backing_create_new_calls_fallocate() {
     let _backing = FileBacking::<512, 2>::create_new_with_os(
         &temp.path,
         FileBackingOptions::new(0xff),
+        crate::test_file_backing_scratch(),
         &mut os,
     )
     .unwrap();
@@ -334,6 +345,7 @@ fn requirement_file_backing_strict_allocation_fails_on_any_fallocate_error() {
     let error = FileBacking::<512, 2>::create_new_with_os(
         &temp.path,
         FileBackingOptions::new(0xff),
+        crate::test_file_backing_scratch(),
         &mut os,
     )
     .unwrap_err();
@@ -352,16 +364,24 @@ fn requirement_file_backing_fallback_only_allows_unsupported_fallocate_errors() 
     let mut fallback_os = FakeOs::new().with_fallocate_result(Err(unsupported_fallocate_error()));
     let mut options = FileBackingOptions::new(0xff);
     options.allocation_policy = AllocationPolicy::FallbackOnUnsupported;
-    let _backing =
-        FileBacking::<512, 2>::create_new_with_os(&fallback_temp.path, options, &mut fallback_os)
-            .unwrap();
+    let _backing = FileBacking::<512, 2>::create_new_with_os(
+        &fallback_temp.path,
+        options,
+        crate::test_file_backing_scratch(),
+        &mut fallback_os,
+    )
+    .unwrap();
     assert_eq!(fallback_os.set_len_calls, 1);
 
     let no_space_temp = TempFile::new("fallback-nospace");
     let mut no_space_os = FakeOs::new().with_fallocate_result(Err(no_space_fallocate_error()));
-    let error =
-        FileBacking::<512, 2>::create_new_with_os(&no_space_temp.path, options, &mut no_space_os)
-            .unwrap_err();
+    let error = FileBacking::<512, 2>::create_new_with_os(
+        &no_space_temp.path,
+        options,
+        crate::test_file_backing_scratch(),
+        &mut no_space_os,
+    )
+    .unwrap_err();
     assert_eq!(error, no_space_fallocate_error());
 }
 
@@ -377,7 +397,13 @@ fn requirement_file_backing_applies_configured_madvise_policy() {
     let mut os = FakeOs::new();
     let mut options = FileBackingOptions::new(0xff);
     options.madvise_policy = MadvisePolicy::Sequential;
-    let _backing = FileBacking::<512, 2>::create_new_with_os(&temp.path, options, &mut os).unwrap();
+    let _backing = FileBacking::<512, 2>::create_new_with_os(
+        &temp.path,
+        options,
+        crate::test_file_backing_scratch(),
+        &mut os,
+    )
+    .unwrap();
     assert_eq!(os.madvise_calls, 1);
     assert_eq!(os.last_madvise_policy, Some(MadvisePolicy::Sequential));
     assert_eq!(os.fallocate_calls, 1);
@@ -396,6 +422,7 @@ fn requirement_file_backing_initializes_new_files_to_erased_byte() {
     let backing = FileBacking::<512, 2>::create_new_with_os(
         &temp.path,
         FileBackingOptions::new(0xee),
+        crate::test_file_backing_scratch(),
         &mut os,
     )
     .unwrap();
@@ -415,6 +442,7 @@ fn requirement_file_backing_rejects_out_of_bounds_region_operations() {
     let mut backing = FileBacking::<512, 2>::create_new_with_os(
         &temp.path,
         FileBackingOptions::new(0xff),
+        crate::test_file_backing_scratch(),
         &mut os,
     )
     .unwrap();
@@ -443,6 +471,7 @@ fn requirement_file_backing_erase_fills_region_with_erased_byte() {
     let mut backing = FileBacking::<512, 2>::create_new_with_os(
         &temp.path,
         FileBackingOptions::new(0xee),
+        crate::test_file_backing_scratch(),
         &mut os,
     )
     .unwrap();
@@ -468,14 +497,22 @@ fn requirement_file_backing_sync_persists_changes_across_reopen() {
     let mut options = FileBackingOptions::new(0xff);
     options.allocation_policy = AllocationPolicy::FallbackOnUnsupported;
     {
-        let mut backing =
-            FileBacking::<REGION_SIZE, REGION_COUNT>::create_new(&temp.path, options).unwrap();
+        let mut backing = FileBacking::<REGION_SIZE, REGION_COUNT>::create_new(
+            &temp.path,
+            options,
+            crate::test_file_backing_scratch(),
+        )
+        .unwrap();
         backing.write_region(1, 7, &[0x44, 0x55]).unwrap();
         backing.sync().unwrap();
     }
 
-    let mut reopened =
-        FileBacking::<REGION_SIZE, REGION_COUNT>::open_existing(&temp.path, options).unwrap();
+    let mut reopened = FileBacking::<REGION_SIZE, REGION_COUNT>::open_existing(
+        &temp.path,
+        options,
+        crate::test_file_backing_scratch(),
+    )
+    .unwrap();
     let mut bytes = [0u8; 2];
     reopened
         .read_region(1, 7, bytes.len(), |data| bytes.copy_from_slice(data))
@@ -495,9 +532,13 @@ fn requirement_file_backing_sync_report_uses_range_flush_for_wal_write() {
     let mut os = FakeOs::new();
     let mut options = FileBackingOptions::new(0xff);
     options.allocation_policy = AllocationPolicy::FallbackOnUnsupported;
-    let mut backing =
-        FileBacking::<REGION_SIZE, REGION_COUNT>::create_new_with_os(&temp.path, options, &mut os)
-            .unwrap();
+    let mut backing = FileBacking::<REGION_SIZE, REGION_COUNT>::create_new_with_os(
+        &temp.path,
+        options,
+        crate::test_file_backing_scratch(),
+        &mut os,
+    )
+    .unwrap();
     let sync_calls_after_create = os.sync_calls;
 
     backing.write_region(1, 7, &[0x44, 0x55]).unwrap();
@@ -531,9 +572,13 @@ fn requirement_file_backing_sync_report_syncs_file_for_metadata_write() {
     let mut os = FakeOs::new();
     let mut options = FileBackingOptions::new(0xff);
     options.allocation_policy = AllocationPolicy::FallbackOnUnsupported;
-    let mut backing =
-        FileBacking::<REGION_SIZE, REGION_COUNT>::create_new_with_os(&temp.path, options, &mut os)
-            .unwrap();
+    let mut backing = FileBacking::<REGION_SIZE, REGION_COUNT>::create_new_with_os(
+        &temp.path,
+        options,
+        crate::test_file_backing_scratch(),
+        &mut os,
+    )
+    .unwrap();
     let sync_calls_after_create = os.sync_calls;
     let metadata =
         StorageMetadata::new(REGION_SIZE as u32, REGION_COUNT as u32, 0, 8, 0xff, 0xa5).unwrap();
@@ -565,9 +610,13 @@ fn requirement_file_backing_sync_report_clean_sync_is_noop() {
     let mut os = FakeOs::new();
     let mut options = FileBackingOptions::new(0xff);
     options.allocation_policy = AllocationPolicy::FallbackOnUnsupported;
-    let mut backing =
-        FileBacking::<REGION_SIZE, REGION_COUNT>::create_new_with_os(&temp.path, options, &mut os)
-            .unwrap();
+    let mut backing = FileBacking::<REGION_SIZE, REGION_COUNT>::create_new_with_os(
+        &temp.path,
+        options,
+        crate::test_file_backing_scratch(),
+        &mut os,
+    )
+    .unwrap();
     let sync_calls_after_create = os.sync_calls;
 
     let report = backing.sync_with_os_report(&mut os).unwrap();
@@ -596,9 +645,13 @@ fn requirement_file_backing_sync_report_clears_dirty_range_after_success() {
     let mut os = FakeOs::new();
     let mut options = FileBackingOptions::new(0xff);
     options.allocation_policy = AllocationPolicy::FallbackOnUnsupported;
-    let mut backing =
-        FileBacking::<REGION_SIZE, REGION_COUNT>::create_new_with_os(&temp.path, options, &mut os)
-            .unwrap();
+    let mut backing = FileBacking::<REGION_SIZE, REGION_COUNT>::create_new_with_os(
+        &temp.path,
+        options,
+        crate::test_file_backing_scratch(),
+        &mut os,
+    )
+    .unwrap();
 
     backing.write_region(1, 7, &[0x44, 0x55]).unwrap();
     let first = backing.sync_with_os_report(&mut os).unwrap();
@@ -625,14 +678,19 @@ fn requirement_file_backing_works_with_generic_storage_api() {
     let temp = TempFile::new("storage-api");
     let mut options = FileBackingOptions::new(0xff);
     options.allocation_policy = AllocationPolicy::FallbackOnUnsupported;
-    let mut backing =
-        FileBacking::<REGION_SIZE, REGION_COUNT>::create_new(&temp.path, options).unwrap();
+    let mut backing = FileBacking::<REGION_SIZE, REGION_COUNT>::create_new(
+        &temp.path,
+        options,
+        crate::test_file_backing_scratch(),
+    )
+    .unwrap();
     let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT, 8, 4>::format(
         &mut backing,
         StorageFormatConfig::new(2, 8, 0xa5),
+        crate::test_storage_memory(),
     )
     .unwrap();
-    let mut map = LsmMap::<u16, u16, 8>::new(&mut storage).unwrap();
+    let mut map = LsmMap::<u16, u16, 8>::new(&mut storage, crate::test_lsm_map_memory()).unwrap();
     map.set(&mut storage, 7, 70).unwrap();
     assert_eq!(
         map.get(&mut storage, &7, |_, value| *value).unwrap(),

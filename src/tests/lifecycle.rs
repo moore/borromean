@@ -1,3 +1,5 @@
+#![allow(clippy::drop_non_drop)]
+
 use crate::{
     CollectionId, CollectionType, FlashIo, LsmMap, MockFlash, Storage, StorageFormatConfig,
     StorageRuntimeError,
@@ -54,6 +56,7 @@ fn mark_current_wal_chain<
 >(
     storage: &mut Storage<
         'db,
+        'db,
         IO,
         REGION_SIZE,
         REGION_COUNT,
@@ -69,10 +72,16 @@ fn mark_current_wal_chain<
     }
 
     let regions = storage.with_runtime_io_workspace(|runtime, flash, workspace| {
-        let plan = runtime.prepare_wal_head_reclaim::<REGION_SIZE, IO>(flash, workspace)?;
+        let mut plan = crate::storage::WalHeadReclaimPlan::<MAX_COLLECTIONS>::empty();
+        runtime.prepare_wal_head_reclaim::<REGION_SIZE, IO>(flash, workspace, &mut plan)?;
+        let mut regions = heapless::Vec::<u32, REGION_COUNT>::new();
         runtime.collect_wal_head_reclaim_regions::<REGION_SIZE, REGION_COUNT, IO>(
-            flash, workspace, &plan,
-        )
+            flash,
+            workspace,
+            &plan,
+            &mut regions,
+        )?;
+        Ok::<_, StorageRuntimeError>(regions)
     })?;
     for region in regions {
         mark_region(seen_regions, region);
@@ -89,6 +98,7 @@ fn force_wal_rotation<
     const MAX_PENDING_RECLAIMS: usize,
 >(
     storage: &mut Storage<
+        'db,
         'db,
         IO,
         REGION_SIZE,
@@ -114,6 +124,7 @@ fn wal_chain_len<
 >(
     storage: &mut Storage<
         'db,
+        'db,
         IO,
         REGION_SIZE,
         REGION_COUNT,
@@ -126,12 +137,17 @@ fn wal_chain_len<
     }
 
     storage.with_runtime_io_workspace(|runtime, flash, workspace| {
-        let plan = runtime.prepare_wal_head_reclaim::<REGION_SIZE, IO>(flash, workspace)?;
+        let mut plan = crate::storage::WalHeadReclaimPlan::<MAX_COLLECTIONS>::empty();
+        runtime.prepare_wal_head_reclaim::<REGION_SIZE, IO>(flash, workspace, &mut plan)?;
+        let mut regions = heapless::Vec::<u32, REGION_COUNT>::new();
         runtime
             .collect_wal_head_reclaim_regions::<REGION_SIZE, REGION_COUNT, IO>(
-                flash, workspace, &plan,
+                flash,
+                workspace,
+                &plan,
+                &mut regions,
             )
-            .map(|regions| regions.len())
+            .map(|()| regions.len())
     })
 }
 
@@ -144,6 +160,7 @@ fn complete_all_pending_reclaims<
     const MAX_PENDING_RECLAIMS: usize,
 >(
     storage: &mut Storage<
+        'db,
         'db,
         IO,
         REGION_SIZE,
@@ -168,6 +185,7 @@ fn service_storage_lifecycle<
     const MAX_PENDING_RECLAIMS: usize,
 >(
     storage: &mut Storage<
+        'db,
         'db,
         IO,
         REGION_SIZE,
@@ -211,13 +229,14 @@ fn assert_map_model<
 >(
     storage: &mut Storage<
         'db,
+        'db,
         IO,
         REGION_SIZE,
         REGION_COUNT,
         MAX_COLLECTIONS,
         MAX_PENDING_RECLAIMS,
     >,
-    map: &LsmMap<u64, u64, MAX_INDEXES, MAX_RUNS>,
+    map: &mut LsmMap<'_, u64, u64, MAX_INDEXES, MAX_RUNS>,
     expected: &[Option<u64>; KEY_SPACE],
 ) {
     for (key, expected_value) in expected.iter().enumerate() {
@@ -247,6 +266,7 @@ fn requirement_wal_lifecycle_reuses_every_region_across_reclaim_cycles() {
         Storage::<_, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>::format(
             &mut *flash,
             StorageFormatConfig::new(2, 8, 0xa5),
+            crate::test_storage_memory(),
         )
         .unwrap();
     storage.create_map(CollectionId::new(1)).unwrap();
@@ -301,6 +321,7 @@ fn requirement_wal_lifecycle_reuses_every_region_across_reclaim_cycles() {
     let reopened =
         Storage::<_, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>::open(
             &mut *flash,
+            crate::test_storage_memory(),
         )
         .unwrap();
     assert!(reopened
@@ -343,12 +364,14 @@ fn run_map_lifecycle_preserves_model_across_compaction_reclaim_and_rollover() {
         Storage::<_, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>::format(
             &mut *flash,
             StorageFormatConfig::new(2, 8, 0xa5),
+            crate::test_storage_memory(),
         )
         .unwrap();
-    let mut map = LsmMap::<u64, u64, MAX_INDEXES, MAX_RUNS>::new(&mut storage)
-        .unwrap()
-        .with_compaction_run_target(8)
-        .unwrap();
+    let mut map =
+        LsmMap::<u64, u64, MAX_INDEXES, MAX_RUNS>::new(&mut storage, crate::test_lsm_map_memory())
+            .unwrap()
+            .with_compaction_run_target(8)
+            .unwrap();
     let collection_id = map.collection_id();
     let mut expected = [None; KEY_SPACE];
     let mut rng = LifecycleRng::new(0x5eed_cafe_f00d_fade);
@@ -384,7 +407,7 @@ fn run_map_lifecycle_preserves_model_across_compaction_reclaim_and_rollover() {
                 MAX_PENDING_RECLAIMS,
                 MAX_INDEXES,
                 MAX_RUNS,
-            >(&mut storage, &map, &expected);
+            >(&mut storage, &mut map, &expected);
         }
     }
 
@@ -400,7 +423,7 @@ fn run_map_lifecycle_preserves_model_across_compaction_reclaim_and_rollover() {
         MAX_PENDING_RECLAIMS,
         MAX_INDEXES,
         MAX_RUNS,
-    >(&mut storage, &map, &expected);
+    >(&mut storage, &mut map, &expected);
 
     assert!(stats.compactions > 0);
     assert!(stats.completed_reclaims > 0);
@@ -412,10 +435,15 @@ fn run_map_lifecycle_preserves_model_across_compaction_reclaim_and_rollover() {
     let mut reopened =
         Storage::<_, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>::open(
             &mut *flash,
+            crate::test_storage_memory(),
         )
         .unwrap();
-    let reopened_map =
-        LsmMap::<u64, u64, MAX_INDEXES, MAX_RUNS>::open(collection_id, &mut reopened).unwrap();
+    let mut reopened_map = LsmMap::<u64, u64, MAX_INDEXES, MAX_RUNS>::open(
+        collection_id,
+        &mut reopened,
+        crate::test_lsm_map_memory(),
+    )
+    .unwrap();
     assert_map_model::<
         _,
         KEY_SPACE,
@@ -425,7 +453,7 @@ fn run_map_lifecycle_preserves_model_across_compaction_reclaim_and_rollover() {
         MAX_PENDING_RECLAIMS,
         MAX_INDEXES,
         MAX_RUNS,
-    >(&mut reopened, &reopened_map, &expected);
+    >(&mut reopened, &mut reopened_map, &expected);
 }
 
 //= spec/ring.md#storage-runtime-state-requirements
@@ -455,6 +483,7 @@ fn run_wal_head_reclaim_capacity_stress_reclaims_bounded_prefix() {
         Storage::<_, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>::format(
             &mut *flash,
             StorageFormatConfig::new(2, 8, 0xa5),
+            crate::test_storage_memory(),
         )
         .unwrap();
     storage.create_map(CollectionId::new(1)).unwrap();
@@ -466,10 +495,16 @@ fn run_wal_head_reclaim_capacity_stress_reclaims_bounded_prefix() {
 
     let source_regions = storage
         .with_runtime_io_workspace(|runtime, flash, workspace| {
-            let plan = runtime.prepare_wal_head_reclaim::<REGION_SIZE, _>(flash, workspace)?;
+            let mut plan = crate::storage::WalHeadReclaimPlan::<MAX_COLLECTIONS>::empty();
+            runtime.prepare_wal_head_reclaim::<REGION_SIZE, _>(flash, workspace, &mut plan)?;
+            let mut regions = heapless::Vec::<u32, REGION_COUNT>::new();
             runtime.collect_wal_head_reclaim_regions::<REGION_SIZE, REGION_COUNT, _>(
-                flash, workspace, &plan,
-            )
+                flash,
+                workspace,
+                &plan,
+                &mut regions,
+            )?;
+            Ok::<_, StorageRuntimeError>(regions)
         })
         .unwrap();
     let original_chain_len = source_regions.len();

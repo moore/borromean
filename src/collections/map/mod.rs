@@ -1,12 +1,13 @@
 //! Durable map collection implementation and storage helpers.
+#![allow(clippy::too_many_arguments)]
 
 use crate::disk::{DiskError, FreePointerFooter, Header};
 use crate::flash_io::{FlashIo, StorageIoError};
 use crate::mock::MockError;
-use crate::storage::{StorageRuntime, StorageRuntimeError, StorageVisitError};
+use crate::startup::StartupOpenPlan;
+use crate::storage::{StorageRuntime, StorageRuntimeError, StorageVisitError, WalHeadReclaimPlan};
 use crate::workspace::StorageWorkspace;
 use crate::{CollectionId, CollectionType, StorageMetadata};
-use core::cell::RefCell;
 use core::cmp::Ordering;
 use core::fmt::Debug;
 use core::marker::PhantomData;
@@ -1702,27 +1703,106 @@ enum SearchResult {
 }
 
 /// Small durable map handle used by the public object-level API.
-pub struct LsmMap<K, V, const MAX_INDEXES: usize, const MAX_RUNS: usize = MAX_INDEXES> {
+pub struct LsmMap<'mem, K, V, const MAX_INDEXES: usize, const MAX_RUNS: usize = MAX_INDEXES>
+where
+    K: LsmKey,
+    V: LsmValue,
+{
     pub(crate) collection_id: CollectionId,
     pub(crate) compaction_run_target: usize,
-    pub(crate) cached_frontier: RefCell<Option<CachedMapFrontier<K, MAX_RUNS>>>,
+    pub(crate) memory: &'mem mut LsmMapMemory<K, V, MAX_INDEXES, MAX_RUNS>,
     _phantom: PhantomData<(K, V)>,
 }
 
-pub(crate) struct CachedMapFrontier<K, const MAX_RUNS: usize> {
+pub(crate) struct CachedMapFrontier {
     pub(crate) buffer_generation: u64,
-    pub(crate) state: MapFrontierState<K, MAX_RUNS>,
+    pub(crate) state: MapFrontierState,
 }
 
-impl<K, V, const MAX_INDEXES: usize, const MAX_RUNS: usize> LsmMap<K, V, MAX_INDEXES, MAX_RUNS> {
+/// Caller-owned memory for the public durable map handle.
+pub struct LsmMapMemory<K, V, const MAX_INDEXES: usize, const MAX_RUNS: usize = MAX_INDEXES>
+where
+    K: LsmKey,
+    V: LsmValue,
+{
+    pub(crate) cached_frontier: Option<CachedMapFrontier>,
+    pub(crate) frontier: MapFrontierMemory<K, MAX_RUNS>,
+    pub(crate) compaction_cursors: Vec<RunEntryCursor<K, V>, MAX_RUNS>,
+    pub(crate) duplicate_indices: Vec<usize, MAX_RUNS>,
+    pub(crate) retained_runs: Vec<MapRunDescriptor<K>, MAX_RUNS>,
+    pub(crate) compaction_segment_entries: Vec<Entry<K, V>, MAX_INDEXES>,
+    _phantom: PhantomData<(K, V)>,
+}
+
+impl<K, V, const MAX_INDEXES: usize, const MAX_RUNS: usize>
+    LsmMapMemory<K, V, MAX_INDEXES, MAX_RUNS>
+where
+    K: LsmKey,
+    V: LsmValue,
+{
+    /// Allocates caller-owned memory for a durable map handle.
+    pub fn new() -> Self {
+        Self {
+            cached_frontier: None,
+            frontier: MapFrontierMemory::new(),
+            compaction_cursors: Vec::new(),
+            duplicate_indices: Vec::new(),
+            retained_runs: Vec::new(),
+            compaction_segment_entries: Vec::new(),
+            _phantom: PhantomData,
+        }
+    }
+}
+
+impl<K, V, const MAX_INDEXES: usize, const MAX_RUNS: usize> Default
+    for LsmMapMemory<K, V, MAX_INDEXES, MAX_RUNS>
+where
+    K: LsmKey,
+    V: LsmValue,
+{
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Caller-owned memory for a low-level map frontier.
+pub struct MapFrontierMemory<K, const MAX_RUNS: usize> {
+    pub(crate) runs: Vec<MapRunDescriptor<K>, MAX_RUNS>,
+}
+
+impl<K, const MAX_RUNS: usize> MapFrontierMemory<K, MAX_RUNS> {
+    /// Allocates caller-owned frontier memory.
+    pub fn new() -> Self {
+        Self { runs: Vec::new() }
+    }
+}
+
+impl<K, const MAX_RUNS: usize> Default for MapFrontierMemory<K, MAX_RUNS> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<'mem, K, V, const MAX_INDEXES: usize, const MAX_RUNS: usize>
+    LsmMap<'mem, K, V, MAX_INDEXES, MAX_RUNS>
+where
+    K: LsmKey,
+    V: LsmValue,
+{
     pub(crate) fn from_collection_id(
         collection_id: CollectionId,
         compaction_run_target: usize,
+        memory: &'mem mut LsmMapMemory<K, V, MAX_INDEXES, MAX_RUNS>,
     ) -> Self {
+        memory.cached_frontier = None;
+        memory.frontier.runs.clear();
+        memory.compaction_cursors.clear();
+        memory.duplicate_indices.clear();
+        memory.retained_runs.clear();
         Self {
             collection_id,
             compaction_run_target,
-            cached_frontier: RefCell::new(None),
+            memory,
             _phantom: PhantomData,
         }
     }
@@ -1740,16 +1820,15 @@ pub struct MapFrontier<'a, K, V, const MAX_INDEXES: usize, const MAX_RUNS: usize
     next_record_offset: RecordOffset,
     next_record_index: RecordIndex,
     map: &'a mut [u8],
-    runs: Vec<MapRunDescriptor<K>, MAX_RUNS>,
+    runs: &'a mut Vec<MapRunDescriptor<K>, MAX_RUNS>,
     _phantom: PhantomData<(K, V)>,
 }
 
-pub(crate) struct MapFrontierState<K, const MAX_RUNS: usize> {
+pub(crate) struct MapFrontierState {
     id: CollectionId,
     record_count: EntryCount,
     next_record_offset: RecordOffset,
     next_record_index: RecordIndex,
-    runs: Vec<MapRunDescriptor<K>, MAX_RUNS>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1758,7 +1837,7 @@ enum RunChainOrder {
     Descending,
 }
 
-struct RunEntryCursor<K, V>
+pub(crate) struct RunEntryCursor<K, V>
 where
     K: LsmKey,
     V: LsmValue,
@@ -1987,7 +2066,7 @@ where
     }
 }
 
-struct CompactionRunWriter<K, V, const MAX_INDEXES: usize>
+struct CompactionRunWriter<'a, K, V, const MAX_INDEXES: usize>
 where
     K: Debug + Ord + PartialOrd + Eq + PartialEq,
     V: Debug,
@@ -1998,15 +2077,16 @@ where
     lowest_region: Option<u32>,
     region_count: u32,
     state_count: u32,
-    segment_entries: Vec<Entry<K, V>, MAX_INDEXES>,
+    segment_entries: &'a mut Vec<Entry<K, V>, MAX_INDEXES>,
 }
 
-impl<K, V, const MAX_INDEXES: usize> CompactionRunWriter<K, V, MAX_INDEXES>
+impl<'a, K, V, const MAX_INDEXES: usize> CompactionRunWriter<'a, K, V, MAX_INDEXES>
 where
     K: LsmKey,
     V: LsmValue,
 {
-    fn new(generation: u64) -> Self {
+    fn new(generation: u64, segment_entries: &'a mut Vec<Entry<K, V>, MAX_INDEXES>) -> Self {
+        segment_entries.clear();
         Self {
             generation,
             next_region: None,
@@ -2014,7 +2094,7 @@ where
             lowest_region: None,
             region_count: 0,
             state_count: 0,
-            segment_entries: Vec::new(),
+            segment_entries,
         }
     }
 
@@ -2030,6 +2110,10 @@ where
         storage: &mut StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
+        reclaim_source_regions: &mut Vec<u32, REGION_COUNT>,
+        active_collections: &mut Vec<CollectionId, MAX_COLLECTIONS>,
+        reclaim_plan: &mut WalHeadReclaimPlan<MAX_COLLECTIONS>,
+        open_plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
         entry: Entry<K, V>,
     ) -> Result<(), MapStorageError> {
         match self.segment_entries.push(entry) {
@@ -2049,7 +2133,16 @@ where
                     IO,
                     MAX_COLLECTIONS,
                     MAX_PENDING_RECLAIMS,
-                >(collection_id, storage, flash, workspace)?;
+                >(
+                    collection_id,
+                    storage,
+                    flash,
+                    workspace,
+                    reclaim_source_regions,
+                    active_collections,
+                    reclaim_plan,
+                    open_plan,
+                )?;
                 self.segment_entries
                     .push(entry)
                     .map_err(|_| MapError::BufferTooSmall)?;
@@ -2066,7 +2159,16 @@ where
                     IO,
                     MAX_COLLECTIONS,
                     MAX_PENDING_RECLAIMS,
-                >(collection_id, storage, flash, workspace)?;
+                >(
+                    collection_id,
+                    storage,
+                    flash,
+                    workspace,
+                    reclaim_source_regions,
+                    active_collections,
+                    reclaim_plan,
+                    open_plan,
+                )?;
                 self.segment_entries
                     .push(entry)
                     .map_err(|_| MapError::BufferTooSmall)?;
@@ -2091,12 +2193,20 @@ where
         storage: &mut StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
+        reclaim_source_regions: &mut Vec<u32, REGION_COUNT>,
+        active_collections: &mut Vec<CollectionId, MAX_COLLECTIONS>,
+        reclaim_plan: &mut WalHeadReclaimPlan<MAX_COLLECTIONS>,
+        open_plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
     ) -> Result<Option<MapRunDescriptor<K>>, MapStorageError> {
         self.flush_segment::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>(
             collection_id,
             storage,
             flash,
             workspace,
+            reclaim_source_regions,
+            active_collections,
+            reclaim_plan,
+            open_plan,
         )?;
 
         let Some(first_region) = self.first_region else {
@@ -2159,6 +2269,10 @@ where
         storage: &mut StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
+        reclaim_source_regions: &mut Vec<u32, REGION_COUNT>,
+        active_collections: &mut Vec<CollectionId, MAX_COLLECTIONS>,
+        reclaim_plan: &mut WalHeadReclaimPlan<MAX_COLLECTIONS>,
+        open_plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
     ) -> Result<(), MapStorageError> {
         if self.segment_entries.is_empty() {
             return Ok(());
@@ -2174,8 +2288,14 @@ where
                     )?;
             }
         }
-        let region_index =
-            storage.reserve_next_region::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace)?;
+        let region_index = storage.reserve_next_region::<REGION_SIZE, REGION_COUNT, IO>(
+            flash,
+            workspace,
+            reclaim_source_regions,
+            active_collections,
+            reclaim_plan,
+            open_plan,
+        )?;
         {
             let (payload, _) = workspace.encode_buffers();
             let payload = committed_payload_buffer::<REGION_SIZE>(payload)?;
@@ -2320,7 +2440,19 @@ where
     V: LsmValue,
 {
     /// Creates a new empty map frontier over `buffer`.
-    pub fn new(id: CollectionId, buffer: &'a mut [u8]) -> Result<Self, MapError> {
+    pub fn new(
+        id: CollectionId,
+        buffer: &'a mut [u8],
+        memory: &'a mut MapFrontierMemory<K, MAX_RUNS>,
+    ) -> Result<Self, MapError> {
+        Self::new_with_runs(id, buffer, &mut memory.runs)
+    }
+
+    pub(crate) fn new_with_runs(
+        id: CollectionId,
+        buffer: &'a mut [u8],
+        runs: &'a mut Vec<MapRunDescriptor<K>, MAX_RUNS>,
+    ) -> Result<Self, MapError> {
         if buffer.len() < ENTRY_COUNT_SIZE {
             return Err(MapError::BufferTooSmall);
         }
@@ -2332,6 +2464,7 @@ where
         let _phantom = PhantomData;
 
         record_count.write(map);
+        runs.clear();
 
         Ok(Self {
             id,
@@ -2339,30 +2472,33 @@ where
             next_record_index,
             next_record_offset,
             map,
-            runs: Vec::new(),
+            runs,
             _phantom,
         })
     }
 
-    pub(crate) fn from_state(state: MapFrontierState<K, MAX_RUNS>, buffer: &'a mut [u8]) -> Self {
+    pub(crate) fn from_state(
+        state: MapFrontierState,
+        buffer: &'a mut [u8],
+        memory: &'a mut MapFrontierMemory<K, MAX_RUNS>,
+    ) -> Self {
         Self {
             id: state.id,
             record_count: state.record_count,
             next_record_index: state.next_record_index,
             next_record_offset: state.next_record_offset,
             map: buffer,
-            runs: state.runs,
+            runs: &mut memory.runs,
             _phantom: PhantomData,
         }
     }
 
-    pub(crate) fn into_state(self) -> MapFrontierState<K, MAX_RUNS> {
+    pub(crate) fn into_state(self) -> MapFrontierState {
         MapFrontierState {
             id: self.id,
             record_count: self.record_count,
             next_record_offset: self.next_record_offset,
             next_record_index: self.next_record_index,
-            runs: self.runs,
         }
     }
 
@@ -2984,7 +3120,14 @@ where
         storage: &mut StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
+        reclaim_source_regions: &mut Vec<u32, REGION_COUNT>,
+        active_collections: &mut Vec<CollectionId, MAX_COLLECTIONS>,
+        reclaim_plan: &mut WalHeadReclaimPlan<MAX_COLLECTIONS>,
+        open_plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
         selected_runs: usize,
+        cursors: &mut Vec<RunEntryCursor<K, V>, MAX_RUNS>,
+        duplicate_indices: &mut Vec<usize, MAX_RUNS>,
+        segment_entries: &mut Vec<Entry<K, V>, MAX_INDEXES>,
     ) -> Result<Option<MapRunDescriptor<K>>, MapStorageError> {
         if selected_runs == 0 {
             return Ok(None);
@@ -2993,7 +3136,7 @@ where
             return Err(MapStorageError::Map(MapError::IndexOutOfBounds));
         }
 
-        let mut cursors = Vec::<RunEntryCursor<K, V>, MAX_RUNS>::new();
+        cursors.clear();
         for run in self.runs.iter().take(selected_runs) {
             let mut cursor = RunEntryCursor::new(run)?;
             cursor.advance::<REGION_SIZE, IO>(self.id, flash, workspace)?;
@@ -3005,7 +3148,10 @@ where
                 })?;
         }
 
-        let mut writer = CompactionRunWriter::<K, V, MAX_INDEXES>::new(self.next_run_generation());
+        let mut writer = CompactionRunWriter::<K, V, MAX_INDEXES>::new(
+            self.next_run_generation(),
+            segment_entries,
+        );
         loop {
             let mut min_index: Option<usize> = None;
             for index in 0..cursors.len() {
@@ -3030,7 +3176,7 @@ where
             let Some(min_index) = min_index else {
                 break;
             };
-            let mut duplicate_indices = Vec::<usize, MAX_RUNS>::new();
+            duplicate_indices.clear();
             for index in 0..cursors.len() {
                 let same_key = {
                     let min_key = &cursors[min_index]
@@ -3070,12 +3216,23 @@ where
                 storage,
                 flash,
                 workspace,
+                reclaim_source_regions,
+                active_collections,
+                reclaim_plan,
+                open_plan,
                 winning_entry,
             )?;
         }
 
         writer.finish::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>(
-            self.id, storage, flash, workspace,
+            self.id,
+            storage,
+            flash,
+            workspace,
+            reclaim_source_regions,
+            active_collections,
+            reclaim_plan,
+            open_plan,
         )
     }
 
@@ -3107,6 +3264,10 @@ where
                 collection_id: self.id,
                 max_runs: MAX_RUNS,
             })
+    }
+
+    pub(crate) fn clear_retained_runs(&mut self) {
+        self.runs.clear();
     }
 
     pub(crate) fn reclaim_run_regions<
@@ -4020,6 +4181,10 @@ where
         storage: &mut StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
+        reclaim_source_regions: &mut Vec<u32, REGION_COUNT>,
+        active_collections: &mut Vec<CollectionId, MAX_COLLECTIONS>,
+        reclaim_plan: &mut WalHeadReclaimPlan<MAX_COLLECTIONS>,
+        open_plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
         generation: u64,
     ) -> Result<Option<MapRunDescriptor<K>>, MapStorageError> {
         let entry_count =
@@ -4050,8 +4215,14 @@ where
                     >(flash, workspace, region_index)?;
                 }
             }
-            let region_index =
-                storage.reserve_next_region::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace)?;
+            let region_index = storage.reserve_next_region::<REGION_SIZE, REGION_COUNT, IO>(
+                flash,
+                workspace,
+                reclaim_source_regions,
+                active_collections,
+                reclaim_plan,
+                open_plan,
+            )?;
             {
                 let (payload, _) = workspace.encode_buffers();
                 let payload = committed_payload_buffer::<REGION_SIZE>(payload)?;
@@ -4107,6 +4278,10 @@ where
         storage: &mut StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
+        reclaim_source_regions: &mut Vec<u32, REGION_COUNT>,
+        active_collections: &mut Vec<CollectionId, MAX_COLLECTIONS>,
+        reclaim_plan: &mut WalHeadReclaimPlan<MAX_COLLECTIONS>,
+        open_plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
         source: &[u8],
         generation: u64,
     ) -> Result<Option<MapRunDescriptor<K>>, MapStorageError> {
@@ -4140,8 +4315,14 @@ where
                     >(flash, workspace, region_index)?;
                 }
             }
-            let region_index =
-                storage.reserve_next_region::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace)?;
+            let region_index = storage.reserve_next_region::<REGION_SIZE, REGION_COUNT, IO>(
+                flash,
+                workspace,
+                reclaim_source_regions,
+                active_collections,
+                reclaim_plan,
+                open_plan,
+            )?;
             {
                 let (payload, _) = workspace.encode_buffers();
                 let payload = committed_payload_buffer::<REGION_SIZE>(payload)?;
@@ -4197,6 +4378,10 @@ where
         storage: &mut StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
+        reclaim_source_regions: &mut Vec<u32, REGION_COUNT>,
+        active_collections: &mut Vec<CollectionId, MAX_COLLECTIONS>,
+        reclaim_plan: &mut WalHeadReclaimPlan<MAX_COLLECTIONS>,
+        open_plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
         extra_newest: Option<MapRunDescriptor<K>>,
     ) -> Result<u32, MapStorageError> {
         let previous_region = storage
@@ -4226,8 +4411,14 @@ where
                 )?;
             }
         }
-        let manifest_region =
-            storage.reserve_next_region::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace)?;
+        let manifest_region = storage.reserve_next_region::<REGION_SIZE, REGION_COUNT, IO>(
+            flash,
+            workspace,
+            reclaim_source_regions,
+            active_collections,
+            reclaim_plan,
+            open_plan,
+        )?;
         {
             let (payload, _) = workspace.encode_buffers();
             let payload = committed_payload_buffer::<REGION_SIZE>(payload)?;
@@ -4256,31 +4447,20 @@ where
             )?;
         }
 
-        let mut retained = Vec::<MapRunDescriptor<K>, MAX_RUNS>::new();
         if let Some(run) = extra_newest {
-            retained
-                .push(run)
+            self.runs
+                .insert(0, run)
                 .map_err(|_| MapStorageError::TooManyRuns {
                     collection_id: self.id,
                     max_runs: MAX_RUNS,
                 })?;
         }
-        while !self.runs.is_empty() {
-            let run = self.runs.remove(0);
-            retained
-                .push(run)
-                .map_err(|_| MapStorageError::TooManyRuns {
-                    collection_id: self.id,
-                    max_runs: MAX_RUNS,
-                })?;
-        }
-        self.runs = retained;
         self.clear_frontier();
         Ok(manifest_region)
     }
 
     /// Flushes this frontier into immutable run regions and commits a manifest head.
-    pub fn flush_to_storage<
+    pub(crate) fn flush_to_storage<
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
         IO: FlashIo,
@@ -4291,6 +4471,10 @@ where
         storage: &mut StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
+        reclaim_source_regions: &mut Vec<u32, REGION_COUNT>,
+        active_collections: &mut Vec<CollectionId, MAX_COLLECTIONS>,
+        reclaim_plan: &mut WalHeadReclaimPlan<MAX_COLLECTIONS>,
+        open_plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
     ) -> Result<u32, MapStorageError> {
         let previous_region = storage
             .collections()
@@ -4314,6 +4498,10 @@ where
         storage.ensure_foreground_allocation_headroom_for::<REGION_SIZE, REGION_COUNT, IO>(
             flash,
             workspace,
+            reclaim_source_regions,
+            active_collections,
+            reclaim_plan,
+            open_plan,
             additional_allocations,
         )?;
 
@@ -4323,7 +4511,16 @@ where
             IO,
             MAX_COLLECTIONS,
             MAX_PENDING_RECLAIMS,
-        >(storage, flash, workspace, frontier_generation)?;
+        >(
+            storage,
+            flash,
+            workspace,
+            reclaim_source_regions,
+            active_collections,
+            reclaim_plan,
+            open_plan,
+            frontier_generation,
+        )?;
 
         let manifest_run_count = self
             .runs
@@ -4343,8 +4540,14 @@ where
                 )?;
             }
         }
-        let manifest_region =
-            storage.reserve_next_region::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace)?;
+        let manifest_region = storage.reserve_next_region::<REGION_SIZE, REGION_COUNT, IO>(
+            flash,
+            workspace,
+            reclaim_source_regions,
+            active_collections,
+            reclaim_plan,
+            open_plan,
+        )?;
         {
             let (payload, _) = workspace.encode_buffers();
             let payload = committed_payload_buffer::<REGION_SIZE>(payload)?;
@@ -4373,25 +4576,14 @@ where
             )?;
         }
 
-        let mut retained = Vec::<MapRunDescriptor<K>, MAX_RUNS>::new();
         if let Some(run) = frontier_run {
-            retained
-                .push(run)
+            self.runs
+                .insert(0, run)
                 .map_err(|_| MapStorageError::TooManyRuns {
                     collection_id: self.id,
                     max_runs: MAX_RUNS,
                 })?;
         }
-        while !self.runs.is_empty() {
-            let run = self.runs.remove(0);
-            retained
-                .push(run)
-                .map_err(|_| MapStorageError::TooManyRuns {
-                    collection_id: self.id,
-                    max_runs: MAX_RUNS,
-                })?;
-        }
-        self.runs = retained;
         self.clear_frontier();
         Ok(manifest_region)
     }
@@ -4410,6 +4602,7 @@ where
         basis_scratch: &mut [u8],
         collection_id: CollectionId,
         buffer: &'a mut [u8],
+        memory: &'a mut MapFrontierMemory<K, MAX_RUNS>,
     ) -> Result<Self, MapStorageError> {
         Self::open_from_storage_inner::<
             REGION_SIZE,
@@ -4424,6 +4617,7 @@ where
             basis_scratch,
             collection_id,
             buffer,
+            memory,
             #[cfg(feature = "perf-counters")]
             None,
         )
@@ -4443,6 +4637,7 @@ where
         basis_scratch: &mut [u8],
         collection_id: CollectionId,
         buffer: &'a mut [u8],
+        memory: &'a mut MapFrontierMemory<K, MAX_RUNS>,
         metrics: &mut StoragePerfMetrics,
     ) -> Result<Self, MapStorageError> {
         Self::open_from_storage_inner::<
@@ -4458,6 +4653,7 @@ where
             basis_scratch,
             collection_id,
             buffer,
+            memory,
             Some(metrics),
         )
     }
@@ -4475,6 +4671,7 @@ where
         basis_scratch: &mut [u8],
         collection_id: CollectionId,
         buffer: &'a mut [u8],
+        memory: &'a mut MapFrontierMemory<K, MAX_RUNS>,
         #[cfg(feature = "perf-counters")] mut metrics: Option<&mut StoragePerfMetrics>,
     ) -> Result<Self, MapStorageError> {
         let Some(collection) = storage
@@ -4495,7 +4692,7 @@ where
             });
         }
 
-        let mut map = Self::new(collection_id, buffer)?;
+        let mut map = Self::new(collection_id, buffer, memory)?;
         let target_basis = collection.basis();
         let mut basis_loaded = matches!(target_basis, crate::StartupCollectionBasis::Empty);
         #[cfg(feature = "perf-counters")]
