@@ -26,17 +26,18 @@ The full generated summary lives in [BENCHMARKS.md](BENCHMARKS.md).
 
 | scenario | borromean 1MiB | borromean 4KiB | redb | fjall |
 | --- | --- | --- | --- | --- |
-| insert | 1.00x | 0.46x | 0.71x | **1.01x** |
-| update_hot | **1.00x** | 0.48x | 0.76x | 0.99x |
-| read_hits | 1.00x | 0.27x | 0.73x | **1.15x** |
-| read_misses | 1.00x | 1.16x | 0.52x | **1.33x** |
-| mixed_update | 1.00x | 0.48x | 0.74x | **1.01x** |
+| insert | 1.00x | 0.42x | 0.73x | **1.03x** |
+| update_hot | 1.00x | 0.48x | 0.78x | **1.01x** |
+| read_hits | **1.00x** | 0.21x | 0.50x | 0.76x |
+| read_misses | 1.00x | **1.09x** | 0.33x | 0.82x |
+| mixed_update | 1.00x | 0.51x | 0.77x | **1.05x** |
 
 In the current local results, Borromean is close to Fjall on durable insert, hot-update, and mixed
-read/update throughput; faster than redb on those write-heavy scenarios; and fastest on read-hit
-throughput. Fjall is substantially faster on read misses. The IO tables show Borromean and Fjall
-write similar byte counts in the write workloads, so the current write-side optimization focus is
-durability sync cost rather than raw write volume.
+read/update throughput, and faster than redb on those write-heavy scenarios. Borromean leads the
+read-heavy scenarios in this run: 1 MiB regions are fastest on read hits, while 4 KiB regions are
+fastest on read misses. The IO tables show Borromean and Fjall write similar byte counts in the
+write workloads, so the current write-side optimization focus is durability sync cost rather than
+raw write volume.
 
 ## Supported Today
 

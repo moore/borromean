@@ -109,62 +109,62 @@ full count breakdown.
 
 | scenario | borromean 1MiB | borromean 4KiB | redb | fjall |
 | --- | --- | --- | --- | --- |
-| insert | 407.1 | 185.8 | 288.7 | **409.5** |
-| update_hot | **406.3** | 196.9 | 307.5 | 402.4 |
-| read_hits | 1,501,800.3 | 406,768.6 | 1,099,080.7 | **1,730,534.6** |
-| read_misses | 2,222,884.9 | 2,575,030.7 | 1,150,544.4 | **2,964,721.3** |
-| mixed_update | 1,975.7 | 956.7 | 1,464.9 | **2,003.3** |
+| insert | 397.1 | 168.7 | 291.6 | **409.1** |
+| update_hot | 405.5 | 194.3 | 316.1 | **409.9** |
+| read_hits | **2,154,156.4** | 460,095.2 | 1,069,172.8 | 1,636,149.8 |
+| read_misses | 3,537,493.2 | **3,848,877.1** | 1,160,014.5 | 2,883,817.3 |
+| mixed_update | 1,934.2 | 979.3 | 1,481.1 | **2,031.7** |
 
 ### Relative Throughput (x, engine / borromean 1MiB when present, higher is better)
 
 | scenario | borromean 1MiB | borromean 4KiB | redb | fjall |
 | --- | --- | --- | --- | --- |
-| insert | 1.00x | 0.46x | 0.71x | **1.01x** |
-| update_hot | **1.00x** | 0.48x | 0.76x | 0.99x |
-| read_hits | 1.00x | 0.27x | 0.73x | **1.15x** |
-| read_misses | 1.00x | 1.16x | 0.52x | **1.33x** |
-| mixed_update | 1.00x | 0.48x | 0.74x | **1.01x** |
+| insert | 1.00x | 0.42x | 0.73x | **1.03x** |
+| update_hot | 1.00x | 0.48x | 0.78x | **1.01x** |
+| read_hits | **1.00x** | 0.21x | 0.50x | 0.76x |
+| read_misses | 1.00x | **1.09x** | 0.33x | 0.82x |
+| mixed_update | 1.00x | 0.51x | 0.77x | **1.05x** |
 
 ### Latency P50 (time/op, lower is better)
 
 | scenario | borromean 1MiB | borromean 4KiB | redb | fjall |
 | --- | --- | --- | --- | --- |
-| insert | 2.300ms | 2.328ms | 2.721ms | **2.234ms** |
-| update_hot | **2.264ms** | 2.295ms | 2.511ms | 2.277ms |
-| read_hits | 587ns | 2.297us | 822ns | **521ns** |
-| read_misses | 394ns | 328ns | 767ns | **286ns** |
-| mixed_update | **3.726us** | 30.751us | 4.635us | 4.330us |
+| insert | 2.275ms | 2.289ms | 2.639ms | **2.241ms** |
+| update_hot | **2.205ms** | 2.287ms | 2.599ms | 2.243ms |
+| read_hits | **411ns** | 1.953us | 820ns | 529ns |
+| read_misses | 246ns | **200ns** | 764ns | 296ns |
+| mixed_update | **2.718us** | 32.172us | 5.571us | 4.322us |
 
 ### Latency P95 (time/op, lower is better)
 
 | scenario | borromean 1MiB | borromean 4KiB | redb | fjall |
 | --- | --- | --- | --- | --- |
-| insert | **3.001ms** | 6.565ms | 7.866ms | 3.314ms |
-| update_hot | 3.821ms | 22.969ms | **2.905ms** | 4.187ms |
-| read_hits | **838ns** | 3.957us | 1.369us | 859ns |
-| read_misses | 856ns | **633ns** | 1.043us | 681ns |
-| mixed_update | **2.309ms** | 2.367ms | 2.946ms | 2.336ms |
+| insert | 2.863ms | 2.896ms | 5.200ms | **2.639ms** |
+| update_hot | **2.483ms** | 21.083ms | 3.415ms | 2.546ms |
+| read_hits | **607ns** | 3.546us | 1.319us | 1.126us |
+| read_misses | **573ns** | 680ns | 1.028us | 752ns |
+| mixed_update | **2.287ms** | 2.402ms | 2.632ms | 2.470ms |
 
 ### Latency P99 (time/op, lower is better)
 
 | scenario | borromean 1MiB | borromean 4KiB | redb | fjall |
 | --- | --- | --- | --- | --- |
-| insert | 54.715ms | 25.169ms | 51.157ms | **5.165ms** |
-| update_hot | 5.672ms | 55.387ms | **3.183ms** | 5.544ms |
-| read_hits | 2.112us | 43.984us | 3.341us | **2.008us** |
-| read_misses | 3.611us | 1.200us | 10.877us | **988ns** |
-| mixed_update | **2.603ms** | 2.834ms | 3.091ms | 2.669ms |
+| insert | **4.919ms** | 6.709ms | 5.389ms | 4.946ms |
+| update_hot | **2.548ms** | 22.494ms | 7.356ms | 2.726ms |
+| read_hits | **1.539us** | 37.494us | 5.012us | 5.979us |
+| read_misses | **987ns** | 1.103us | 17.334us | 1.077us |
+| mixed_update | **2.490ms** | 2.604ms | 3.005ms | 2.690ms |
 
 ### Disk And IO (bytes)
 
 | scenario | target | logical | file_len | path_size | process_read | process_write |
 | --- | --- | --- | --- | --- | --- | --- |
 | insert | borromean 1MiB | 65.00MiB | 65.00MiB | - | 0B | 39.98MiB |
-| insert | borromean 4KiB | 64.00MiB | 64.00MiB | - | 0B | 74.60MiB |
+| insert | borromean 4KiB | 64.00MiB | 64.00MiB | - | 0B | 79.53MiB |
 | insert | redb | 1.43MiB | 1.43MiB | - | 0B | 255.21MiB |
 | insert | fjall | 64.00MiB | 64.00MiB | 64.00MiB | 0B | 40.19MiB |
 | update_hot | borromean 1MiB | 65.00MiB | 65.00MiB | - | 0B | 40.97MiB |
-| update_hot | borromean 4KiB | 64.00MiB | 64.00MiB | - | 0B | 69.62MiB |
+| update_hot | borromean 4KiB | 64.00MiB | 64.00MiB | - | 0B | 70.41MiB |
 | update_hot | redb | 292.00KiB | 292.00KiB | - | 0B | 234.38MiB |
 | update_hot | fjall | 64.00MiB | 64.00MiB | 64.00MiB | 0B | 40.19MiB |
 | read_hits | borromean 1MiB | 65.00MiB | 65.00MiB | - | 0B | 0B |
@@ -176,7 +176,7 @@ full count breakdown.
 | read_misses | redb | 292.00KiB | 292.00KiB | - | 0B | 0B |
 | read_misses | fjall | 64.00MiB | 64.00MiB | 64.00MiB | 0B | 0B |
 | mixed_update | borromean 1MiB | 65.00MiB | 65.00MiB | - | 0B | 8.18MiB |
-| mixed_update | borromean 4KiB | 64.00MiB | 64.00MiB | - | 0B | 14.30MiB |
+| mixed_update | borromean 4KiB | 64.00MiB | 64.00MiB | - | 0B | 14.24MiB |
 | mixed_update | redb | 292.00KiB | 292.00KiB | - | 0B | 47.98MiB |
 | mixed_update | fjall | 64.00MiB | 64.00MiB | 64.00MiB | 0B | 8.23MiB |
 
@@ -184,38 +184,38 @@ full count breakdown.
 
 | scenario | target | mode | count | time | time/op | wal_bytes |
 | --- | --- | --- | --- | --- | --- | --- |
-| insert | borromean 1MiB | wal-sync | 10,000 | 23.889s | 2.389ms | 1015.59KiB |
-| insert | borromean 4KiB | wal-sync | 10,000 | 24.514s | 2.451ms | 1015.59KiB |
-| insert | redb | commit | 10,000 | 34.014s | 3.401ms | - |
-| insert | fjall | sync-data | 10,000 | 24.174s | 2.417ms | - |
-| update_hot | borromean 1MiB | wal-sync | 10,000 | 23.946s | 2.395ms | 1010.85KiB |
-| update_hot | borromean 4KiB | wal-sync | 10,000 | 24.258s | 2.426ms | 1010.85KiB |
-| update_hot | redb | commit | 11,000 | 35.383s | 3.217ms | - |
-| update_hot | fjall | sync-data | 10,000 | 24.579s | 2.458ms | - |
+| insert | borromean 1MiB | wal-sync | 10,000 | 24.516s | 2.452ms | 1015.59KiB |
+| insert | borromean 4KiB | wal-sync | 10,000 | 24.873s | 2.487ms | 1015.59KiB |
+| insert | redb | commit | 10,000 | 33.687s | 3.369ms | - |
+| insert | fjall | sync-data | 10,000 | 24.203s | 2.420ms | - |
+| update_hot | borromean 1MiB | wal-sync | 10,000 | 24.025s | 2.403ms | 1010.85KiB |
+| update_hot | borromean 4KiB | wal-sync | 10,000 | 24.459s | 2.446ms | 1010.85KiB |
+| update_hot | redb | commit | 11,000 | 34.444s | 3.131ms | - |
+| update_hot | fjall | sync-data | 10,000 | 24.145s | 2.414ms | - |
 | read_hits | borromean 1MiB | wal-sync | 0 | 0ns | - | 0B |
 | read_hits | borromean 4KiB | wal-sync | 0 | 0ns | - | 0B |
-| read_hits | redb | commit | 1,000 | 3.301s | 3.301ms | - |
+| read_hits | redb | commit | 1,000 | 3.378s | 3.378ms | - |
 | read_hits | fjall | sync-data | 0 | 0ns | - | - |
 | read_misses | borromean 1MiB | wal-sync | 0 | 0ns | - | 0B |
 | read_misses | borromean 4KiB | wal-sync | 0 | 0ns | - | 0B |
-| read_misses | redb | commit | 1,000 | 3.121s | 3.121ms | - |
+| read_misses | redb | commit | 1,000 | 3.442s | 3.442ms | - |
 | read_misses | fjall | sync-data | 0 | 0ns | - | - |
-| mixed_update | borromean 1MiB | wal-sync | 2,047 | 4.900s | 2.394ms | 207.05KiB |
-| mixed_update | borromean 4KiB | wal-sync | 2,047 | 5.042s | 2.463ms | 207.05KiB |
-| mixed_update | redb | commit | 3,047 | 9.849s | 3.232ms | - |
-| mixed_update | fjall | sync-data | 2,047 | 4.908s | 2.398ms | - |
+| mixed_update | borromean 1MiB | wal-sync | 2,047 | 5.019s | 2.452ms | 207.05KiB |
+| mixed_update | borromean 4KiB | wal-sync | 2,047 | 4.733s | 2.312ms | 207.05KiB |
+| mixed_update | redb | commit | 3,047 | 9.938s | 3.262ms | - |
+| mixed_update | fjall | sync-data | 2,047 | 4.839s | 2.364ms | - |
 
 ### Borromean Internals (counts, bytes, and time)
 
 | scenario | target | cache_hits | cache_misses | reloads | wal_bytes | wal_sync | mmap_flush | compactions | undo_records | checkpoint_fallbacks |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| insert | borromean 1MiB | 9,999 | 1 | 1 | 1015.59KiB | 23.889s | 23.860s | 0 | 10,000 | 0 |
-| insert | borromean 4KiB | 10,014 | 1 | 1 | 1015.59KiB | 24.514s | 43.243s | 15 | 10,000 | 221 |
-| update_hot | borromean 1MiB | 10,000 | 0 | 0 | 1010.85KiB | 23.946s | 23.937s | 0 | 10,000 | 0 |
-| update_hot | borromean 4KiB | 10,015 | 0 | 0 | 1010.85KiB | 24.258s | 40.253s | 15 | 10,000 | 222 |
+| insert | borromean 1MiB | 9,999 | 1 | 1 | 1015.59KiB | 24.516s | 24.486s | 0 | 10,000 | 0 |
+| insert | borromean 4KiB | 10,015 | 1 | 1 | 1015.59KiB | 24.873s | 47.081s | 16 | 10,000 | 221 |
+| update_hot | borromean 1MiB | 10,000 | 0 | 0 | 1010.85KiB | 24.025s | 24.016s | 0 | 10,000 | 0 |
+| update_hot | borromean 4KiB | 10,016 | 0 | 0 | 1010.85KiB | 24.459s | 40.914s | 16 | 10,000 | 222 |
 | read_hits | borromean 1MiB | 300,000 | 0 | 0 | 0B | 0ns | 0ns | 0 | 0 | 0 |
 | read_hits | borromean 4KiB | 300,000 | 0 | 0 | 0B | 0ns | 0ns | 0 | 0 | 0 |
 | read_misses | borromean 1MiB | 300,000 | 0 | 0 | 0B | 0ns | 0ns | 0 | 0 | 0 |
 | read_misses | borromean 4KiB | 300,000 | 0 | 0 | 0B | 0ns | 0ns | 0 | 0 | 0 |
-| mixed_update | borromean 1MiB | 10,000 | 0 | 0 | 207.05KiB | 4.900s | 4.894s | 0 | 2,047 | 0 |
-| mixed_update | borromean 4KiB | 10,003 | 0 | 0 | 207.05KiB | 5.042s | 8.284s | 3 | 2,047 | 45 |
+| mixed_update | borromean 1MiB | 10,000 | 0 | 0 | 207.05KiB | 5.019s | 5.014s | 0 | 2,047 | 0 |
+| mixed_update | borromean 4KiB | 10,003 | 0 | 0 | 207.05KiB | 4.733s | 8.062s | 3 | 2,047 | 45 |
