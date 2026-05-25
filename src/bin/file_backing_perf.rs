@@ -421,6 +421,7 @@ struct PerfDiagnostics {
     commit_count: u64,
     transaction_count: u64,
     borromean_io: Option<IoDiagnostics>,
+    workload_process_io: Option<ProcessIoDiagnostics>,
     memory: MemoryDiagnostics,
     redb_cache_size_bytes: Option<usize>,
     redb_stats: Option<RedbStorageStats>,
@@ -461,6 +462,17 @@ struct IoDiagnostics {
     requested_mmap_flush_bytes: u64,
     flush_overreach_bytes: u64,
     last_file_sync_kind: Option<SyncFileKind>,
+}
+
+#[derive(Debug, Default, Clone, Copy, Serialize)]
+struct ProcessIoDiagnostics {
+    rchar: u64,
+    wchar: u64,
+    syscr: u64,
+    syscw: u64,
+    read_bytes: u64,
+    write_bytes: u64,
+    cancelled_write_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -535,6 +547,8 @@ struct EngineComparisonReport {
     average_read_time_ratio: Option<f64>,
     average_write_time_ratio: Option<f64>,
     logical_size_ratio: Option<f64>,
+    process_read_bytes_ratio: Option<f64>,
+    process_write_bytes_ratio: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -743,6 +757,77 @@ impl SyncAuditSnapshot {
                 .saturating_sub(before.metrics.reclaim_ends),
         }
     }
+}
+
+impl ProcessIoDiagnostics {
+    fn delta_since(self, before: Self) -> Self {
+        Self {
+            rchar: self.rchar.saturating_sub(before.rchar),
+            wchar: self.wchar.saturating_sub(before.wchar),
+            syscr: self.syscr.saturating_sub(before.syscr),
+            syscw: self.syscw.saturating_sub(before.syscw),
+            read_bytes: self.read_bytes.saturating_sub(before.read_bytes),
+            write_bytes: self.write_bytes.saturating_sub(before.write_bytes),
+            cancelled_write_bytes: self
+                .cancelled_write_bytes
+                .saturating_sub(before.cancelled_write_bytes),
+        }
+    }
+}
+
+fn capture_process_io_snapshot() -> Option<ProcessIoDiagnostics> {
+    let contents = fs::read_to_string("/proc/self/io").ok()?;
+    let mut diagnostics = ProcessIoDiagnostics::default();
+    let mut seen = 0u8;
+
+    for line in contents.lines() {
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let Ok(value) = value.trim().parse::<u64>() else {
+            continue;
+        };
+        match key {
+            "rchar" => {
+                diagnostics.rchar = value;
+                seen |= 1 << 0;
+            }
+            "wchar" => {
+                diagnostics.wchar = value;
+                seen |= 1 << 1;
+            }
+            "syscr" => {
+                diagnostics.syscr = value;
+                seen |= 1 << 2;
+            }
+            "syscw" => {
+                diagnostics.syscw = value;
+                seen |= 1 << 3;
+            }
+            "read_bytes" => {
+                diagnostics.read_bytes = value;
+                seen |= 1 << 4;
+            }
+            "write_bytes" => {
+                diagnostics.write_bytes = value;
+                seen |= 1 << 5;
+            }
+            "cancelled_write_bytes" => {
+                diagnostics.cancelled_write_bytes = value;
+                seen |= 1 << 6;
+            }
+            _ => {}
+        }
+    }
+
+    (seen == 0x7f).then_some(diagnostics)
+}
+
+fn finish_process_io_snapshot(
+    before: Option<ProcessIoDiagnostics>,
+) -> Option<ProcessIoDiagnostics> {
+    let before = before?;
+    capture_process_io_snapshot().map(|after| after.delta_since(before))
 }
 
 impl SyncAuditDelta {
@@ -1280,7 +1365,7 @@ where
         self.diagnostics.update(|state| {
             state.diagnostics.metadata_reads = state.diagnostics.metadata_reads.saturating_add(1);
         });
-        self.inner.read_metadata().map_err(StorageIoError::from)
+        self.inner.read_metadata()
     }
 
     fn write_metadata(&mut self, metadata: StorageMetadata) -> Result<(), StorageIoError> {
@@ -1917,6 +2002,7 @@ where
     let mut latency_samples = Vec::new();
     let mut latency_samples_by_op = OperationLatencySamples::default();
     let mut sync_audit = SyncAuditCollector::default();
+    let process_io_start = capture_process_io_snapshot();
     let workload_start = Instant::now();
     let mut workload_progress = ProgressReporter::new(
         config.output.progress_interval,
@@ -1956,6 +2042,7 @@ where
         maybe_sample_memory(&mut memory, config.output.progress_interval, index);
     }
     let workload = workload_start.elapsed();
+    let workload_process_io = finish_process_io_snapshot(process_io_start);
     workload_progress.report(
         "borromean workload complete",
         config.workload.operation_count,
@@ -1987,6 +2074,7 @@ where
         read_lookup_nanos: workload_timings.reads_nanos,
         write_apply_nanos: workload_timings.writes_nanos,
         borromean_io: Some(io_diagnostics),
+        workload_process_io,
         memory,
         ..PerfDiagnostics::default()
     };
@@ -2133,6 +2221,7 @@ where
     let mut latency_samples = Vec::new();
     let mut latency_samples_by_op = OperationLatencySamples::default();
     let mut sync_audit = SyncAuditCollector::default();
+    let process_io_start = capture_process_io_snapshot();
     let workload_start = Instant::now();
     let mut workload_progress = ProgressReporter::new(
         config.output.progress_interval,
@@ -2172,6 +2261,7 @@ where
         maybe_sample_memory(&mut memory, config.output.progress_interval, index);
     }
     let workload = workload_start.elapsed();
+    let workload_process_io = finish_process_io_snapshot(process_io_start);
     workload_progress.report(
         "borromean-memory workload complete",
         config.workload.operation_count,
@@ -2199,6 +2289,7 @@ where
         read_lookup_nanos: workload_timings.reads_nanos,
         write_apply_nanos: workload_timings.writes_nanos,
         borromean_io: Some(io_diagnostics),
+        workload_process_io,
         memory,
         ..PerfDiagnostics::default()
     };
@@ -2335,6 +2426,7 @@ fn run_redb_engine<const VALUE_BYTES: usize>(
     let mut workload_timings = WorkloadTimings::default();
     let mut latency_samples = Vec::new();
     let mut latency_samples_by_op = OperationLatencySamples::default();
+    let process_io_start = capture_process_io_snapshot();
     let workload_start = Instant::now();
     let mut workload_progress = ProgressReporter::new(
         config.output.progress_interval,
@@ -2370,6 +2462,7 @@ fn run_redb_engine<const VALUE_BYTES: usize>(
         compact_redb(&mut db, Some(&mut counters), Some(&mut workload_timings))?;
     }
     let workload = workload_start.elapsed();
+    let workload_process_io = finish_process_io_snapshot(process_io_start);
     workload_progress.report(
         "redb workload complete",
         config.workload.operation_count,
@@ -2385,6 +2478,7 @@ fn run_redb_engine<const VALUE_BYTES: usize>(
         remove_file_if_present(&config.redb.path)?;
     }
     diagnostics.operation_generation_nanos = workload_timings.operation_generation_nanos;
+    diagnostics.workload_process_io = workload_process_io;
     diagnostics.memory = memory.finish();
 
     Ok(EngineReport {
@@ -2520,6 +2614,7 @@ fn run_fjall_engine<const VALUE_BYTES: usize>(
     let mut workload_timings = WorkloadTimings::default();
     let mut latency_samples = Vec::new();
     let mut latency_samples_by_op = OperationLatencySamples::default();
+    let process_io_start = capture_process_io_snapshot();
     let workload_start = Instant::now();
     let mut workload_progress = ProgressReporter::new(
         config.output.progress_interval,
@@ -2552,6 +2647,7 @@ fn run_fjall_engine<const VALUE_BYTES: usize>(
         maybe_sample_memory(&mut memory, config.output.progress_interval, index);
     }
     let workload = workload_start.elapsed();
+    let workload_process_io = finish_process_io_snapshot(process_io_start);
     workload_progress.report(
         "fjall workload complete",
         config.workload.operation_count,
@@ -2560,6 +2656,7 @@ fn run_fjall_engine<const VALUE_BYTES: usize>(
     );
 
     diagnostics.operation_generation_nanos = workload_timings.operation_generation_nanos;
+    diagnostics.workload_process_io = workload_process_io;
     diagnostics.fjall_disk_space_bytes = db.disk_space().ok();
     diagnostics.fjall_journal_count = Some(db.journal_count());
     diagnostics.fjall_keyspace_count = Some(db.keyspace_count());
@@ -2898,6 +2995,7 @@ fn run_fjall_preload<const VALUE_BYTES: usize>(
     Ok(())
 }
 
+#[allow(clippy::needless_option_as_deref)]
 fn execute_one_borromean_operation<
     IO,
     const REGION_SIZE: usize,
@@ -3013,6 +3111,7 @@ where
     })
 }
 
+#[allow(clippy::needless_option_as_deref)]
 fn execute_one_redb_operation<const VALUE_BYTES: usize>(
     config: &PerfConfig,
     rng: &mut XorShift64,
@@ -3209,6 +3308,7 @@ fn execute_one_redb_operation<const VALUE_BYTES: usize>(
     })
 }
 
+#[allow(clippy::needless_option_as_deref)]
 fn execute_one_fjall_operation<const VALUE_BYTES: usize>(
     config: &PerfConfig,
     rng: &mut XorShift64,
@@ -3893,6 +3993,21 @@ fn print_diagnostics(report: &EngineReport) {
             .rss_delta_bytes
             .map_or_else(|| "unknown".to_owned(), |bytes| bytes.to_string())
     );
+    if let Some(process_io) = diagnostics.workload_process_io {
+        let write_operations = report.counters.sets.saturating_add(report.counters.deletes);
+        println!(
+            "  process io: read_bytes={} write_bytes={} cancelled_write_bytes={} rchar={} wchar={} syscr={} syscw={} read_bytes/op={} write_bytes/write={}",
+            process_io.read_bytes,
+            process_io.write_bytes,
+            process_io.cancelled_write_bytes,
+            process_io.rchar,
+            process_io.wchar,
+            process_io.syscr,
+            process_io.syscw,
+            format_average_bytes(process_io.read_bytes, report.counters.reads),
+            format_average_bytes(process_io.write_bytes, write_operations)
+        );
+    }
     if let Some(io) = diagnostics.borromean_io {
         println!(
             "  io: metadata_reads={} metadata_writes={} region_reads={} region_writes={} region_erases={} syncs={} bytes_read={} borrowed_read_bytes={} copied_read_bytes={} bytes_written={} bytes_erased={} dirty_sync_bytes={} dirty_sync_regions={} dirty_sync_metadata_regions={} exact_dirty_range_bytes={} aligned_dirty_bytes={} requested_mmap_flush_bytes={} flush_overreach_bytes={} file_sync_kind={} read_time={} write_time={} erase_time={} sync_time={} mmap_flush={} file_sync={}",
@@ -4100,6 +4215,13 @@ fn print_borromean_core_metrics(metrics: &StoragePerfMetrics) {
         metrics.committed_run_entry_reads,
         metrics.committed_run_full_region_reads
     );
+    println!(
+        "  borromean decode counters: encoded_key_comparisons={} key_decodes_during_comparison={} value_decodes={} full_entry_decodes={}",
+        metrics.encoded_key_comparisons,
+        metrics.key_decodes_during_comparison,
+        metrics.value_decodes,
+        metrics.full_entry_decodes
+    );
 }
 
 fn print_workload_timing_split(report: &EngineReport) {
@@ -4205,6 +4327,8 @@ fn push_comparison_report(
             left.logical_len_bytes as f64,
             right.logical_len_bytes as f64,
         ),
+        process_read_bytes_ratio: process_read_bytes_ratio(left, right),
+        process_write_bytes_ratio: process_write_bytes_ratio(left, right),
     });
 }
 
@@ -4233,6 +4357,16 @@ fn print_comparison(report: &PerfReport) {
             "x",
         );
         print_optional_ratio("  logical size", comparison.logical_size_ratio, "x");
+        print_optional_ratio(
+            "  process read bytes",
+            comparison.process_read_bytes_ratio,
+            "x",
+        );
+        print_optional_ratio(
+            "  process write bytes",
+            comparison.process_write_bytes_ratio,
+            "x",
+        );
     }
 }
 
@@ -4314,6 +4448,20 @@ fn sync_nanos(report: &EngineReport) -> u128 {
     report.diagnostics.commit_nanos
 }
 
+fn process_read_bytes_ratio(left: &EngineReport, right: &EngineReport) -> Option<f64> {
+    ratio_u64(
+        left.diagnostics.workload_process_io?.read_bytes,
+        right.diagnostics.workload_process_io?.read_bytes,
+    )
+}
+
+fn process_write_bytes_ratio(left: &EngineReport, right: &EngineReport) -> Option<f64> {
+    ratio_u64(
+        left.diagnostics.workload_process_io?.write_bytes,
+        right.diagnostics.workload_process_io?.write_bytes,
+    )
+}
+
 fn write_count(report: &EngineReport) -> u64 {
     report.counters.sets.saturating_add(report.counters.deletes)
 }
@@ -4379,81 +4527,8 @@ fn format_nanos(nanos: u128) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn sync_audit_records_unexpected_hot_write_violation() {
-        let mut collector = SyncAuditCollector::default();
-        collector.observe(
-            7,
-            WorkloadOp::Set,
-            SyncAuditDelta {
-                wal_records: 1,
-                wal_syncs: 2,
-                io_region_writes: 1,
-                io_syncs: 2,
-                ..SyncAuditDelta::default()
-            },
-        );
-
-        assert_eq!(collector.write_operations, 1);
-        assert_eq!(collector.non_hot_write_exceptions, 0);
-        assert_eq!(collector.first_violations.len(), 1);
-        assert!(!collector.first_violations[0].expected_exception);
-        assert!(collector.first_violations[0]
-            .reasons
-            .iter()
-            .any(|reason| reason.contains("wal_syncs=2")));
-    }
-
-    #[test]
-    fn sync_audit_marks_frontier_flush_as_expected_exception() {
-        let mut collector = SyncAuditCollector::default();
-        collector.observe(
-            11,
-            WorkloadOp::Set,
-            SyncAuditDelta {
-                wal_records: 3,
-                wal_syncs: 3,
-                io_region_writes: 5,
-                io_syncs: 3,
-                flushes: 1,
-                overflow_flushes: 1,
-                ..SyncAuditDelta::default()
-            },
-        );
-
-        assert_eq!(collector.write_operations, 1);
-        assert_eq!(collector.non_hot_write_exceptions, 1);
-        assert_eq!(collector.first_violations.len(), 1);
-        assert!(collector.first_violations[0].expected_exception);
-    }
-
-    #[test]
-    fn sync_audit_marks_wal_rotation_as_expected_exception() {
-        let mut collector = SyncAuditCollector::default();
-        collector.observe(
-            13,
-            WorkloadOp::Set,
-            SyncAuditDelta {
-                wal_records: 2,
-                wal_syncs: 2,
-                io_region_writes: 3,
-                io_syncs: 2,
-                wal_rotations_attempted: 1,
-                wal_rotations_completed: 1,
-                wal_rotation_required: 1,
-                ..SyncAuditDelta::default()
-            },
-        );
-
-        assert_eq!(collector.write_operations, 1);
-        assert_eq!(collector.non_hot_write_exceptions, 1);
-        assert_eq!(collector.first_violations.len(), 1);
-        assert!(collector.first_violations[0].expected_exception);
-    }
-}
+#[path = "file_backing_perf/tests.rs"]
+mod tests;
 
 fn write_json_report(report: &PerfReport) -> PerfResult<()> {
     let Some(path) = &report.config.output.json_path else {

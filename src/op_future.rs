@@ -1,16 +1,15 @@
-use core::fmt::Debug;
 use core::future::Future;
 use core::mem;
 use core::pin::Pin;
 use core::task::{Context, Poll};
-use serde::{Deserialize, Serialize};
 
 use crate::mode::{CollectionFlushMode, OpenMode, StorageMode, WalHeadReclaimMode};
 use crate::startup::StartupOpenPlan;
 use crate::storage::WalHeadReclaimPlan;
 use crate::{
-    CollectionType, FlashIo, MapFrontier, MapStorageError, StartupCollectionBasis, Storage,
-    StorageFormatConfig, StorageOpenError, StorageRuntimeError, StorageWorkspace,
+    CollectionType, FlashIo, LsmKey, LsmValue, MapFrontier, MapStorageError,
+    StartupCollectionBasis, Storage, StorageFormatConfig, StorageOpenError, StorageRuntimeError,
+    StorageWorkspace,
 };
 
 /// Minimal future wrapper that executes a closure exactly once when first polled.
@@ -145,8 +144,8 @@ pub struct YieldingFlushMapFuture<
     const MAX_RUNS: usize,
 > where
     IO: FlashIo,
-    K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
-    V: Debug + Serialize + for<'de> Deserialize<'de>,
+    K: LsmKey,
+    V: LsmValue,
 {
     storage:
         &'a mut Storage<'db, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
@@ -182,8 +181,8 @@ impl<
     >
 where
     IO: FlashIo,
-    K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
-    V: Debug + Serialize + for<'de> Deserialize<'de>,
+    K: LsmKey,
+    V: LsmValue,
 {
     /// Creates a new yielding manifest flush future.
     pub fn new(
@@ -233,8 +232,8 @@ impl<
     >
 where
     IO: FlashIo,
-    K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
-    V: Debug + Serialize + for<'de> Deserialize<'de>,
+    K: LsmKey,
+    V: LsmValue,
 {
 }
 
@@ -266,8 +265,8 @@ impl<
     >
 where
     IO: FlashIo,
-    K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
-    V: Debug + Serialize + for<'de> Deserialize<'de>,
+    K: LsmKey,
+    V: LsmValue,
 {
     type Output = Result<u32, MapStorageError>;
 
@@ -362,8 +361,8 @@ impl<
     >
 where
     IO: FlashIo,
-    K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
-    V: Debug + Serialize + for<'de> Deserialize<'de>,
+    K: LsmKey,
+    V: LsmValue,
 {
     fn drop(&mut self) {
         self.storage.finish_mode();

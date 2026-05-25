@@ -43,6 +43,10 @@ pub struct StoragePerfMetrics {
     pub committed_run_snapshot_ref_reads: u64,
     pub committed_run_entry_reads: u64,
     pub committed_run_full_region_reads: u64,
+    pub encoded_key_comparisons: u64,
+    pub key_decodes_during_comparison: u64,
+    pub value_decodes: u64,
+    pub full_entry_decodes: u64,
     pub buffer_too_small_errors: u64,
     pub wal_rotation_required: u64,
     pub append_failures: u64,
@@ -161,6 +165,19 @@ impl StoragePerfMetrics {
             StoragePerfCounter::CommittedRunEntryReads => {
                 self.committed_run_entry_reads =
                     self.committed_run_entry_reads.saturating_add(value);
+            }
+            StoragePerfCounter::EncodedKeyComparisons => {
+                self.encoded_key_comparisons = self.encoded_key_comparisons.saturating_add(value);
+            }
+            StoragePerfCounter::KeyDecodesDuringComparison => {
+                self.key_decodes_during_comparison =
+                    self.key_decodes_during_comparison.saturating_add(value);
+            }
+            StoragePerfCounter::ValueDecodes => {
+                self.value_decodes = self.value_decodes.saturating_add(value);
+            }
+            StoragePerfCounter::FullEntryDecodes => {
+                self.full_entry_decodes = self.full_entry_decodes.saturating_add(value);
             }
             StoragePerfCounter::BufferTooSmallErrors => {
                 self.buffer_too_small_errors = self.buffer_too_small_errors.saturating_add(value);
@@ -282,6 +299,11 @@ pub(crate) enum StoragePerfCounter {
     CommittedRunBoundsReads,
     CommittedRunSnapshotRefReads,
     CommittedRunEntryReads,
+    EncodedKeyComparisons,
+    KeyDecodesDuringComparison,
+    ValueDecodes,
+    #[allow(dead_code)]
+    FullEntryDecodes,
     BufferTooSmallErrors,
     WalRotationRequired,
     AppendFailures,

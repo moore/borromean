@@ -6,6 +6,8 @@ use crate::StoragePerfMetrics;
 use crate::{MockFlash, MockOperation, Storage, StorageFormatConfig, StorageWorkspace};
 use postcard::to_slice;
 use proptest::prelude::*;
+#[cfg(feature = "perf-counters")]
+use serde::{Deserialize, Serialize};
 use std::{vec, vec::Vec};
 
 type LargeValue = ([u8; 16], [u8; 16]);
@@ -157,8 +159,12 @@ fn requirement_object_lsm_map_new_open_get_set_delete_use_storage_owned_scratch(
 }
 
 #[cfg(feature = "perf-counters")]
+//= spec/map.md#map-api-model
+//= type=test
+//# `open` reconstructs the logical map from the retained durable basis
+//# and later retained updates using storage-owned buffers.
 #[test]
-fn perf_metrics_first_read_records_frontier_miss_and_reload() {
+fn requirement_perf_metrics_first_read_records_frontier_miss_and_reload() {
     let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
     let mut storage =
         Storage::<_, 512, 8, 8, 4>::format(&mut flash, StorageFormatConfig::new(2, 8, 0xa5))
@@ -177,8 +183,13 @@ fn perf_metrics_first_read_records_frontier_miss_and_reload() {
 }
 
 #[cfg(feature = "perf-counters")]
+//= spec/map.md#map-api-model
+//= type=test
+//# This keeps each `LsmMap` handle small enough that many collections
+//# can be open at once; the handle primarily tracks the collection id and
+//# may cache small metadata for efficiency.
 #[test]
-fn perf_metrics_hot_reads_record_frontier_cache_hits() {
+fn requirement_perf_metrics_hot_reads_record_frontier_cache_hits() {
     let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
     let mut storage =
         Storage::<_, 512, 8, 8, 4>::format(&mut flash, StorageFormatConfig::new(2, 8, 0xa5))
@@ -201,12 +212,135 @@ fn perf_metrics_hot_reads_record_frontier_cache_hits() {
     assert_eq!(metrics.frontier_cache_hits, 2);
     assert_eq!(metrics.frontier_cache_misses, 0);
     assert_eq!(metrics.frontier_reloads, 0);
+    assert_eq!(metrics.encoded_key_comparisons, 2);
+    assert_eq!(metrics.key_decodes_during_comparison, 0);
+    assert_eq!(metrics.value_decodes, 2);
     assert!(metrics.map_read_lookup_nanos > 0);
 }
 
 #[cfg(feature = "perf-counters")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+struct DecodingTestKey(u16);
+
+#[cfg(feature = "perf-counters")]
+impl LsmKey for DecodingTestKey {
+    fn encode_key(&self, out: &mut [u8]) -> Result<usize, LsmKeyError> {
+        to_slice(self, out)
+            .map(|encoded| encoded.len())
+            .map_err(LsmKeyError::from)
+    }
+
+    fn decode_key(bytes: &[u8]) -> Result<Self, LsmKeyError> {
+        from_bytes(bytes).map_err(LsmKeyError::from)
+    }
+}
+
+#[cfg(feature = "perf-counters")]
+//= spec/map.md#key-and-value-model
+//= type=test
+//# For keys whose natural ordering is not lexicographic over their raw
+//# bytes, `K: Ord` must define the stable map ordering and the encoded
+//# representation must remain compatible with that ordering wherever
+//# committed run metadata uses decoded key bounds.
 #[test]
-fn perf_metrics_set_delete_record_write_path() {
+fn requirement_perf_metrics_custom_key_fallback_records_key_decodes() {
+    let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
+    let mut storage =
+        Storage::<_, 512, 8, 8, 4>::format(&mut flash, StorageFormatConfig::new(2, 8, 0xa5))
+            .unwrap();
+    let mut map = LsmMap::<DecodingTestKey, u16, 8>::new(&mut storage).unwrap();
+    assert!(!map.set(&mut storage, DecodingTestKey(7), 70).unwrap());
+
+    storage.reset_perf_metrics();
+    assert_eq!(
+        map.get(&mut storage, &DecodingTestKey(7), |_, value| *value)
+            .unwrap(),
+        Some(70)
+    );
+
+    let metrics = storage.perf_metrics();
+    assert_eq!(metrics.encoded_key_comparisons, 1);
+    assert_eq!(metrics.key_decodes_during_comparison, 1);
+    assert_eq!(metrics.value_decodes, 1);
+}
+
+//= spec/map.md#snapshot-frontier-and-logical-map-requirements
+//= type=test
+//# The in-memory frontier and snapshot payload use the same sorted-entry
+//# model, so the low-level helper behavior is part of the durable
+//# contract.
+#[test]
+fn requirement_v2_entry_layout_validates_headers_and_lengths() {
+    let mut encoded = [0u8; 32];
+    let used = encode_entry_into(&5u16, Some(&70u16), &mut encoded).unwrap();
+    assert_eq!(encoded[0], ENTRY_KIND_SET);
+    let parsed = parse_encoded_entry(&encoded[..used]).unwrap();
+    assert_eq!(u16::decode_key(parsed.key).unwrap(), 5);
+    assert_eq!(u16::decode_value(parsed.value.unwrap()).unwrap(), 70);
+
+    let delete_used = encode_entry_into::<u16, u16>(&5, None, &mut encoded).unwrap();
+    assert_eq!(encoded[0], ENTRY_KIND_DELETE);
+    assert!(matches!(
+        encoded_entry_lookup_value::<u16>(&encoded[..delete_used]).unwrap(),
+        LookupResult::Deleted
+    ));
+
+    let mut corrupt = encoded[..delete_used].to_vec();
+    corrupt.extend_from_slice(&[0]);
+    let value_len_offset = ENTRY_KIND_SIZE + ENTRY_KEY_LEN_SIZE;
+    corrupt[value_len_offset..value_len_offset + ENTRY_VALUE_LEN_SIZE]
+        .copy_from_slice(&1u32.to_le_bytes());
+    assert!(matches!(
+        parse_encoded_entry(&corrupt),
+        Err(MapError::SerializationError)
+    ));
+
+    let mut corrupt = encoded[..used].to_vec();
+    corrupt[ENTRY_KIND_SIZE..ENTRY_KIND_SIZE + ENTRY_KEY_LEN_SIZE]
+        .copy_from_slice(&u32::MAX.to_le_bytes());
+    assert!(matches!(
+        parse_encoded_entry(&corrupt),
+        Err(MapError::SerializationError)
+    ));
+}
+
+//= spec/map.md#key-and-value-model
+//= type=test
+//# `encode_key` produces the canonical durable key bytes.
+#[test]
+fn requirement_primitive_encoded_key_bytes_sort_like_ord() {
+    fn assert_encoded_order<K>(values: &[K])
+    where
+        K: LsmKey + Copy + Ord,
+    {
+        let mut by_ord = values.to_vec();
+        by_ord.sort();
+
+        let mut encoded = Vec::new();
+        for value in values {
+            let mut bytes = [0u8; 16];
+            let len = value.encode_key(&mut bytes).unwrap();
+            encoded.push((bytes[..len].to_vec(), *value));
+        }
+        encoded.sort_by(|left, right| left.0.cmp(&right.0));
+        let by_bytes: Vec<K> = encoded.into_iter().map(|(_, value)| value).collect();
+        assert_eq!(by_bytes, by_ord);
+    }
+
+    assert_encoded_order(&[3u64, 0, u64::MAX, 7, 1]);
+    assert_encoded_order(&[-3i64, 0, i64::MIN, i64::MAX, 7, 1]);
+    assert_encoded_order(&[3u16, 0, u16::MAX, 7, 1]);
+    assert_encoded_order(&[-3i32, 0, i32::MIN, i32::MAX, 7, 1]);
+}
+
+#[cfg(feature = "perf-counters")]
+//= spec/map.md#map-api-model
+//= type=test
+//# `set` and `delete` update the logical map and persist the mutation,
+//# flushing the frontier first if bounded in-memory capacity would
+//# otherwise be exceeded.
+#[test]
+fn requirement_perf_metrics_set_delete_record_write_path() {
     let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
     let mut storage =
         Storage::<_, 512, 8, 8, 4>::format(&mut flash, StorageFormatConfig::new(2, 8, 0xa5))
@@ -235,8 +369,14 @@ fn perf_metrics_set_delete_record_write_path() {
 }
 
 #[cfg(feature = "perf-counters")]
+//= spec/ring.md#storage-api-requirements
+//= type=test
+//# `Storage` MUST be the public database context that owns logical
+//# runtime state, replay state, configuration, dirty-frontier tracking,
+//# and bounded reusable scratch memory needed by normal storage and
+//# collection operations.
 #[test]
-fn perf_metrics_reset_and_take_clear_metrics() {
+fn requirement_perf_metrics_reset_and_take_clear_metrics() {
     let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
     let mut storage =
         Storage::<_, 512, 8, 8, 4>::format(&mut flash, StorageFormatConfig::new(2, 8, 0xa5))
@@ -268,8 +408,13 @@ fn count_mock_operations(
 }
 
 #[cfg(feature = "perf-counters")]
+//= spec/map.md#map-api-model
+//= type=test
+//# On success, `set` and `delete` return `true` when the map's
+//# configured compaction policy says compaction is needed after that
+//# mutation and any required frontier flush.
 #[test]
-fn sync_audit_hot_inserts_write_one_wal_record_and_sync_once() {
+fn requirement_sync_audit_hot_inserts_write_one_wal_record_and_sync_once() {
     const COUNT: u16 = 10;
     let mut flash = MockFlash::<4096, 16, 8192>::new(0xff);
     let mut storage =
@@ -316,8 +461,11 @@ fn sync_audit_hot_inserts_write_one_wal_record_and_sync_once() {
 }
 
 #[cfg(feature = "perf-counters")]
+//= spec/map.md#map-api-model
+//= type=test
+//# They return `false` when no compaction is currently needed.
 #[test]
-fn sync_audit_hot_updates_exclude_preload_and_sync_once() {
+fn requirement_sync_audit_hot_updates_exclude_preload_and_sync_once() {
     const COUNT: u16 = 10;
     let mut flash = MockFlash::<4096, 16, 8192>::new(0xff);
     let mut storage =
@@ -366,6 +514,11 @@ fn sync_audit_hot_updates_exclude_preload_and_sync_once() {
     );
 }
 
+//= spec/map.md#map-api-model
+//= type=test
+//# The `Storage` value owns the bounded memory used for mutable
+//# frontiers, read/value materialization, serialization scratch, run
+//# descriptor capacity, and compaction scratch.
 #[test]
 fn requirement_lsm_map_reuses_storage_owned_frontier_buffer_for_hot_reads() {
     let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
@@ -402,6 +555,10 @@ fn requirement_lsm_map_reuses_storage_owned_frontier_buffer_for_hot_reads() {
     assert_eq!(storage.frontier_buffer_owner(), owner_after_write);
 }
 
+//= spec/map.md#map-api-model
+//= type=test
+//# `get` observes newest-wins map visibility across the mutable frontier
+//# and retained durable layers.
 #[test]
 fn requirement_lsm_map_raw_update_invalidates_cached_frontier() {
     let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
@@ -433,6 +590,9 @@ fn requirement_lsm_map_raw_update_invalidates_cached_frontier() {
     );
 }
 
+//= spec/map.md#map-api-model
+//= type=test
+//# Map operations borrow `&mut Storage` while they use that memory.
 #[test]
 fn requirement_two_lsm_maps_reload_storage_owned_frontier_buffer() {
     let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
@@ -485,6 +645,9 @@ fn requirement_two_lsm_maps_reload_storage_owned_frontier_buffer() {
     ));
 }
 
+//= spec/map.md#map-api-model
+//= type=test
+//# `set` and `delete` update the logical map and persist the mutation.
 #[test]
 fn requirement_lsm_map_writes_remain_durable_without_frontier_flush() {
     let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
@@ -563,6 +726,10 @@ fn requirement_object_lsm_map_compaction_signal_and_compact_preserve_visible_sta
 }
 
 #[cfg(feature = "perf-counters")]
+//= spec/map.md#map-api-model
+//= type=test
+//# `compact` performs whole-run compaction for that map using
+//# storage-owned scratch buffers.
 #[test]
 fn requirement_object_lsm_map_compaction_reuses_cached_frontier() {
     let mut flash = MockFlash::<512, 12, 4096>::new(0xff);
@@ -699,10 +866,7 @@ fn requirement_snapshot_helpers_validate_ranges_and_lookup_semantics() {
     let (entry_count, entry_bytes_len, entries_offset, refs_start) =
         snapshot_parts(snapshot).unwrap();
     assert_eq!(entry_count, 4);
-    assert_eq!(
-        entries_offset,
-        SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE
-    );
+    assert_eq!(entries_offset, SNAPSHOT_HEADER_SIZE);
     assert_eq!(refs_start, snapshot_len - entry_count * ENTRY_REF_SIZE);
     assert_eq!(
         snapshot_len,
@@ -731,10 +895,7 @@ fn requirement_snapshot_helpers_validate_ranges_and_lookup_semantics() {
     );
 
     let empty_range_len = snapshot_range_len(snapshot, entry_count, 0).unwrap();
-    assert_eq!(
-        empty_range_len,
-        SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE
-    );
+    assert_eq!(empty_range_len, SNAPSHOT_HEADER_SIZE);
     assert_eq!(
         snapshot_range_len(snapshot, 0, entry_count).unwrap(),
         snapshot_len
@@ -827,29 +988,21 @@ fn requirement_search_helpers_cover_even_windows_and_insert_positions() {
 //# physical entry byte order so reversed adjacent entry storage still loads sorted keys.
 #[test]
 fn requirement_load_snapshot_accepts_reversed_adjacent_entry_storage() {
-    let first = Entry {
-        key: 1i32,
-        value: Some(10i32),
-    };
-    let second = Entry {
-        key: 2i32,
-        value: Some(20i32),
-    };
     let mut first_bytes = [0u8; 32];
-    let first_len = to_slice(&first, &mut first_bytes).unwrap().len();
+    let first_len = encode_entry_into(&1i32, Some(&10i32), &mut first_bytes).unwrap();
     let mut second_bytes = [0u8; 32];
-    let second_len = to_slice(&second, &mut second_bytes).unwrap().len();
+    let second_len = encode_entry_into(&2i32, Some(&20i32), &mut second_bytes).unwrap();
 
     let entry_bytes_len = first_len + second_len;
-    let snapshot_len = SNAPSHOT_ENTRY_COUNT_SIZE
-        + SNAPSHOT_ENTRY_BYTES_LEN_SIZE
-        + entry_bytes_len
-        + 2 * ENTRY_REF_SIZE;
-    let entries_offset = SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE;
+    let snapshot_len = SNAPSHOT_HEADER_SIZE + entry_bytes_len + 2 * ENTRY_REF_SIZE;
+    let entries_offset = SNAPSHOT_HEADER_SIZE;
     let refs_start = entries_offset + entry_bytes_len;
     let mut snapshot = [0u8; 128];
-    snapshot[..SNAPSHOT_ENTRY_COUNT_SIZE].copy_from_slice(&2u32.to_le_bytes());
-    snapshot[SNAPSHOT_ENTRY_COUNT_SIZE..SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE]
+    snapshot[..SNAPSHOT_MAGIC_SIZE].copy_from_slice(&SNAPSHOT_MAGIC);
+    snapshot[SNAPSHOT_MAGIC_SIZE..SNAPSHOT_MAGIC_SIZE + SNAPSHOT_ENTRY_COUNT_SIZE]
+        .copy_from_slice(&2u32.to_le_bytes());
+    let entry_bytes_len_offset = SNAPSHOT_MAGIC_SIZE + SNAPSHOT_ENTRY_COUNT_SIZE;
+    snapshot[entry_bytes_len_offset..entry_bytes_len_offset + SNAPSHOT_ENTRY_BYTES_LEN_SIZE]
         .copy_from_slice(&(entry_bytes_len as u32).to_le_bytes());
 
     snapshot[entries_offset..entries_offset + second_len]
@@ -883,7 +1036,7 @@ fn requirement_load_snapshot_accepts_reversed_adjacent_entry_storage() {
 //# snapshot decoding MUST reject invalid entry references.
 #[test]
 fn requirement_snapshot_encoding_accepts_exact_empty_capacity_and_rejects_invalid_refs() {
-    let mut empty = [0u8; SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE];
+    let mut empty = [0u8; SNAPSHOT_HEADER_SIZE];
     let len = encode_snapshot_from_entries_into::<i32, i32>(&[], &mut empty).unwrap();
     assert_eq!(len, empty.len());
     assert_eq!(snapshot_parts(&empty).unwrap().0, 0);
@@ -1063,8 +1216,8 @@ fn requirement_run_segment_payload_round_trip_preserves_header_bounds_and_snapsh
 
     assert_eq!(view.generation, 11);
     assert_eq!(view.next_region, Some(9));
-    assert_eq!(from_bytes::<i32>(view.lower_key).unwrap(), 3);
-    assert_eq!(from_bytes::<i32>(view.upper_key).unwrap(), 5);
+    assert_eq!(i32::decode_key(view.lower_key).unwrap(), 3);
+    assert_eq!(i32::decode_key(view.upper_key).unwrap(), 5);
     assert_eq!(
         lookup_snapshot::<i32, i32>(view.snapshot, &3).unwrap(),
         LookupResult::Set(30)
@@ -1101,7 +1254,7 @@ fn requirement_committed_region_and_legacy_snapshot_helpers_accept_exact_boundar
     const REGION_SIZE: usize = Header::ENCODED_LEN + FreePointerFooter::ENCODED_LEN;
     let metadata = StorageMetadata::new(REGION_SIZE as u32, 2, 0, 8, 0xff, 0xa5).unwrap();
     let mut flash = MockFlash::<REGION_SIZE, 2, 16>::new(0xff);
-    init_user_region_header(&mut flash, 0, 1, CollectionId(95), MAP_REGION_V1_FORMAT);
+    init_user_region_header(&mut flash, 0, 1, CollectionId(95), MAP_REGION_V2_FORMAT);
 
     let mut region = [0u8; REGION_SIZE];
     let (header, payload) = read_committed_region(&mut flash, metadata, 0, &mut region).unwrap();
@@ -1119,7 +1272,7 @@ fn requirement_committed_region_and_legacy_snapshot_helpers_accept_exact_boundar
     )
     .unwrap();
     let mut flash = MockFlash::<FULL_PAYLOAD_REGION_SIZE, 2, 16>::new(0xff);
-    init_user_region_header(&mut flash, 0, 1, CollectionId(96), MAP_REGION_V1_FORMAT);
+    init_user_region_header(&mut flash, 0, 1, CollectionId(96), MAP_REGION_V2_FORMAT);
     let mut region = [0u8; FULL_PAYLOAD_REGION_SIZE];
     let (_, payload) =
         read_committed_region(&mut flash, full_payload_metadata, 0, &mut region).unwrap();
@@ -1230,7 +1383,7 @@ fn requirement_frontier_range_region_and_checkpoint_helpers_accept_exact_buffers
     );
     assert_eq!(
         map.snapshot_range_len_from_frontier(4, 0).unwrap(),
-        SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE
+        SNAPSHOT_HEADER_SIZE
     );
     assert!(matches!(
         map.snapshot_range_len_from_frontier(5, 0),
@@ -1337,7 +1490,7 @@ fn requirement_snapshot_run_segment_helpers_plan_and_encode_exact_subranges() {
     let (snapshot, snapshot_len) =
         snapshot_for_entries(&[(1, Some(10)), (2, Some(20)), (3, Some(30))]);
     let snapshot = &snapshot[..snapshot_len];
-    let mut workspace = StorageWorkspace::<128>::new();
+    let mut workspace = StorageWorkspace::<256>::new();
 
     let planned =
         MapFrontier::<i32, i32, 8>::planned_snapshot_run_region_count(&mut workspace, snapshot, 4)
@@ -1357,8 +1510,8 @@ fn requirement_snapshot_run_segment_helpers_plan_and_encode_exact_subranges() {
     let view = parse_run_segment_payload(&payload[..used]).unwrap();
     assert_eq!(view.generation, 4);
     assert_eq!(view.next_region, Some(11));
-    assert_eq!(from_bytes::<i32>(view.lower_key).unwrap(), 2);
-    assert_eq!(from_bytes::<i32>(view.upper_key).unwrap(), 3);
+    assert_eq!(i32::decode_key(view.lower_key).unwrap(), 2);
+    assert_eq!(i32::decode_key(view.upper_key).unwrap(), 3);
     assert_eq!(
         lookup_snapshot::<i32, i32>(view.snapshot, &1).unwrap(),
         LookupResult::NotFound
@@ -1389,7 +1542,7 @@ fn requirement_snapshot_run_planning_and_storage_write_cover_multi_region_snapsh
     let snapshot_len = source.encode_snapshot_into(&mut snapshot).unwrap();
     let snapshot = &snapshot[..snapshot_len];
 
-    let mut planning_workspace = StorageWorkspace::<128>::new();
+    let mut planning_workspace = StorageWorkspace::<256>::new();
     let planned = MapFrontier::<i32, LargeValue, MAX_INDEXES>::planned_snapshot_run_region_count(
         &mut planning_workspace,
         snapshot,
@@ -1426,7 +1579,7 @@ fn requirement_snapshot_run_planning_and_storage_write_cover_multi_region_snapsh
     assert_eq!(written.lower_key, Some(0));
     assert_eq!(written.upper_key, Some(9));
 
-    let mut empty = [0u8; SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE];
+    let mut empty = [0u8; SNAPSHOT_HEADER_SIZE];
     let empty_len = encode_snapshot_from_entries_into::<i32, LargeValue>(&[], &mut empty).unwrap();
     assert!(storage
         .with_runtime_io_workspace(|runtime, flash, workspace| {
@@ -1457,7 +1610,7 @@ fn requirement_frontier_run_planning_counts_all_committed_payload_segments() {
         map.set(key, large_value(key as u8)).unwrap();
     }
 
-    let mut workspace = StorageWorkspace::<128>::new();
+    let mut workspace = StorageWorkspace::<256>::new();
     assert!(
         map.planned_frontier_run_region_count(&mut workspace, 23)
             .unwrap()
@@ -1648,7 +1801,7 @@ fn requirement_committed_run_storage_helpers_validate_headers_and_next_links() {
         2,
         1,
         collection_id,
-        MAP_RUN_V1_FORMAT,
+        MAP_RUN_V2_FORMAT,
         &payload[..used],
     );
 
@@ -1675,7 +1828,7 @@ fn requirement_committed_run_storage_helpers_validate_headers_and_next_links() {
         Some(3)
     );
 
-    init_user_region_header(&mut flash, 2, 2, collection_id, MAP_REGION_V1_FORMAT);
+    init_user_region_header(&mut flash, 2, 2, collection_id, MAP_REGION_V2_FORMAT);
     assert!(matches!(
         read_run_segment_bounds::<i32, REGION_SIZE, _>(
             collection_id,
@@ -1725,7 +1878,7 @@ fn requirement_lookup_and_head_reference_helpers_follow_manifest_runs() {
         2,
         2,
         collection_id,
-        MAP_RUN_V1_FORMAT,
+        MAP_RUN_V2_FORMAT,
         &run_payload[..run_used],
     );
 
@@ -1781,7 +1934,7 @@ fn requirement_lookup_and_head_reference_helpers_follow_manifest_runs() {
         3,
         3,
         collection_id,
-        MAP_MANIFEST_V1_FORMAT,
+        MAP_MANIFEST_V2_FORMAT,
         &manifest_payload[..manifest_used],
     );
 
@@ -2067,7 +2220,8 @@ fn requirement_empty_map_new_matches_empty_durable_basis_state() {
 //= spec/map.md#snapshot-payload-format
 //= type=test
 //# `MAP-SNAPSHOT-001` A map snapshot payload MUST be encoded as
-//# `[entry_count:u32 little-endian][entry_bytes_len:u32 little-endian][entry_bytes][entry_refs]`.
+//# `[magic:"MAP2"][entry_count:u32 little-endian][entry_bytes_len:u32
+//# little-endian][entry_bytes][entry_refs]`.
 #[test]
 fn requirement_snapshot_encoding_stores_header_compact_entries_and_refs() {
     assert_snapshot_encoding_stores_header_compact_entries_and_refs();
@@ -2086,20 +2240,25 @@ fn assert_snapshot_encoding_stores_header_compact_entries_and_refs() {
     let mut snapshot = [0u8; BUFFER_SIZE];
     let snapshot_len = source.encode_snapshot_into(&mut snapshot).unwrap();
 
-    let entry_count = u32::from_le_bytes(snapshot[..SNAPSHOT_ENTRY_COUNT_SIZE].try_into().unwrap());
+    assert_eq!(&snapshot[..SNAPSHOT_MAGIC_SIZE], SNAPSHOT_MAGIC.as_slice());
+    let entry_count_offset = SNAPSHOT_MAGIC_SIZE;
+    let entry_count = u32::from_le_bytes(
+        snapshot[entry_count_offset..entry_count_offset + SNAPSHOT_ENTRY_COUNT_SIZE]
+            .try_into()
+            .unwrap(),
+    );
     assert_eq!(entry_count, 2);
 
+    let entry_bytes_len_offset = SNAPSHOT_MAGIC_SIZE + SNAPSHOT_ENTRY_COUNT_SIZE;
     let entry_bytes_len = usize::try_from(u32::from_le_bytes(
-        snapshot
-            [SNAPSHOT_ENTRY_COUNT_SIZE..SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE]
+        snapshot[entry_bytes_len_offset..entry_bytes_len_offset + SNAPSHOT_ENTRY_BYTES_LEN_SIZE]
             .try_into()
             .unwrap(),
     ))
     .unwrap();
     assert_eq!(
         snapshot_len,
-        SNAPSHOT_ENTRY_COUNT_SIZE
-            + SNAPSHOT_ENTRY_BYTES_LEN_SIZE
+        SNAPSHOT_HEADER_SIZE
             + entry_bytes_len
             + usize::try_from(entry_count).unwrap() * ENTRY_REF_SIZE
     );
@@ -2130,13 +2289,13 @@ fn assert_snapshot_encoding_stores_header_compact_entries_and_refs() {
     assert_eq!(first_end, second_start);
     assert_eq!(second_end, ENTRY_COUNT_SIZE + entry_bytes_len);
 
-    let entry_bytes_offset = SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE;
-    let first_entry: Entry<i32, i32> = postcard::from_bytes(
+    let entry_bytes_offset = SNAPSHOT_HEADER_SIZE;
+    let first_entry: Entry<i32, i32> = encoded_entry_to_entry(
         &snapshot[entry_bytes_offset + first_start - ENTRY_COUNT_SIZE
             ..entry_bytes_offset + first_end - ENTRY_COUNT_SIZE],
     )
     .unwrap();
-    let second_entry: Entry<i32, i32> = postcard::from_bytes(
+    let second_entry: Entry<i32, i32> = encoded_entry_to_entry(
         &snapshot[entry_bytes_offset + second_start - ENTRY_COUNT_SIZE
             ..entry_bytes_offset + second_end - ENTRY_COUNT_SIZE],
     )
@@ -2241,7 +2400,7 @@ fn requirement_map_collection_format_covers_empty_state_snapshot_update_region_a
 //= spec/map.md#committed-head-format
 //= type=test
 //# `MAP-REGION-001` A committed map head with
-//# `collection_format = MAP_MANIFEST_V1_FORMAT` MUST encode a manifest that
+//# `collection_format = MAP_MANIFEST_V2_FORMAT` MUST encode a manifest that
 //# describes the live immutable map run set.
 #[test]
 fn requirement_region_round_trip_restores_logical_state() {
@@ -2282,7 +2441,7 @@ fn assert_region_round_trip_restores_logical_state() {
     });
     let header = Header::decode(&committed_region[..Header::ENCODED_LEN]).unwrap();
     assert_eq!(header.collection_id, id);
-    assert_eq!(header.collection_format, MAP_MANIFEST_V1_FORMAT);
+    assert_eq!(header.collection_format, MAP_MANIFEST_V2_FORMAT);
 
     let mut dest_buffer = [0u8; BUFFER_SIZE];
     let restored = storage
@@ -2336,7 +2495,7 @@ fn requirement_region_payload_prefix_matches_embedded_snapshot_len() {
                 flash,
                 region_index,
                 CollectionId(60),
-                MAP_REGION_V1_FORMAT,
+                MAP_REGION_V2_FORMAT,
                 &EMPTY_MAP_SNAPSHOT,
             )
         })
@@ -2352,7 +2511,7 @@ fn requirement_region_payload_prefix_matches_embedded_snapshot_len() {
         Err(MapStorageError::UnsupportedRegionFormat {
             collection_id: CollectionId(60),
             region_index: actual_region,
-            actual: MAP_REGION_V1_FORMAT,
+            actual: MAP_REGION_V2_FORMAT,
         }) if actual_region == region_index
     ));
 }
@@ -2431,7 +2590,7 @@ fn requirement_open_from_storage_rejects_live_collections_with_a_non_map_collect
 fn assert_open_from_storage_rejects_live_collections_with_a_non_map_collection_type() {
     let mut flash = MockFlash::<512, 4, 256>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
-    init_user_region_header(&mut flash, 2, 4, CollectionId(61), MAP_REGION_V1_FORMAT);
+    init_user_region_header(&mut flash, 2, 4, CollectionId(61), MAP_REGION_V2_FORMAT);
     let wal_offset = metadata.wal_record_area_offset().unwrap();
     append_wal_record(
         &mut flash,
@@ -2679,7 +2838,7 @@ fn requirement_map_frontier_takes_precedence_over_older_durable_basis_values() {
 fn requirement_open_from_storage_rejects_unsupported_committed_region_format() {
     let mut flash = MockFlash::<512, 4, 256>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
-    init_user_region_header(&mut flash, 2, 4, CollectionId(72), MAP_RUN_V1_FORMAT + 1);
+    init_user_region_header(&mut flash, 2, 4, CollectionId(72), MAP_RUN_V2_FORMAT + 1);
     let wal_offset = metadata.wal_record_area_offset().unwrap();
     append_wal_record(
         &mut flash,
@@ -2712,7 +2871,7 @@ fn requirement_open_from_storage_rejects_unsupported_committed_region_format() {
             collection_id: CollectionId(72),
             region_index: 2,
             actual,
-        }) if actual == MAP_RUN_V1_FORMAT + 1
+        }) if actual == MAP_RUN_V2_FORMAT + 1
     ));
 }
 
@@ -2741,7 +2900,7 @@ fn assert_open_rejects_invalid_retained_region_snapshot_and_update_payloads(
                     flash,
                     region_index,
                     region_collection_id,
-                    MAP_REGION_V1_FORMAT,
+                    MAP_REGION_V2_FORMAT,
                     &[1, 2, 3],
                 )
             })
@@ -2759,7 +2918,7 @@ fn assert_open_rejects_invalid_retained_region_snapshot_and_update_payloads(
             Err(MapStorageError::UnsupportedRegionFormat {
                 collection_id,
                 region_index: actual_region,
-                actual: MAP_REGION_V1_FORMAT,
+                actual: MAP_REGION_V2_FORMAT,
             }) if collection_id == region_collection_id && actual_region == region_index
         ));
     }
@@ -2993,7 +3152,7 @@ proptest! {
     //# `RING-IMPL-REGRESSION-033` Map read/write operations MUST return the latest inserted values for generated key/value workloads.
     #[test]
     fn requirement_test_read_write(entries in k_v_vec(100)) {
-        const BUFFER_SIZE: usize = 2048;
+        const BUFFER_SIZE: usize = 4096;
         let mut buffer = vec![0u8; BUFFER_SIZE];
         let id = CollectionId(1);
 

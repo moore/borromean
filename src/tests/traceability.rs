@@ -6,7 +6,7 @@ use crate::{
     DiskError, FlashIo, FreePointerFooter, Header, MapError, MapFrontier, MapStorageError,
     MapUpdate, MockFlash, MockFormatError, MockOperation, StartupCollectionBasis, StartupError,
     Storage, StorageFormatConfig, StorageFormatError, StorageIoError, StorageMetadata, StorageMode,
-    StorageRuntimeError, StorageWorkspace, WalRecord, WalRegionPrologue, MAP_REGION_V1_FORMAT,
+    StorageRuntimeError, StorageWorkspace, WalRecord, WalRegionPrologue, MAP_REGION_V2_FORMAT,
     WAL_V1_FORMAT,
 };
 

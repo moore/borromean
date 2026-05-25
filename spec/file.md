@@ -64,7 +64,11 @@ configured erased byte before use.
 indexes, offsets, or lengths outside the configured geometry.
 3. `RING-FILE-017` Erasing a data region MUST fill the entire region with
 the configured erased byte.
-4. `RING-FILE-018` `FileBacking::sync()` MUST flush mmap changes and sync
-the underlying file.
+4. `RING-FILE-018` `FileBacking::sync()` MUST flush dirty mmap ranges durably enough for synced
+data-region writes to survive reopen.
 5. `RING-FILE-019` Formatted `FileBacking` storage MUST be usable through
 the generic Borromean storage API.
+6. `RING-FILE-020` Data-region-only syncs MUST NOT call file-level sync.
+7. `RING-FILE-021` Metadata dirty ranges MUST sync the underlying file.
+8. `RING-FILE-022` Clean syncs MUST be no-ops.
+9. `RING-FILE-023` Successful syncs MUST clear the synced dirty range after success.

@@ -70,13 +70,15 @@ fn requirement_flash_io_trait_exposes_only_primitive_storage_operations() {
         <SurfaceCheckedFlash as FlashIo>::read_metadata;
     let _: fn(&mut SurfaceCheckedFlash, StorageMetadata) -> Result<(), StorageIoError> =
         <SurfaceCheckedFlash as FlashIo>::write_metadata;
-    let _: fn(
+    type ReadRegionFn = fn(
         &mut SurfaceCheckedFlash,
         u32,
         usize,
         usize,
         fn(&[u8]) -> usize,
-    ) -> Result<usize, StorageIoError> =
+    ) -> Result<usize, StorageIoError>;
+
+    let _: ReadRegionFn =
         <SurfaceCheckedFlash as FlashIo>::read_region::<usize, fn(&[u8]) -> usize>;
     let _: fn(&mut SurfaceCheckedFlash, u32, usize, &[u8]) -> Result<(), StorageIoError> =
         <SurfaceCheckedFlash as FlashIo>::write_region;

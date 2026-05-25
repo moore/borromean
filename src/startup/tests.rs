@@ -3,7 +3,7 @@ use crate::disk::{FreePointerFooter, Header};
 use crate::wal_record::{encode_record_into, encoded_record_len, WalRecord};
 use crate::{
     MapError, MapStorageError, MockFlash, Storage, StorageFormatConfig, StorageWorkspace,
-    MAP_REGION_V1_FORMAT,
+    MAP_REGION_V2_FORMAT,
 };
 
 fn open_formatted_store<
@@ -1079,7 +1079,7 @@ fn requirement_has_valid_wal_target_requires_both_wal_collection_id_and_format()
         1,
         1,
         CollectionId(0),
-        crate::MAP_REGION_V1_FORMAT,
+        crate::MAP_REGION_V2_FORMAT,
     );
     assert_eq!(
         has_valid_wal_target(&mut flash, 1, 1, metadata.region_count),
@@ -1100,7 +1100,7 @@ fn requirement_validate_live_region_bases_rejects_committed_region_for_different
         2,
         4,
         CollectionId(8),
-        crate::MAP_REGION_V1_FORMAT,
+        crate::MAP_REGION_V2_FORMAT,
     );
     let collections = [StartupCollection {
         collection_id: CollectionId(7),
@@ -1437,7 +1437,7 @@ fn requirement_storage_open_path_rejects_invalid_retained_map_region_snapshot_an
                     flash,
                     region_index,
                     CollectionId(43),
-                    MAP_REGION_V1_FORMAT,
+                    MAP_REGION_V2_FORMAT,
                     &[1, 2, 3],
                 )
             })
@@ -1455,7 +1455,7 @@ fn requirement_storage_open_path_rejects_invalid_retained_map_region_snapshot_an
             Err(MapStorageError::UnsupportedRegionFormat {
                 collection_id: CollectionId(43),
                 region_index: actual_region,
-                actual: MAP_REGION_V1_FORMAT,
+                actual: MAP_REGION_V2_FORMAT,
             }) if actual_region == region_index
         ));
     }

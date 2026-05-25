@@ -1,0 +1,36 @@
+[geometry]
+region_size = 1048576
+region_count = 64
+
+[comparison]
+engines = ["borromean-memory"]
+
+[preload]
+count = 1000
+
+[storage]
+min_free_regions = 2
+wal_write_granule = 8
+wal_record_magic = 0xa5
+
+[workload]
+map_count = 1
+operation_count = 220000
+warmup_count = 0
+key_space = 1000
+seed = 0x123456789abcdef
+read_ratio = 0
+set_ratio = 100
+delete_ratio = 0
+value_size_bytes = 64
+key_mode = "preloaded"
+compact_on_signal = true
+compaction_region_target = 64
+
+[maintenance]
+optimize_after_workload = false
+
+[output]
+json_path = "target/perf/profile_memory_update_hot.json"
+latency_sample_interval = 0
+progress_interval = 0

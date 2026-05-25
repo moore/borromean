@@ -457,7 +457,8 @@ fn requirement_file_backing_erase_fills_region_with_erased_byte() {
 
 //= spec/file.md#backend-behavior
 //= type=test
-//# `RING-FILE-018` `FileBacking::sync()` MUST flush mmap changes durably.
+//# `RING-FILE-018` `FileBacking::sync()` MUST flush dirty mmap ranges durably enough
+//# for synced data-region writes to survive reopen.
 #[test]
 fn requirement_file_backing_sync_persists_changes_across_reopen() {
     const REGION_SIZE: usize = 4096;
@@ -482,6 +483,9 @@ fn requirement_file_backing_sync_persists_changes_across_reopen() {
     assert_eq!(bytes, [0x44, 0x55]);
 }
 
+//= spec/file.md#backend-behavior
+//= type=test
+//# `RING-FILE-020` Data-region-only syncs MUST NOT call file-level sync.
 #[test]
 fn requirement_file_backing_sync_report_uses_range_flush_for_wal_write() {
     const REGION_SIZE: usize = 4096;
@@ -515,6 +519,9 @@ fn requirement_file_backing_sync_report_uses_range_flush_for_wal_write() {
     assert_eq!(os.sync_calls, sync_calls_after_create);
 }
 
+//= spec/file.md#backend-behavior
+//= type=test
+//# `RING-FILE-021` Metadata dirty ranges MUST sync the underlying file.
 #[test]
 fn requirement_file_backing_sync_report_syncs_file_for_metadata_write() {
     const REGION_SIZE: usize = 4096;
@@ -546,6 +553,9 @@ fn requirement_file_backing_sync_report_syncs_file_for_metadata_write() {
     assert_eq!(os.sync_calls, sync_calls_after_create + 1);
 }
 
+//= spec/file.md#backend-behavior
+//= type=test
+//# `RING-FILE-022` Clean syncs MUST be no-ops.
 #[test]
 fn requirement_file_backing_sync_report_clean_sync_is_noop() {
     const REGION_SIZE: usize = 4096;
@@ -574,6 +584,9 @@ fn requirement_file_backing_sync_report_clean_sync_is_noop() {
     assert_eq!(os.sync_calls, sync_calls_after_create);
 }
 
+//= spec/file.md#backend-behavior
+//= type=test
+//# `RING-FILE-023` Successful syncs MUST clear the synced dirty range after success.
 #[test]
 fn requirement_file_backing_sync_report_clears_dirty_range_after_success() {
     const REGION_SIZE: usize = 4096;

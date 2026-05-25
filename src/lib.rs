@@ -373,8 +373,8 @@ fn update_map_frontier_parts<
 ) -> Result<(), MapStorageError>
 where
     IO: FlashIo,
-    K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
-    V: Debug + Serialize + for<'de> Deserialize<'de>,
+    K: LsmKey,
+    V: LsmValue,
 {
     let collection_id = map.id();
     let Some(collection) = state
@@ -520,6 +520,7 @@ where
     mark_dirty_frontier_in(dirty_frontiers, collection_id).map_err(MapStorageError::from)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn compact_map_frontier_parts<
     'a,
     K,
@@ -549,8 +550,8 @@ fn compact_map_frontier_parts<
 >
 where
     IO: FlashIo,
-    K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
-    V: Debug + Serialize + for<'de> Deserialize<'de>,
+    K: LsmKey,
+    V: LsmValue,
 {
     if region_target == 0 {
         return Err(MapStorageError::InvalidRegionTarget);
@@ -852,8 +853,8 @@ impl<
         >,
     ) -> Result<(), MapStorageError>
     where
-        K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
-        V: Debug + Serialize + for<'de> Deserialize<'de>,
+        K: LsmKey,
+        V: LsmValue,
     {
         if let Some(generation) = self.cached_map_frontier_generation(collection_id) {
             if cache
@@ -1494,8 +1495,8 @@ impl<
         map: &mut MapFrontier<'_, K, V, MAX_INDEXES, MAX_RUNS>,
     ) -> Result<u32, MapStorageError>
     where
-        K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
-        V: Debug + Serialize + for<'de> Deserialize<'de>,
+        K: LsmKey,
+        V: LsmValue,
     {
         let region_index = map.flush_to_storage::<
             REGION_SIZE,
@@ -1515,8 +1516,8 @@ impl<
         map: &MapFrontier<'_, K, V, MAX_INDEXES>,
     ) -> Result<(), MapStorageError>
     where
-        K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
-        V: Debug + Serialize + for<'de> Deserialize<'de>,
+        K: LsmKey,
+        V: LsmValue,
     {
         self.run_map_operation(
             StorageMode::SnapshottingCollection(CollectionSnapshotMode::Running),
@@ -1559,8 +1560,8 @@ impl<
         MAX_PENDING_RECLAIMS,
     >
     where
-        K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
-        V: Debug + Serialize + for<'de> Deserialize<'de>,
+        K: LsmKey,
+        V: LsmValue,
     {
         run_once(move || self.snapshot_map::<K, V, MAX_INDEXES>(map))
     }
@@ -1572,8 +1573,8 @@ impl<
         update: &MapUpdate<K, V>,
     ) -> Result<(), MapStorageError>
     where
-        K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
-        V: Debug + Serialize + for<'de> Deserialize<'de>,
+        K: LsmKey,
+        V: LsmValue,
     {
         self.run_map_operation(
             StorageMode::UpdatingCollection(CollectionUpdateMode::Running),
@@ -1625,8 +1626,8 @@ impl<
         update: &MapUpdate<K, V>,
     ) -> Result<(), MapStorageError>
     where
-        K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
-        V: Debug + Serialize + for<'de> Deserialize<'de>,
+        K: LsmKey,
+        V: LsmValue,
     {
         self.enter_mode(StorageMode::UpdatingCollection(
             CollectionUpdateMode::Running,
@@ -1683,8 +1684,8 @@ impl<
         MAX_PENDING_RECLAIMS,
     >
     where
-        K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
-        V: Debug + Serialize + for<'de> Deserialize<'de>,
+        K: LsmKey,
+        V: LsmValue,
     {
         run_once(move || self.append_map_update::<K, V, MAX_INDEXES>(collection_id, update))
     }
@@ -1695,8 +1696,8 @@ impl<
         map: &mut MapFrontier<'_, K, V, MAX_INDEXES, MAX_RUNS>,
     ) -> Result<u32, MapStorageError>
     where
-        K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
-        V: Debug + Serialize + for<'de> Deserialize<'de>,
+        K: LsmKey,
+        V: LsmValue,
     {
         self.run_map_operation(
             StorageMode::FlushingCollection(CollectionFlushMode::CommitRegion),
@@ -1722,8 +1723,8 @@ impl<
         MAX_RUNS,
     >
     where
-        K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
-        V: Debug + Serialize + for<'de> Deserialize<'de>,
+        K: LsmKey,
+        V: LsmValue,
     {
         YieldingFlushMapFuture::<
             'a,
@@ -1752,8 +1753,8 @@ impl<
         collection_id: CollectionId,
     ) -> Result<Option<u32>, MapStorageError>
     where
-        K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
-        V: Debug + Serialize + for<'de> Deserialize<'de>,
+        K: LsmKey,
+        V: LsmValue,
     {
         self.compact_map_with_target::<K, V, MAX_INDEXES, MAX_RUNS>(collection_id, REGION_TARGET)
     }
@@ -1764,8 +1765,8 @@ impl<
         region_target: usize,
     ) -> Result<Option<u32>, MapStorageError>
     where
-        K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
-        V: Debug + Serialize + for<'de> Deserialize<'de>,
+        K: LsmKey,
+        V: LsmValue,
     {
         self.invalidate_map_frontier_buffer(collection_id);
         #[cfg(feature = "perf-counters")]
@@ -1903,8 +1904,8 @@ impl<
         buffer: &'a mut [u8],
     ) -> Result<MapFrontier<'a, K, V, MAX_INDEXES, MAX_RUNS>, MapStorageError>
     where
-        K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
-        V: Debug + Serialize + for<'de> Deserialize<'de>,
+        K: LsmKey,
+        V: LsmValue,
     {
         self.enter_mode(StorageMode::LoadingCollection(CollectionLoadMode::Running))
             .map_err(MapStorageError::from)?;
@@ -2403,7 +2404,7 @@ where
             }
         }
         storage.finish_mode();
-        Ok(result?)
+        result
     }
 
     /// Compacts selected committed runs. Having nothing to compact is success.

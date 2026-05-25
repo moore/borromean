@@ -7,6 +7,7 @@ use crate::storage::{StorageRuntime, StorageRuntimeError, StorageVisitError};
 use crate::workspace::StorageWorkspace;
 use crate::{CollectionId, CollectionType, StorageMetadata};
 use core::cell::RefCell;
+use core::cmp::Ordering;
 use core::fmt::Debug;
 use core::marker::PhantomData;
 use core::mem::size_of;
@@ -108,33 +109,156 @@ impl From<postcard::Error> for LsmValueError {
     }
 }
 
+impl From<LsmKeyError> for MapError {
+    fn from(error: LsmKeyError) -> Self {
+        match error {
+            LsmKeyError::BufferTooSmall => Self::BufferTooSmall,
+            LsmKeyError::SerializationError => Self::SerializationError,
+        }
+    }
+}
+
+impl From<LsmValueError> for MapError {
+    fn from(error: LsmValueError) -> Self {
+        match error {
+            LsmValueError::BufferTooSmall => Self::BufferTooSmall,
+            LsmValueError::SerializationError => Self::SerializationError,
+        }
+    }
+}
+
 /// Public key boundary for durable LSM maps.
 ///
-/// The default implementation preserves the current postcard-encoded key
-/// bytes while giving the API a named extension point for future multipart
-/// keys and prefix matching.
+/// Implementations may choose an ordered byte encoding so lookup can compare
+/// stored key bytes without decoding owned key values.
 pub trait LsmKey:
     Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>
 {
     /// Encodes the key into `out` and returns the number of bytes written.
-    fn encode_key(&self, out: &mut [u8]) -> Result<usize, LsmKeyError> {
-        to_slice(self, out)
-            .map(|encoded| encoded.len())
-            .map_err(LsmKeyError::from)
-    }
+    fn encode_key(&self, out: &mut [u8]) -> Result<usize, LsmKeyError>;
 
     /// Decodes a key from the current stable key bytes.
     fn decode_key(bytes: &[u8]) -> Result<Self, LsmKeyError>
     where
+        Self: Sized;
+
+    /// Compares stored key bytes with an owned key.
+    fn compare_encoded_key(encoded: &[u8], key: &Self) -> Result<Ordering, LsmKeyError>
+    where
         Self: Sized,
     {
-        from_bytes(bytes).map_err(LsmKeyError::from)
+        Ok(Self::decode_key(encoded)?.cmp(key))
     }
+
+    /// Whether [`Self::compare_encoded_key`] avoids decoding stored key bytes.
+    const COMPARES_ENCODED_KEY_WITHOUT_DECODE: bool = false;
 }
 
-impl<T> LsmKey for T where
-    T: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>
-{
+macro_rules! impl_unsigned_lsm_key {
+    ($ty:ty) => {
+        impl LsmKey for $ty {
+            fn encode_key(&self, out: &mut [u8]) -> Result<usize, LsmKeyError> {
+                let bytes = self.to_be_bytes();
+                if out.len() < bytes.len() {
+                    return Err(LsmKeyError::BufferTooSmall);
+                }
+                out[..bytes.len()].copy_from_slice(&bytes);
+                Ok(bytes.len())
+            }
+
+            fn decode_key(bytes: &[u8]) -> Result<Self, LsmKeyError> {
+                let array: [u8; size_of::<$ty>()] = bytes
+                    .try_into()
+                    .map_err(|_| LsmKeyError::SerializationError)?;
+                Ok(<$ty>::from_be_bytes(array))
+            }
+
+            fn compare_encoded_key(encoded: &[u8], key: &Self) -> Result<Ordering, LsmKeyError> {
+                let mut key_bytes = [0u8; size_of::<$ty>()];
+                key.encode_key(&mut key_bytes)?;
+                if encoded.len() != key_bytes.len() {
+                    return Err(LsmKeyError::SerializationError);
+                }
+                Ok(encoded.cmp(&key_bytes))
+            }
+
+            const COMPARES_ENCODED_KEY_WITHOUT_DECODE: bool = true;
+        }
+    };
+}
+
+macro_rules! impl_signed_lsm_key {
+    ($ty:ty, $unsigned:ty, $flip:expr) => {
+        impl LsmKey for $ty {
+            fn encode_key(&self, out: &mut [u8]) -> Result<usize, LsmKeyError> {
+                let ordered = ((*self as $unsigned) ^ $flip).to_be_bytes();
+                if out.len() < ordered.len() {
+                    return Err(LsmKeyError::BufferTooSmall);
+                }
+                out[..ordered.len()].copy_from_slice(&ordered);
+                Ok(ordered.len())
+            }
+
+            fn decode_key(bytes: &[u8]) -> Result<Self, LsmKeyError> {
+                let array: [u8; size_of::<$unsigned>()] = bytes
+                    .try_into()
+                    .map_err(|_| LsmKeyError::SerializationError)?;
+                let raw = <$unsigned>::from_be_bytes(array) ^ $flip;
+                Ok(raw as $ty)
+            }
+
+            fn compare_encoded_key(encoded: &[u8], key: &Self) -> Result<Ordering, LsmKeyError> {
+                let mut key_bytes = [0u8; size_of::<$unsigned>()];
+                key.encode_key(&mut key_bytes)?;
+                if encoded.len() != key_bytes.len() {
+                    return Err(LsmKeyError::SerializationError);
+                }
+                Ok(encoded.cmp(&key_bytes))
+            }
+
+            const COMPARES_ENCODED_KEY_WITHOUT_DECODE: bool = true;
+        }
+    };
+}
+
+impl_unsigned_lsm_key!(u8);
+impl_unsigned_lsm_key!(u16);
+impl_unsigned_lsm_key!(u32);
+impl_unsigned_lsm_key!(u64);
+impl_unsigned_lsm_key!(u128);
+
+impl_signed_lsm_key!(i8, u8, 0x80u8);
+impl_signed_lsm_key!(i16, u16, 0x8000u16);
+impl_signed_lsm_key!(i32, u32, 0x8000_0000u32);
+impl_signed_lsm_key!(i64, u64, 0x8000_0000_0000_0000u64);
+impl_signed_lsm_key!(i128, u128, 0x8000_0000_0000_0000_0000_0000_0000_0000u128);
+
+impl LsmKey for bool {
+    fn encode_key(&self, out: &mut [u8]) -> Result<usize, LsmKeyError> {
+        let Some(slot) = out.first_mut() else {
+            return Err(LsmKeyError::BufferTooSmall);
+        };
+        *slot = u8::from(*self);
+        Ok(1)
+    }
+
+    fn decode_key(bytes: &[u8]) -> Result<Self, LsmKeyError> {
+        match bytes {
+            [0] => Ok(false),
+            [1] => Ok(true),
+            _ => Err(LsmKeyError::SerializationError),
+        }
+    }
+
+    fn compare_encoded_key(encoded: &[u8], key: &Self) -> Result<Ordering, LsmKeyError> {
+        let key_byte = u8::from(*key);
+        match encoded {
+            [stored] => Ok(stored.cmp(&key_byte)),
+            _ => Err(LsmKeyError::SerializationError),
+        }
+    }
+
+    const COMPARES_ENCODED_KEY_WITHOUT_DECODE: bool = true;
 }
 
 /// Public value boundary for durable LSM maps.
@@ -187,17 +311,39 @@ const ENTRY_REF_POINTER_SIZE: usize = size_of::<RefType>();
 const ENTRY_REF_SIZE: usize = size_of::<[RefType; 2]>();
 const SNAPSHOT_ENTRY_COUNT_SIZE: usize = size_of::<u32>();
 const SNAPSHOT_ENTRY_BYTES_LEN_SIZE: usize = size_of::<u32>();
+const SNAPSHOT_MAGIC: [u8; 4] = *b"MAP2";
+const SNAPSHOT_MAGIC_SIZE: usize = SNAPSHOT_MAGIC.len();
+const SNAPSHOT_HEADER_SIZE: usize =
+    SNAPSHOT_MAGIC_SIZE + SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE;
 const REGION_SNAPSHOT_LEN_SIZE: usize = size_of::<u32>();
+const ENTRY_KIND_SIZE: usize = size_of::<u8>();
+const ENTRY_KEY_LEN_SIZE: usize = size_of::<u32>();
+const ENTRY_VALUE_LEN_SIZE: usize = size_of::<u32>();
+const ENTRY_HEADER_SIZE: usize = ENTRY_KIND_SIZE + ENTRY_KEY_LEN_SIZE + ENTRY_VALUE_LEN_SIZE;
+const ENTRY_KIND_SET: u8 = 1;
+const ENTRY_KIND_DELETE: u8 = 2;
 
 /// Stable committed-region format identifier for map regions.
-pub const MAP_REGION_V1_FORMAT: u16 = 1;
+pub const MAP_REGION_V2_FORMAT: u16 = 4;
 /// Stable committed-region format identifier for map manifest regions.
-pub const MAP_MANIFEST_V1_FORMAT: u16 = 2;
+pub const MAP_MANIFEST_V2_FORMAT: u16 = 5;
 /// Stable committed-region format identifier for immutable map run segments.
-pub const MAP_RUN_V1_FORMAT: u16 = 3;
+pub const MAP_RUN_V2_FORMAT: u16 = 6;
 /// Snapshot bytes representing an empty map basis.
-pub const EMPTY_MAP_SNAPSHOT: [u8; SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE] =
-    [0u8; SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE];
+pub const EMPTY_MAP_SNAPSHOT: [u8; SNAPSHOT_HEADER_SIZE] = [
+    SNAPSHOT_MAGIC[0],
+    SNAPSHOT_MAGIC[1],
+    SNAPSHOT_MAGIC[2],
+    SNAPSHOT_MAGIC[3],
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+    0,
+];
 
 const RUN_GENERATION_SIZE: usize = size_of::<u64>();
 const RUN_NEXT_REGION_SIZE: usize = size_of::<u32>();
@@ -444,16 +590,22 @@ fn write_u64(buffer: &mut [u8], offset: &mut usize, value: u64) -> Result<(), Ma
 }
 
 fn snapshot_parts(snapshot: &[u8]) -> Result<(usize, usize, usize, usize), MapError> {
-    if snapshot.len() < SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE {
+    if snapshot.len() < SNAPSHOT_HEADER_SIZE {
+        return Err(MapError::SerializationError);
+    }
+    if snapshot[..SNAPSHOT_MAGIC_SIZE] != SNAPSHOT_MAGIC {
         return Err(MapError::SerializationError);
     }
 
     let mut entry_count_bytes = [0u8; SNAPSHOT_ENTRY_COUNT_SIZE];
-    entry_count_bytes.copy_from_slice(&snapshot[..SNAPSHOT_ENTRY_COUNT_SIZE]);
+    let entry_count_offset = SNAPSHOT_MAGIC_SIZE;
+    entry_count_bytes.copy_from_slice(
+        &snapshot[entry_count_offset..entry_count_offset + SNAPSHOT_ENTRY_COUNT_SIZE],
+    );
     let entry_count = usize::try_from(u32::from_le_bytes(entry_count_bytes))
         .map_err(|_| MapError::SerializationError)?;
 
-    let entry_bytes_len_offset = SNAPSHOT_ENTRY_COUNT_SIZE;
+    let entry_bytes_len_offset = SNAPSHOT_MAGIC_SIZE + SNAPSHOT_ENTRY_COUNT_SIZE;
     let mut entry_bytes_len_bytes = [0u8; SNAPSHOT_ENTRY_BYTES_LEN_SIZE];
     entry_bytes_len_bytes.copy_from_slice(
         &snapshot[entry_bytes_len_offset..entry_bytes_len_offset + SNAPSHOT_ENTRY_BYTES_LEN_SIZE],
@@ -461,7 +613,7 @@ fn snapshot_parts(snapshot: &[u8]) -> Result<(usize, usize, usize, usize), MapEr
     let entry_bytes_len = usize::try_from(u32::from_le_bytes(entry_bytes_len_bytes))
         .map_err(|_| MapError::SerializationError)?;
 
-    let entries_offset = SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE;
+    let entries_offset = SNAPSHOT_HEADER_SIZE;
     let refs_start = entries_offset
         .checked_add(entry_bytes_len)
         .ok_or(MapError::SerializationError)?;
@@ -541,10 +693,10 @@ fn snapshot_entry_bytes(snapshot: &[u8], index: usize) -> Result<&[u8], MapError
 
 fn snapshot_entry<K, V>(snapshot: &[u8], index: usize) -> Result<Entry<K, V>, MapError>
 where
-    K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
-    V: Debug + Serialize + for<'de> Deserialize<'de>,
+    K: LsmKey,
+    V: LsmValue,
 {
-    Ok(from_bytes(snapshot_entry_bytes(snapshot, index)?)?)
+    encoded_entry_to_entry(snapshot_entry_bytes(snapshot, index)?)
 }
 
 fn midpoint_index(low_index: usize, high_exclusive: usize) -> Result<usize, MapError> {
@@ -560,8 +712,8 @@ fn midpoint_index(low_index: usize, high_exclusive: usize) -> Result<usize, MapE
 #[cfg_attr(not(test), allow(dead_code))]
 fn lookup_snapshot<K, V>(snapshot: &[u8], key: &K) -> Result<LookupResult<V>, MapError>
 where
-    K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
-    V: Debug + Serialize + for<'de> Deserialize<'de>,
+    K: LsmKey,
+    V: LsmValue,
 {
     let (entry_count, _, _, _) = snapshot_parts(snapshot)?;
     if entry_count == 0 {
@@ -578,16 +730,11 @@ where
         if mid >= high_index {
             return Err(MapError::SerializationError);
         }
-        let entry: Entry<K, V> = snapshot_entry(snapshot, mid)?;
-        match key.cmp(&entry.key) {
-            core::cmp::Ordering::Equal => {
-                return Ok(match entry.value {
-                    Some(value) => LookupResult::Set(value),
-                    None => LookupResult::Deleted,
-                });
-            }
-            core::cmp::Ordering::Less => high_index = mid,
-            core::cmp::Ordering::Greater => {
+        let entry = snapshot_entry_bytes(snapshot, mid)?;
+        match compare_entry_key(entry, key)? {
+            Ordering::Equal => return encoded_entry_lookup_value(entry),
+            Ordering::Greater => high_index = mid,
+            Ordering::Less => {
                 low_index = mid.checked_add(1).ok_or(MapError::SerializationError)?;
             }
         }
@@ -597,16 +744,22 @@ where
 }
 
 fn decode_snapshot_header(snapshot_header: &[u8]) -> Result<(usize, usize), MapError> {
-    if snapshot_header.len() != SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE {
+    if snapshot_header.len() != SNAPSHOT_HEADER_SIZE {
+        return Err(MapError::SerializationError);
+    }
+    if snapshot_header[..SNAPSHOT_MAGIC_SIZE] != SNAPSHOT_MAGIC {
         return Err(MapError::SerializationError);
     }
 
     let mut entry_count_bytes = [0u8; SNAPSHOT_ENTRY_COUNT_SIZE];
-    entry_count_bytes.copy_from_slice(&snapshot_header[..SNAPSHOT_ENTRY_COUNT_SIZE]);
+    let entry_count_offset = SNAPSHOT_MAGIC_SIZE;
+    entry_count_bytes.copy_from_slice(
+        &snapshot_header[entry_count_offset..entry_count_offset + SNAPSHOT_ENTRY_COUNT_SIZE],
+    );
     let entry_count = usize::try_from(u32::from_le_bytes(entry_count_bytes))
         .map_err(|_| MapError::SerializationError)?;
 
-    let entry_bytes_len_offset = SNAPSHOT_ENTRY_COUNT_SIZE;
+    let entry_bytes_len_offset = SNAPSHOT_MAGIC_SIZE + SNAPSHOT_ENTRY_COUNT_SIZE;
     let mut entry_bytes_len_bytes = [0u8; SNAPSHOT_ENTRY_BYTES_LEN_SIZE];
     entry_bytes_len_bytes.copy_from_slice(
         &snapshot_header
@@ -633,6 +786,13 @@ fn decode_entry_ref(ref_bytes: &[u8]) -> Result<EntryRef, MapError> {
     })
 }
 
+#[derive(Debug, Clone, Copy)]
+struct EncodedEntry<'a> {
+    kind: u8,
+    key: &'a [u8],
+    value: Option<&'a [u8]>,
+}
+
 fn checked_add_usize(left: usize, right: usize) -> Result<usize, MapError> {
     left.checked_add(right).ok_or(MapError::SerializationError)
 }
@@ -643,6 +803,183 @@ fn checked_mul_usize(left: usize, right: usize) -> Result<usize, MapError> {
 
 fn ref_to_usize(value: RefType) -> Result<usize, MapError> {
     usize::try_from(value).map_err(|_| MapError::SerializationError)
+}
+
+fn parse_encoded_entry(entry: &[u8]) -> Result<EncodedEntry<'_>, MapError> {
+    if entry.len() < ENTRY_HEADER_SIZE {
+        return Err(MapError::SerializationError);
+    }
+
+    let kind = entry[0];
+    let mut key_len_bytes = [0u8; ENTRY_KEY_LEN_SIZE];
+    key_len_bytes.copy_from_slice(&entry[ENTRY_KIND_SIZE..ENTRY_KIND_SIZE + ENTRY_KEY_LEN_SIZE]);
+    let key_len = usize::try_from(u32::from_le_bytes(key_len_bytes))
+        .map_err(|_| MapError::SerializationError)?;
+
+    let value_len_offset = ENTRY_KIND_SIZE + ENTRY_KEY_LEN_SIZE;
+    let mut value_len_bytes = [0u8; ENTRY_VALUE_LEN_SIZE];
+    value_len_bytes
+        .copy_from_slice(&entry[value_len_offset..value_len_offset + ENTRY_VALUE_LEN_SIZE]);
+    let value_len = usize::try_from(u32::from_le_bytes(value_len_bytes))
+        .map_err(|_| MapError::SerializationError)?;
+
+    let key_start = ENTRY_HEADER_SIZE;
+    let key_end = checked_add_usize(key_start, key_len)?;
+    let value_end = checked_add_usize(key_end, value_len)?;
+    if value_end != entry.len() {
+        return Err(MapError::SerializationError);
+    }
+
+    match kind {
+        ENTRY_KIND_SET => Ok(EncodedEntry {
+            kind,
+            key: &entry[key_start..key_end],
+            value: Some(&entry[key_end..value_end]),
+        }),
+        ENTRY_KIND_DELETE => {
+            if value_len != 0 {
+                return Err(MapError::SerializationError);
+            }
+            Ok(EncodedEntry {
+                kind,
+                key: &entry[key_start..key_end],
+                value: None,
+            })
+        }
+        _ => Err(MapError::SerializationError),
+    }
+}
+
+fn encode_entry_into<K, V>(key: &K, value: Option<&V>, out: &mut [u8]) -> Result<usize, MapError>
+where
+    K: LsmKey,
+    V: LsmValue,
+{
+    if out.len() < ENTRY_HEADER_SIZE {
+        return Err(MapError::BufferTooSmall);
+    }
+
+    let key_start = ENTRY_HEADER_SIZE;
+    let key_len = key.encode_key(&mut out[key_start..])?;
+    let key_end = checked_add_usize(key_start, key_len)?;
+    let value_len = if let Some(value) = value {
+        value.encode_value(&mut out[key_end..])?
+    } else {
+        0
+    };
+    let end = checked_add_usize(key_end, value_len)?;
+
+    out[0] = if value.is_some() {
+        ENTRY_KIND_SET
+    } else {
+        ENTRY_KIND_DELETE
+    };
+    let key_len_u32 = u32::try_from(key_len).map_err(|_| MapError::SerializationError)?;
+    let value_len_u32 = u32::try_from(value_len).map_err(|_| MapError::SerializationError)?;
+    out[ENTRY_KIND_SIZE..ENTRY_KIND_SIZE + ENTRY_KEY_LEN_SIZE]
+        .copy_from_slice(&key_len_u32.to_le_bytes());
+    let value_len_offset = ENTRY_KIND_SIZE + ENTRY_KEY_LEN_SIZE;
+    out[value_len_offset..value_len_offset + ENTRY_VALUE_LEN_SIZE]
+        .copy_from_slice(&value_len_u32.to_le_bytes());
+    Ok(end)
+}
+
+fn encoded_entry_key<K>(entry: &[u8]) -> Result<K, MapError>
+where
+    K: LsmKey,
+{
+    Ok(K::decode_key(parse_encoded_entry(entry)?.key)?)
+}
+
+fn encoded_entry_to_entry<K, V>(entry: &[u8]) -> Result<Entry<K, V>, MapError>
+where
+    K: LsmKey,
+    V: LsmValue,
+{
+    let entry = parse_encoded_entry(entry)?;
+    let key = K::decode_key(entry.key)?;
+    let value = match entry.value {
+        Some(value) => Some(V::decode_value(value)?),
+        None => None,
+    };
+    Ok(Entry { key, value })
+}
+
+fn encoded_entry_lookup_value<V>(entry: &[u8]) -> Result<LookupResult<V>, MapError>
+where
+    V: LsmValue,
+{
+    let entry = parse_encoded_entry(entry)?;
+    match (entry.kind, entry.value) {
+        (ENTRY_KIND_SET, Some(value)) => Ok(LookupResult::Set(V::decode_value(value)?)),
+        (ENTRY_KIND_DELETE, None) => Ok(LookupResult::Deleted),
+        _ => Err(MapError::SerializationError),
+    }
+}
+
+#[cfg(feature = "perf-counters")]
+fn encoded_entry_lookup_value_metered<V>(
+    entry: &[u8],
+    metrics: Option<&mut StoragePerfMetrics>,
+) -> Result<LookupResult<V>, MapError>
+where
+    V: LsmValue,
+{
+    let entry = parse_encoded_entry(entry)?;
+    match (entry.kind, entry.value) {
+        (ENTRY_KIND_SET, Some(value)) => {
+            if let Some(metrics) = metrics {
+                metrics.increment(StoragePerfCounter::ValueDecodes);
+            }
+            Ok(LookupResult::Set(V::decode_value(value)?))
+        }
+        (ENTRY_KIND_DELETE, None) => Ok(LookupResult::Deleted),
+        _ => Err(MapError::SerializationError),
+    }
+}
+
+fn compare_entry_key<K>(entry: &[u8], key: &K) -> Result<Ordering, MapError>
+where
+    K: LsmKey,
+{
+    compare_encoded_key_bytes(parse_encoded_entry(entry)?.key, key)
+}
+
+fn compare_encoded_key_bytes<K>(encoded: &[u8], key: &K) -> Result<Ordering, MapError>
+where
+    K: LsmKey,
+{
+    Ok(K::compare_encoded_key(encoded, key)?)
+}
+
+#[cfg(feature = "perf-counters")]
+fn compare_encoded_key_bytes_metered<K>(
+    encoded: &[u8],
+    key: &K,
+    metrics: Option<&mut StoragePerfMetrics>,
+) -> Result<Ordering, MapError>
+where
+    K: LsmKey,
+{
+    if let Some(metrics) = metrics {
+        metrics.increment(StoragePerfCounter::EncodedKeyComparisons);
+        if !K::COMPARES_ENCODED_KEY_WITHOUT_DECODE {
+            metrics.increment(StoragePerfCounter::KeyDecodesDuringComparison);
+        }
+    }
+    compare_encoded_key_bytes(encoded, key)
+}
+
+#[cfg(feature = "perf-counters")]
+fn compare_entry_key_metered<K>(
+    entry: &[u8],
+    key: &K,
+    metrics: Option<&mut StoragePerfMetrics>,
+) -> Result<Ordering, MapError>
+where
+    K: LsmKey,
+{
+    compare_encoded_key_bytes_metered(parse_encoded_entry(entry)?.key, key, metrics)
 }
 
 #[cfg(test)]
@@ -669,9 +1006,8 @@ fn snapshot_range_len(
             .ok_or(MapError::SerializationError)?;
     }
 
-    SNAPSHOT_ENTRY_COUNT_SIZE
-        .checked_add(SNAPSHOT_ENTRY_BYTES_LEN_SIZE)
-        .and_then(|len| len.checked_add(entry_bytes_len))
+    SNAPSHOT_HEADER_SIZE
+        .checked_add(entry_bytes_len)
         .and_then(|len| len.checked_add(entry_count.checked_mul(ENTRY_REF_SIZE)?))
         .ok_or(MapError::SerializationError)
 }
@@ -689,7 +1025,10 @@ fn encode_snapshot_range_from_snapshot_into(
     }
 
     let entry_count_u32 = u32::try_from(entry_count).map_err(|_| MapError::SerializationError)?;
-    snapshot[..SNAPSHOT_ENTRY_COUNT_SIZE].copy_from_slice(&entry_count_u32.to_le_bytes());
+    snapshot[..SNAPSHOT_MAGIC_SIZE].copy_from_slice(&SNAPSHOT_MAGIC);
+    let entry_count_offset = SNAPSHOT_MAGIC_SIZE;
+    snapshot[entry_count_offset..entry_count_offset + SNAPSHOT_ENTRY_COUNT_SIZE]
+        .copy_from_slice(&entry_count_u32.to_le_bytes());
 
     let refs_len = entry_count
         .checked_mul(ENTRY_REF_SIZE)
@@ -697,7 +1036,7 @@ fn encode_snapshot_range_from_snapshot_into(
     let refs_start = snapshot_len
         .checked_sub(refs_len)
         .ok_or(MapError::SerializationError)?;
-    let entries_offset = SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE;
+    let entries_offset = SNAPSHOT_HEADER_SIZE;
     let mut write_offset = entries_offset;
     let mut compact_offset = ENTRY_COUNT_SIZE;
 
@@ -736,7 +1075,8 @@ fn encode_snapshot_range_from_snapshot_into(
         .ok_or(MapError::SerializationError)?;
     let entry_bytes_len_u32 =
         u32::try_from(entry_bytes_len).map_err(|_| MapError::SerializationError)?;
-    snapshot[SNAPSHOT_ENTRY_COUNT_SIZE..SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE]
+    let entry_bytes_len_offset = SNAPSHOT_MAGIC_SIZE + SNAPSHOT_ENTRY_COUNT_SIZE;
+    snapshot[entry_bytes_len_offset..entry_bytes_len_offset + SNAPSHOT_ENTRY_BYTES_LEN_SIZE]
         .copy_from_slice(&entry_bytes_len_u32.to_le_bytes());
 
     Ok(snapshot_len)
@@ -747,14 +1087,14 @@ fn encode_snapshot_from_entries_into<K, V>(
     snapshot: &mut [u8],
 ) -> Result<usize, MapError>
 where
-    K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize,
-    V: Debug + Serialize,
+    K: LsmKey,
+    V: LsmValue,
 {
     let entry_count = entries.len();
     let refs_len = entry_count
         .checked_mul(ENTRY_REF_SIZE)
         .ok_or(MapError::SerializationError)?;
-    let entries_offset = SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE;
+    let entries_offset = SNAPSHOT_HEADER_SIZE;
     let temp_refs_start = snapshot
         .len()
         .checked_sub(refs_len)
@@ -766,7 +1106,11 @@ where
     let mut write_offset = entries_offset;
     let mut compact_offset = ENTRY_COUNT_SIZE;
     for (index, entry) in entries.iter().enumerate() {
-        let used = to_slice(entry, &mut snapshot[write_offset..temp_refs_start])?.len();
+        let used = encode_entry_into(
+            &entry.key,
+            entry.value.as_ref(),
+            &mut snapshot[write_offset..temp_refs_start],
+        )?;
         let next_write_offset = write_offset
             .checked_add(used)
             .ok_or(MapError::SerializationError)?;
@@ -808,10 +1152,14 @@ where
     }
 
     let entry_count_u32 = u32::try_from(entry_count).map_err(|_| MapError::SerializationError)?;
-    snapshot[..SNAPSHOT_ENTRY_COUNT_SIZE].copy_from_slice(&entry_count_u32.to_le_bytes());
+    snapshot[..SNAPSHOT_MAGIC_SIZE].copy_from_slice(&SNAPSHOT_MAGIC);
+    let entry_count_offset = SNAPSHOT_MAGIC_SIZE;
+    snapshot[entry_count_offset..entry_count_offset + SNAPSHOT_ENTRY_COUNT_SIZE]
+        .copy_from_slice(&entry_count_u32.to_le_bytes());
     let entry_bytes_len_u32 =
         u32::try_from(entry_bytes_len).map_err(|_| MapError::SerializationError)?;
-    snapshot[SNAPSHOT_ENTRY_COUNT_SIZE..SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE]
+    let entry_bytes_len_offset = SNAPSHOT_MAGIC_SIZE + SNAPSHOT_ENTRY_COUNT_SIZE;
+    snapshot[entry_bytes_len_offset..entry_bytes_len_offset + SNAPSHOT_ENTRY_BYTES_LEN_SIZE]
         .copy_from_slice(&entry_bytes_len_u32.to_le_bytes());
 
     Ok(snapshot_len)
@@ -932,15 +1280,15 @@ fn lookup_run_segment_snapshot<K, V, IO: FlashIo>(
     #[cfg(feature = "perf-counters")] mut metrics: Option<&mut StoragePerfMetrics>,
 ) -> Result<LookupResult<V>, MapStorageError>
 where
-    K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
-    V: Debug + Serialize + for<'de> Deserialize<'de>,
+    K: LsmKey,
+    V: LsmValue,
 {
-    let snapshot_header_len = SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE;
+    let snapshot_header_len = SNAPSHOT_HEADER_SIZE;
     let (entry_count, entry_bytes_len) = flash.read_region(
         region_index,
         snapshot_offset,
         snapshot_header_len,
-        |bytes| decode_snapshot_header(bytes),
+        decode_snapshot_header,
     )??;
     if entry_count != expected_entry_count {
         return Err(MapStorageError::Map(MapError::SerializationError));
@@ -1011,23 +1359,34 @@ where
         let entry_len = entry_end_in_snapshot
             .checked_sub(entry_start_in_snapshot)
             .ok_or(MapStorageError::Map(MapError::SerializationError))?;
-        let entry: Entry<K, V> =
-            flash.read_region(region_index, entry_offset, entry_len, |bytes| {
-                from_bytes(bytes).map_err(MapError::from)
-            })??;
+        let entry_order = flash.read_region(region_index, entry_offset, entry_len, |bytes| {
+            #[cfg(feature = "perf-counters")]
+            {
+                compare_entry_key_metered(bytes, key, metrics.as_deref_mut())
+            }
+            #[cfg(not(feature = "perf-counters"))]
+            {
+                compare_entry_key(bytes, key)
+            }
+        })??;
         #[cfg(feature = "perf-counters")]
         if let Some(metrics) = metrics.as_deref_mut() {
             metrics.increment(StoragePerfCounter::CommittedRunEntryReads);
         }
-        match key.cmp(&entry.key) {
-            core::cmp::Ordering::Equal => {
-                return Ok(match entry.value {
-                    Some(value) => LookupResult::Set(value),
-                    None => LookupResult::Deleted,
-                });
+        match entry_order {
+            Ordering::Equal => {
+                return flash.read_region(region_index, entry_offset, entry_len, |bytes| {
+                    #[cfg(feature = "perf-counters")]
+                    {
+                        encoded_entry_lookup_value_metered(bytes, metrics)
+                            .map_err(MapStorageError::Map)
+                    }
+                    #[cfg(not(feature = "perf-counters"))]
+                    encoded_entry_lookup_value(bytes).map_err(MapStorageError::Map)
+                })?;
             }
-            core::cmp::Ordering::Less => high_index = mid,
-            core::cmp::Ordering::Greater => {
+            Ordering::Greater => high_index = mid,
+            Ordering::Less => {
                 low_index = mid.checked_add(1).ok_or(MapError::SerializationError)?;
             }
         }
@@ -1069,7 +1428,7 @@ fn encode_manifest_descriptor<K>(
     run: &MapRunDescriptor<K>,
 ) -> Result<(), MapError>
 where
-    K: Serialize,
+    K: LsmKey,
 {
     write_u64(manifest_payload, offset, run.generation)?;
     write_u32(manifest_payload, offset, run.first_region)?;
@@ -1082,7 +1441,7 @@ where
     write_u32(manifest_payload, offset, 0)?;
 
     let lower_len = if let Some(key) = run.lower_key.as_ref() {
-        let used = to_slice(key, &mut manifest_payload[*offset..])?.len();
+        let used = key.encode_key(&mut manifest_payload[*offset..])?;
         *offset = (*offset)
             .checked_add(used)
             .ok_or(MapError::SerializationError)?;
@@ -1091,7 +1450,7 @@ where
         0
     };
     let upper_len = if let Some(key) = run.upper_key.as_ref() {
-        let used = to_slice(key, &mut manifest_payload[*offset..])?.len();
+        let used = key.encode_key(&mut manifest_payload[*offset..])?;
         *offset = (*offset)
             .checked_add(used)
             .ok_or(MapError::SerializationError)?;
@@ -1119,7 +1478,7 @@ fn encode_run_segment_with_snapshot_writer<K, F>(
     write_snapshot: F,
 ) -> Result<usize, MapError>
 where
-    K: Serialize,
+    K: LsmKey,
     F: FnOnce(&mut [u8]) -> Result<usize, MapError>,
 {
     if run_payload.get(..RUN_SEGMENT_FIXED_SIZE).is_none() {
@@ -1127,11 +1486,11 @@ where
     }
 
     let mut offset = RUN_SEGMENT_FIXED_SIZE;
-    let lower_len = to_slice(lower_key, &mut run_payload[offset..])?.len();
+    let lower_len = lower_key.encode_key(&mut run_payload[offset..])?;
     offset = offset
         .checked_add(lower_len)
         .ok_or(MapError::SerializationError)?;
-    let upper_len = to_slice(upper_key, &mut run_payload[offset..])?.len();
+    let upper_len = upper_key.encode_key(&mut run_payload[offset..])?;
     offset = offset
         .checked_add(upper_len)
         .ok_or(MapError::SerializationError)?;
@@ -1177,8 +1536,8 @@ fn encode_run_segment_from_entries_into<K, V>(
     entries: &[Entry<K, V>],
 ) -> Result<usize, MapError>
 where
-    K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize,
-    V: Debug + Serialize,
+    K: LsmKey,
+    V: LsmValue,
 {
     let lower = entries.first().ok_or(MapError::SerializationError)?;
     let upper = entries.last().ok_or(MapError::SerializationError)?;
@@ -1268,6 +1627,7 @@ impl EntryCount {
         self.0 += 1;
     }
 
+    #[allow(dead_code)]
     fn decode(bytes: [u8; ENTRY_COUNT_SIZE]) -> Self {
         Self(u32::from_le_bytes(bytes))
     }
@@ -1383,8 +1743,8 @@ enum RunChainOrder {
 
 struct RunEntryCursor<K, V>
 where
-    K: Debug + Ord + PartialOrd + Eq + PartialEq,
-    V: Debug,
+    K: LsmKey,
+    V: LsmValue,
 {
     generation: u64,
     first_region: u32,
@@ -1399,8 +1759,8 @@ where
 
 impl<K, V> RunEntryCursor<K, V>
 where
-    K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
-    V: Debug + Serialize + for<'de> Deserialize<'de>,
+    K: LsmKey,
+    V: LsmValue,
 {
     fn new(run: &MapRunDescriptor<K>) -> Result<Self, MapStorageError> {
         if run.region_count == 0 {
@@ -1460,7 +1820,7 @@ where
                     region_index,
                 });
             }
-            if header.collection_format != MAP_RUN_V1_FORMAT {
+            if header.collection_format != MAP_RUN_V2_FORMAT {
                 return Err(MapStorageError::InvalidRun {
                     collection_id,
                     region_index,
@@ -1626,8 +1986,8 @@ where
 
 impl<K, V, const MAX_INDEXES: usize> CompactionRunWriter<K, V, MAX_INDEXES>
 where
-    K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
-    V: Debug + Serialize + for<'de> Deserialize<'de>,
+    K: LsmKey,
+    V: LsmValue,
 {
     fn new(generation: u64) -> Self {
         Self {
@@ -1812,7 +2172,7 @@ where
                 flash,
                 region_index,
                 collection_id,
-                MAP_RUN_V1_FORMAT,
+                MAP_RUN_V2_FORMAT,
                 &payload[..used],
             )?;
         }
@@ -1852,7 +2212,7 @@ fn read_run_segment_bounds<K, const REGION_SIZE: usize, IO: FlashIo>(
     region_index: u32,
 ) -> Result<(K, K), MapStorageError>
 where
-    K: Debug + Ord + PartialOrd + Eq + PartialEq + for<'de> Deserialize<'de>,
+    K: LsmKey,
 {
     let (region_bytes, _) = workspace.scan_buffers();
     flash.read_region(region_index, 0, region_bytes.len(), |bytes| {
@@ -1865,7 +2225,7 @@ where
             region_index,
         });
     }
-    if header.collection_format != MAP_RUN_V1_FORMAT {
+    if header.collection_format != MAP_RUN_V2_FORMAT {
         return Err(MapStorageError::InvalidRun {
             collection_id,
             region_index,
@@ -1888,8 +2248,8 @@ where
     }
 
     Ok((
-        from_bytes(view.lower_key).map_err(MapError::from)?,
-        from_bytes(view.upper_key).map_err(MapError::from)?,
+        K::decode_key(view.lower_key).map_err(MapError::from)?,
+        K::decode_key(view.upper_key).map_err(MapError::from)?,
     ))
 }
 
@@ -1911,7 +2271,7 @@ fn read_run_segment_next_region<const REGION_SIZE: usize, IO: FlashIo>(
             region_index,
         });
     }
-    if header.collection_format != MAP_RUN_V1_FORMAT {
+    if header.collection_format != MAP_RUN_V2_FORMAT {
         return Err(MapStorageError::InvalidRun {
             collection_id,
             region_index,
@@ -1939,8 +2299,8 @@ fn read_run_segment_next_region<const REGION_SIZE: usize, IO: FlashIo>(
 impl<'a, K, V, const MAX_INDEXES: usize, const MAX_RUNS: usize>
     MapFrontier<'a, K, V, MAX_INDEXES, MAX_RUNS>
 where
-    K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
-    V: Debug + Serialize + for<'de> Deserialize<'de>,
+    K: LsmKey,
+    V: LsmValue,
 {
     /// Creates a new empty map frontier over `buffer`.
     pub fn new(id: CollectionId, buffer: &'a mut [u8]) -> Result<Self, MapError> {
@@ -2003,8 +2363,8 @@ where
     /// Inserts or replaces a key with the supplied value.
     pub fn set(&mut self, key: K, value: V) -> Result<(), MapError>
     where
-        K: Ord + PartialOrd + Eq + PartialEq + Serialize + for<'d> Deserialize<'d>,
-        V: Serialize + for<'d> Deserialize<'d>,
+        K: LsmKey,
+        V: LsmValue,
     {
         self.set_worker(key, Some(value))
     }
@@ -2012,32 +2372,32 @@ where
     /// Deletes a key from the logical map.
     pub fn delete(&mut self, key: K) -> Result<(), MapError>
     where
-        K: Ord + PartialOrd + Eq + PartialEq + Serialize + for<'d> Deserialize<'d>,
+        K: LsmKey,
+        V: LsmValue,
     {
         self.set_worker(key, None)
     }
 
     fn set_worker(&mut self, key: K, value: Option<V>) -> Result<(), MapError>
     where
-        K: Ord + PartialOrd + Eq + PartialEq + Serialize + for<'d> Deserialize<'d>,
-        V: Serialize + for<'d> Deserialize<'d>,
+        K: LsmKey,
+        V: LsmValue,
     {
         let search_result = self.find_index(&key)?;
-        let entry = Entry { key, value };
 
         match search_result {
             SearchResult::Found(index) => {
                 // Updating in place is a possible space optimization, but the
                 // current format keeps append-only entry payloads until the
                 // next snapshot/flush compacts them.
-                let (start, end) = self.add_entry(&entry)?;
+                let (start, end) = self.add_entry(&key, value.as_ref())?;
 
                 EntryRef::write(self.map, index, start, end)?;
 
                 self.next_record_offset = end;
             }
             SearchResult::NotFound(index) => {
-                let (start, end) = self.add_entry(&entry)?;
+                let (start, end) = self.add_entry(&key, value.as_ref())?;
                 if index == self.next_record_index {
                     EntryRef::write(self.map, index, start, end)?;
                 } else {
@@ -2068,24 +2428,41 @@ where
     /// newest frontier entry is a delete tombstone. Use [`Self::get`] for full
     /// storage-backed map visibility.
     pub fn get_frontier(&self, key: &K) -> Result<Option<V>, MapError> {
-        match self.lookup_frontier(key)? {
+        match self.lookup_frontier(
+            key,
+            #[cfg(feature = "perf-counters")]
+            None,
+        )? {
             LookupResult::NotFound | LookupResult::Deleted => Ok(None),
             LookupResult::Set(value) => Ok(Some(value)),
         }
     }
 
-    fn lookup_frontier(&self, key: &K) -> Result<LookupResult<V>, MapError> {
-        let search_result = self.find_index(key)?;
+    fn lookup_frontier(
+        &self,
+        key: &K,
+        #[cfg(feature = "perf-counters")] mut metrics: Option<&mut StoragePerfMetrics>,
+    ) -> Result<LookupResult<V>, MapError> {
+        let search_result = self.find_index_inner(
+            key,
+            #[cfg(feature = "perf-counters")]
+            metrics.as_deref_mut(),
+        )?;
         match search_result {
             SearchResult::NotFound(_) => Ok(LookupResult::NotFound),
             SearchResult::Found(index) => {
                 let entry_ref = EntryRef::read(self.map, index)?;
-                let entry: Entry<K, V> =
-                    from_bytes(&self.map[entry_ref.start as usize..entry_ref.end as usize])?;
-                Ok(match entry.value {
-                    Some(value) => LookupResult::Set(value),
-                    None => LookupResult::Deleted,
-                })
+                #[cfg(feature = "perf-counters")]
+                {
+                    encoded_entry_lookup_value_metered(
+                        &self.map[entry_ref.start as usize..entry_ref.end as usize],
+                        metrics,
+                    )
+                }
+                #[cfg(not(feature = "perf-counters"))]
+                encoded_entry_lookup_value(
+                    &self.map[entry_ref.start as usize..entry_ref.end as usize],
+                )
             }
         }
     }
@@ -2124,7 +2501,11 @@ where
         key: &K,
         #[cfg(feature = "perf-counters")] mut metrics: Option<&mut StoragePerfMetrics>,
     ) -> Result<Option<V>, MapStorageError> {
-        match self.lookup_frontier(key)? {
+        match self.lookup_frontier(
+            key,
+            #[cfg(feature = "perf-counters")]
+            metrics.as_deref_mut(),
+        )? {
             LookupResult::Set(value) => return Ok(Some(value)),
             LookupResult::Deleted => return Ok(None),
             LookupResult::NotFound => {}
@@ -2248,7 +2629,7 @@ where
                     region_index,
                 });
             }
-            if header.collection_format != MAP_RUN_V1_FORMAT {
+            if header.collection_format != MAP_RUN_V2_FORMAT {
                 return Err(MapStorageError::InvalidRun {
                     collection_id: self.id,
                     region_index,
@@ -2279,26 +2660,43 @@ where
                 });
             }
 
-            let (lower_key, upper_key): (K, K) = flash.read_region(
+            let (lower_order, upper_order) = flash.read_region(
                 region_index,
                 bounds_offset,
                 bounds_len,
-                |bytes| -> Result<(K, K), MapStorageError> {
+                |bytes| -> Result<(Ordering, Ordering), MapStorageError> {
                     let lower_end = segment.lower_key_len;
-                    let lower_key = from_bytes(&bytes[..lower_end]).map_err(MapError::from)?;
-                    let upper_key = from_bytes(&bytes[lower_end..]).map_err(MapError::from)?;
-                    Ok((lower_key, upper_key))
+                    #[cfg(feature = "perf-counters")]
+                    {
+                        let lower_order = compare_encoded_key_bytes_metered(
+                            &bytes[..lower_end],
+                            key,
+                            metrics.as_deref_mut(),
+                        )?;
+                        let upper_order = compare_encoded_key_bytes_metered(
+                            &bytes[lower_end..],
+                            key,
+                            metrics.as_deref_mut(),
+                        )?;
+                        Ok((lower_order, upper_order))
+                    }
+                    #[cfg(not(feature = "perf-counters"))]
+                    {
+                        let lower_order = compare_encoded_key_bytes(&bytes[..lower_end], key)?;
+                        let upper_order = compare_encoded_key_bytes(&bytes[lower_end..], key)?;
+                        Ok((lower_order, upper_order))
+                    }
                 },
             )??;
             #[cfg(feature = "perf-counters")]
             if let Some(metrics) = metrics.as_deref_mut() {
                 metrics.increment(StoragePerfCounter::CommittedRunBoundsReads);
             }
-            if key < &lower_key {
+            if lower_order == Ordering::Greater {
                 current_region = segment.next_region;
                 continue;
             }
-            if key > &upper_key {
+            if upper_order == Ordering::Less {
                 current_region = segment.next_region;
                 continue;
             }
@@ -2596,7 +2994,7 @@ where
                             region_index,
                         });
                     }
-                    if header.collection_format != MAP_RUN_V1_FORMAT {
+                    if header.collection_format != MAP_RUN_V2_FORMAT {
                         return Err(MapStorageError::InvalidRun {
                             collection_id: self.id,
                             region_index,
@@ -2628,14 +3026,22 @@ where
         Ok(())
     }
 
-    fn add_entry(&mut self, entry: &Entry<K, V>) -> Result<(RecordOffset, RecordOffset), MapError> {
+    fn add_entry(
+        &mut self,
+        key: &K,
+        value: Option<&V>,
+    ) -> Result<(RecordOffset, RecordOffset), MapError>
+    where
+        K: LsmKey,
+        V: LsmValue,
+    {
         let start = self.next_record_offset;
         let index_offset = self.next_record_index.offset(self.map)?;
         if start.0 >= index_offset {
             return Err(MapError::BufferTooSmall);
         }
         let buf = &mut self.map[start.0..index_offset];
-        let used = to_slice(&entry, buf)?.len();
+        let used = encode_entry_into(key, value, buf)?;
 
         let mut end = start;
 
@@ -2657,9 +3063,8 @@ where
                 .checked_add(encoded_len)
                 .ok_or(MapError::SerializationError)?;
         }
-        SNAPSHOT_ENTRY_COUNT_SIZE
-            .checked_add(SNAPSHOT_ENTRY_BYTES_LEN_SIZE)
-            .and_then(|len| len.checked_add(entry_bytes_len))
+        SNAPSHOT_HEADER_SIZE
+            .checked_add(entry_bytes_len)
             .and_then(|len| len.checked_add(entry_count.checked_mul(ENTRY_REF_SIZE)?))
             .ok_or(MapError::SerializationError)
     }
@@ -2678,8 +3083,11 @@ where
             return Err(MapError::BufferTooSmall);
         }
 
+        snapshot[..SNAPSHOT_MAGIC_SIZE].copy_from_slice(&SNAPSHOT_MAGIC);
         let entry_count_bytes = self.record_count.0.to_le_bytes();
-        snapshot[..SNAPSHOT_ENTRY_COUNT_SIZE].copy_from_slice(&entry_count_bytes);
+        let entry_count_offset = SNAPSHOT_MAGIC_SIZE;
+        snapshot[entry_count_offset..entry_count_offset + SNAPSHOT_ENTRY_COUNT_SIZE]
+            .copy_from_slice(&entry_count_bytes);
 
         let entry_count =
             usize::try_from(self.record_count.0).map_err(|_| MapError::SerializationError)?;
@@ -2691,7 +3099,7 @@ where
             .ok_or(MapError::SerializationError)?;
         let mut entry_bytes_len = 0usize;
         let mut compact_offset = ENTRY_COUNT_SIZE;
-        let entries_offset = SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE;
+        let entries_offset = SNAPSHOT_HEADER_SIZE;
         let mut write_offset = entries_offset;
 
         for index in 0..entry_count {
@@ -2732,7 +3140,7 @@ where
 
         let entry_bytes_len_u32 =
             u32::try_from(entry_bytes_len).map_err(|_| MapError::SerializationError)?;
-        let entry_bytes_len_offset = SNAPSHOT_ENTRY_COUNT_SIZE;
+        let entry_bytes_len_offset = SNAPSHOT_MAGIC_SIZE + SNAPSHOT_ENTRY_COUNT_SIZE;
         snapshot[entry_bytes_len_offset..entry_bytes_len_offset + SNAPSHOT_ENTRY_BYTES_LEN_SIZE]
             .copy_from_slice(&entry_bytes_len_u32.to_le_bytes());
         snapshot.copy_within(
@@ -2771,9 +3179,8 @@ where
                 .ok_or(MapError::SerializationError)?;
         }
 
-        SNAPSHOT_ENTRY_COUNT_SIZE
-            .checked_add(SNAPSHOT_ENTRY_BYTES_LEN_SIZE)
-            .and_then(|len| len.checked_add(entry_bytes_len))
+        SNAPSHOT_HEADER_SIZE
+            .checked_add(entry_bytes_len)
             .and_then(|len| len.checked_add(entry_count.checked_mul(ENTRY_REF_SIZE)?))
             .ok_or(MapError::SerializationError)
     }
@@ -2791,7 +3198,10 @@ where
 
         let entry_count_u32 =
             u32::try_from(entry_count).map_err(|_| MapError::SerializationError)?;
-        snapshot[..SNAPSHOT_ENTRY_COUNT_SIZE].copy_from_slice(&entry_count_u32.to_le_bytes());
+        snapshot[..SNAPSHOT_MAGIC_SIZE].copy_from_slice(&SNAPSHOT_MAGIC);
+        let entry_count_offset = SNAPSHOT_MAGIC_SIZE;
+        snapshot[entry_count_offset..entry_count_offset + SNAPSHOT_ENTRY_COUNT_SIZE]
+            .copy_from_slice(&entry_count_u32.to_le_bytes());
 
         let refs_len = entry_count
             .checked_mul(ENTRY_REF_SIZE)
@@ -2801,7 +3211,7 @@ where
             .ok_or(MapError::SerializationError)?;
         let mut entry_bytes_len = 0usize;
         let mut compact_offset = ENTRY_COUNT_SIZE;
-        let entries_offset = SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE;
+        let entries_offset = SNAPSHOT_HEADER_SIZE;
         let mut write_offset = entries_offset;
 
         for (target_index, source_index) in (start_index..start_index + entry_count).enumerate() {
@@ -2842,8 +3252,8 @@ where
 
         let entry_bytes_len_u32 =
             u32::try_from(entry_bytes_len).map_err(|_| MapError::SerializationError)?;
-        snapshot
-            [SNAPSHOT_ENTRY_COUNT_SIZE..SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE]
+        let entry_bytes_len_offset = SNAPSHOT_MAGIC_SIZE + SNAPSHOT_ENTRY_COUNT_SIZE;
+        snapshot[entry_bytes_len_offset..entry_bytes_len_offset + SNAPSHOT_ENTRY_BYTES_LEN_SIZE]
             .copy_from_slice(&entry_bytes_len_u32.to_le_bytes());
         snapshot.copy_within(
             refs_staging_start..snapshot_len,
@@ -2857,7 +3267,7 @@ where
         let entry_ref = EntryRef::read(self.map, RecordIndex::new(index))?;
         let start = ref_to_usize(entry_ref.start)?;
         let end = ref_to_usize(entry_ref.end)?;
-        Ok(from_bytes(&self.map[start..end])?)
+        encoded_entry_to_entry(&self.map[start..end])
     }
 
     /// Encodes a committed-region payload into `region_payload`.
@@ -2879,39 +3289,13 @@ where
 
     /// Loads a compact snapshot payload into this frontier.
     pub fn load_snapshot(&mut self, snapshot: &[u8]) -> Result<(), MapError> {
-        if snapshot.len() < SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE {
-            return Err(MapError::SerializationError);
-        }
-
-        let mut entry_count_bytes = [0u8; SNAPSHOT_ENTRY_COUNT_SIZE];
-        entry_count_bytes.copy_from_slice(&snapshot[..SNAPSHOT_ENTRY_COUNT_SIZE]);
-        let record_count = EntryCount::decode(entry_count_bytes);
-        let entry_count =
-            usize::try_from(record_count.0).map_err(|_| MapError::SerializationError)?;
-
-        let mut entry_bytes_len_bytes = [0u8; SNAPSHOT_ENTRY_BYTES_LEN_SIZE];
-        let entry_bytes_len_offset = SNAPSHOT_ENTRY_COUNT_SIZE;
-        entry_bytes_len_bytes.copy_from_slice(
-            &snapshot
-                [entry_bytes_len_offset..entry_bytes_len_offset + SNAPSHOT_ENTRY_BYTES_LEN_SIZE],
-        );
-        let entry_bytes_len = usize::try_from(u32::from_le_bytes(entry_bytes_len_bytes))
-            .map_err(|_| MapError::SerializationError)?;
-
-        let expected_len = SNAPSHOT_ENTRY_COUNT_SIZE
-            .checked_add(SNAPSHOT_ENTRY_BYTES_LEN_SIZE)
-            .and_then(|len| len.checked_add(entry_bytes_len))
-            .and_then(|len| len.checked_add(entry_count.checked_mul(ENTRY_REF_SIZE)?))
-            .ok_or(MapError::SerializationError)?;
-        if snapshot.len() != expected_len {
-            return Err(MapError::SerializationError);
-        }
+        let (entry_count, entry_bytes_len, entries_offset, refs_start) = snapshot_parts(snapshot)?;
+        let record_count =
+            EntryCount(u32::try_from(entry_count).map_err(|_| MapError::SerializationError)?);
 
         let next_record_offset = ENTRY_COUNT_SIZE
             .checked_add(entry_bytes_len)
             .ok_or(MapError::SerializationError)?;
-        let refs_start =
-            SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE + entry_bytes_len;
         let index_bytes = entry_count
             .checked_mul(ENTRY_REF_SIZE)
             .ok_or(MapError::SerializationError)?;
@@ -2927,9 +3311,8 @@ where
 
         self.map.fill(0);
         record_count.write(self.map);
-        self.map[ENTRY_COUNT_SIZE..next_record_offset].copy_from_slice(
-            &snapshot[SNAPSHOT_ENTRY_COUNT_SIZE + SNAPSHOT_ENTRY_BYTES_LEN_SIZE..refs_start],
-        );
+        self.map[ENTRY_COUNT_SIZE..next_record_offset]
+            .copy_from_slice(&snapshot[entries_offset..refs_start]);
         for index in 0..entry_count {
             let ref_offset = refs_start + index * ENTRY_REF_SIZE;
             let mut start_bytes = [0u8; ENTRY_REF_POINTER_SIZE];
@@ -3049,12 +3432,15 @@ where
             let lower_key = if lower_key_len == 0 {
                 None
             } else {
-                Some(from_bytes(&manifest_payload[offset..lower_end]).map_err(MapError::from)?)
+                Some(K::decode_key(&manifest_payload[offset..lower_end]).map_err(MapError::from)?)
             };
             let upper_key = if upper_key_len == 0 {
                 None
             } else {
-                Some(from_bytes(&manifest_payload[lower_end..upper_end]).map_err(MapError::from)?)
+                Some(
+                    K::decode_key(&manifest_payload[lower_end..upper_end])
+                        .map_err(MapError::from)?,
+                )
             };
             offset = upper_end;
 
@@ -3222,18 +3608,30 @@ where
                 }
             }
 
-            let entry: Entry<K, V> = from_bytes(&self.map[start..end])?;
+            let key: K = encoded_entry_key(&self.map[start..end])?;
             if let Some(previous) = previous_key.as_ref() {
-                if entry.key.cmp(previous) != core::cmp::Ordering::Greater {
+                if key.cmp(previous) != Ordering::Greater {
                     return Err(MapError::SerializationError);
                 }
             }
-            previous_key = Some(entry.key);
+            previous_key = Some(key);
         }
         Ok(())
     }
 
     fn find_index(&self, key: &K) -> Result<SearchResult, MapError> {
+        self.find_index_inner(
+            key,
+            #[cfg(feature = "perf-counters")]
+            None,
+        )
+    }
+
+    fn find_index_inner(
+        &self,
+        key: &K,
+        #[cfg(feature = "perf-counters")] mut metrics: Option<&mut StoragePerfMetrics>,
+    ) -> Result<SearchResult, MapError> {
         let entry_count =
             usize::try_from(self.record_count.0).map_err(|_| MapError::SerializationError)?;
         let mut low_index = 0usize;
@@ -3247,12 +3645,15 @@ where
                 return Err(MapError::SerializationError);
             }
             let entry_ref = EntryRef::read(self.map, RecordIndex::new(mid))?;
-            let entry: Entry<K, V> =
-                from_bytes(&self.map[entry_ref.start as usize..entry_ref.end as usize])?;
-            match key.cmp(&entry.key) {
-                core::cmp::Ordering::Equal => return Ok(SearchResult::Found(RecordIndex(mid))),
-                core::cmp::Ordering::Less => high_index = mid,
-                core::cmp::Ordering::Greater => {
+            let entry = &self.map[entry_ref.start as usize..entry_ref.end as usize];
+            #[cfg(feature = "perf-counters")]
+            let ordering = compare_entry_key_metered(entry, key, metrics.as_deref_mut())?;
+            #[cfg(not(feature = "perf-counters"))]
+            let ordering = compare_entry_key(entry, key)?;
+            match ordering {
+                Ordering::Equal => return Ok(SearchResult::Found(RecordIndex(mid))),
+                Ordering::Greater => high_index = mid,
+                Ordering::Less => {
                     low_index = mid.checked_add(1).ok_or(MapError::SerializationError)?;
                 }
             }
@@ -3474,7 +3875,7 @@ where
                     flash,
                     region_index,
                     self.id,
-                    MAP_RUN_V1_FORMAT,
+                    MAP_RUN_V2_FORMAT,
                     &payload[..used],
                 )?;
             }
@@ -3565,7 +3966,7 @@ where
                     flash,
                     region_index,
                     self.id,
-                    MAP_RUN_V1_FORMAT,
+                    MAP_RUN_V2_FORMAT,
                     &payload[..used],
                 )?;
             }
@@ -3644,7 +4045,7 @@ where
                 flash,
                 manifest_region,
                 self.id,
-                MAP_MANIFEST_V1_FORMAT,
+                MAP_MANIFEST_V2_FORMAT,
                 &payload[..used],
             )?;
         }
@@ -3761,7 +4162,7 @@ where
                 flash,
                 manifest_region,
                 self.id,
-                MAP_MANIFEST_V1_FORMAT,
+                MAP_MANIFEST_V2_FORMAT,
                 &payload[..used],
             )?;
         }
@@ -4084,7 +4485,7 @@ where
         }
 
         #[cfg(feature = "perf-counters")]
-        let visit_result = match metrics.as_deref_mut() {
+        let visit_result = match metrics {
             Some(metrics) => visit_wal_records_for_map!(metered metrics),
             None => visit_wal_records_for_map!(plain),
         };
@@ -4115,8 +4516,8 @@ fn load_map_basis_from_flash<
     map: &mut MapFrontier<'_, K, V, MAX_INDEXES, MAX_RUNS>,
 ) -> Result<(), MapStorageError>
 where
-    K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
-    V: Debug + Serialize + for<'de> Deserialize<'de>,
+    K: LsmKey,
+    V: LsmValue,
 {
     let region_slice = basis_scratch
         .get_mut(..REGION_SIZE)
@@ -4131,14 +4532,14 @@ where
     }
 
     match header.collection_format {
-        MAP_REGION_V1_FORMAT => {
+        MAP_REGION_V2_FORMAT => {
             return Err(MapStorageError::UnsupportedRegionFormat {
                 collection_id,
                 region_index,
-                actual: MAP_REGION_V1_FORMAT,
+                actual: MAP_REGION_V2_FORMAT,
             });
         }
-        MAP_MANIFEST_V1_FORMAT => {
+        MAP_MANIFEST_V2_FORMAT => {
             map.load_manifest_descriptors(payload, collection_id, region_index)?;
         }
         actual => {
@@ -4166,14 +4567,14 @@ pub(crate) fn map_head_region_references_region<const REGION_SIZE: usize, IO: Fl
     if header.collection_id != collection_id {
         return Err(MapStorageError::UnknownCollection(collection_id));
     }
-    if header.collection_format == MAP_REGION_V1_FORMAT {
+    if header.collection_format == MAP_REGION_V2_FORMAT {
         return Err(MapStorageError::UnsupportedRegionFormat {
             collection_id,
             region_index: head_region,
-            actual: MAP_REGION_V1_FORMAT,
+            actual: MAP_REGION_V2_FORMAT,
         });
     }
-    if header.collection_format != MAP_MANIFEST_V1_FORMAT {
+    if header.collection_format != MAP_MANIFEST_V2_FORMAT {
         return Err(MapStorageError::UnsupportedRegionFormat {
             collection_id,
             region_index: head_region,
@@ -4251,7 +4652,7 @@ pub(crate) fn map_head_region_references_region<const REGION_SIZE: usize, IO: Fl
                     region_index,
                 });
             }
-            if run_header.collection_format != MAP_RUN_V1_FORMAT {
+            if run_header.collection_format != MAP_RUN_V2_FORMAT {
                 return Err(MapStorageError::InvalidRun {
                     collection_id,
                     region_index,

@@ -551,8 +551,8 @@ fn requirement_wal_and_map_regions_use_distinct_collection_format_namespace_valu
     assert_eq!(wal_header.collection_id, CollectionId(0));
     assert_eq!(wal_header.collection_format, WAL_V1_FORMAT);
     assert_eq!(map_header.collection_id, CollectionId(43));
-    assert_eq!(map_header.collection_format, MAP_MANIFEST_V1_FORMAT);
-    assert_ne!(MAP_MANIFEST_V1_FORMAT, WAL_V1_FORMAT);
+    assert_eq!(map_header.collection_format, MAP_MANIFEST_V2_FORMAT);
+    assert_ne!(MAP_MANIFEST_V2_FORMAT, WAL_V1_FORMAT);
     assert!(map_header.collection_format > 0);
 }
 
@@ -1069,7 +1069,7 @@ fn requirement_storage_reclaim_wal_head_blocks_on_live_staged_region() {
                 flash,
                 staged_region,
                 CollectionId(31),
-                MAP_REGION_V1_FORMAT,
+                MAP_REGION_V2_FORMAT,
                 &[1, 2, 3],
             )
         })

@@ -712,7 +712,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         )?;
         if collection_id != CollectionId(0) {
             if collection_type == CollectionType::MAP_CODE
-                && header.collection_format == crate::MAP_MANIFEST_V1_FORMAT
+                && header.collection_format == crate::MAP_MANIFEST_V2_FORMAT
             {
                 self.staged_regions.clear();
             }
@@ -774,7 +774,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         )?;
         if collection_id != CollectionId(0) {
             if collection_type == CollectionType::MAP_CODE
-                && header.collection_format == crate::MAP_MANIFEST_V1_FORMAT
+                && header.collection_format == crate::MAP_MANIFEST_V2_FORMAT
             {
                 self.staged_regions.clear();
             }
@@ -1059,7 +1059,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         &mut self,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
-        #[cfg(feature = "perf-counters")] mut metrics: Option<&mut StoragePerfMetrics>,
+        #[cfg(feature = "perf-counters")] metrics: Option<&mut StoragePerfMetrics>,
     ) -> Result<u32, StorageRuntimeError> {
         let mut plan = self.prepare_wal_head_reclaim::<REGION_SIZE, IO>(flash, workspace)?;
         let mut source_regions = self
@@ -1095,7 +1095,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
             workspace,
             &plan,
             #[cfg(feature = "perf-counters")]
-            metrics.as_deref_mut(),
+            metrics,
         )?;
         self.commit_wal_head_reclaim::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace, new_head)?;
         for region_index in source_regions.iter().copied() {

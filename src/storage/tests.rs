@@ -188,7 +188,7 @@ fn committed_region_sequence_progress() -> CommittedRegionSequenceProgress {
             &mut flash,
             first_region,
             CollectionId(7),
-            crate::MAP_REGION_V1_FORMAT,
+            crate::MAP_REGION_V2_FORMAT,
             &[1, 2, 3],
         )
         .unwrap();
@@ -214,7 +214,7 @@ fn committed_region_sequence_progress() -> CommittedRegionSequenceProgress {
             &mut flash,
             second_region,
             CollectionId(7),
-            crate::MAP_REGION_V1_FORMAT,
+            crate::MAP_REGION_V2_FORMAT,
             &[4, 5, 6],
         )
         .unwrap();
@@ -337,7 +337,7 @@ fn requirement_committed_region_write_uses_a_region_previously_reserved_by_alloc
             &mut flash,
             region_index,
             CollectionId(7),
-            crate::MAP_REGION_V1_FORMAT,
+            crate::MAP_REGION_V2_FORMAT,
             &[1, 2, 3],
         )
         .unwrap();
@@ -367,7 +367,7 @@ fn requirement_write_committed_region_accepts_payload_that_exactly_fills_committ
             &mut flash,
             region_index,
             CollectionId(7),
-            crate::MAP_REGION_V1_FORMAT,
+            crate::MAP_REGION_V2_FORMAT,
             &payload,
         )
         .unwrap();
@@ -410,7 +410,7 @@ fn requirement_committed_region_write_waits_for_alloc_begin_sync() {
             &mut flash,
             region_index,
             CollectionId(7),
-            crate::MAP_REGION_V1_FORMAT,
+            crate::MAP_REGION_V2_FORMAT,
             &[1, 2, 3],
         )
         .unwrap();
@@ -1008,8 +1008,8 @@ fn requirement_append_free_list_head_and_wal_recovery_refresh_runtime_state() {
 
 //= spec/ring.md#storage-runtime-state-requirements
 //= type=test
-//# Control-record appends MUST refresh the in-memory runtime state without reopening and replaying
-//# the WAL.
+//# `RING-IMPL-REGRESSION-133` Control-record appends MUST refresh the in-memory runtime state
+//# without reopening and replaying the WAL.
 #[test]
 fn requirement_control_record_appends_refresh_runtime_without_reopen() {
     let mut flash = MockFlash::<512, 6, 2048>::new(0xff);
@@ -1029,7 +1029,7 @@ fn requirement_control_record_appends_refresh_runtime_without_reopen() {
         4,
         17,
         CollectionId(7),
-        crate::MAP_REGION_V1_FORMAT,
+        crate::MAP_REGION_V2_FORMAT,
     );
 
     flash.clear_operations();
@@ -1076,7 +1076,8 @@ fn requirement_control_record_appends_refresh_runtime_without_reopen() {
 
 //= spec/ring.md#storage-runtime-state-requirements
 //= type=test
-//# Completing reclaim MUST refresh the free-list tail from footers, not by reopening the store.
+//# `RING-IMPL-REGRESSION-134` Completing reclaim MUST refresh the free-list tail from footers,
+//# not by reopening the store.
 #[test]
 fn requirement_reclaim_end_refreshes_free_list_tail_without_reopen() {
     let mut flash = MockFlash::<512, 6, 4096>::new(0xff);
@@ -1271,7 +1272,7 @@ fn requirement_stage_ready_region_detaches_ready_region_and_allows_next_allocati
             &mut flash,
             first_region,
             CollectionId(7),
-            crate::MAP_REGION_V1_FORMAT,
+            crate::MAP_REGION_V2_FORMAT,
             &[1, 2, 3],
         )
         .unwrap();
@@ -1307,7 +1308,7 @@ fn requirement_staged_regions_are_reclaimed_on_reopen_when_uncommitted() {
             &mut flash,
             region_index,
             CollectionId(7),
-            crate::MAP_REGION_V1_FORMAT,
+            crate::MAP_REGION_V2_FORMAT,
             &[1, 2, 3],
         )
         .unwrap();
@@ -1367,7 +1368,7 @@ fn requirement_committed_region_writes_do_not_write_a_live_free_pointer_footer()
             &mut flash,
             region_index,
             CollectionId(7),
-            crate::MAP_REGION_V1_FORMAT,
+            crate::MAP_REGION_V2_FORMAT,
             &[1, 2, 3],
         )
         .unwrap();
@@ -1416,7 +1417,7 @@ fn requirement_free_regions_are_erased_only_when_reused() {
             &mut flash,
             region_index,
             CollectionId(7),
-            crate::MAP_REGION_V1_FORMAT,
+            crate::MAP_REGION_V2_FORMAT,
             &[9],
         )
         .unwrap();
@@ -1762,7 +1763,7 @@ fn requirement_classify_wal_head_reclaim_copies_only_the_retained_region_head() 
             &mut flash,
             retained_region,
             CollectionId(7),
-            crate::MAP_REGION_V1_FORMAT,
+            crate::MAP_REGION_V2_FORMAT,
             &[1, 2, 3],
         )
         .unwrap();
@@ -1983,7 +1984,7 @@ fn requirement_region_reachable_from_live_state_follows_map_head_references_to_r
                 read_header_from_flash::<REGION_SIZE, REGION_COUNT, _>(flash, *region_index)
                     .is_ok_and(|header| {
                         header.collection_id == collection_id
-                            && header.collection_format == crate::MAP_RUN_V1_FORMAT
+                            && header.collection_format == crate::MAP_RUN_V2_FORMAT
                     })
             })
         })

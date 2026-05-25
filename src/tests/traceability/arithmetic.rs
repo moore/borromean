@@ -67,7 +67,7 @@ fn requirement_arithmetic_boundary_failures_surface_explicit_error_variants() {
             &mut flash,
             1,
             CollectionId(9),
-            MAP_REGION_V1_FORMAT,
+            MAP_REGION_V2_FORMAT,
             &oversized_payload,
         ),
         Err(StorageRuntimeError::CommittedRegionTooLarge {
@@ -104,7 +104,7 @@ fn requirement_sequence_advancement_stops_at_the_maximum_value_instead_of_wrappi
             &mut flash,
             1,
             CollectionId(11),
-            MAP_REGION_V1_FORMAT,
+            MAP_REGION_V2_FORMAT,
             &[1, 2, 3],
         ),
         Err(StorageRuntimeError::WalRotationRequired)
@@ -115,6 +115,10 @@ fn requirement_sequence_advancement_stops_at_the_maximum_value_instead_of_wrappi
     assert_eq!(reopened.wal_head(), 0);
 }
 
+//= spec/map.md#snapshot-frontier-and-logical-map-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-135` Entry reference serialization MUST preserve 32-bit offsets for
+//# entries beyond 64 KiB of frontier storage.
 #[test]
 fn requirement_large_map_entry_offsets_round_trip_with_32_bit_refs() {
     std::thread::Builder::new()

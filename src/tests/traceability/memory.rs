@@ -54,7 +54,7 @@ fn requirement_explicit_collection_and_reclaim_capacities_fail_when_exhausted() 
             ))
     ));
 
-    let mut tiny_buffer = [0u8; 16];
+    let mut tiny_buffer = [0u8; 32];
     let mut tiny_map = MapFrontier::<u16, u16, 8>::new(CollectionId(3), &mut tiny_buffer).unwrap();
     tiny_map.set(1, 10).unwrap();
     assert!(matches!(tiny_map.set(2, 20), Err(MapError::BufferTooSmall)));
@@ -176,7 +176,7 @@ fn requirement_map_in_memory_state_runs_inside_a_borrowed_buffer_without_allocat
         assert_eq!(map.get_frontier(&2).unwrap(), Some(20));
     });
 
-    let mut tiny_buffer = [0u8; 16];
+    let mut tiny_buffer = [0u8; 32];
     let mut tiny_map = MapFrontier::<u16, u16, 8>::new(CollectionId(8), &mut tiny_buffer).unwrap();
     tiny_map.set(1, 10).unwrap();
     assert!(matches!(tiny_map.set(2, 20), Err(MapError::BufferTooSmall)));

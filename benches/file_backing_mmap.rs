@@ -85,7 +85,14 @@ fn bench_raw_region_io(c: &mut Criterion) {
         group.bench_function("read_region_4k", |bencher| {
             bencher.iter(|| {
                 db.backing
-                    .read_region(black_box(1), black_box(0), black_box(&mut buffer))
+                    .read_region(
+                        black_box(1),
+                        black_box(0),
+                        black_box(buffer.len()),
+                        |data| {
+                            buffer.copy_from_slice(data);
+                        },
+                    )
                     .expect("read benchmark region");
                 black_box(buffer[0]);
             });

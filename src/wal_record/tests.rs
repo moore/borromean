@@ -222,7 +222,7 @@ fn requirement_canonical_scalar_widths_match_storage_header_and_wal_field_sizes(
     let header = crate::Header {
         sequence: 9,
         collection_id: CollectionId(7),
-        collection_format: crate::MAP_REGION_V1_FORMAT,
+        collection_format: crate::MAP_REGION_V2_FORMAT,
     };
     assert_eq!(core::mem::size_of_val(&header.sequence), size_of::<u64>());
     assert_eq!(CollectionId(7).to_le_bytes().len(), size_of::<u64>());

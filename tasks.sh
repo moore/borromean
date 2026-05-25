@@ -3,6 +3,14 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+MEMORY_PROFILE_CONFIGS=(
+    perf/profile_memory_insert.toml
+    perf/profile_memory_update_hot.toml
+    perf/profile_memory_read_hits.toml
+    perf/profile_memory_read_misses.toml
+    perf/profile_memory_mixed_update.toml
+)
+
 run_verify() {
     echo "==> ./scripts/verify.sh"
     ./scripts/verify.sh
@@ -84,7 +92,20 @@ run_perf_matrix() {
     done
 }
 
-run_perf_profile_for_config() {
+require_perf() {
+    if ! command -v perf >/dev/null 2>&1; then
+        echo "perf is required for profiling but was not found on PATH" >&2
+        return 127
+    fi
+}
+
+build_perf_profile_binary() {
+    echo "==> RUSTFLAGS=\"${RUSTFLAGS:-} -C force-frame-pointers=yes\" cargo build --release --features perf-tools --bin file_backing_perf"
+    RUSTFLAGS="${RUSTFLAGS:-} -C force-frame-pointers=yes" \
+        cargo build --release --features perf-tools --bin file_backing_perf
+}
+
+run_perf_profile_artifacts() {
     local label="$1"
     local config_path="$2"
     local profile_dir="${BORROMEAN_PERF_PROFILE_DIR:-target/perf/profiles}"
@@ -94,23 +115,15 @@ run_perf_profile_for_config() {
     base_name="$(basename "$config_path" .toml)"
     output_prefix="${profile_dir}/${label}-${base_name}"
 
-    if ! command -v perf >/dev/null 2>&1; then
-        echo "perf is required for profiling but was not found on PATH" >&2
-        return 127
-    fi
-
     mkdir -p "$profile_dir"
-    echo "==> RUSTFLAGS=\"${RUSTFLAGS:-} -C force-frame-pointers=yes\" cargo build --release --features perf-tools --bin file_backing_perf"
-    RUSTFLAGS="${RUSTFLAGS:-} -C force-frame-pointers=yes" \
-        cargo build --release --features perf-tools --bin file_backing_perf
 
     echo "==> perf stat -d -o ${output_prefix}.stat.txt -- target/release/file_backing_perf --config ${config_path}"
     perf stat -d \
         -o "${output_prefix}.stat.txt" \
         -- target/release/file_backing_perf --config "$config_path"
 
-    echo "==> perf record -F ${frequency} -g -o ${output_prefix}.perf.data -- target/release/file_backing_perf --config ${config_path}"
-    perf record -F "$frequency" -g \
+    echo "==> perf record -F ${frequency} -g --call-graph fp -o ${output_prefix}.perf.data -- target/release/file_backing_perf --config ${config_path}"
+    perf record -F "$frequency" -g --call-graph fp \
         -o "${output_prefix}.perf.data" \
         -- target/release/file_backing_perf --config "$config_path"
 
@@ -119,14 +132,50 @@ run_perf_profile_for_config() {
     echo "profile artifacts: ${output_prefix}.stat.txt ${output_prefix}.perf.data ${output_prefix}.perf.txt"
 }
 
+run_perf_profile_for_config() {
+    local label="$1"
+    local config_path="$2"
+
+    require_perf
+    build_perf_profile_binary
+    run_perf_profile_artifacts "$label" "$config_path"
+}
+
 run_perf_profile() {
     local config_path="${BORROMEAN_PERF_PROFILE_CONFIG:-perf/file_backing_smoke.toml}"
     run_perf_profile_for_config "file" "$config_path"
 }
 
 run_perf_profile_memory() {
-    local config_path="${BORROMEAN_PERF_MEMORY_PROFILE_CONFIG:-perf/file_backing_memory_profile.toml}"
+    local config_path="${BORROMEAN_PERF_MEMORY_PROFILE_CONFIG:-perf/profile_memory_update_hot.toml}"
     run_perf_profile_for_config "memory" "$config_path"
+}
+
+run_perf_profile_memory_matrix() {
+    local config_path
+    local json_paths=()
+
+    require_perf
+    build_perf_profile_binary
+    for config_path in "${MEMORY_PROFILE_CONFIGS[@]}"; do
+        run_perf_profile_artifacts "memory" "$config_path"
+        json_paths+=("target/perf/$(basename "$config_path" .toml).json")
+    done
+    summarize_memory_profile_jsons "${json_paths[@]}"
+}
+
+run_perf_profile_memory_summary() {
+    local config_path
+    local json_paths=()
+
+    for config_path in "${MEMORY_PROFILE_CONFIGS[@]}"; do
+        json_paths+=("target/perf/$(basename "$config_path" .toml).json")
+    done
+    summarize_memory_profile_jsons "${json_paths[@]}"
+}
+
+summarize_memory_profile_jsons() {
+    python3 scripts/summarize_memory_profile_jsons.py "$@"
 }
 
 run_bench() {
@@ -156,6 +205,10 @@ Tasks:
            Profile a release perf run with frame pointers (override config with BORROMEAN_PERF_PROFILE_CONFIG)
   perf-profile-memory
            Profile a memory-backed Borromean perf run (override config with BORROMEAN_PERF_MEMORY_PROFILE_CONFIG)
+  perf-profile-memory-matrix
+           Profile insert, update, read-hit, read-miss, and mixed memory-backed configs
+  perf-profile-memory-summary
+           Summarize generated memory profile JSON reports
   bench    Run Criterion benchmarks for the FileBacking mmap backend
 USAGE
 }
@@ -194,6 +247,12 @@ run_task() {
             ;;
         perf-profile-memory)
             run_perf_profile_memory
+            ;;
+        perf-profile-memory-matrix)
+            run_perf_profile_memory_matrix
+            ;;
+        perf-profile-memory-summary)
+            run_perf_profile_memory_summary
             ;;
         bench)
             run_bench

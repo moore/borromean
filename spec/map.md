@@ -206,7 +206,8 @@ the header, entry bytes, ordered references, and round-trip rule are
 enough to decode the same partial function and reject ambiguous payloads.
 
 1. `MAP-SNAPSHOT-001` A map snapshot payload MUST be encoded as
-`[entry_count:u32 little-endian][entry_bytes_len:u32 little-endian][entry_bytes][entry_refs]`.
+`[magic:"MAP2"][entry_count:u32 little-endian][entry_bytes_len:u32
+little-endian][entry_bytes][entry_refs]`.
 2. `MAP-SNAPSHOT-002` Snapshot encoding MUST write `entry_count` as the
 number of visible entries in the logical map and `entry_bytes_len` as
 the exact byte length of the compact serialized entry data that follows.
@@ -336,9 +337,11 @@ the latest non-deleted value is visible and deleted keys are absent.
    exact-size buffers, preserve lookup state, and reject undersized or malformed inputs.
 8. `RING-IMPL-REGRESSION-031` Entry reference serialization MUST preserve independent start and end
    offsets for distinct record indexes.
-9. `RING-IMPL-REGRESSION-033` Map read/write operations MUST return the latest inserted values for
-   generated key/value workloads.
-10. `RING-IMPL-REGRESSION-034` Map write/delete operations MUST remove deleted keys while preserving
+9. `RING-IMPL-REGRESSION-135` Entry reference serialization MUST preserve 32-bit offsets for
+   entries beyond 64 KiB of frontier storage.
+10. `RING-IMPL-REGRESSION-033` Map read/write operations MUST return the latest inserted values for
+    generated key/value workloads.
+11. `RING-IMPL-REGRESSION-034` Map write/delete operations MUST remove deleted keys while preserving
     non-deleted entries for generated workloads.
 
 ## Run Manifest And Committed Map Region Requirements
