@@ -15,6 +15,10 @@ pub struct StoragePerfMetrics {
     pub update_encodes: u64,
     pub encoded_update_bytes: u64,
     pub frontier_checkpoints: u64,
+    pub frontier_undo_records: u64,
+    pub frontier_undo_bytes: u64,
+    pub frontier_undo_restores: u64,
+    pub frontier_full_checkpoint_fallbacks: u64,
     pub frontier_applies: u64,
     pub overflow_flushes: u64,
     pub wal_records: u64,
@@ -100,6 +104,20 @@ impl StoragePerfMetrics {
             }
             StoragePerfCounter::FrontierCheckpoints => {
                 self.frontier_checkpoints = self.frontier_checkpoints.saturating_add(value);
+            }
+            StoragePerfCounter::FrontierUndoRecords => {
+                self.frontier_undo_records = self.frontier_undo_records.saturating_add(value);
+            }
+            StoragePerfCounter::FrontierUndoBytes => {
+                self.frontier_undo_bytes = self.frontier_undo_bytes.saturating_add(value);
+            }
+            StoragePerfCounter::FrontierUndoRestores => {
+                self.frontier_undo_restores = self.frontier_undo_restores.saturating_add(value);
+            }
+            StoragePerfCounter::FrontierFullCheckpointFallbacks => {
+                self.frontier_full_checkpoint_fallbacks = self
+                    .frontier_full_checkpoint_fallbacks
+                    .saturating_add(value);
             }
             StoragePerfCounter::FrontierApplies => {
                 self.frontier_applies = self.frontier_applies.saturating_add(value);
@@ -277,6 +295,10 @@ pub(crate) enum StoragePerfCounter {
     UpdateEncodes,
     EncodedUpdateBytes,
     FrontierCheckpoints,
+    FrontierUndoRecords,
+    FrontierUndoBytes,
+    FrontierUndoRestores,
+    FrontierFullCheckpointFallbacks,
     FrontierApplies,
     OverflowFlushes,
     WalRecords,

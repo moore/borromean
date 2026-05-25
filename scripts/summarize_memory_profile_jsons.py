@@ -15,6 +15,9 @@ HEADERS = [
     "writes",
     "checkpoint",
     "apply",
+    "undo_records",
+    "undo_bytes",
+    "checkpoint_fallbacks",
     "update_encode",
     "wal_encode",
     "wal_write",
@@ -39,7 +42,7 @@ def fmt_nanos(value: object) -> str:
 
 def summary_row(path: Path) -> list[str]:
     if not path.exists():
-        return [path.stem, "missing", "", "", "", "", "", "", "", "", "", "", "", ""]
+        return [path.stem, "missing", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]
 
     data = json.loads(path.read_text())
     report = next(
@@ -51,7 +54,7 @@ def summary_row(path: Path) -> list[str]:
         None,
     )
     if report is None:
-        return [path.stem, "no-report", "", "", "", "", "", "", "", "", "", "", "", ""]
+        return [path.stem, "no-report", "", "", "", "", "", "", "", "", "", "", "", "", "", "", ""]
 
     counters = report["counters"]
     metrics = report.get("borromean_core_metrics") or {}
@@ -64,6 +67,9 @@ def summary_row(path: Path) -> list[str]:
         str(writes),
         fmt_nanos(metrics.get("frontier_checkpoint_nanos", 0)),
         fmt_nanos(metrics.get("frontier_apply_nanos", 0)),
+        str(metrics.get("frontier_undo_records", 0)),
+        str(metrics.get("frontier_undo_bytes", 0)),
+        str(metrics.get("frontier_full_checkpoint_fallbacks", 0)),
         fmt_nanos(metrics.get("update_encode_nanos", 0)),
         fmt_nanos(metrics.get("wal_encode_nanos", 0)),
         fmt_nanos(metrics.get("wal_write_nanos", 0)),

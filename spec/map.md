@@ -233,6 +233,10 @@ serialization of `MapUpdate<K, V>`.
 2. `MAP-UPDATE-002` Applying a `Set` update payload MUST make the key
 visible with the supplied value, and applying a `Delete` update payload
 MUST make the key absent from the frontier.
+3. `MAP-UPDATE-003` Rolling back an in-memory map update MUST restore the
+previous frontier metadata and visible key/value state.
+4. `MAP-UPDATE-004` Rolling back an in-memory map insert MUST make the
+inserted key unreachable while preserving older keys.
 
 ## Committed Head Format
 

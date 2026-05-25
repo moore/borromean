@@ -4182,12 +4182,16 @@ fn print_borromean_core_metrics(metrics: &StoragePerfMetrics) {
         )
     );
     println!(
-        "  borromean write path: full={} avg_write={} update_encode={} frontier_checkpoint={} frontier_apply={} overflow_flushes={} overflow_flush_time={}",
+        "  borromean write path: full={} avg_write={} update_encode={} frontier_checkpoint={} frontier_apply={} undo_records={} undo_bytes={} undo_restores={} checkpoint_fallbacks={} overflow_flushes={} overflow_flush_time={}",
         format_nanos(metrics.full_write_path_nanos),
         format_average_nanos(metrics.full_write_path_nanos, write_ops),
         format_nanos(metrics.update_encode_nanos),
         format_nanos(metrics.frontier_checkpoint_nanos),
         format_nanos(metrics.frontier_apply_nanos),
+        metrics.frontier_undo_records,
+        metrics.frontier_undo_bytes,
+        metrics.frontier_undo_restores,
+        metrics.frontier_full_checkpoint_fallbacks,
         metrics.overflow_flushes,
         format_nanos(metrics.overflow_flush_nanos)
     );

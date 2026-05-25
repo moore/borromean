@@ -349,6 +349,11 @@ fn clear_dirty_frontier_in<const MAX_COLLECTIONS: usize>(
     }
 }
 
+enum AppliedMapUpdate {
+    Undo(crate::collections::map::MapMutationUndo),
+    Checkpoint(crate::collections::map::MapCheckpoint),
+}
+
 #[allow(clippy::too_many_arguments)]
 fn update_map_frontier_parts<
     K,
@@ -412,58 +417,34 @@ where
     let used = encoded_update?;
 
     #[cfg(feature = "perf-counters")]
-    let checkpoint_timer = StoragePerfTimerGuard::start();
-    let mut checkpoint = map.checkpoint_into(checkpoint_scratch)?;
-    #[cfg(feature = "perf-counters")]
-    {
-        perf_metrics.increment(StoragePerfCounter::FrontierCheckpoints);
-        perf_metrics.add_nanos(
-            StoragePerfTimer::FrontierCheckpoint,
-            checkpoint_timer.elapsed_nanos(),
-        );
-    }
-
-    #[cfg(feature = "perf-counters")]
     let apply_timer = StoragePerfTimerGuard::start();
-    let apply_result = map.apply_update_payload(&payload_scratch[..used]);
+    let apply_result =
+        map.apply_update_payload_with_undo(&payload_scratch[..used], checkpoint_scratch);
     #[cfg(feature = "perf-counters")]
     {
         perf_metrics.add_nanos(StoragePerfTimer::FrontierApply, apply_timer.elapsed_nanos());
-        if apply_result.is_ok() {
+        if let Ok(undo) = apply_result.as_ref() {
             perf_metrics.increment(StoragePerfCounter::FrontierApplies);
+            perf_metrics.increment(StoragePerfCounter::FrontierUndoRecords);
+            perf_metrics.add(
+                StoragePerfCounter::FrontierUndoBytes,
+                undo.saved_bytes_len() as u64,
+            );
         }
     }
 
-    match apply_result {
-        Ok(()) => {}
+    let applied = match apply_result {
+        Ok(undo) => AppliedMapUpdate::Undo(undo),
         Err(MapError::BufferTooSmall) => {
             #[cfg(feature = "perf-counters")]
-            perf_metrics.increment(StoragePerfCounter::BufferTooSmallErrors);
-            map.restore_from_checkpoint(checkpoint, checkpoint_scratch)?;
-
-            #[cfg(feature = "perf-counters")]
-            let flush_timer = StoragePerfTimerGuard::start();
-            let flush_result = map.flush_to_storage::<
-                REGION_SIZE,
-                REGION_COUNT,
-                IO,
-                MAX_COLLECTIONS,
-                MAX_PENDING_RECLAIMS,
-            >(state, backing, workspace);
-            #[cfg(feature = "perf-counters")]
             {
-                let flush_nanos = flush_timer.elapsed_nanos();
-                perf_metrics.increment(StoragePerfCounter::OverflowFlushes);
-                perf_metrics.increment(StoragePerfCounter::Flushes);
-                perf_metrics.add_nanos(StoragePerfTimer::OverflowFlush, flush_nanos);
-                perf_metrics.add_nanos(StoragePerfTimer::Flush, flush_nanos);
+                perf_metrics.increment(StoragePerfCounter::BufferTooSmallErrors);
+                perf_metrics.increment(StoragePerfCounter::FrontierFullCheckpointFallbacks);
             }
-            flush_result?;
-            clear_dirty_frontier_in(dirty_frontiers, collection_id);
 
             #[cfg(feature = "perf-counters")]
             let checkpoint_timer = StoragePerfTimerGuard::start();
-            checkpoint = map.checkpoint_into(checkpoint_scratch)?;
+            let checkpoint = map.checkpoint_into(checkpoint_scratch)?;
             #[cfg(feature = "perf-counters")]
             {
                 perf_metrics.increment(StoragePerfCounter::FrontierCheckpoints);
@@ -475,25 +456,75 @@ where
 
             #[cfg(feature = "perf-counters")]
             let apply_timer = StoragePerfTimerGuard::start();
-            let retry_apply_result = map.apply_update_payload(&payload_scratch[..used]);
+            let apply_result = map.apply_update_payload(&payload_scratch[..used]);
             #[cfg(feature = "perf-counters")]
             {
                 perf_metrics
                     .add_nanos(StoragePerfTimer::FrontierApply, apply_timer.elapsed_nanos());
-                if retry_apply_result.is_ok() {
+                if apply_result.is_ok() {
                     perf_metrics.increment(StoragePerfCounter::FrontierApplies);
                 }
             }
-            if let Err(error) = retry_apply_result {
-                map.restore_from_checkpoint(checkpoint, checkpoint_scratch)?;
-                return Err(error.into());
+
+            match apply_result {
+                Ok(()) => AppliedMapUpdate::Checkpoint(checkpoint),
+                Err(MapError::BufferTooSmall) => {
+                    map.restore_from_checkpoint(checkpoint, checkpoint_scratch)?;
+
+                    #[cfg(feature = "perf-counters")]
+                    let flush_timer = StoragePerfTimerGuard::start();
+                    let flush_result = map.flush_to_storage::<
+                        REGION_SIZE,
+                        REGION_COUNT,
+                        IO,
+                        MAX_COLLECTIONS,
+                        MAX_PENDING_RECLAIMS,
+                    >(state, backing, workspace);
+                    #[cfg(feature = "perf-counters")]
+                    {
+                        let flush_nanos = flush_timer.elapsed_nanos();
+                        perf_metrics.increment(StoragePerfCounter::OverflowFlushes);
+                        perf_metrics.increment(StoragePerfCounter::Flushes);
+                        perf_metrics.add_nanos(StoragePerfTimer::OverflowFlush, flush_nanos);
+                        perf_metrics.add_nanos(StoragePerfTimer::Flush, flush_nanos);
+                    }
+                    flush_result?;
+                    clear_dirty_frontier_in(dirty_frontiers, collection_id);
+
+                    #[cfg(feature = "perf-counters")]
+                    let retry_apply_timer = StoragePerfTimerGuard::start();
+                    let retry_apply_result = map.apply_update_payload_with_undo(
+                        &payload_scratch[..used],
+                        checkpoint_scratch,
+                    );
+                    #[cfg(feature = "perf-counters")]
+                    {
+                        perf_metrics.add_nanos(
+                            StoragePerfTimer::FrontierApply,
+                            retry_apply_timer.elapsed_nanos(),
+                        );
+                        if let Ok(undo) = retry_apply_result.as_ref() {
+                            perf_metrics.increment(StoragePerfCounter::FrontierApplies);
+                            perf_metrics.increment(StoragePerfCounter::FrontierUndoRecords);
+                            perf_metrics.add(
+                                StoragePerfCounter::FrontierUndoBytes,
+                                undo.saved_bytes_len() as u64,
+                            );
+                        }
+                    }
+                    match retry_apply_result {
+                        Ok(undo) => AppliedMapUpdate::Undo(undo),
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                Err(error) => {
+                    map.restore_from_checkpoint(checkpoint, checkpoint_scratch)?;
+                    return Err(error.into());
+                }
             }
         }
-        Err(error) => {
-            map.restore_from_checkpoint(checkpoint, checkpoint_scratch)?;
-            return Err(error.into());
-        }
-    }
+        Err(error) => return Err(error.into()),
+    };
 
     #[cfg(feature = "perf-counters")]
     let append_result = state.append_update_with_rotation_metered::<REGION_SIZE, REGION_COUNT, IO>(
@@ -513,7 +544,16 @@ where
     if let Err(error) = append_result {
         #[cfg(feature = "perf-counters")]
         perf_metrics.increment(StoragePerfCounter::AppendFailures);
-        map.restore_from_checkpoint(checkpoint, checkpoint_scratch)?;
+        match applied {
+            AppliedMapUpdate::Undo(undo) => {
+                #[cfg(feature = "perf-counters")]
+                perf_metrics.increment(StoragePerfCounter::FrontierUndoRestores);
+                map.restore_from_mutation_undo(undo, checkpoint_scratch)?;
+            }
+            AppliedMapUpdate::Checkpoint(checkpoint) => {
+                map.restore_from_checkpoint(checkpoint, checkpoint_scratch)?;
+            }
+        }
         return Err(error.into());
     }
 

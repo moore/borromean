@@ -356,7 +356,12 @@ fn requirement_perf_metrics_set_delete_record_write_path() {
     assert_eq!(metrics.map_deletes, 1);
     assert_eq!(metrics.update_encodes, 2);
     assert!(metrics.encoded_update_bytes > 0);
+    assert_eq!(metrics.frontier_checkpoints, 0);
     assert_eq!(metrics.frontier_applies, 2);
+    assert_eq!(metrics.frontier_undo_records, 2);
+    assert!(metrics.frontier_undo_bytes >= ENTRY_REF_SIZE as u64);
+    assert_eq!(metrics.frontier_undo_restores, 0);
+    assert_eq!(metrics.frontier_full_checkpoint_fallbacks, 0);
     assert_eq!(metrics.wal_update_records, 2);
     assert_eq!(metrics.wal_records, 2);
     assert_eq!(metrics.wal_syncs, 2);
@@ -431,6 +436,10 @@ fn requirement_sync_audit_hot_inserts_write_one_wal_record_and_sync_once() {
     let metrics = storage.perf_metrics();
     let operations = storage.with_io_workspace(|flash, _| flash.operations().to_vec());
     assert_eq!(metrics.map_sets, u64::from(COUNT));
+    assert_eq!(metrics.frontier_checkpoints, 0);
+    assert_eq!(metrics.frontier_undo_records, u64::from(COUNT));
+    assert_eq!(metrics.frontier_undo_bytes, 0);
+    assert_eq!(metrics.frontier_full_checkpoint_fallbacks, 0);
     assert_eq!(metrics.wal_records, u64::from(COUNT));
     assert_eq!(metrics.wal_syncs, u64::from(COUNT));
     assert_eq!(metrics.flushes, 0);
@@ -485,6 +494,13 @@ fn requirement_sync_audit_hot_updates_exclude_preload_and_sync_once() {
     let metrics = storage.perf_metrics();
     let operations = storage.with_io_workspace(|flash, _| flash.operations().to_vec());
     assert_eq!(metrics.map_sets, u64::from(COUNT));
+    assert_eq!(metrics.frontier_checkpoints, 0);
+    assert_eq!(metrics.frontier_undo_records, u64::from(COUNT));
+    assert_eq!(
+        metrics.frontier_undo_bytes,
+        u64::from(COUNT) * ENTRY_REF_SIZE as u64
+    );
+    assert_eq!(metrics.frontier_full_checkpoint_fallbacks, 0);
     assert_eq!(metrics.wal_records, u64::from(COUNT));
     assert_eq!(metrics.wal_syncs, u64::from(COUNT));
     assert_eq!(metrics.flushes, 0);
@@ -2167,6 +2183,98 @@ fn requirement_update_payload_round_trip_applies_frontier_change() {
     map.apply_update_payload(&delete_payload[..delete_len])
         .unwrap();
     assert_eq!(map.get_frontier(&5).unwrap(), None);
+}
+
+//= spec/map.md#update-payload-format
+//= type=test
+//# `MAP-UPDATE-003` Rolling back an in-memory map update MUST restore the
+//# previous frontier metadata and visible key/value state.
+#[test]
+fn requirement_update_payload_undo_restores_found_update_and_delete() {
+    const BUFFER_SIZE: usize = 512;
+    const MAX_INDEXES: usize = 4;
+    let id = CollectionId(91);
+
+    let mut buffer = [0u8; BUFFER_SIZE];
+    let mut map = MapFrontier::<i32, i32, MAX_INDEXES>::new(id, &mut buffer).unwrap();
+    map.set(1, 10).unwrap();
+    map.set(2, 20).unwrap();
+
+    let mut payload = [0u8; 64];
+    let update_len = MapFrontier::<i32, i32, MAX_INDEXES>::encode_update_into(
+        &MapUpdate::Set { key: 1, value: 99 },
+        &mut payload,
+    )
+    .unwrap();
+    let mut scratch = [0u8; BUFFER_SIZE];
+    let undo = map
+        .apply_update_payload_with_undo(&payload[..update_len], &mut scratch)
+        .unwrap();
+    assert_eq!(undo.saved_bytes_len(), ENTRY_REF_SIZE);
+    assert_eq!(map.get_frontier(&1).unwrap(), Some(99));
+    map.restore_from_mutation_undo(undo, &scratch).unwrap();
+    assert_eq!(map.get_frontier(&1).unwrap(), Some(10));
+    assert_eq!(map.get_frontier(&2).unwrap(), Some(20));
+
+    let delete_len = MapFrontier::<i32, i32, MAX_INDEXES>::encode_update_into(
+        &MapUpdate::Delete { key: 2 },
+        &mut payload,
+    )
+    .unwrap();
+    let undo = map
+        .apply_update_payload_with_undo(&payload[..delete_len], &mut scratch)
+        .unwrap();
+    assert_eq!(map.get_frontier(&2).unwrap(), None);
+    map.restore_from_mutation_undo(undo, &scratch).unwrap();
+    assert_eq!(map.get_frontier(&1).unwrap(), Some(10));
+    assert_eq!(map.get_frontier(&2).unwrap(), Some(20));
+}
+
+//= spec/map.md#update-payload-format
+//= type=test
+//# `MAP-UPDATE-004` Rolling back an in-memory map insert MUST make the
+//# inserted key unreachable while preserving older keys.
+#[test]
+fn requirement_update_payload_undo_restores_end_and_middle_insert() {
+    const BUFFER_SIZE: usize = 512;
+    const MAX_INDEXES: usize = 4;
+    let id = CollectionId(92);
+
+    let mut buffer = [0u8; BUFFER_SIZE];
+    let mut map = MapFrontier::<i32, i32, MAX_INDEXES>::new(id, &mut buffer).unwrap();
+    map.set(1, 10).unwrap();
+
+    let mut payload = [0u8; 64];
+    let mut scratch = [0u8; BUFFER_SIZE];
+    let end_insert_len = MapFrontier::<i32, i32, MAX_INDEXES>::encode_update_into(
+        &MapUpdate::Set { key: 3, value: 30 },
+        &mut payload,
+    )
+    .unwrap();
+    let undo = map
+        .apply_update_payload_with_undo(&payload[..end_insert_len], &mut scratch)
+        .unwrap();
+    assert_eq!(undo.saved_bytes_len(), 0);
+    assert_eq!(map.get_frontier(&3).unwrap(), Some(30));
+    map.restore_from_mutation_undo(undo, &scratch).unwrap();
+    assert_eq!(map.get_frontier(&1).unwrap(), Some(10));
+    assert_eq!(map.get_frontier(&3).unwrap(), None);
+
+    map.set(3, 30).unwrap();
+    let middle_insert_len = MapFrontier::<i32, i32, MAX_INDEXES>::encode_update_into(
+        &MapUpdate::Set { key: 2, value: 20 },
+        &mut payload,
+    )
+    .unwrap();
+    let undo = map
+        .apply_update_payload_with_undo(&payload[..middle_insert_len], &mut scratch)
+        .unwrap();
+    assert_eq!(undo.saved_bytes_len(), ENTRY_REF_SIZE);
+    assert_eq!(map.get_frontier(&2).unwrap(), Some(20));
+    map.restore_from_mutation_undo(undo, &scratch).unwrap();
+    assert_eq!(map.get_frontier(&1).unwrap(), Some(10));
+    assert_eq!(map.get_frontier(&2).unwrap(), None);
+    assert_eq!(map.get_frontier(&3).unwrap(), Some(30));
 }
 
 //= spec/map.md#empty-logical-state

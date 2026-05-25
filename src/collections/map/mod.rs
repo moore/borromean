@@ -365,6 +365,23 @@ pub(crate) struct MapCheckpoint {
     next_record_index: usize,
 }
 
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MapMutationUndo {
+    record_count: u32,
+    next_record_offset: usize,
+    next_record_index: usize,
+    ref_backup_map_offset: usize,
+    ref_backup_scratch_offset: usize,
+    ref_backup_len: usize,
+}
+
+impl MapMutationUndo {
+    #[cfg_attr(not(any(test, feature = "perf-counters")), allow(dead_code))]
+    pub(crate) fn saved_bytes_len(self) -> usize {
+        self.ref_backup_len
+    }
+}
+
 /// Errors returned while combining map operations with storage state.
 #[derive(Debug)]
 pub enum MapStorageError {
@@ -1678,7 +1695,7 @@ impl RecordIndex {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 enum SearchResult {
     Found(RecordIndex),
     NotFound(RecordIndex),
@@ -2420,6 +2437,127 @@ where
             }
         }
         Ok(())
+    }
+
+    fn set_worker_with_undo(
+        &mut self,
+        key: &K,
+        value: Option<&V>,
+        scratch: &mut [u8],
+    ) -> Result<MapMutationUndo, MapError>
+    where
+        K: LsmKey,
+        V: LsmValue,
+    {
+        let search_result = self.find_index(key)?;
+        let entry_len = encode_entry_into(key, value, scratch)?;
+        let start = self.next_record_offset;
+        let index_offset = self.next_record_index.offset(self.map)?;
+        if start.0 >= index_offset {
+            return Err(MapError::BufferTooSmall);
+        }
+        let available = index_offset
+            .checked_sub(start.0)
+            .ok_or(MapError::SerializationError)?;
+        if entry_len > available {
+            return Err(MapError::BufferTooSmall);
+        }
+        let end = RecordOffset(
+            start
+                .0
+                .checked_add(entry_len)
+                .ok_or(MapError::SerializationError)?,
+        );
+
+        let _: RefType = start
+            .0
+            .try_into()
+            .map_err(|_| MapError::SerializationError)?;
+        let _: RefType = end.0.try_into().map_err(|_| MapError::SerializationError)?;
+
+        let (ref_backup_map_offset, ref_backup_len) = self.ref_backup_span(search_result)?;
+        let ref_backup_scratch_offset = entry_len;
+        let ref_backup_scratch_end = ref_backup_scratch_offset
+            .checked_add(ref_backup_len)
+            .ok_or(MapError::SerializationError)?;
+        if ref_backup_scratch_end > scratch.len() {
+            return Err(MapError::BufferTooSmall);
+        }
+        if ref_backup_len > 0 {
+            let map_end = ref_backup_map_offset
+                .checked_add(ref_backup_len)
+                .ok_or(MapError::SerializationError)?;
+            let map_ref_bytes = self
+                .map
+                .get(ref_backup_map_offset..map_end)
+                .ok_or(MapError::IndexOutOfBounds)?;
+            scratch[ref_backup_scratch_offset..ref_backup_scratch_end]
+                .copy_from_slice(map_ref_bytes);
+        }
+
+        let undo = MapMutationUndo {
+            record_count: self.record_count.0,
+            next_record_offset: self.next_record_offset.0,
+            next_record_index: self.next_record_index.0,
+            ref_backup_map_offset,
+            ref_backup_scratch_offset,
+            ref_backup_len,
+        };
+
+        self.map[start.0..end.0].copy_from_slice(&scratch[..entry_len]);
+        let mutation_result = (|| -> Result<(), MapError> {
+            match search_result {
+                SearchResult::Found(index) => {
+                    EntryRef::write(self.map, index, start, end)?;
+                    self.next_record_offset = end;
+                    Ok(())
+                }
+                SearchResult::NotFound(index) => {
+                    if index == self.next_record_index {
+                        EntryRef::write(self.map, index, start, end)?;
+                    } else {
+                        EntryRef::insert(
+                            self.map,
+                            index,
+                            self.next_record_index.previous(),
+                            start,
+                            end,
+                        )?;
+                    }
+
+                    self.next_record_index.increment();
+                    self.next_record_offset = end;
+                    self.record_count.increment();
+                    self.record_count.write(self.map);
+                    Ok(())
+                }
+            }
+        })();
+        if let Err(error) = mutation_result {
+            self.restore_from_mutation_undo(undo, scratch)?;
+            return Err(error);
+        }
+
+        Ok(undo)
+    }
+
+    fn ref_backup_span(&self, search_result: SearchResult) -> Result<(usize, usize), MapError> {
+        match search_result {
+            SearchResult::Found(index) => Ok((index.offset(self.map)?, ENTRY_REF_SIZE)),
+            SearchResult::NotFound(index) if index == self.next_record_index => Ok((0, 0)),
+            SearchResult::NotFound(index) => {
+                let last_index = self.next_record_index.previous();
+                let end_offset = last_index.offset(self.map)?;
+                let current_offset = index
+                    .offset(self.map)?
+                    .checked_add(ENTRY_REF_SIZE)
+                    .ok_or(MapError::SerializationError)?;
+                if end_offset > current_offset || current_offset > self.map.len() {
+                    return Err(MapError::IndexOutOfBounds);
+                }
+                Ok((end_offset, current_offset - end_offset))
+            }
+        }
     }
 
     /// Returns the current frontier value for `key`, without consulting durable runs.
@@ -3565,6 +3703,37 @@ where
         Ok(())
     }
 
+    pub(crate) fn restore_from_mutation_undo(
+        &mut self,
+        undo: MapMutationUndo,
+        scratch: &[u8],
+    ) -> Result<(), MapError> {
+        let backup_scratch_end = undo
+            .ref_backup_scratch_offset
+            .checked_add(undo.ref_backup_len)
+            .ok_or(MapError::SerializationError)?;
+        if backup_scratch_end > scratch.len() {
+            return Err(MapError::BufferTooSmall);
+        }
+        let backup_map_end = undo
+            .ref_backup_map_offset
+            .checked_add(undo.ref_backup_len)
+            .ok_or(MapError::SerializationError)?;
+        if backup_map_end > self.map.len() {
+            return Err(MapError::IndexOutOfBounds);
+        }
+        if undo.ref_backup_len > 0 {
+            self.map[undo.ref_backup_map_offset..backup_map_end]
+                .copy_from_slice(&scratch[undo.ref_backup_scratch_offset..backup_scratch_end]);
+        }
+
+        self.record_count = EntryCount(undo.record_count);
+        self.next_record_offset = RecordOffset(undo.next_record_offset);
+        self.next_record_index = RecordIndex::new(undo.next_record_index);
+        self.record_count.write(self.map);
+        Ok(())
+    }
+
     /// Encodes a map update payload into `payload`.
     pub fn encode_update_into(
         update: &MapUpdate<K, V>,
@@ -3579,6 +3748,18 @@ where
         match update {
             MapUpdate::Set { key, value } => self.set(key, value),
             MapUpdate::Delete { key } => self.delete(key),
+        }
+    }
+
+    pub(crate) fn apply_update_payload_with_undo(
+        &mut self,
+        payload: &[u8],
+        scratch: &mut [u8],
+    ) -> Result<MapMutationUndo, MapError> {
+        let update: MapUpdate<K, V> = from_bytes(payload)?;
+        match update {
+            MapUpdate::Set { key, value } => self.set_worker_with_undo(&key, Some(&value), scratch),
+            MapUpdate::Delete { key } => self.set_worker_with_undo(&key, None, scratch),
         }
     }
 
