@@ -99,6 +99,32 @@ pub struct FileBackingSyncReport {
     pub mmap_flush_nanos: u128,
     /// Time spent syncing the underlying file.
     pub file_sync_nanos: u128,
+    /// Start of the exact byte range dirtied since the previous successful sync.
+    pub dirty_range_start: Option<usize>,
+    /// End of the exact byte range dirtied since the previous successful sync.
+    pub dirty_range_end: Option<usize>,
+    /// Exact dirty byte range length, or zero when no writes were tracked.
+    pub dirty_range_bytes: usize,
+    /// Start of the dirty range aligned to the mmap page size.
+    pub aligned_dirty_range_start: Option<usize>,
+    /// End of the dirty range aligned to the mmap page size.
+    pub aligned_dirty_range_end: Option<usize>,
+    /// Page-aligned dirty byte range length.
+    pub aligned_dirty_bytes: usize,
+    /// Bytes requested from the mmap flush operation.
+    pub requested_mmap_flush_bytes: usize,
+    /// Bytes flushed beyond the aligned dirty range.
+    pub flush_overreach_bytes: usize,
+    /// File sync primitive used after the mmap flush.
+    pub file_sync_kind: FileBackingFileSyncKind,
+}
+
+/// File sync primitive used by [`FileBacking::sync_with_report`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum FileBackingFileSyncKind {
+    /// `std::fs::File::sync_all`.
+    #[default]
+    SyncAll,
 }
 
 /// File-backed storage geometry errors.
@@ -431,6 +457,7 @@ pub struct FileBacking<const REGION_SIZE: usize, const REGION_COUNT: usize> {
     map: MmapMut,
     options: FileBackingOptions,
     geometry: FileBackingGeometry,
+    dirty_range: Option<Range<usize>>,
 }
 
 impl<const REGION_SIZE: usize, const REGION_COUNT: usize> core::fmt::Debug
@@ -500,9 +527,12 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize> FileBacking<REGION_SIZ
     pub fn write_metadata(&mut self, metadata: StorageMetadata) -> Result<(), FileBackingError> {
         self.validate_metadata(metadata)?;
         let erased_byte = self.options.erased_byte;
-        let metadata_region = self.metadata_region_mut();
-        metadata_region.fill(erased_byte);
-        metadata.encode_into(metadata_region)?;
+        {
+            let metadata_region = self.metadata_region_mut();
+            metadata_region.fill(erased_byte);
+            metadata.encode_into(metadata_region)?;
+        }
+        self.mark_dirty_range(0..REGION_SIZE);
         Ok(())
     }
 
@@ -526,14 +556,16 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize> FileBacking<REGION_SIZ
         data: &[u8],
     ) -> Result<(), FileBackingError> {
         let range = self.region_range(region_index, offset, data.len())?;
-        self.map[range].copy_from_slice(data);
+        self.map[range.clone()].copy_from_slice(data);
+        self.mark_dirty_range(range);
         Ok(())
     }
 
     /// Erases a single data region to the configured erased byte.
     pub fn erase_region(&mut self, region_index: u32) -> Result<(), FileBackingError> {
         let range = self.region_range(region_index, 0, REGION_SIZE)?;
-        self.map[range].fill(self.options.erased_byte);
+        self.map[range.clone()].fill(self.options.erased_byte);
+        self.mark_dirty_range(range);
         Ok(())
     }
 
@@ -653,8 +685,10 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize> FileBacking<REGION_SIZ
             map,
             options,
             geometry,
+            dirty_range: None,
         };
         backing.map.fill(options.erased_byte);
+        backing.mark_dirty_range(0..geometry.file_len);
         backing.apply_madvise_with_os(os)?;
         if options.sync_on_create {
             backing.sync_with_os(os)?;
@@ -681,6 +715,7 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize> FileBacking<REGION_SIZ
             map,
             options,
             geometry,
+            dirty_range: None,
         };
         backing.apply_madvise_with_os(os)?;
         Ok(backing)
@@ -705,6 +740,19 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize> FileBacking<REGION_SIZ
         &mut self,
         os: &mut OS,
     ) -> Result<FileBackingSyncReport, FileBackingError> {
+        let dirty_range = self.dirty_range.clone();
+        let aligned_dirty_range = dirty_range
+            .as_ref()
+            .and_then(|range| self.page_aligned_range(range));
+        let dirty_range_bytes = dirty_range
+            .as_ref()
+            .map_or(0, |range| range.end.saturating_sub(range.start));
+        let aligned_dirty_bytes = aligned_dirty_range
+            .as_ref()
+            .map_or(0, |range| range.end.saturating_sub(range.start));
+        let requested_mmap_flush_bytes = self.geometry.file_len;
+        let flush_overreach_bytes = requested_mmap_flush_bytes.saturating_sub(aligned_dirty_bytes);
+
         let flush_start = Instant::now();
         self.map
             .flush()
@@ -712,10 +760,41 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize> FileBacking<REGION_SIZ
         let mmap_flush_nanos = flush_start.elapsed().as_nanos();
         let file_sync_start = Instant::now();
         os.sync_file(&self.file)?;
+        let file_sync_nanos = file_sync_start.elapsed().as_nanos();
+        self.dirty_range = None;
         Ok(FileBackingSyncReport {
             mmap_flush_nanos,
-            file_sync_nanos: file_sync_start.elapsed().as_nanos(),
+            file_sync_nanos,
+            dirty_range_start: dirty_range.as_ref().map(|range| range.start),
+            dirty_range_end: dirty_range.as_ref().map(|range| range.end),
+            dirty_range_bytes,
+            aligned_dirty_range_start: aligned_dirty_range.as_ref().map(|range| range.start),
+            aligned_dirty_range_end: aligned_dirty_range.as_ref().map(|range| range.end),
+            aligned_dirty_bytes,
+            requested_mmap_flush_bytes,
+            flush_overreach_bytes,
+            file_sync_kind: FileBackingFileSyncKind::SyncAll,
         })
+    }
+
+    fn mark_dirty_range(&mut self, range: Range<usize>) {
+        if range.start == range.end {
+            return;
+        }
+        self.dirty_range = Some(match self.dirty_range.take() {
+            Some(existing) => existing.start.min(range.start)..existing.end.max(range.end),
+            None => range,
+        });
+    }
+
+    fn page_aligned_range(&self, range: &Range<usize>) -> Option<Range<usize>> {
+        if range.start == range.end {
+            return None;
+        }
+        let page_size = self.geometry.page_size;
+        let start = range.start - (range.start % page_size);
+        let end = align_up(range.end, page_size)?.min(self.geometry.file_len);
+        Some(start..end)
     }
 
     fn metadata_region(&self) -> &[u8] {
@@ -840,6 +919,17 @@ fn checked_range(
         return Err(FileBackingError::OutOfBounds);
     }
     Ok(offset..end)
+}
+
+fn align_up(value: usize, alignment: usize) -> Option<usize> {
+    if alignment == 0 {
+        return None;
+    }
+    let remainder = value % alignment;
+    if remainder == 0 {
+        return Some(value);
+    }
+    value.checked_add(alignment - remainder)
 }
 
 fn gcd(mut left: usize, mut right: usize) -> usize {

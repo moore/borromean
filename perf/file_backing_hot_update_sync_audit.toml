@@ -1,0 +1,46 @@
+[geometry]
+region_size = 65536
+region_count = 64
+
+[comparison]
+engines = ["borromean"]
+
+[backing]
+path = "target/perf/file_backing_hot_update_sync_audit.db"
+allocation_policy = "fallback-on-unsupported"
+madvise_policy = "normal"
+erased_byte = 0xff
+sync_on_create = false
+remove_existing = true
+remove_after = true
+
+[preload]
+count = 32
+
+[storage]
+min_free_regions = 2
+wal_write_granule = 8
+wal_record_magic = 0xa5
+
+[workload]
+map_count = 1
+operation_count = 100
+warmup_count = 0
+key_space = 32
+seed = 0x123456789abcdef
+read_ratio = 0
+set_ratio = 100
+delete_ratio = 0
+value_size_bytes = 8
+key_mode = "preloaded"
+compact_on_signal = false
+compact_interval = 0
+compaction_region_target = 128
+
+[maintenance]
+optimize_after_workload = false
+
+[output]
+json_path = "target/perf/file_backing_hot_update_sync_audit.json"
+latency_sample_interval = 10
+progress_interval = 50

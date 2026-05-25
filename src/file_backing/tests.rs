@@ -479,6 +479,68 @@ fn requirement_file_backing_sync_persists_changes_across_reopen() {
     assert_eq!(bytes, [0x44, 0x55]);
 }
 
+#[test]
+fn requirement_file_backing_sync_report_exposes_full_map_flush_overreach() {
+    const REGION_SIZE: usize = 4096;
+    const REGION_COUNT: usize = 2;
+
+    let temp = TempFile::new("sync-report-overreach");
+    let mut os = FakeOs::new();
+    let mut options = FileBackingOptions::new(0xff);
+    options.allocation_policy = AllocationPolicy::FallbackOnUnsupported;
+    let mut backing =
+        FileBacking::<REGION_SIZE, REGION_COUNT>::create_new_with_os(&temp.path, options, &mut os)
+            .unwrap();
+
+    backing.write_region(1, 7, &[0x44, 0x55]).unwrap();
+    let report = backing.sync_with_os_report(&mut os).unwrap();
+
+    let dirty_start = (1 + 1) * REGION_SIZE + 7;
+    assert_eq!(report.dirty_range_start, Some(dirty_start));
+    assert_eq!(report.dirty_range_end, Some(dirty_start + 2));
+    assert_eq!(report.dirty_range_bytes, 2);
+    assert_eq!(report.aligned_dirty_range_start, Some(2 * REGION_SIZE));
+    assert_eq!(
+        report.aligned_dirty_range_end,
+        Some(2 * REGION_SIZE + os.page_size)
+    );
+    assert_eq!(report.aligned_dirty_bytes, os.page_size);
+    assert_eq!(report.requested_mmap_flush_bytes, 3 * REGION_SIZE);
+    assert_eq!(
+        report.flush_overreach_bytes,
+        (3 * REGION_SIZE) - os.page_size
+    );
+    assert_eq!(report.file_sync_kind, FileBackingFileSyncKind::SyncAll);
+}
+
+#[test]
+fn requirement_file_backing_sync_report_clears_dirty_range_after_success() {
+    const REGION_SIZE: usize = 4096;
+    const REGION_COUNT: usize = 2;
+
+    let temp = TempFile::new("sync-report-clears-dirty");
+    let mut os = FakeOs::new();
+    let mut options = FileBackingOptions::new(0xff);
+    options.allocation_policy = AllocationPolicy::FallbackOnUnsupported;
+    let mut backing =
+        FileBacking::<REGION_SIZE, REGION_COUNT>::create_new_with_os(&temp.path, options, &mut os)
+            .unwrap();
+
+    backing.write_region(1, 7, &[0x44, 0x55]).unwrap();
+    let first = backing.sync_with_os_report(&mut os).unwrap();
+    assert_eq!(first.dirty_range_bytes, 2);
+
+    let second = backing.sync_with_os_report(&mut os).unwrap();
+    assert_eq!(second.dirty_range_start, None);
+    assert_eq!(second.dirty_range_end, None);
+    assert_eq!(second.dirty_range_bytes, 0);
+    assert_eq!(second.aligned_dirty_bytes, 0);
+    assert_eq!(
+        second.flush_overreach_bytes,
+        second.requested_mmap_flush_bytes
+    );
+}
+
 //= spec/file.md#backend-behavior
 //= type=test
 //# `RING-FILE-019` Formatted `FileBacking` storage MUST be usable through

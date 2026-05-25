@@ -1,9 +1,9 @@
 use super::*;
 extern crate std;
 use crate::wal_record::encode_record_into;
-#[cfg(feature = "perf-counters")]
-use crate::StoragePerfMetrics;
 use crate::{MockFlash, Storage, StorageFormatConfig, StorageWorkspace};
+#[cfg(feature = "perf-counters")]
+use crate::{MockOperation, StoragePerfMetrics};
 use postcard::to_slice;
 use proptest::prelude::*;
 use std::{vec, vec::Vec};
@@ -253,6 +253,117 @@ fn perf_metrics_reset_and_take_clear_metrics() {
     let taken = storage.take_perf_metrics();
     assert_eq!(taken.map_sets, 1);
     assert_eq!(storage.perf_metrics(), StoragePerfMetrics::default());
+}
+
+#[cfg(feature = "perf-counters")]
+fn count_mock_operations(
+    operations: &[MockOperation],
+    matches_operation: impl Fn(MockOperation) -> bool,
+) -> usize {
+    operations
+        .iter()
+        .copied()
+        .filter(|operation| matches_operation(*operation))
+        .count()
+}
+
+#[cfg(feature = "perf-counters")]
+#[test]
+fn sync_audit_hot_inserts_write_one_wal_record_and_sync_once() {
+    const COUNT: u16 = 10;
+    let mut flash = MockFlash::<4096, 16, 8192>::new(0xff);
+    let mut storage =
+        Storage::<_, 4096, 16, 8, 4>::format(&mut flash, StorageFormatConfig::new(2, 8, 0xa5))
+            .unwrap();
+    let mut map = LsmMap::<u16, u16, 8>::new(&mut storage).unwrap();
+
+    storage.with_io_workspace(|flash, _| flash.clear_operations());
+    storage.reset_perf_metrics();
+    for key in 0..COUNT {
+        assert!(!map.set(&mut storage, key, key + 100).unwrap());
+    }
+
+    let metrics = storage.perf_metrics();
+    let operations = storage.with_io_workspace(|flash, _| flash.operations().to_vec());
+    assert_eq!(metrics.map_sets, u64::from(COUNT));
+    assert_eq!(metrics.wal_records, u64::from(COUNT));
+    assert_eq!(metrics.wal_syncs, u64::from(COUNT));
+    assert_eq!(metrics.flushes, 0);
+    assert_eq!(metrics.compactions_run, 0);
+    assert_eq!(
+        count_mock_operations(&operations, |operation| matches!(
+            operation,
+            MockOperation::WriteRegion { .. }
+        )),
+        usize::from(COUNT)
+    );
+    assert_eq!(
+        count_mock_operations(&operations, |operation| operation == MockOperation::Sync),
+        usize::from(COUNT)
+    );
+    assert_eq!(
+        count_mock_operations(&operations, |operation| operation
+            == MockOperation::WriteMetadata),
+        0
+    );
+    assert_eq!(
+        count_mock_operations(&operations, |operation| matches!(
+            operation,
+            MockOperation::EraseRegion { .. }
+        )),
+        0
+    );
+}
+
+#[cfg(feature = "perf-counters")]
+#[test]
+fn sync_audit_hot_updates_exclude_preload_and_sync_once() {
+    const COUNT: u16 = 10;
+    let mut flash = MockFlash::<4096, 16, 8192>::new(0xff);
+    let mut storage =
+        Storage::<_, 4096, 16, 8, 4>::format(&mut flash, StorageFormatConfig::new(2, 8, 0xa5))
+            .unwrap();
+    let mut map = LsmMap::<u16, u16, 8>::new(&mut storage).unwrap();
+    for key in 0..COUNT {
+        assert!(!map.set(&mut storage, key, key + 100).unwrap());
+    }
+
+    storage.with_io_workspace(|flash, _| flash.clear_operations());
+    storage.reset_perf_metrics();
+    for key in 0..COUNT {
+        assert!(!map.set(&mut storage, key, key + 200).unwrap());
+    }
+
+    let metrics = storage.perf_metrics();
+    let operations = storage.with_io_workspace(|flash, _| flash.operations().to_vec());
+    assert_eq!(metrics.map_sets, u64::from(COUNT));
+    assert_eq!(metrics.wal_records, u64::from(COUNT));
+    assert_eq!(metrics.wal_syncs, u64::from(COUNT));
+    assert_eq!(metrics.flushes, 0);
+    assert_eq!(metrics.compactions_run, 0);
+    assert_eq!(
+        count_mock_operations(&operations, |operation| matches!(
+            operation,
+            MockOperation::WriteRegion { .. }
+        )),
+        usize::from(COUNT)
+    );
+    assert_eq!(
+        count_mock_operations(&operations, |operation| operation == MockOperation::Sync),
+        usize::from(COUNT)
+    );
+    assert_eq!(
+        count_mock_operations(&operations, |operation| operation
+            == MockOperation::WriteMetadata),
+        0
+    );
+    assert_eq!(
+        count_mock_operations(&operations, |operation| matches!(
+            operation,
+            MockOperation::EraseRegion { .. }
+        )),
+        0
+    );
 }
 
 #[test]

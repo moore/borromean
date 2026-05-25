@@ -8,10 +8,10 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use borromean::{
-    AllocationPolicy, CollectionId, FileBacking, FileBackingOptions, FlashIo, FreePointerFooter,
-    Header, LsmMap, MadvisePolicy, MockError, MockFormatError, Storage, StorageFormatConfig,
-    StorageFormatError, StorageIoError, StorageMetadata, StoragePerfMetrics, WalRegionPrologue,
-    WAL_V1_FORMAT,
+    AllocationPolicy, CollectionId, FileBacking, FileBackingFileSyncKind, FileBackingOptions,
+    FlashIo, FreePointerFooter, Header, LsmMap, MadvisePolicy, MockError, MockFormatError, Storage,
+    StorageFormatConfig, StorageFormatError, StorageIoError, StorageMetadata, StoragePerfMetrics,
+    WalRegionPrologue, WAL_V1_FORMAT,
 };
 use heapless::Vec as HeaplessVec;
 use redb::{Builder as RedbBuilder, Database, Durability, ReadableDatabase, TableDefinition};
@@ -389,6 +389,17 @@ struct IoDiagnostics {
     dirty_sync_bytes: u64,
     dirty_sync_regions: u64,
     dirty_sync_metadata_regions: u64,
+    exact_dirty_range_bytes: u64,
+    aligned_dirty_bytes: u64,
+    requested_mmap_flush_bytes: u64,
+    flush_overreach_bytes: u64,
+    last_file_sync_kind: Option<SyncFileKind>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SyncFileKind {
+    SyncAll,
 }
 
 #[derive(Debug, Default, Clone, Copy, Serialize)]
@@ -476,9 +487,249 @@ struct EngineReport {
     sampled_latency_by_op: OperationLatencySummaries,
     diagnostics: PerfDiagnostics,
     borromean_core_metrics: Option<StoragePerfMetrics>,
+    sync_audit: Option<SyncAuditReport>,
     maintenance: MaintenanceReport,
     file_len_bytes: u64,
     logical_len_bytes: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SyncAuditReport {
+    write_operations: u64,
+    wal_records: u64,
+    wal_bytes: u64,
+    wal_syncs: u64,
+    io_region_writes: u64,
+    io_syncs: u64,
+    metadata_writes_during_workload: u64,
+    region_erases: u64,
+    flushes: u64,
+    compactions: u64,
+    dirty_regions_synced: u64,
+    exact_dirty_range_bytes: u64,
+    aligned_dirty_bytes: u64,
+    requested_mmap_flush_bytes: u64,
+    flush_overreach_bytes: u64,
+    wal_syncs_per_write: Option<f64>,
+    io_syncs_per_write: Option<f64>,
+    wal_records_per_write: Option<f64>,
+    io_region_writes_per_write: Option<f64>,
+    dirty_regions_per_sync: Option<f64>,
+    non_hot_write_exceptions: u64,
+    first_violations: Vec<SyncAuditViolation>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SyncAuditViolation {
+    operation_index: u64,
+    operation: WorkloadOp,
+    expected_exception: bool,
+    reasons: Vec<String>,
+    delta: SyncAuditDelta,
+}
+
+#[derive(Debug, Default, Clone, Copy, Serialize)]
+struct SyncAuditDelta {
+    wal_records: u64,
+    wal_syncs: u64,
+    io_region_writes: u64,
+    io_syncs: u64,
+    metadata_writes: u64,
+    region_erases: u64,
+    flushes: u64,
+    compactions: u64,
+    overflow_flushes: u64,
+    wal_rotations_attempted: u64,
+    wal_rotations_completed: u64,
+    wal_rotation_required: u64,
+    reclaim_starts: u64,
+    reclaim_ends: u64,
+}
+
+#[derive(Default)]
+struct SyncAuditCollector {
+    write_operations: u64,
+    non_hot_write_exceptions: u64,
+    first_violations: Vec<SyncAuditViolation>,
+}
+
+#[derive(Clone, Copy)]
+struct SyncAuditSnapshot {
+    metrics: StoragePerfMetrics,
+    io: IoDiagnostics,
+}
+
+const MAX_SYNC_AUDIT_VIOLATIONS: usize = 8;
+
+impl SyncAuditCollector {
+    fn observe(&mut self, operation_index: u64, operation: WorkloadOp, delta: SyncAuditDelta) {
+        if !operation.is_write() {
+            return;
+        }
+        self.write_operations = self.write_operations.saturating_add(1);
+
+        let expected_exception = delta.has_expected_exception();
+        if expected_exception {
+            self.non_hot_write_exceptions = self.non_hot_write_exceptions.saturating_add(1);
+        }
+
+        let reasons = delta.violation_reasons();
+        if reasons.is_empty() || self.first_violations.len() >= MAX_SYNC_AUDIT_VIOLATIONS {
+            return;
+        }
+
+        self.first_violations.push(SyncAuditViolation {
+            operation_index,
+            operation,
+            expected_exception,
+            reasons,
+            delta,
+        });
+    }
+
+    fn finish(
+        self,
+        metrics: StoragePerfMetrics,
+        io: IoDiagnostics,
+        counters: &WorkloadCounters,
+    ) -> SyncAuditReport {
+        let write_operations = counters.sets.saturating_add(counters.deletes);
+        SyncAuditReport {
+            write_operations,
+            wal_records: metrics.wal_records,
+            wal_bytes: metrics.wal_bytes,
+            wal_syncs: metrics.wal_syncs,
+            io_region_writes: io.region_writes,
+            io_syncs: io.syncs,
+            metadata_writes_during_workload: io.metadata_writes,
+            region_erases: io.region_erases,
+            flushes: metrics.flushes,
+            compactions: metrics.compactions_run,
+            dirty_regions_synced: io.dirty_sync_regions,
+            exact_dirty_range_bytes: io.exact_dirty_range_bytes,
+            aligned_dirty_bytes: io.aligned_dirty_bytes,
+            requested_mmap_flush_bytes: io.requested_mmap_flush_bytes,
+            flush_overreach_bytes: io.flush_overreach_bytes,
+            wal_syncs_per_write: ratio_u64(metrics.wal_syncs, write_operations),
+            io_syncs_per_write: ratio_u64(io.syncs, write_operations),
+            wal_records_per_write: ratio_u64(metrics.wal_records, write_operations),
+            io_region_writes_per_write: ratio_u64(io.region_writes, write_operations),
+            dirty_regions_per_sync: ratio_u64(io.dirty_sync_regions, io.syncs),
+            non_hot_write_exceptions: self.non_hot_write_exceptions,
+            first_violations: self.first_violations,
+        }
+    }
+}
+
+impl SyncAuditSnapshot {
+    fn delta_since(self, before: Self) -> SyncAuditDelta {
+        SyncAuditDelta {
+            wal_records: self
+                .metrics
+                .wal_records
+                .saturating_sub(before.metrics.wal_records),
+            wal_syncs: self
+                .metrics
+                .wal_syncs
+                .saturating_sub(before.metrics.wal_syncs),
+            io_region_writes: self
+                .io
+                .region_writes
+                .saturating_sub(before.io.region_writes),
+            io_syncs: self.io.syncs.saturating_sub(before.io.syncs),
+            metadata_writes: self
+                .io
+                .metadata_writes
+                .saturating_sub(before.io.metadata_writes),
+            region_erases: self
+                .io
+                .region_erases
+                .saturating_sub(before.io.region_erases),
+            flushes: self.metrics.flushes.saturating_sub(before.metrics.flushes),
+            compactions: self
+                .metrics
+                .compactions_run
+                .saturating_sub(before.metrics.compactions_run),
+            overflow_flushes: self
+                .metrics
+                .overflow_flushes
+                .saturating_sub(before.metrics.overflow_flushes),
+            wal_rotations_attempted: self
+                .metrics
+                .wal_rotations_attempted
+                .saturating_sub(before.metrics.wal_rotations_attempted),
+            wal_rotations_completed: self
+                .metrics
+                .wal_rotations_completed
+                .saturating_sub(before.metrics.wal_rotations_completed),
+            wal_rotation_required: self
+                .metrics
+                .wal_rotation_required
+                .saturating_sub(before.metrics.wal_rotation_required),
+            reclaim_starts: self
+                .metrics
+                .reclaim_starts
+                .saturating_sub(before.metrics.reclaim_starts),
+            reclaim_ends: self
+                .metrics
+                .reclaim_ends
+                .saturating_sub(before.metrics.reclaim_ends),
+        }
+    }
+}
+
+impl SyncAuditDelta {
+    fn has_expected_exception(self) -> bool {
+        self.overflow_flushes != 0
+            || self.flushes != 0
+            || self.compactions != 0
+            || self.wal_rotations_attempted != 0
+            || self.wal_rotations_completed != 0
+            || self.wal_rotation_required != 0
+            || self.reclaim_starts != 0
+            || self.reclaim_ends != 0
+    }
+
+    fn violation_reasons(self) -> Vec<String> {
+        let mut reasons = Vec::new();
+        if self.wal_syncs != 1 {
+            reasons.push(format!("wal_syncs={} expected=1", self.wal_syncs));
+        }
+        if self.io_syncs != 1 {
+            reasons.push(format!("io_syncs={} expected=1", self.io_syncs));
+        }
+        if self.wal_records != 1 {
+            reasons.push(format!("wal_records={} expected=1", self.wal_records));
+        }
+        if self.io_region_writes != 1 {
+            reasons.push(format!(
+                "io_region_writes={} expected=1",
+                self.io_region_writes
+            ));
+        }
+        if self.metadata_writes != 0 {
+            reasons.push(format!(
+                "metadata_writes={} expected=0",
+                self.metadata_writes
+            ));
+        }
+        if self.region_erases != 0 {
+            reasons.push(format!("region_erases={} expected=0", self.region_erases));
+        }
+        if self.flushes != 0 {
+            reasons.push(format!("flushes={} expected=0", self.flushes));
+        }
+        if self.compactions != 0 {
+            reasons.push(format!("compactions={} expected=0", self.compactions));
+        }
+        if self.wal_rotations_attempted != 0 {
+            reasons.push(format!(
+                "wal_rotations_attempted={} expected=0",
+                self.wal_rotations_attempted
+            ));
+        }
+        reasons
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -544,6 +795,11 @@ impl MemoryTracker {
 struct SyncDetails {
     mmap_flush_nanos: u128,
     file_sync_nanos: u128,
+    exact_dirty_range_bytes: u64,
+    aligned_dirty_bytes: u64,
+    requested_mmap_flush_bytes: u64,
+    flush_overreach_bytes: u64,
+    file_sync_kind: Option<SyncFileKind>,
 }
 
 trait PerfBacking: FlashIo {
@@ -558,6 +814,13 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize> PerfBacking
         Ok(SyncDetails {
             mmap_flush_nanos: report.mmap_flush_nanos,
             file_sync_nanos: report.file_sync_nanos,
+            exact_dirty_range_bytes: report.dirty_range_bytes as u64,
+            aligned_dirty_bytes: report.aligned_dirty_bytes as u64,
+            requested_mmap_flush_bytes: report.requested_mmap_flush_bytes as u64,
+            flush_overreach_bytes: report.flush_overreach_bytes as u64,
+            file_sync_kind: Some(match report.file_sync_kind {
+                FileBackingFileSyncKind::SyncAll => SyncFileKind::SyncAll,
+            }),
         })
     }
 }
@@ -790,6 +1053,11 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize> PerfBacking
         Ok(SyncDetails {
             mmap_flush_nanos: 0,
             file_sync_nanos: 0,
+            exact_dirty_range_bytes: 0,
+            aligned_dirty_bytes: 0,
+            requested_mmap_flush_bytes: 0,
+            flush_overreach_bytes: 0,
+            file_sync_kind: None,
         })
     }
 }
@@ -912,6 +1180,26 @@ fn merge_io_metrics_into_core(metrics: &mut StoragePerfMetrics, io: IoDiagnostic
         .saturating_add(io.dirty_sync_metadata_regions);
 }
 
+fn capture_sync_audit_snapshot<IO, const REGION_SIZE: usize, const REGION_COUNT: usize>(
+    storage: &Storage<
+        '_,
+        InstrumentedBacking<IO, REGION_SIZE, REGION_COUNT>,
+        REGION_SIZE,
+        REGION_COUNT,
+        MAX_COLLECTIONS,
+        MAX_PENDING_RECLAIMS,
+    >,
+    diagnostics_handle: &IoDiagnosticsHandle<REGION_SIZE, REGION_COUNT>,
+) -> SyncAuditSnapshot
+where
+    IO: PerfBacking,
+{
+    SyncAuditSnapshot {
+        metrics: storage.perf_metrics(),
+        io: diagnostics_handle.diagnostics(),
+    }
+}
+
 impl<IO, const REGION_SIZE: usize, const REGION_COUNT: usize> FlashIo
     for InstrumentedBacking<IO, REGION_SIZE, REGION_COUNT>
 where
@@ -1018,6 +1306,23 @@ where
                         .diagnostics
                         .file_sync_nanos
                         .saturating_add(details.file_sync_nanos);
+                    state.diagnostics.exact_dirty_range_bytes = state
+                        .diagnostics
+                        .exact_dirty_range_bytes
+                        .saturating_add(details.exact_dirty_range_bytes);
+                    state.diagnostics.aligned_dirty_bytes = state
+                        .diagnostics
+                        .aligned_dirty_bytes
+                        .saturating_add(details.aligned_dirty_bytes);
+                    state.diagnostics.requested_mmap_flush_bytes = state
+                        .diagnostics
+                        .requested_mmap_flush_bytes
+                        .saturating_add(details.requested_mmap_flush_bytes);
+                    state.diagnostics.flush_overreach_bytes = state
+                        .diagnostics
+                        .flush_overreach_bytes
+                        .saturating_add(details.flush_overreach_bytes);
+                    state.diagnostics.last_file_sync_kind = details.file_sync_kind;
                     state.diagnostics.dirty_sync_regions = state
                         .diagnostics
                         .dirty_sync_regions
@@ -1136,11 +1441,17 @@ impl ProgressReporter {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize)]
 enum WorkloadOp {
     Read,
     Set,
     Delete,
+}
+
+impl WorkloadOp {
+    fn is_write(self) -> bool {
+        matches!(self, Self::Set | Self::Delete)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1514,6 +1825,7 @@ where
     let mut workload_timings = WorkloadTimings::default();
     let mut latency_samples = Vec::new();
     let mut latency_samples_by_op = OperationLatencySamples::default();
+    let mut sync_audit = SyncAuditCollector::default();
     let workload_start = Instant::now();
     let mut workload_progress = ProgressReporter::new(
         config.output.progress_interval,
@@ -1522,6 +1834,7 @@ where
     for index in 0..config.workload.operation_count {
         let sample = should_sample_latency(config.output.latency_sample_interval, index);
         let operation_start = sample.then(Instant::now);
+        let audit_before = capture_sync_audit_snapshot(&storage, &diagnostics_handle);
         let executed = execute_one_borromean_operation(
             config,
             &mut rng,
@@ -1532,6 +1845,12 @@ where
             Some(index),
         )
         .map_err(|error| format!("workload operation {index} failed: {error}"))?;
+        let audit_after = capture_sync_audit_snapshot(&storage, &diagnostics_handle);
+        sync_audit.observe(
+            index,
+            executed.operation,
+            audit_after.delta_since(audit_before),
+        );
         if let Some(start) = operation_start {
             let elapsed = start.elapsed().as_nanos();
             latency_samples.push(elapsed);
@@ -1556,6 +1875,7 @@ where
     let mut borromean_core_metrics = storage.take_perf_metrics();
     let io_diagnostics = diagnostics_handle.diagnostics();
     merge_io_metrics_into_core(&mut borromean_core_metrics, io_diagnostics);
+    let sync_audit = sync_audit.finish(borromean_core_metrics, io_diagnostics, &counters);
     let maintenance = run_borromean_post_workload_maintenance::<
         _,
         REGION_SIZE,
@@ -1596,6 +1916,7 @@ where
         sampled_latency_by_op: summarize_operation_latency(latency_samples_by_op),
         diagnostics,
         borromean_core_metrics: Some(borromean_core_metrics),
+        sync_audit: Some(sync_audit),
         maintenance,
         file_len_bytes,
         logical_len_bytes: file_len_bytes,
@@ -1720,6 +2041,7 @@ where
     let mut workload_timings = WorkloadTimings::default();
     let mut latency_samples = Vec::new();
     let mut latency_samples_by_op = OperationLatencySamples::default();
+    let mut sync_audit = SyncAuditCollector::default();
     let workload_start = Instant::now();
     let mut workload_progress = ProgressReporter::new(
         config.output.progress_interval,
@@ -1728,6 +2050,7 @@ where
     for index in 0..config.workload.operation_count {
         let sample = should_sample_latency(config.output.latency_sample_interval, index);
         let operation_start = sample.then(Instant::now);
+        let audit_before = capture_sync_audit_snapshot(&storage, &diagnostics_handle);
         let executed = execute_one_borromean_operation(
             config,
             &mut rng,
@@ -1738,6 +2061,12 @@ where
             Some(index),
         )
         .map_err(|error| format!("workload operation {index} failed: {error}"))?;
+        let audit_after = capture_sync_audit_snapshot(&storage, &diagnostics_handle);
+        sync_audit.observe(
+            index,
+            executed.operation,
+            audit_after.delta_since(audit_before),
+        );
         if let Some(start) = operation_start {
             let elapsed = start.elapsed().as_nanos();
             latency_samples.push(elapsed);
@@ -1762,6 +2091,7 @@ where
     let mut borromean_core_metrics = storage.take_perf_metrics();
     let io_diagnostics = diagnostics_handle.diagnostics();
     merge_io_metrics_into_core(&mut borromean_core_metrics, io_diagnostics);
+    let sync_audit = sync_audit.finish(borromean_core_metrics, io_diagnostics, &counters);
     let maintenance = run_borromean_post_workload_maintenance::<
         _,
         REGION_SIZE,
@@ -1798,6 +2128,7 @@ where
         sampled_latency_by_op: summarize_operation_latency(latency_samples_by_op),
         diagnostics,
         borromean_core_metrics: Some(borromean_core_metrics),
+        sync_audit: Some(sync_audit),
         maintenance,
         file_len_bytes: 0,
         logical_len_bytes,
@@ -1981,6 +2312,7 @@ fn run_redb_engine<const VALUE_BYTES: usize>(
         sampled_latency_by_op: summarize_operation_latency(latency_samples_by_op),
         diagnostics,
         borromean_core_metrics: None,
+        sync_audit: None,
         maintenance,
         file_len_bytes,
         logical_len_bytes: file_len_bytes,
@@ -3033,7 +3365,7 @@ fn print_diagnostics(report: &EngineReport) {
     );
     if let Some(io) = diagnostics.borromean_io {
         println!(
-            "  io: metadata_reads={} metadata_writes={} region_reads={} region_writes={} region_erases={} syncs={} bytes_read={} bytes_written={} bytes_erased={} dirty_sync_bytes={} dirty_sync_regions={} dirty_sync_metadata_regions={} read_time={} write_time={} erase_time={} sync_time={} mmap_flush={} file_sync={}",
+            "  io: metadata_reads={} metadata_writes={} region_reads={} region_writes={} region_erases={} syncs={} bytes_read={} bytes_written={} bytes_erased={} dirty_sync_bytes={} dirty_sync_regions={} dirty_sync_metadata_regions={} exact_dirty_range_bytes={} aligned_dirty_bytes={} requested_mmap_flush_bytes={} flush_overreach_bytes={} file_sync_kind={} read_time={} write_time={} erase_time={} sync_time={} mmap_flush={} file_sync={}",
             io.metadata_reads,
             io.metadata_writes,
             io.region_reads,
@@ -3046,6 +3378,11 @@ fn print_diagnostics(report: &EngineReport) {
             io.dirty_sync_bytes,
             io.dirty_sync_regions,
             io.dirty_sync_metadata_regions,
+            io.exact_dirty_range_bytes,
+            io.aligned_dirty_bytes,
+            io.requested_mmap_flush_bytes,
+            io.flush_overreach_bytes,
+            format_sync_file_kind(io.last_file_sync_kind),
             format_nanos(io.read_region_nanos),
             format_nanos(io.write_region_nanos),
             format_nanos(io.erase_region_nanos),
@@ -3056,6 +3393,9 @@ fn print_diagnostics(report: &EngineReport) {
     }
     if let Some(metrics) = report.borromean_core_metrics {
         print_borromean_core_metrics(&metrics);
+    }
+    if let Some(audit) = &report.sync_audit {
+        print_sync_audit(audit);
     }
     if let Some(cache_size) = diagnostics.redb_cache_size_bytes {
         println!("  redb cache_size: {cache_size} bytes");
@@ -3071,6 +3411,44 @@ fn print_diagnostics(report: &EngineReport) {
             stats.metadata_bytes,
             stats.fragmented_bytes,
             stats.page_size
+        );
+    }
+}
+
+fn print_sync_audit(audit: &SyncAuditReport) {
+    println!(
+        "  sync audit: writes={} wal_syncs/write={} io_syncs/write={} wal_records/write={} io_region_writes/write={} dirty_regions/sync={} metadata_writes={} non_hot_exceptions={}",
+        audit.write_operations,
+        format_optional_ratio_value(audit.wal_syncs_per_write),
+        format_optional_ratio_value(audit.io_syncs_per_write),
+        format_optional_ratio_value(audit.wal_records_per_write),
+        format_optional_ratio_value(audit.io_region_writes_per_write),
+        format_optional_ratio_value(audit.dirty_regions_per_sync),
+        audit.metadata_writes_during_workload,
+        audit.non_hot_write_exceptions
+    );
+    println!(
+        "  sync audit bytes: wal_bytes={} exact_dirty_range_bytes={} aligned_dirty_bytes={} requested_mmap_flush_bytes={} flush_overreach_bytes={}",
+        audit.wal_bytes,
+        audit.exact_dirty_range_bytes,
+        audit.aligned_dirty_bytes,
+        audit.requested_mmap_flush_bytes,
+        audit.flush_overreach_bytes
+    );
+    for violation in &audit.first_violations {
+        println!(
+            "  sync audit violation: op={} kind={:?} expected_exception={} reasons={} delta_wal_syncs={} delta_io_syncs={} delta_wal_records={} delta_region_writes={} delta_flushes={} delta_compactions={} delta_rotations={}",
+            violation.operation_index,
+            violation.operation,
+            violation.expected_exception,
+            violation.reasons.join("; "),
+            violation.delta.wal_syncs,
+            violation.delta.io_syncs,
+            violation.delta.wal_records,
+            violation.delta.io_region_writes,
+            violation.delta.flushes,
+            violation.delta.compactions,
+            violation.delta.wal_rotations_attempted
         );
     }
 }
@@ -3287,6 +3665,27 @@ fn print_optional_ratio(label: &str, ratio: Option<f64>, suffix: &str) {
     }
 }
 
+fn format_optional_ratio_value(ratio: Option<f64>) -> String {
+    match ratio {
+        Some(ratio) if ratio.is_finite() => format!("{ratio:.3}"),
+        _ => "n/a".to_owned(),
+    }
+}
+
+fn format_sync_file_kind(kind: Option<SyncFileKind>) -> &'static str {
+    match kind {
+        Some(SyncFileKind::SyncAll) => "sync_all",
+        None => "none",
+    }
+}
+
+fn ratio_u64(numerator: u64, denominator: u64) -> Option<f64> {
+    if denominator == 0 {
+        return None;
+    }
+    Some(numerator as f64 / denominator as f64)
+}
+
 fn ratio_f64(numerator: f64, denominator: f64) -> Option<f64> {
     if denominator == 0.0 {
         return None;
@@ -3365,6 +3764,83 @@ fn format_nanos(nanos: u128) -> String {
         return format!("{:.3} ms", nanos as f64 / NANOS_PER_MILLI as f64);
     }
     format!("{:.3} s", nanos as f64 / NANOS_PER_SECOND as f64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sync_audit_records_unexpected_hot_write_violation() {
+        let mut collector = SyncAuditCollector::default();
+        collector.observe(
+            7,
+            WorkloadOp::Set,
+            SyncAuditDelta {
+                wal_records: 1,
+                wal_syncs: 2,
+                io_region_writes: 1,
+                io_syncs: 2,
+                ..SyncAuditDelta::default()
+            },
+        );
+
+        assert_eq!(collector.write_operations, 1);
+        assert_eq!(collector.non_hot_write_exceptions, 0);
+        assert_eq!(collector.first_violations.len(), 1);
+        assert!(!collector.first_violations[0].expected_exception);
+        assert!(collector.first_violations[0]
+            .reasons
+            .iter()
+            .any(|reason| reason.contains("wal_syncs=2")));
+    }
+
+    #[test]
+    fn sync_audit_marks_frontier_flush_as_expected_exception() {
+        let mut collector = SyncAuditCollector::default();
+        collector.observe(
+            11,
+            WorkloadOp::Set,
+            SyncAuditDelta {
+                wal_records: 3,
+                wal_syncs: 3,
+                io_region_writes: 5,
+                io_syncs: 3,
+                flushes: 1,
+                overflow_flushes: 1,
+                ..SyncAuditDelta::default()
+            },
+        );
+
+        assert_eq!(collector.write_operations, 1);
+        assert_eq!(collector.non_hot_write_exceptions, 1);
+        assert_eq!(collector.first_violations.len(), 1);
+        assert!(collector.first_violations[0].expected_exception);
+    }
+
+    #[test]
+    fn sync_audit_marks_wal_rotation_as_expected_exception() {
+        let mut collector = SyncAuditCollector::default();
+        collector.observe(
+            13,
+            WorkloadOp::Set,
+            SyncAuditDelta {
+                wal_records: 2,
+                wal_syncs: 2,
+                io_region_writes: 3,
+                io_syncs: 2,
+                wal_rotations_attempted: 1,
+                wal_rotations_completed: 1,
+                wal_rotation_required: 1,
+                ..SyncAuditDelta::default()
+            },
+        );
+
+        assert_eq!(collector.write_operations, 1);
+        assert_eq!(collector.non_hot_write_exceptions, 1);
+        assert_eq!(collector.first_violations.len(), 1);
+        assert!(collector.first_violations[0].expected_exception);
+    }
 }
 
 fn write_json_report(report: &PerfReport) -> PerfResult<()> {
