@@ -1,9 +1,9 @@
 [geometry]
-region_size = 4096
-region_count = 4096
+region_size = 1048576
+region_count = 64
 
 [comparison]
-engines = ["borromean", "borromean-memory", "redb"]
+engines = ["borromean", "borromean-memory", "redb", "fjall"]
 
 [backing]
 path = "target/perf/file_backing_read_misses.db"
@@ -21,6 +21,15 @@ remove_after = false
 compact_interval = 0
 compact_after_workload = false
 durability = "immediate"
+
+[fjall]
+path = "target/perf/fjall_read_misses.db"
+remove_existing = true
+remove_after = false
+cache_size_bytes = 0
+persist_mode = "sync-data"
+manual_journal_persist = true
+worker_threads = 1
 
 [preload]
 count = 1000
@@ -42,7 +51,7 @@ delete_ratio = 0
 value_size_bytes = 64
 key_mode = "missing"
 compact_on_signal = true
-compaction_region_target = 64
+compaction_region_target = 16
 
 [maintenance]
 optimize_after_workload = false

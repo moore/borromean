@@ -1,7 +1,7 @@
 [geometry]
-# 100 MiB total DB file, including the metadata region.
-region_size = 65536
-db_size_bytes = 104857600
+# 64 one-megabyte data regions plus the metadata region.
+region_size = 1048576
+region_count = 64
 
 [backing]
 path = "target/perf/file_backing_mixed.db"

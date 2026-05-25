@@ -36,11 +36,15 @@ fn requirement_mock_flash_supports_region_granularity_write_and_erase() {
     flash.write_region(0, 0, &[1, 2, 3, 4]).unwrap();
 
     let mut buffer = [0u8; 8];
-    flash.read_region(0, 0, &mut buffer).unwrap();
+    flash
+        .read_region(0, 0, buffer.len(), |bytes| buffer.copy_from_slice(bytes))
+        .unwrap();
     assert_eq!(buffer[..4], [1, 2, 3, 4]);
 
     flash.erase_region(0).unwrap();
-    flash.read_region(0, 0, &mut buffer).unwrap();
+    flash
+        .read_region(0, 0, buffer.len(), |bytes| buffer.copy_from_slice(bytes))
+        .unwrap();
     assert_eq!(buffer, [0xff; 8]);
 }
 
@@ -146,7 +150,9 @@ fn requirement_erase_write_read_and_sync_are_logged() {
 
     flash.write_region(1, 4, b"bor").unwrap();
     let mut buffer = [0u8; 3];
-    flash.read_region(1, 4, &mut buffer).unwrap();
+    flash
+        .read_region(1, 4, buffer.len(), |bytes| buffer.copy_from_slice(bytes))
+        .unwrap();
     flash.erase_region(1).unwrap();
     flash.sync().unwrap();
 
@@ -181,7 +187,9 @@ fn requirement_erase_restores_erased_bytes() {
     flash.erase_region(0).unwrap();
 
     let mut buffer = [0u8; 8];
-    flash.read_region(0, 0, &mut buffer).unwrap();
+    flash
+        .read_region(0, 0, buffer.len(), |bytes| buffer.copy_from_slice(bytes))
+        .unwrap();
     assert_eq!(buffer, [0xff; 8]);
 }
 

@@ -419,7 +419,7 @@ fn requirement_file_backing_rejects_out_of_bounds_region_operations() {
     )
     .unwrap();
     assert_eq!(
-        backing.read_region(2, 0, &mut [0u8; 1]),
+        backing.read_region(2, 0, 1, |_| ()),
         Err(FileBackingError::InvalidRegionIndex(2))
     );
     assert_eq!(
@@ -449,14 +449,15 @@ fn requirement_file_backing_erase_fills_region_with_erased_byte() {
     backing.write_region(0, 0, &[0x11; 512]).unwrap();
     backing.erase_region(0).unwrap();
     let mut bytes = [0u8; 512];
-    backing.read_region(0, 0, &mut bytes).unwrap();
+    backing
+        .read_region(0, 0, bytes.len(), |data| bytes.copy_from_slice(data))
+        .unwrap();
     assert!(bytes.iter().all(|byte| *byte == 0xee));
 }
 
 //= spec/file.md#backend-behavior
 //= type=test
-//# `RING-FILE-018` `FileBacking::sync()` MUST flush mmap changes and sync
-//# the underlying file.
+//# `RING-FILE-018` `FileBacking::sync()` MUST flush mmap changes durably.
 #[test]
 fn requirement_file_backing_sync_persists_changes_across_reopen() {
     const REGION_SIZE: usize = 4096;
@@ -475,22 +476,25 @@ fn requirement_file_backing_sync_persists_changes_across_reopen() {
     let mut reopened =
         FileBacking::<REGION_SIZE, REGION_COUNT>::open_existing(&temp.path, options).unwrap();
     let mut bytes = [0u8; 2];
-    reopened.read_region(1, 7, &mut bytes).unwrap();
+    reopened
+        .read_region(1, 7, bytes.len(), |data| bytes.copy_from_slice(data))
+        .unwrap();
     assert_eq!(bytes, [0x44, 0x55]);
 }
 
 #[test]
-fn requirement_file_backing_sync_report_exposes_full_map_flush_overreach() {
+fn requirement_file_backing_sync_report_uses_range_flush_for_wal_write() {
     const REGION_SIZE: usize = 4096;
     const REGION_COUNT: usize = 2;
 
-    let temp = TempFile::new("sync-report-overreach");
+    let temp = TempFile::new("sync-report-range");
     let mut os = FakeOs::new();
     let mut options = FileBackingOptions::new(0xff);
     options.allocation_policy = AllocationPolicy::FallbackOnUnsupported;
     let mut backing =
         FileBacking::<REGION_SIZE, REGION_COUNT>::create_new_with_os(&temp.path, options, &mut os)
             .unwrap();
+    let sync_calls_after_create = os.sync_calls;
 
     backing.write_region(1, 7, &[0x44, 0x55]).unwrap();
     let report = backing.sync_with_os_report(&mut os).unwrap();
@@ -505,12 +509,69 @@ fn requirement_file_backing_sync_report_exposes_full_map_flush_overreach() {
         Some(2 * REGION_SIZE + os.page_size)
     );
     assert_eq!(report.aligned_dirty_bytes, os.page_size);
-    assert_eq!(report.requested_mmap_flush_bytes, 3 * REGION_SIZE);
-    assert_eq!(
-        report.flush_overreach_bytes,
-        (3 * REGION_SIZE) - os.page_size
-    );
+    assert_eq!(report.requested_mmap_flush_bytes, os.page_size);
+    assert_eq!(report.flush_overreach_bytes, 0);
+    assert_eq!(report.file_sync_kind, FileBackingFileSyncKind::NoFileSync);
+    assert_eq!(os.sync_calls, sync_calls_after_create);
+}
+
+#[test]
+fn requirement_file_backing_sync_report_syncs_file_for_metadata_write() {
+    const REGION_SIZE: usize = 4096;
+    const REGION_COUNT: usize = 2;
+
+    let temp = TempFile::new("sync-report-metadata");
+    let mut os = FakeOs::new();
+    let mut options = FileBackingOptions::new(0xff);
+    options.allocation_policy = AllocationPolicy::FallbackOnUnsupported;
+    let mut backing =
+        FileBacking::<REGION_SIZE, REGION_COUNT>::create_new_with_os(&temp.path, options, &mut os)
+            .unwrap();
+    let sync_calls_after_create = os.sync_calls;
+    let metadata =
+        StorageMetadata::new(REGION_SIZE as u32, REGION_COUNT as u32, 0, 8, 0xff, 0xa5).unwrap();
+
+    backing.write_metadata(metadata).unwrap();
+    let report = backing.sync_with_os_report(&mut os).unwrap();
+
+    assert_eq!(report.dirty_range_start, Some(0));
+    assert_eq!(report.dirty_range_end, Some(REGION_SIZE));
+    assert_eq!(report.dirty_range_bytes, REGION_SIZE);
+    assert_eq!(report.aligned_dirty_range_start, Some(0));
+    assert_eq!(report.aligned_dirty_range_end, Some(REGION_SIZE));
+    assert_eq!(report.aligned_dirty_bytes, REGION_SIZE);
+    assert_eq!(report.requested_mmap_flush_bytes, REGION_SIZE);
+    assert_eq!(report.flush_overreach_bytes, 0);
     assert_eq!(report.file_sync_kind, FileBackingFileSyncKind::SyncAll);
+    assert_eq!(os.sync_calls, sync_calls_after_create + 1);
+}
+
+#[test]
+fn requirement_file_backing_sync_report_clean_sync_is_noop() {
+    const REGION_SIZE: usize = 4096;
+    const REGION_COUNT: usize = 2;
+
+    let temp = TempFile::new("sync-report-clean");
+    let mut os = FakeOs::new();
+    let mut options = FileBackingOptions::new(0xff);
+    options.allocation_policy = AllocationPolicy::FallbackOnUnsupported;
+    let mut backing =
+        FileBacking::<REGION_SIZE, REGION_COUNT>::create_new_with_os(&temp.path, options, &mut os)
+            .unwrap();
+    let sync_calls_after_create = os.sync_calls;
+
+    let report = backing.sync_with_os_report(&mut os).unwrap();
+
+    assert_eq!(report.dirty_range_start, None);
+    assert_eq!(report.dirty_range_end, None);
+    assert_eq!(report.dirty_range_bytes, 0);
+    assert_eq!(report.aligned_dirty_range_start, None);
+    assert_eq!(report.aligned_dirty_range_end, None);
+    assert_eq!(report.aligned_dirty_bytes, 0);
+    assert_eq!(report.requested_mmap_flush_bytes, 0);
+    assert_eq!(report.flush_overreach_bytes, 0);
+    assert_eq!(report.file_sync_kind, FileBackingFileSyncKind::NoFileSync);
+    assert_eq!(os.sync_calls, sync_calls_after_create);
 }
 
 #[test]
@@ -535,10 +596,8 @@ fn requirement_file_backing_sync_report_clears_dirty_range_after_success() {
     assert_eq!(second.dirty_range_end, None);
     assert_eq!(second.dirty_range_bytes, 0);
     assert_eq!(second.aligned_dirty_bytes, 0);
-    assert_eq!(
-        second.flush_overreach_bytes,
-        second.requested_mmap_flush_bytes
-    );
+    assert_eq!(second.requested_mmap_flush_bytes, 0);
+    assert_eq!(second.flush_overreach_bytes, 0);
 }
 
 //= spec/file.md#backend-behavior

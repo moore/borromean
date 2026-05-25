@@ -765,6 +765,8 @@ where
                         this.storage.backing,
                         &mut this.storage.workspace,
                         &plan,
+                        #[cfg(feature = "perf-counters")]
+                        None,
                     )
                 {
                     this.storage.finish_mode();

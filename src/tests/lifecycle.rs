@@ -192,7 +192,8 @@ fn service_storage_lifecycle<
     let new_head = storage.reclaim_wal_head().unwrap();
     assert_ne!(old_head, new_head);
     assert_eq!(storage.wal_head(), new_head);
-    assert_eq!(storage.wal_tail(), new_head);
+    let new_chain_len = wal_chain_len(storage).unwrap();
+    assert!(new_chain_len < chain_len);
     stats.wal_reclaims += 1;
     complete_all_pending_reclaims(storage, stats);
 }

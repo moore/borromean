@@ -122,8 +122,10 @@ pub struct FileBackingSyncReport {
 /// File sync primitive used by [`FileBacking::sync_with_report`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum FileBackingFileSyncKind {
-    /// `std::fs::File::sync_all`.
+    /// No file-level sync was needed after the mmap flush.
     #[default]
+    NoFileSync,
+    /// `std::fs::File::sync_all`.
     SyncAll,
 }
 
@@ -536,16 +538,19 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize> FileBacking<REGION_SIZ
         Ok(())
     }
 
-    /// Reads bytes from a single data region.
-    pub fn read_region(
+    /// Reads bytes from a single data region and passes the mmap slice to `read`.
+    pub fn read_region<R, F>(
         &mut self,
         region_index: u32,
         offset: usize,
-        buffer: &mut [u8],
-    ) -> Result<(), FileBackingError> {
-        let range = self.region_range(region_index, offset, buffer.len())?;
-        buffer.copy_from_slice(&self.map[range]);
-        Ok(())
+        len: usize,
+        read: F,
+    ) -> Result<R, FileBackingError>
+    where
+        F: FnOnce(&[u8]) -> R,
+    {
+        let range = self.region_range(region_index, offset, len)?;
+        Ok(read(&self.map[range]))
     }
 
     /// Writes bytes to a single data region.
@@ -750,17 +755,30 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize> FileBacking<REGION_SIZ
         let aligned_dirty_bytes = aligned_dirty_range
             .as_ref()
             .map_or(0, |range| range.end.saturating_sub(range.start));
-        let requested_mmap_flush_bytes = self.geometry.file_len;
+        let requested_mmap_flush_bytes = aligned_dirty_bytes;
         let flush_overreach_bytes = requested_mmap_flush_bytes.saturating_sub(aligned_dirty_bytes);
+        let needs_file_sync = dirty_range
+            .as_ref()
+            .is_some_and(|range| range.start < REGION_SIZE);
 
-        let flush_start = Instant::now();
-        self.map
-            .flush()
-            .map_err(|error| FileBackingError::from_io_error(FileBackingOperation::Flush, error))?;
-        let mmap_flush_nanos = flush_start.elapsed().as_nanos();
-        let file_sync_start = Instant::now();
-        os.sync_file(&self.file)?;
-        let file_sync_nanos = file_sync_start.elapsed().as_nanos();
+        let mmap_flush_nanos = if let Some(range) = aligned_dirty_range.as_ref() {
+            let flush_start = Instant::now();
+            self.map
+                .flush_range(range.start, range.end - range.start)
+                .map_err(|error| {
+                    FileBackingError::from_io_error(FileBackingOperation::Flush, error)
+                })?;
+            flush_start.elapsed().as_nanos()
+        } else {
+            0
+        };
+        let file_sync_nanos = if needs_file_sync {
+            let file_sync_start = Instant::now();
+            os.sync_file(&self.file)?;
+            file_sync_start.elapsed().as_nanos()
+        } else {
+            0
+        };
         self.dirty_range = None;
         Ok(FileBackingSyncReport {
             mmap_flush_nanos,
@@ -773,7 +791,11 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize> FileBacking<REGION_SIZ
             aligned_dirty_bytes,
             requested_mmap_flush_bytes,
             flush_overreach_bytes,
-            file_sync_kind: FileBackingFileSyncKind::SyncAll,
+            file_sync_kind: if needs_file_sync {
+                FileBackingFileSyncKind::SyncAll
+            } else {
+                FileBackingFileSyncKind::NoFileSync
+            },
         })
     }
 
@@ -870,13 +892,17 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize> FlashIo
         Self::write_metadata(self, metadata).map_err(StorageIoError::from)
     }
 
-    fn read_region(
+    fn read_region<R, F>(
         &mut self,
         region_index: u32,
         offset: usize,
-        buffer: &mut [u8],
-    ) -> Result<(), StorageIoError> {
-        Self::read_region(self, region_index, offset, buffer).map_err(StorageIoError::from)
+        len: usize,
+        read: F,
+    ) -> Result<R, StorageIoError>
+    where
+        F: FnOnce(&[u8]) -> R,
+    {
+        Self::read_region(self, region_index, offset, len, read).map_err(StorageIoError::from)
     }
 
     fn write_region(

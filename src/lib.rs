@@ -520,6 +520,113 @@ where
     mark_dirty_frontier_in(dirty_frontiers, collection_id).map_err(MapStorageError::from)
 }
 
+fn compact_map_frontier_parts<
+    'a,
+    K,
+    V,
+    IO,
+    const REGION_SIZE: usize,
+    const REGION_COUNT: usize,
+    const MAX_COLLECTIONS: usize,
+    const MAX_PENDING_RECLAIMS: usize,
+    const MAX_INDEXES: usize,
+    const MAX_RUNS: usize,
+>(
+    state: &mut StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+    backing: &mut IO,
+    workspace: &mut StorageWorkspace<REGION_SIZE>,
+    dirty_frontiers: &mut Vec<CollectionId, MAX_COLLECTIONS>,
+    collection_scratch: &'a mut [u8; REGION_SIZE],
+    collection_id: CollectionId,
+    region_target: usize,
+    mut opened: MapFrontier<'a, K, V, MAX_INDEXES, MAX_RUNS>,
+) -> Result<
+    (
+        crate::collections::map::MapFrontierState<K, MAX_RUNS>,
+        Option<u32>,
+    ),
+    MapStorageError,
+>
+where
+    IO: FlashIo,
+    K: Debug + Ord + PartialOrd + Eq + PartialEq + Serialize + for<'de> Deserialize<'de>,
+    V: Debug + Serialize + for<'de> Deserialize<'de>,
+{
+    if region_target == 0 {
+        return Err(MapStorageError::InvalidRegionTarget);
+    }
+
+    let Some(selected_runs) = opened.selected_compaction_run_count(region_target)? else {
+        return Ok((opened.into_state(), None));
+    };
+    let frontier_generation = opened.next_run_generation().saturating_add(1);
+
+    let mut planned_allocations = opened
+        .selected_compaction_region_count(selected_runs)?
+        .checked_add(1)
+        .ok_or(MapStorageError::Map(
+            crate::collections::map::MapError::SerializationError,
+        ))?;
+    if !opened.frontier_is_empty() {
+        planned_allocations = planned_allocations
+            .checked_add(opened.planned_frontier_run_region_count(workspace, frontier_generation)?)
+            .ok_or(MapStorageError::Map(
+                crate::collections::map::MapError::SerializationError,
+            ))?;
+    }
+    let additional_allocations = if state.ready_region().is_some() {
+        planned_allocations.saturating_sub(1)
+    } else {
+        planned_allocations
+    };
+    state.ensure_foreground_allocation_headroom_for::<REGION_SIZE, REGION_COUNT, IO>(
+        backing,
+        workspace,
+        additional_allocations,
+    )?;
+
+    let replacement_run = opened.write_compacted_run_to_storage::<
+        REGION_SIZE,
+        REGION_COUNT,
+        IO,
+        MAX_COLLECTIONS,
+        MAX_PENDING_RECLAIMS,
+    >(state, backing, workspace, selected_runs)?;
+    let frontier_run = if opened.frontier_is_empty() {
+        None
+    } else {
+        opened.write_frontier_run_to_storage::<
+            REGION_SIZE,
+            REGION_COUNT,
+            IO,
+            MAX_COLLECTIONS,
+            MAX_PENDING_RECLAIMS,
+        >(state, backing, workspace, frontier_generation)?
+    };
+    let mut replacement =
+        MapFrontier::<K, V, MAX_INDEXES, MAX_RUNS>::new(collection_id, collection_scratch)?;
+    if let Some(run) = replacement_run {
+        replacement.push_retained_run(run)?;
+    }
+    opened.move_unselected_runs_into(selected_runs, &mut replacement)?;
+    let manifest_region = replacement.commit_manifest_to_storage::<
+        REGION_SIZE,
+        REGION_COUNT,
+        IO,
+        MAX_COLLECTIONS,
+        MAX_PENDING_RECLAIMS,
+    >(state, backing, workspace, frontier_run)?;
+    opened.reclaim_run_regions::<
+        REGION_SIZE,
+        REGION_COUNT,
+        IO,
+        MAX_COLLECTIONS,
+        MAX_PENDING_RECLAIMS,
+    >(state, backing, workspace)?;
+    clear_dirty_frontier_in(dirty_frontiers, collection_id);
+    Ok((replacement.into_state(), Some(manifest_region)))
+}
+
 impl<
         'db,
         IO: FlashIo,
@@ -705,6 +812,23 @@ impl<
         }
     }
 
+    fn mark_map_frontier_clean(&mut self, collection_id: CollectionId) {
+        if let FrontierBufferOwner::Map {
+            collection_id: active,
+            generation,
+            ..
+        } = self.frontier_buffer_owner
+        {
+            if active == collection_id {
+                self.frontier_buffer_owner = FrontierBufferOwner::Map {
+                    collection_id,
+                    generation,
+                    dirty: false,
+                };
+            }
+        }
+    }
+
     fn invalidate_map_frontier_buffer(&mut self, collection_id: CollectionId) {
         if let FrontierBufferOwner::Map {
             collection_id: active,
@@ -754,6 +878,23 @@ impl<
 
         cache.borrow_mut().take();
         let generation = self.assign_map_frontier_buffer(collection_id);
+        #[cfg(feature = "perf-counters")]
+        let frontier = MapFrontier::<K, V, MAX_INDEXES, MAX_RUNS>::open_from_storage_metered::<
+            REGION_SIZE,
+            REGION_COUNT,
+            IO,
+            MAX_COLLECTIONS,
+            MAX_PENDING_RECLAIMS,
+        >(
+            &self.state,
+            self.backing,
+            &mut self.workspace,
+            &mut self.collection_scratch,
+            collection_id,
+            &mut self.open_scratch,
+            &mut self.perf_metrics,
+        )?;
+        #[cfg(not(feature = "perf-counters"))]
         let frontier = MapFrontier::<K, V, MAX_INDEXES, MAX_RUNS>::open_from_storage::<
             REGION_SIZE,
             REGION_COUNT,
@@ -1219,11 +1360,23 @@ impl<
         let result = self.run_storage_operation(
             StorageMode::ReclaimingWalHead(WalHeadReclaimMode::Plan),
             |this| {
-                this.state
-                    .reclaim_wal_head::<REGION_SIZE, REGION_COUNT, IO>(
-                        this.backing,
-                        &mut this.workspace,
-                    )
+                #[cfg(feature = "perf-counters")]
+                {
+                    this.state
+                        .reclaim_wal_head_metered::<REGION_SIZE, REGION_COUNT, IO>(
+                            this.backing,
+                            &mut this.workspace,
+                            &mut this.perf_metrics,
+                        )
+                }
+                #[cfg(not(feature = "perf-counters"))]
+                {
+                    this.state
+                        .reclaim_wal_head::<REGION_SIZE, REGION_COUNT, IO>(
+                            this.backing,
+                            &mut this.workspace,
+                        )
+                }
             },
         );
         #[cfg(feature = "perf-counters")]
@@ -1617,111 +1770,65 @@ impl<
         self.invalidate_map_frontier_buffer(collection_id);
         #[cfg(feature = "perf-counters")]
         let compaction_timer = StoragePerfTimerGuard::start();
-        let result = self.run_map_operation(
-            StorageMode::CompactingCollection(CollectionCompactionMode::Running),
-            |this| {
-                if region_target == 0 {
-                    return Err(MapStorageError::InvalidRegionTarget);
-                }
-
-                let mut opened = MapFrontier::<K, V, MAX_INDEXES, MAX_RUNS>::open_from_storage::<
-                    REGION_SIZE,
-                    REGION_COUNT,
-                    IO,
-                    MAX_COLLECTIONS,
-                    MAX_PENDING_RECLAIMS,
-                >(
-                    &this.state,
-                    this.backing,
-                    &mut this.workspace,
-                    &mut this.collection_scratch,
-                    collection_id,
-                    &mut this.open_scratch,
-                )?;
-
-                let Some(selected_runs) = opened.selected_compaction_run_count(region_target)?
-                else {
-                    return Ok(None);
-                };
-                let frontier_generation = opened.next_run_generation().saturating_add(1);
-
-                let mut planned_allocations = opened
-                    .selected_compaction_state_count(selected_runs)?
-                    .checked_add(1)
-                    .ok_or(MapStorageError::Map(
-                        crate::collections::map::MapError::SerializationError,
-                    ))?;
-                if !opened.frontier_is_empty() {
-                    planned_allocations = planned_allocations
-                        .checked_add(opened.planned_frontier_run_region_count(
+        let result =
+            self.run_map_operation(
+                StorageMode::CompactingCollection(CollectionCompactionMode::Running),
+                |this| {
+                    #[cfg(feature = "perf-counters")]
+                    let opened =
+                        MapFrontier::<K, V, MAX_INDEXES, MAX_RUNS>::open_from_storage_metered::<
+                            REGION_SIZE,
+                            REGION_COUNT,
+                            IO,
+                            MAX_COLLECTIONS,
+                            MAX_PENDING_RECLAIMS,
+                        >(
+                            &this.state,
+                            this.backing,
                             &mut this.workspace,
-                            frontier_generation,
-                        )?)
-                        .ok_or(MapStorageError::Map(
-                            crate::collections::map::MapError::SerializationError,
-                        ))?;
-                }
-                let additional_allocations = if this.state.ready_region().is_some() {
-                    planned_allocations.saturating_sub(1)
-                } else {
-                    planned_allocations
-                };
-                this.state
-                    .ensure_foreground_allocation_headroom_for::<REGION_SIZE, REGION_COUNT, IO>(
-                        this.backing,
-                        &mut this.workspace,
-                        additional_allocations,
-                    )?;
-
-                let replacement_run = opened.write_compacted_run_to_storage::<
-                    REGION_SIZE,
-                    REGION_COUNT,
-                    IO,
-                    MAX_COLLECTIONS,
-                    MAX_PENDING_RECLAIMS,
-                >(&mut this.state, this.backing, &mut this.workspace, selected_runs)?;
-                let frontier_run = if opened.frontier_is_empty() {
-                    None
-                } else {
-                    opened.write_frontier_run_to_storage::<
+                            &mut this.collection_scratch,
+                            collection_id,
+                            &mut this.open_scratch,
+                            &mut this.perf_metrics,
+                        )?;
+                    #[cfg(not(feature = "perf-counters"))]
+                    let opened = MapFrontier::<K, V, MAX_INDEXES, MAX_RUNS>::open_from_storage::<
                         REGION_SIZE,
                         REGION_COUNT,
                         IO,
                         MAX_COLLECTIONS,
                         MAX_PENDING_RECLAIMS,
                     >(
+                        &this.state,
+                        this.backing,
+                        &mut this.workspace,
+                        &mut this.collection_scratch,
+                        collection_id,
+                        &mut this.open_scratch,
+                    )?;
+                    let (_, manifest_region) = compact_map_frontier_parts::<
+                        K,
+                        V,
+                        IO,
+                        REGION_SIZE,
+                        REGION_COUNT,
+                        MAX_COLLECTIONS,
+                        MAX_PENDING_RECLAIMS,
+                        MAX_INDEXES,
+                        MAX_RUNS,
+                    >(
                         &mut this.state,
                         this.backing,
                         &mut this.workspace,
-                        frontier_generation,
-                    )?
-                };
-                let mut replacement = MapFrontier::<K, V, MAX_INDEXES, MAX_RUNS>::new(
-                    collection_id,
-                    &mut this.collection_scratch,
-                )?;
-                if let Some(run) = replacement_run {
-                    replacement.push_retained_run(run)?;
-                }
-                opened.move_unselected_runs_into(selected_runs, &mut replacement)?;
-                let manifest_region = replacement.commit_manifest_to_storage::<
-                    REGION_SIZE,
-                    REGION_COUNT,
-                    IO,
-                    MAX_COLLECTIONS,
-                    MAX_PENDING_RECLAIMS,
-                >(&mut this.state, this.backing, &mut this.workspace, frontier_run)?;
-                opened.reclaim_run_regions::<
-                    REGION_SIZE,
-                    REGION_COUNT,
-                    IO,
-                    MAX_COLLECTIONS,
-                    MAX_PENDING_RECLAIMS,
-                >(&mut this.state, this.backing, &mut this.workspace)?;
-                this.clear_dirty_frontier(collection_id);
-                Ok(Some(manifest_region))
-            },
-        );
+                        &mut this.dirty_frontiers,
+                        &mut this.collection_scratch,
+                        collection_id,
+                        region_target,
+                        opened,
+                    )?;
+                    Ok(manifest_region)
+                },
+            );
         #[cfg(feature = "perf-counters")]
         {
             self.perf_metrics.add_nanos(
@@ -1968,6 +2075,14 @@ where
             );
             #[cfg(feature = "perf-counters")]
             let read_timer = StoragePerfTimerGuard::start();
+            #[cfg(feature = "perf-counters")]
+            let result = frontier.get_metered::<REGION_SIZE, IO>(
+                storage.backing,
+                &mut storage.workspace,
+                key,
+                &mut storage.perf_metrics,
+            );
+            #[cfg(not(feature = "perf-counters"))]
             let result =
                 frontier.get::<REGION_SIZE, IO>(storage.backing, &mut storage.workspace, key);
             #[cfg(feature = "perf-counters")]
@@ -2218,14 +2333,77 @@ where
             MAX_PENDING_RECLAIMS,
         >,
     ) -> Result<bool, LsmMapError> {
-        self.cached_frontier.borrow_mut().take();
-        storage.invalidate_map_frontier_buffer(self.collection_id);
-        Ok(storage
-            .compact_map_with_target::<K, V, MAX_INDEXES, MAX_RUNS>(
+        storage
+            .enter_mode(StorageMode::CompactingCollection(
+                CollectionCompactionMode::Running,
+            ))
+            .map_err(MapStorageError::from)?;
+        #[cfg(feature = "perf-counters")]
+        let compaction_timer = StoragePerfTimerGuard::start();
+        let result = (|| {
+            storage.ensure_map_frontier_cached::<K, V, MAX_INDEXES, MAX_RUNS>(
+                self.collection_id,
+                &self.cached_frontier,
+            )?;
+            let mut cached = self.cached_frontier.borrow_mut();
+            let cached_frontier = cached
+                .take()
+                .ok_or(MapStorageError::UnknownCollection(self.collection_id))?;
+            let buffer_generation = cached_frontier.buffer_generation;
+            let opened = MapFrontier::<K, V, MAX_INDEXES, MAX_RUNS>::from_state(
+                cached_frontier.state,
+                &mut storage.open_scratch,
+            );
+            match compact_map_frontier_parts::<
+                K,
+                V,
+                IO,
+                REGION_SIZE,
+                REGION_COUNT,
+                MAX_COLLECTIONS,
+                MAX_PENDING_RECLAIMS,
+                MAX_INDEXES,
+                MAX_RUNS,
+            >(
+                &mut storage.state,
+                storage.backing,
+                &mut storage.workspace,
+                &mut storage.dirty_frontiers,
+                &mut storage.collection_scratch,
                 self.collection_id,
                 self.compaction_region_target,
-            )?
-            .is_some())
+                opened,
+            ) {
+                Ok((state, manifest_region)) => {
+                    *cached = Some(crate::collections::map::CachedMapFrontier {
+                        buffer_generation,
+                        state,
+                    });
+                    if manifest_region.is_some() {
+                        storage.mark_map_frontier_clean(self.collection_id);
+                    }
+                    Ok(manifest_region.is_some())
+                }
+                Err(error) => {
+                    storage.invalidate_map_frontier_buffer(self.collection_id);
+                    Err(error)
+                }
+            }
+        })();
+        #[cfg(feature = "perf-counters")]
+        {
+            storage.perf_metrics.add_nanos(
+                StoragePerfTimer::Compaction,
+                compaction_timer.elapsed_nanos(),
+            );
+            if matches!(result, Ok(true)) {
+                storage
+                    .perf_metrics
+                    .increment(StoragePerfCounter::CompactionsRun);
+            }
+        }
+        storage.finish_mode();
+        Ok(result?)
     }
 
     /// Compacts selected committed runs. Having nothing to compact is success.

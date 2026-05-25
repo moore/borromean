@@ -1,10 +1,10 @@
 [geometry]
-# Same 100 MiB geometry as file_backing.toml, with a short workload for smoke tests.
-region_size = 65536
-db_size_bytes = 104857600
+# Same 1 MiB segment geometry as file_backing.toml, with a short workload for smoke tests.
+region_size = 1048576
+region_count = 64
 
 [comparison]
-engines = ["borromean", "borromean-memory", "redb"]
+engines = ["borromean", "borromean-memory", "redb", "fjall"]
 
 [backing]
 path = "target/perf/file_backing_smoke.db"
@@ -22,6 +22,15 @@ remove_after = true
 compact_interval = 0
 compact_after_workload = false
 durability = "immediate"
+
+[fjall]
+path = "target/perf/fjall_smoke.db"
+remove_existing = true
+remove_after = true
+cache_size_bytes = 0
+persist_mode = "sync-data"
+manual_journal_persist = true
+worker_threads = 1
 
 [preload]
 count = 0
@@ -42,7 +51,7 @@ set_ratio = 100
 delete_ratio = 0
 key_mode = "insert-range"
 compact_on_signal = true
-compaction_region_target = 32
+compaction_region_target = 16
 
 [maintenance]
 optimize_after_workload = false

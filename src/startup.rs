@@ -586,10 +586,9 @@ fn locate_wal_tail<const REGION_SIZE: usize, IO: FlashIo>(
     let mut wal_tail_sequence = 0u64;
     let mut duplicate_tail = false;
 
-    let mut header_bytes = [0u8; Header::ENCODED_LEN];
     for region_index in 0..metadata.region_count {
-        flash.read_region(region_index, 0, &mut header_bytes)?;
-        let Ok(header) = Header::decode(&header_bytes) else {
+        let Ok(header) = flash.read_region(region_index, 0, Header::ENCODED_LEN, Header::decode)?
+        else {
             continue;
         };
 
@@ -833,7 +832,9 @@ where
     let granule =
         usize::try_from(metadata.wal_write_granule).map_err(|_| StartupError::LengthOverflow)?;
     let (region_bytes, logical_scratch) = workspace.scan_buffers();
-    flash.read_region(region_index, 0, region_bytes)?;
+    flash.read_region(region_index, 0, region_bytes.len(), |bytes| {
+        region_bytes.copy_from_slice(bytes);
+    })?;
     let mut offset = metadata.wal_record_area_offset()?;
     let mut last_valid_record = None;
     let mut wal_head_override = None;
@@ -1191,9 +1192,9 @@ fn read_region_header<IO: FlashIo>(
     flash: &mut IO,
     region_index: u32,
 ) -> Result<Header, StartupError> {
-    let mut header_bytes = [0u8; Header::ENCODED_LEN];
-    flash.read_region(region_index, 0, &mut header_bytes)?;
-    Header::decode(&header_bytes).map_err(StartupError::from)
+    flash
+        .read_region(region_index, 0, Header::ENCODED_LEN, Header::decode)?
+        .map_err(StartupError::from)
 }
 
 fn read_wal_prologue<IO: FlashIo>(
@@ -1201,9 +1202,14 @@ fn read_wal_prologue<IO: FlashIo>(
     region_index: u32,
     region_count: u32,
 ) -> Result<WalRegionPrologue, StartupError> {
-    let mut prologue_bytes = [0u8; WalRegionPrologue::ENCODED_LEN];
-    flash.read_region(region_index, Header::ENCODED_LEN, &mut prologue_bytes)?;
-    WalRegionPrologue::decode(&prologue_bytes, region_count).map_err(StartupError::from)
+    flash
+        .read_region(
+            region_index,
+            Header::ENCODED_LEN,
+            WalRegionPrologue::ENCODED_LEN,
+            |bytes| WalRegionPrologue::decode(bytes, region_count),
+        )?
+        .map_err(StartupError::from)
 }
 
 fn read_strict_wal_region<IO: FlashIo>(
@@ -1229,9 +1235,8 @@ fn has_valid_wal_target<IO: FlashIo>(
 ) -> Result<bool, StartupError> {
     ensure_region_index_in_range(region_index, region_count)?;
 
-    let mut header_bytes = [0u8; Header::ENCODED_LEN];
-    flash.read_region(region_index, 0, &mut header_bytes)?;
-    let Ok(header) = Header::decode(&header_bytes) else {
+    let Ok(header) = flash.read_region(region_index, 0, Header::ENCODED_LEN, Header::decode)?
+    else {
         return Ok(false);
     };
     if header.collection_id != CollectionId(0)
@@ -1241,9 +1246,14 @@ fn has_valid_wal_target<IO: FlashIo>(
         return Ok(false);
     }
 
-    let mut prologue_bytes = [0u8; WalRegionPrologue::ENCODED_LEN];
-    flash.read_region(region_index, Header::ENCODED_LEN, &mut prologue_bytes)?;
-    Ok(WalRegionPrologue::decode(&prologue_bytes, region_count).is_ok())
+    Ok(flash
+        .read_region(
+            region_index,
+            Header::ENCODED_LEN,
+            WalRegionPrologue::ENCODED_LEN,
+            |bytes| WalRegionPrologue::decode(bytes, region_count),
+        )?
+        .is_ok())
 }
 
 fn validate_live_collection_types(collections: &[StartupCollection]) -> Result<(), StartupError> {
@@ -1353,18 +1363,23 @@ fn reconstruct_free_list_tail<IO: FlashIo>(
         usize::try_from(metadata.region_size).map_err(|_| StartupError::InvalidFreeListChain {
             region_index: current_region,
         })? - FreePointerFooter::ENCODED_LEN;
-    let mut footer_bytes = [0u8; FreePointerFooter::ENCODED_LEN];
-
     for _visited in 0..metadata.region_count {
-        flash.read_region(current_region, footer_offset, &mut footer_bytes)?;
-        let footer = FreePointerFooter::decode_with_region_count(
-            &footer_bytes,
-            metadata.erased_byte,
-            metadata.region_count,
-        )
-        .map_err(|_| StartupError::InvalidFreeListChain {
-            region_index: current_region,
-        })?;
+        let footer = flash
+            .read_region(
+                current_region,
+                footer_offset,
+                FreePointerFooter::ENCODED_LEN,
+                |bytes| {
+                    FreePointerFooter::decode_with_region_count(
+                        bytes,
+                        metadata.erased_byte,
+                        metadata.region_count,
+                    )
+                },
+            )?
+            .map_err(|_| StartupError::InvalidFreeListChain {
+                region_index: current_region,
+            })?;
 
         match footer.next_tail {
             Some(next_region) => current_region = next_region,

@@ -406,7 +406,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         const REGION_COUNT: usize,
         IO: FlashIo,
     >(
-        &self,
+        &mut self,
         flash: &mut IO,
         region_index: u32,
         collection_id: CollectionId,
@@ -446,6 +446,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         flash.write_region(region_index, 0, &header_bytes)?;
         flash.write_region(region_index, Header::ENCODED_LEN, payload)?;
         flash.sync()?;
+        self.max_seen_sequence = sequence;
         Ok(())
     }
 
@@ -708,7 +709,16 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
                 collection_type,
                 region_index,
             },
-        )
+        )?;
+        if collection_id != CollectionId(0) {
+            if collection_type == CollectionType::MAP_CODE
+                && header.collection_format == crate::MAP_MANIFEST_V1_FORMAT
+            {
+                self.staged_regions.clear();
+            }
+            self.max_seen_sequence = self.max_seen_sequence.max(header.sequence);
+        }
+        Ok(())
     }
 
     /// Appends a `head` record, rotating the WAL first if the current tail lacks room.
@@ -761,7 +771,16 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
                 collection_type,
                 region_index,
             },
-        )
+        )?;
+        if collection_id != CollectionId(0) {
+            if collection_type == CollectionType::MAP_CODE
+                && header.collection_format == crate::MAP_MANIFEST_V1_FORMAT
+            {
+                self.staged_regions.clear();
+            }
+            self.max_seen_sequence = self.max_seen_sequence.max(header.sequence);
+        }
+        Ok(())
     }
 
     /// Ensures a `head` record can be appended, rotating before a ready region is held.
@@ -1010,6 +1029,38 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
     ) -> Result<u32, StorageRuntimeError> {
+        self.reclaim_wal_head_inner::<REGION_SIZE, REGION_COUNT, IO>(
+            flash,
+            workspace,
+            #[cfg(feature = "perf-counters")]
+            None,
+        )
+    }
+
+    #[cfg(feature = "perf-counters")]
+    pub(crate) fn reclaim_wal_head_metered<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        metrics: &mut StoragePerfMetrics,
+    ) -> Result<u32, StorageRuntimeError> {
+        self.reclaim_wal_head_inner::<REGION_SIZE, REGION_COUNT, IO>(
+            flash,
+            workspace,
+            Some(metrics),
+        )
+    }
+
+    fn reclaim_wal_head_inner<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        #[cfg(feature = "perf-counters")] mut metrics: Option<&mut StoragePerfMetrics>,
+    ) -> Result<u32, StorageRuntimeError> {
         let mut plan = self.prepare_wal_head_reclaim::<REGION_SIZE, IO>(flash, workspace)?;
         let mut source_regions = self
             .collect_wal_head_reclaim_regions::<REGION_SIZE, REGION_COUNT, IO>(
@@ -1040,7 +1091,11 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
             flash, workspace,
         )?;
         self.copy_live_wal_head_reclaim_state::<REGION_SIZE, REGION_COUNT, IO>(
-            flash, workspace, &plan,
+            flash,
+            workspace,
+            &plan,
+            #[cfg(feature = "perf-counters")]
+            metrics.as_deref_mut(),
         )?;
         self.commit_wal_head_reclaim::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace, new_head)?;
         for region_index in source_regions.iter().copied() {
@@ -1252,18 +1307,30 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
             expected_sequence,
             self.wal_head,
         )?;
-        *self = reopen_without_reclaim_recovery::<
-            REGION_SIZE,
-            REGION_COUNT,
-            IO,
-            MAX_COLLECTIONS,
-            MAX_PENDING_RECLAIMS,
-        >(flash, workspace)?;
-        self.append_free_list_head::<REGION_SIZE, REGION_COUNT, IO>(
+
+        self.wal_tail = next_region_index;
+        self.wal_append_offset = self
+            .metadata
+            .wal_record_area_offset()
+            .map_err(|error| StorageRuntimeError::Startup(error.into()))?;
+        self.ready_region = None;
+        self.max_seen_sequence = expected_sequence;
+        self.pending_wal_recovery_boundary = false;
+        if self.last_free_list_head.is_none() {
+            self.free_list_tail = None;
+        }
+
+        let encoded_len = self.write_record_raw::<REGION_SIZE, REGION_COUNT, IO>(
             flash,
             workspace,
-            self.last_free_list_head,
+            WalRecord::FreeListHead {
+                region_index: self.last_free_list_head,
+            },
         )?;
+        self.wal_append_offset = self
+            .wal_append_offset
+            .checked_add(encoded_len)
+            .ok_or(StorageRuntimeError::WalRotationRequired)?;
         Ok(())
     }
 
@@ -1324,6 +1391,9 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
                 Err(StorageRuntimeError::WalRotationRequired) => {
                     metrics.increment(StoragePerfCounter::WalRotationRequired);
                     metrics.increment(StoragePerfCounter::WalRotationsAttempted);
+                    self.observe_wal_rotation_window::<REGION_SIZE, REGION_COUNT, IO>(
+                        flash, workspace, metrics,
+                    );
                     let rotation_timer = StoragePerfTimerGuard::start();
                     self.rotate_wal_tail::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace)?;
                     metrics.add_nanos(
@@ -1335,6 +1405,46 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
                 Err(error) => return Err(error),
             }
         }
+    }
+
+    #[cfg(feature = "perf-counters")]
+    fn observe_wal_rotation_window<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
+        &self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        metrics: &mut StoragePerfMetrics,
+    ) {
+        let remaining_bytes = REGION_SIZE.saturating_sub(self.wal_append_offset) as u64;
+        let Some(next_region_index) = self.last_free_list_head else {
+            metrics.observe_wal_rotation_window(remaining_bytes, 0, 0, 0);
+            return;
+        };
+        let Ok(free_list_head_after) = read_free_pointer_successor::<REGION_SIZE, REGION_COUNT, IO>(
+            flash,
+            self.metadata,
+            next_region_index,
+        ) else {
+            metrics.observe_wal_rotation_window(remaining_bytes, 0, 0, 0);
+            return;
+        };
+        let Ok(reserves) = self.rotation_reserves::<REGION_SIZE, REGION_COUNT>(
+            workspace,
+            next_region_index,
+            free_list_head_after,
+        ) else {
+            metrics.observe_wal_rotation_window(remaining_bytes, 0, 0, 0);
+            return;
+        };
+        metrics.observe_wal_rotation_window(
+            remaining_bytes,
+            reserves.alloc_begin_len as u64,
+            reserves.link_reserve as u64,
+            reserves.rotation_reserve as u64,
+        );
     }
 
     #[cfg(feature = "perf-counters")]
@@ -1373,20 +1483,11 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         let encoded_len = self.write_record_raw_metered::<REGION_SIZE, REGION_COUNT, IO>(
             flash, workspace, record, metrics,
         )?;
-        if matches!(
+        self.apply_synced_record_and_refresh_runtime::<REGION_SIZE, REGION_COUNT, IO>(
+            flash,
             record,
-            WalRecord::Head { .. } | WalRecord::FreeListHead { .. } | WalRecord::ReclaimEnd { .. }
-        ) {
-            *self = reopen_without_reclaim_recovery::<
-                REGION_SIZE,
-                REGION_COUNT,
-                IO,
-                MAX_COLLECTIONS,
-                MAX_PENDING_RECLAIMS,
-            >(flash, workspace)?;
-        } else {
-            self.apply_synced_record(record, encoded_len)?;
-        }
+            encoded_len,
+        )?;
         Ok(())
     }
 
@@ -1398,19 +1499,49 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
     ) -> Result<(), StorageRuntimeError> {
         let encoded_len =
             self.write_record_raw::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace, record)?;
-        if matches!(
+        self.apply_synced_record_and_refresh_runtime::<REGION_SIZE, REGION_COUNT, IO>(
+            flash,
             record,
-            WalRecord::Head { .. } | WalRecord::FreeListHead { .. } | WalRecord::ReclaimEnd { .. }
-        ) {
-            *self = reopen_without_reclaim_recovery::<
-                REGION_SIZE,
-                REGION_COUNT,
-                IO,
-                MAX_COLLECTIONS,
-                MAX_PENDING_RECLAIMS,
-            >(flash, workspace)?;
-        } else {
-            self.apply_synced_record(record, encoded_len)?;
+            encoded_len,
+        )?;
+        Ok(())
+    }
+
+    fn apply_synced_record_and_refresh_runtime<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
+        &mut self,
+        flash: &mut IO,
+        record: WalRecord<'_>,
+        encoded_len: usize,
+    ) -> Result<(), StorageRuntimeError> {
+        self.apply_synced_record(record, encoded_len)?;
+        match record {
+            WalRecord::Head {
+                collection_id: CollectionId(0),
+                collection_type,
+                region_index,
+            } => {
+                if collection_type == CollectionType::WAL_CODE {
+                    self.wal_head = region_index;
+                }
+            }
+            WalRecord::FreeListHead { .. } | WalRecord::ReclaimEnd { .. } => {
+                self.refresh_free_list_tail::<REGION_SIZE, REGION_COUNT, IO>(flash)?;
+            }
+            WalRecord::AllocBegin {
+                free_list_head_after,
+                ..
+            } => {
+                if free_list_head_after.is_none() {
+                    self.free_list_tail = None;
+                } else if self.free_list_tail.is_none() {
+                    self.refresh_free_list_tail::<REGION_SIZE, REGION_COUNT, IO>(flash)?;
+                }
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -1437,6 +1568,41 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
             self.pending_wal_recovery_boundary = false;
         }
         Ok(())
+    }
+
+    fn refresh_free_list_tail<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
+        &mut self,
+        flash: &mut IO,
+    ) -> Result<(), StorageRuntimeError> {
+        let mut current = self.last_free_list_head;
+        let Some(mut tail) = current else {
+            self.free_list_tail = None;
+            return Ok(());
+        };
+
+        for _ in 0..self.metadata.region_count {
+            let next = read_free_pointer_successor::<REGION_SIZE, REGION_COUNT, IO>(
+                flash,
+                self.metadata,
+                tail,
+            )?;
+            match next {
+                Some(next_region) => {
+                    current = Some(next_region);
+                    tail = next_region;
+                }
+                None => {
+                    self.free_list_tail = Some(tail);
+                    return Ok(());
+                }
+            }
+        }
+
+        Err(StorageRuntimeError::Startup(
+            StartupError::InvalidFreeListChain {
+                region_index: current.unwrap_or(tail),
+            },
+        ))
     }
 
     fn write_record_raw<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
@@ -1533,6 +1699,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         source_region: u32,
         source_offset: usize,
         encoded_len: usize,
+        #[cfg(feature = "perf-counters")] mut metrics: Option<&mut StoragePerfMetrics>,
     ) -> Result<(), StorageRuntimeError> {
         loop {
             match self.ensure_encoded_append_reserve::<REGION_SIZE, REGION_COUNT, IO>(
@@ -1544,11 +1711,9 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
                 Ok(()) => {
                     {
                         let (physical, _) = workspace.encode_buffers();
-                        flash.read_region(
-                            source_region,
-                            source_offset,
-                            &mut physical[..encoded_len],
-                        )?;
+                        flash.read_region(source_region, source_offset, encoded_len, |bytes| {
+                            physical[..encoded_len].copy_from_slice(bytes);
+                        })?;
                         flash.write_region(
                             self.wal_tail,
                             self.wal_append_offset,
@@ -1563,6 +1728,10 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
                         MAX_COLLECTIONS,
                         MAX_PENDING_RECLAIMS,
                     >(flash, workspace)?;
+                    #[cfg(feature = "perf-counters")]
+                    if let Some(metrics) = metrics.as_deref_mut() {
+                        metrics.increment(StoragePerfCounter::RuntimeReopens);
+                    }
                     return Ok(());
                 }
                 Err(StorageRuntimeError::WalRotationRequired) => {
@@ -2269,6 +2438,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
         plan: &WalHeadReclaimPlan<MAX_COLLECTIONS>,
+        #[cfg(feature = "perf-counters")] mut metrics: Option<&mut StoragePerfMetrics>,
     ) -> Result<(), StorageRuntimeError> {
         let mut active_collections = Vec::<CollectionId, MAX_COLLECTIONS>::new();
         let metadata = self.metadata;
@@ -2282,6 +2452,8 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
                     plan,
                     &mut active_collections,
                     current_region,
+                    #[cfg(feature = "perf-counters")]
+                    metrics.as_deref_mut(),
                 )?;
 
             if current_region == plan.source_tail {
@@ -2310,6 +2482,7 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         plan: &WalHeadReclaimPlan<MAX_COLLECTIONS>,
         active_collections: &mut Vec<CollectionId, MAX_COLLECTIONS>,
         source_region: u32,
+        #[cfg(feature = "perf-counters")] mut metrics: Option<&mut StoragePerfMetrics>,
     ) -> Result<Option<u32>, StorageRuntimeError> {
         let metadata = self.metadata;
         let region_size = usize::try_from(metadata.region_size)
@@ -2331,7 +2504,9 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
 
             let action = {
                 let (region_bytes, logical_scratch) = workspace.scan_buffers();
-                flash.read_region(source_region, offset, &mut region_bytes[..remaining])?;
+                flash.read_region(source_region, offset, remaining, |bytes| {
+                    region_bytes[..remaining].copy_from_slice(bytes);
+                })?;
                 if region_bytes[0] == metadata.erased_byte {
                     None
                 } else {
@@ -2359,12 +2534,18 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
             match reclaim_action {
                 WalHeadReclaimAction::Skip => {}
                 WalHeadReclaimAction::CopyEncoded => {
+                    #[cfg(feature = "perf-counters")]
+                    if let Some(metrics) = metrics.as_deref_mut() {
+                        metrics.increment(StoragePerfCounter::WalHeadReclaimCopiedRecords);
+                    }
                     self.copy_encoded_record_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
                         flash,
                         workspace,
                         source_region,
                         offset,
                         encoded_len,
+                        #[cfg(feature = "perf-counters")]
+                        metrics.as_deref_mut(),
                     )?;
                 }
                 WalHeadReclaimAction::RewriteEmptyBasisAsSnapshot {
@@ -2591,10 +2772,48 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
         &self,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
+        visitor: F,
+    ) -> Result<(), StorageVisitError<E>>
+    where
+        F: for<'record> FnMut(&mut IO, WalRecord<'record>) -> Result<(), E>,
+    {
+        self.visit_wal_records_inner::<REGION_SIZE, IO, E, F>(
+            flash,
+            workspace,
+            #[cfg(feature = "perf-counters")]
+            None,
+            visitor,
+        )
+    }
+
+    #[cfg(feature = "perf-counters")]
+    pub(crate) fn visit_wal_records_metered<const REGION_SIZE: usize, IO: FlashIo, E, F>(
+        &self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        metrics: &mut StoragePerfMetrics,
+        visitor: F,
+    ) -> Result<(), StorageVisitError<E>>
+    where
+        F: for<'record> FnMut(&mut IO, WalRecord<'record>) -> Result<(), E>,
+    {
+        self.visit_wal_records_inner::<REGION_SIZE, IO, E, F>(
+            flash,
+            workspace,
+            Some(metrics),
+            visitor,
+        )
+    }
+
+    fn visit_wal_records_inner<const REGION_SIZE: usize, IO: FlashIo, E, F>(
+        &self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        #[cfg(feature = "perf-counters")] mut metrics: Option<&mut StoragePerfMetrics>,
         mut visitor: F,
     ) -> Result<(), StorageVisitError<E>>
     where
-        F: FnMut(&mut IO, WalRecord<'_>) -> Result<(), E>,
+        F: for<'record> FnMut(&mut IO, WalRecord<'record>) -> Result<(), E>,
     {
         let metadata = self.metadata;
         let region_size = usize::try_from(metadata.region_size)
@@ -2609,8 +2828,18 @@ impl<const MAX_COLLECTIONS: usize, const MAX_PENDING_RECLAIMS: usize>
                 region_size
             };
             let (region_bytes, logical_scratch) = workspace.scan_buffers();
+            #[cfg(feature = "perf-counters")]
+            if let Some(metrics) = metrics.as_deref_mut() {
+                metrics.increment(StoragePerfCounter::WalReplayReads);
+                metrics.add(
+                    StoragePerfCounter::WalReplayReadBytes,
+                    region_bytes.len() as u64,
+                );
+            }
             flash
-                .read_region(current_region, 0, region_bytes)
+                .read_region(current_region, 0, region_bytes.len(), |bytes| {
+                    region_bytes.copy_from_slice(bytes);
+                })
                 .map_err(StorageRuntimeError::from)?;
 
             let mut offset = metadata
@@ -2786,11 +3015,12 @@ fn read_header_from_flash<const REGION_SIZE: usize, const REGION_COUNT: usize, I
     flash: &mut IO,
     region_index: u32,
 ) -> Result<crate::Header, StorageRuntimeError> {
-    let mut header_bytes = [0u8; crate::Header::ENCODED_LEN];
     flash
-        .read_region(region_index, 0, &mut header_bytes)
-        .map_err(StorageRuntimeError::from)?;
-    crate::Header::decode(&header_bytes).map_err(|error| StorageRuntimeError::Startup(error.into()))
+        .read_region(region_index, 0, crate::Header::ENCODED_LEN, |bytes| {
+            crate::Header::decode(bytes)
+        })
+        .map_err(StorageRuntimeError::from)?
+        .map_err(|error| StorageRuntimeError::Startup(error.into()))
 }
 
 fn read_free_pointer_successor<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
@@ -2801,14 +3031,20 @@ fn read_free_pointer_successor<const REGION_SIZE: usize, const REGION_COUNT: usi
     let footer_offset = usize::try_from(metadata.region_size)
         .map_err(|_| StorageRuntimeError::WalRotationRequired)?
         - FreePointerFooter::ENCODED_LEN;
-    let mut footer_bytes = [0u8; FreePointerFooter::ENCODED_LEN];
-    flash.read_region(region_index, footer_offset, &mut footer_bytes)?;
-    let footer = FreePointerFooter::decode_with_region_count(
-        &footer_bytes,
-        metadata.erased_byte,
-        metadata.region_count,
-    )
-    .map_err(|error| StorageRuntimeError::Startup(error.into()))?;
+    let footer = flash
+        .read_region(
+            region_index,
+            footer_offset,
+            FreePointerFooter::ENCODED_LEN,
+            |bytes| {
+                FreePointerFooter::decode_with_region_count(
+                    bytes,
+                    metadata.erased_byte,
+                    metadata.region_count,
+                )
+            },
+        )?
+        .map_err(|error| StorageRuntimeError::Startup(error.into()))?;
     Ok(footer.next_tail)
 }
 
@@ -2906,7 +3142,9 @@ fn find_link_target_in_wal_region<const REGION_SIZE: usize, IO: FlashIo>(
     let region_size = usize::try_from(metadata.region_size)
         .map_err(|_| StorageRuntimeError::WalRotationRequired)?;
     let (region_bytes, logical_scratch) = workspace.scan_buffers();
-    flash.read_region(region_index, 0, region_bytes)?;
+    flash.read_region(region_index, 0, region_bytes.len(), |bytes| {
+        region_bytes.copy_from_slice(bytes);
+    })?;
 
     let mut offset = metadata
         .wal_record_area_offset()

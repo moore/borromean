@@ -192,14 +192,17 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize>
         Ok(())
     }
 
-    /// Reads bytes from a single region.
-    pub fn read_region(
+    /// Reads bytes from a single region and passes them to `read`.
+    pub fn read_region<R, F>(
         &mut self,
         region_index: u32,
         offset: usize,
-        buffer: &mut [u8],
-    ) -> Result<(), MockError> {
-        let len = buffer.len();
+        len: usize,
+        read: F,
+    ) -> Result<R, MockError>
+    where
+        F: FnOnce(&[u8]) -> R,
+    {
         self.log(MockOperation::ReadRegion {
             region_index,
             offset,
@@ -208,8 +211,7 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize>
         let region = self.region(region_index)?;
         let end = offset.checked_add(len).ok_or(MockError::OutOfBounds)?;
         let source = region.get(offset..end).ok_or(MockError::OutOfBounds)?;
-        buffer.copy_from_slice(source);
-        Ok(())
+        Ok(read(source))
     }
 
     /// Writes bytes to a single region.

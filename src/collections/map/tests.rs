@@ -1,9 +1,9 @@
 use super::*;
 extern crate std;
 use crate::wal_record::encode_record_into;
-use crate::{MockFlash, Storage, StorageFormatConfig, StorageWorkspace};
 #[cfg(feature = "perf-counters")]
-use crate::{MockOperation, StoragePerfMetrics};
+use crate::StoragePerfMetrics;
+use crate::{MockFlash, MockOperation, Storage, StorageFormatConfig, StorageWorkspace};
 use postcard::to_slice;
 use proptest::prelude::*;
 use std::{vec, vec::Vec};
@@ -558,6 +558,67 @@ fn requirement_object_lsm_map_compaction_signal_and_compact_preserve_visible_sta
     );
     assert_eq!(
         map.get(&mut storage, &3, |_, value| *value).unwrap(),
+        Some(30)
+    );
+}
+
+#[cfg(feature = "perf-counters")]
+#[test]
+fn requirement_object_lsm_map_compaction_reuses_cached_frontier() {
+    let mut flash = MockFlash::<512, 12, 4096>::new(0xff);
+    let mut storage =
+        Storage::<_, 512, 12, 8, 4>::format(&mut flash, StorageFormatConfig::new(2, 8, 0xa5))
+            .unwrap();
+    let mut map = LsmMap::<i32, i32, 8, 4>::new(&mut storage)
+        .unwrap()
+        .with_compaction_region_target(1)
+        .unwrap();
+
+    map.set(&mut storage, 1, 10).unwrap();
+    {
+        let mut buffer = [0u8; 512];
+        let mut frontier = storage
+            .open_map::<i32, i32, 8, 4>(map.collection_id(), &mut buffer)
+            .unwrap();
+        storage.flush_map(&mut frontier).unwrap();
+    }
+    map.set(&mut storage, 2, 20).unwrap();
+    {
+        let mut buffer = [0u8; 512];
+        let mut frontier = storage
+            .open_map::<i32, i32, 8, 4>(map.collection_id(), &mut buffer)
+            .unwrap();
+        storage.flush_map(&mut frontier).unwrap();
+    }
+
+    assert!(map.set(&mut storage, 3, 30).unwrap());
+    assert!(map.delete(&mut storage, 1).unwrap());
+
+    storage.reset_perf_metrics();
+    assert!(map.compact_and_report(&mut storage).unwrap());
+    let metrics = storage.perf_metrics();
+    assert_eq!(metrics.frontier_reloads, 0);
+    assert_eq!(metrics.frontier_open_wal_scans, 0);
+
+    drop(storage);
+    let mut reopened = Storage::<_, 512, 12, 8, 4>::open(&mut flash).unwrap();
+    let reopened_map = LsmMap::<i32, i32, 8, 4>::open(map.collection_id(), &mut reopened).unwrap();
+    assert_eq!(
+        reopened_map
+            .get(&mut reopened, &1, |_, value| *value)
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        reopened_map
+            .get(&mut reopened, &2, |_, value| *value)
+            .unwrap(),
+        Some(20)
+    );
+    assert_eq!(
+        reopened_map
+            .get(&mut reopened, &3, |_, value| *value)
+            .unwrap(),
         Some(30)
     );
 }
@@ -1677,11 +1738,30 @@ fn requirement_lookup_and_head_reference_helpers_follow_manifest_runs() {
         lower_key: Some(5),
         upper_key: Some(6),
     };
+    flash.clear_operations();
     assert_eq!(
         map.lookup_run_chain::<REGION_SIZE, _>(&mut flash, &mut workspace, &run, &6)
             .unwrap(),
         LookupResult::Set(60)
     );
+    let lookup_reads: Vec<_> = flash
+        .operations()
+        .iter()
+        .copied()
+        .filter(|operation| matches!(operation, MockOperation::ReadRegion { .. }))
+        .collect();
+    assert!(lookup_reads.iter().all(|operation| match operation {
+        MockOperation::ReadRegion { len, .. } => *len < REGION_SIZE,
+        _ => true,
+    }));
+    assert!(lookup_reads.iter().any(|operation| matches!(
+        operation,
+        MockOperation::ReadRegion {
+            offset: 0,
+            len,
+            ..
+        } if *len == Header::ENCODED_LEN + RUN_SEGMENT_FIXED_SIZE
+    )));
     assert_eq!(
         map.lookup_run_chain::<REGION_SIZE, _>(&mut flash, &mut workspace, &run, &7)
             .unwrap(),
@@ -2042,10 +2122,10 @@ fn assert_snapshot_encoding_stores_header_compact_entries_and_refs() {
             [refs_start + ENTRY_REF_SIZE + ENTRY_REF_POINTER_SIZE..refs_start + ENTRY_REF_SIZE * 2],
     );
 
-    let first_start = usize::from(RefType::from_le_bytes(first_start));
-    let first_end = usize::from(RefType::from_le_bytes(first_end));
-    let second_start = usize::from(RefType::from_le_bytes(second_start));
-    let second_end = usize::from(RefType::from_le_bytes(second_end));
+    let first_start = usize::try_from(RefType::from_le_bytes(first_start)).unwrap();
+    let first_end = usize::try_from(RefType::from_le_bytes(first_end)).unwrap();
+    let second_start = usize::try_from(RefType::from_le_bytes(second_start)).unwrap();
+    let second_end = usize::try_from(RefType::from_le_bytes(second_end)).unwrap();
     assert_eq!(first_start, ENTRY_COUNT_SIZE);
     assert_eq!(first_end, second_start);
     assert_eq!(second_end, ENTRY_COUNT_SIZE + entry_bytes_len);
@@ -2195,7 +2275,9 @@ fn assert_region_round_trip_restores_logical_state() {
     let mut committed_region = [0u8; BUFFER_SIZE];
     storage.with_io_workspace(|flash, _workspace| {
         flash
-            .read_region(manifest_region, 0, &mut committed_region)
+            .read_region(manifest_region, 0, committed_region.len(), |bytes| {
+                committed_region.copy_from_slice(bytes);
+            })
             .unwrap()
     });
     let header = Header::decode(&committed_region[..Header::ENCODED_LEN]).unwrap();

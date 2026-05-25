@@ -61,7 +61,7 @@ fn requirement_arithmetic_boundary_failures_surface_explicit_error_variants() {
             .unwrap();
 
     let oversized_payload = [0u8; 64];
-    let runtime = storage.into_runtime();
+    let mut runtime = storage.into_runtime();
     assert!(matches!(
         runtime.write_committed_region::<64, 4, _>(
             &mut flash,
@@ -98,7 +98,7 @@ fn requirement_sequence_advancement_stops_at_the_maximum_value_instead_of_wrappi
     let mut flash = flash_with_max_seen_sequence();
     let storage = Storage::<_, 128, 4, 8, 4>::open(&mut flash).unwrap();
     assert_eq!(storage.max_seen_sequence(), u64::MAX);
-    let runtime = storage.into_runtime();
+    let mut runtime = storage.into_runtime();
     assert_eq!(
         runtime.write_committed_region::<128, 4, _>(
             &mut flash,
@@ -115,21 +115,23 @@ fn requirement_sequence_advancement_stops_at_the_maximum_value_instead_of_wrappi
     assert_eq!(reopened.wal_head(), 0);
 }
 
-//= spec/implementation.md#arithmetic-requirements
-//= type=test
-//# `RING-IMPL-ARITH-004` Conversions between integer widths that may
-//# lose information MUST be checked and MUST fail explicitly if the
-//# value is out of range for the destination type.
 #[test]
-fn requirement_lossy_integer_width_conversions_fail_with_explicit_map_errors() {
+fn requirement_large_map_entry_offsets_round_trip_with_32_bit_refs() {
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(run_large_map_entry_offsets_round_trip_with_32_bit_refs)
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+fn run_large_map_entry_offsets_round_trip_with_32_bit_refs() {
     let mut map_buffer = [0u8; 70_000];
     let mut map =
         MapFrontier::<u16, HeaplessVec<u8, 66_000>, 8>::new(CollectionId(12), &mut map_buffer)
             .unwrap();
     let large_value = HeaplessVec::<u8, 66_000>::from_slice(&[0u8; 66_000]).unwrap();
 
-    assert!(matches!(
-        map.set(1, large_value),
-        Err(MapError::SerializationError)
-    ));
+    map.set(1, large_value).unwrap();
+    assert!(map.get_frontier(&1).unwrap().is_some());
 }

@@ -374,7 +374,9 @@ fn requirement_write_committed_region_accepts_payload_that_exactly_fills_committ
 
     let mut stored = [0u8; PAYLOAD_CAPACITY];
     flash
-        .read_region(region_index, Header::ENCODED_LEN, &mut stored)
+        .read_region(region_index, Header::ENCODED_LEN, stored.len(), |bytes| {
+            stored.copy_from_slice(bytes);
+        })
         .unwrap();
     assert_eq!(stored, payload);
 }
@@ -1006,6 +1008,111 @@ fn requirement_append_free_list_head_and_wal_recovery_refresh_runtime_state() {
 
 //= spec/ring.md#storage-runtime-state-requirements
 //= type=test
+//# Control-record appends MUST refresh the in-memory runtime state without reopening and replaying
+//# the WAL.
+#[test]
+fn requirement_control_record_appends_refresh_runtime_without_reopen() {
+    let mut flash = MockFlash::<512, 6, 2048>::new(0xff);
+    let mut workspace = StorageWorkspace::<512>::new();
+    let mut state = format::<512, 6, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+
+    state
+        .append_new_collection::<512, 6, _>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(7),
+            CollectionType::MAP_CODE,
+        )
+        .unwrap();
+    init_user_region_header(
+        &mut flash,
+        4,
+        17,
+        CollectionId(7),
+        crate::MAP_REGION_V1_FORMAT,
+    );
+
+    flash.clear_operations();
+    state
+        .append_head::<512, 6, _>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(7),
+            CollectionType::MAP_CODE,
+            4,
+        )
+        .unwrap();
+    assert_eq!(
+        flash
+            .operations()
+            .iter()
+            .filter(|operation| matches!(operation, MockOperation::ReadMetadata))
+            .count(),
+        0
+    );
+    assert_eq!(
+        state.collections()[0].basis(),
+        StartupCollectionBasis::Region(4)
+    );
+    assert_eq!(state.max_seen_sequence(), 17);
+
+    flash.clear_operations();
+    state
+        .append_free_list_head::<512, 6, _>(&mut flash, &mut workspace, Some(2))
+        .unwrap();
+    assert_eq!(
+        flash
+            .operations()
+            .iter()
+            .filter(|operation| matches!(operation, MockOperation::ReadMetadata))
+            .count(),
+        0
+    );
+    let reopened = open::<512, 6, _, 8, 4>(&mut flash).unwrap();
+    assert_eq!(state.last_free_list_head(), reopened.last_free_list_head());
+    assert_eq!(state.free_list_tail(), reopened.free_list_tail());
+    assert_eq!(state.max_seen_sequence(), reopened.max_seen_sequence());
+}
+
+//= spec/ring.md#storage-runtime-state-requirements
+//= type=test
+//# Completing reclaim MUST refresh the free-list tail from footers, not by reopening the store.
+#[test]
+fn requirement_reclaim_end_refreshes_free_list_tail_without_reopen() {
+    let mut flash = MockFlash::<512, 6, 4096>::new(0xff);
+    let mut workspace = StorageWorkspace::<512>::new();
+    let mut state = format::<512, 6, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+
+    let reclaimed = state
+        .reserve_next_region::<512, 6, _>(&mut flash, &mut workspace)
+        .unwrap();
+    state
+        .append_reclaim_begin::<512, 6, _>(&mut flash, &mut workspace, reclaimed)
+        .unwrap();
+
+    flash.clear_operations();
+    state
+        .complete_pending_reclaim::<512, 6, _>(&mut flash, &mut workspace, reclaimed)
+        .unwrap();
+    assert_eq!(
+        flash
+            .operations()
+            .iter()
+            .filter(|operation| matches!(operation, MockOperation::ReadMetadata))
+            .count(),
+        0
+    );
+    assert!(state.pending_reclaims().is_empty());
+    assert_eq!(state.free_list_tail(), Some(reclaimed));
+
+    let reopened = open::<512, 6, _, 8, 4>(&mut flash).unwrap();
+    assert_eq!(state.last_free_list_head(), reopened.last_free_list_head());
+    assert_eq!(state.free_list_tail(), reopened.free_list_tail());
+    assert_eq!(state.pending_reclaims(), reopened.pending_reclaims());
+}
+
+//= spec/ring.md#storage-runtime-state-requirements
+//= type=test
 //# `RING-IMPL-REGRESSION-073` WAL rotation start/finish appends MUST reserve the next free region,
 //# advance allocator state, then move WAL tail to the new region and clear ready_region.
 #[test]
@@ -1030,6 +1137,15 @@ fn requirement_append_rotation_start_and_finish_move_to_new_tail() {
     assert_eq!(state.ready_region(), None);
     assert_eq!(state.last_free_list_head(), Some(2));
     assert_eq!(state.max_seen_sequence(), 1);
+
+    let reopened = open::<128, 4, 128, 8, 4>(&mut flash).unwrap();
+    assert_eq!(reopened.wal_head(), state.wal_head());
+    assert_eq!(reopened.wal_tail(), state.wal_tail());
+    assert_eq!(reopened.wal_append_offset(), state.wal_append_offset());
+    assert_eq!(reopened.ready_region(), state.ready_region());
+    assert_eq!(reopened.last_free_list_head(), state.last_free_list_head());
+    assert_eq!(reopened.free_list_tail(), state.free_list_tail());
+    assert_eq!(reopened.max_seen_sequence(), state.max_seen_sequence());
 }
 
 //= spec/ring.md#storage-requirements
@@ -1327,7 +1443,9 @@ fn requirement_initialized_wal_regions_use_reserved_wal_header_fields() {
 
     let mut prologue_bytes = [0u8; WalRegionPrologue::ENCODED_LEN];
     flash
-        .read_region(1, Header::ENCODED_LEN, &mut prologue_bytes)
+        .read_region(1, Header::ENCODED_LEN, prologue_bytes.len(), |bytes| {
+            prologue_bytes.copy_from_slice(bytes)
+        })
         .unwrap();
     let prologue = WalRegionPrologue::decode(&prologue_bytes, metadata.region_count).unwrap();
     assert_eq!(prologue.wal_head_region_index, 0);
@@ -1783,7 +1901,13 @@ fn requirement_copy_live_wal_head_reclaim_state_stops_when_a_record_ends_at_regi
     };
 
     state
-        .copy_live_wal_head_reclaim_state::<128, 4, _>(&mut flash, &mut workspace, &plan)
+        .copy_live_wal_head_reclaim_state::<128, 4, _>(
+            &mut flash,
+            &mut workspace,
+            &plan,
+            #[cfg(feature = "perf-counters")]
+            None,
+        )
         .unwrap();
 }
 

@@ -18,13 +18,17 @@ fn requirement_flash_io_trait_exposes_only_primitive_storage_operations() {
             Ok(())
         }
 
-        fn read_region(
+        fn read_region<R, F>(
             &mut self,
             _region_index: u32,
             _offset: usize,
-            _buffer: &mut [u8],
-        ) -> Result<(), StorageIoError> {
-            Ok(())
+            _len: usize,
+            read: F,
+        ) -> Result<R, StorageIoError>
+        where
+            F: FnOnce(&[u8]) -> R,
+        {
+            Ok(read(&[]))
         }
 
         fn write_region(
@@ -66,8 +70,14 @@ fn requirement_flash_io_trait_exposes_only_primitive_storage_operations() {
         <SurfaceCheckedFlash as FlashIo>::read_metadata;
     let _: fn(&mut SurfaceCheckedFlash, StorageMetadata) -> Result<(), StorageIoError> =
         <SurfaceCheckedFlash as FlashIo>::write_metadata;
-    let _: fn(&mut SurfaceCheckedFlash, u32, usize, &mut [u8]) -> Result<(), StorageIoError> =
-        <SurfaceCheckedFlash as FlashIo>::read_region;
+    let _: fn(
+        &mut SurfaceCheckedFlash,
+        u32,
+        usize,
+        usize,
+        fn(&[u8]) -> usize,
+    ) -> Result<usize, StorageIoError> =
+        <SurfaceCheckedFlash as FlashIo>::read_region::<usize, fn(&[u8]) -> usize>;
     let _: fn(&mut SurfaceCheckedFlash, u32, usize, &[u8]) -> Result<(), StorageIoError> =
         <SurfaceCheckedFlash as FlashIo>::write_region;
     let _: fn(&mut SurfaceCheckedFlash, u32) -> Result<(), StorageIoError> =

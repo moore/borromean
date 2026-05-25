@@ -55,13 +55,16 @@ pub trait FlashIo {
     /// Writes the storage metadata region durably.
     fn write_metadata(&mut self, metadata: StorageMetadata) -> Result<(), StorageIoError>;
 
-    /// Reads bytes from a region into `buffer`.
-    fn read_region(
+    /// Reads bytes from a region and passes the borrowed bytes to `read`.
+    fn read_region<R, F>(
         &mut self,
         region_index: u32,
         offset: usize,
-        buffer: &mut [u8],
-    ) -> Result<(), StorageIoError>;
+        len: usize,
+        read: F,
+    ) -> Result<R, StorageIoError>
+    where
+        F: FnOnce(&[u8]) -> R;
 
     /// Writes bytes into a region at the supplied offset.
     fn write_region(
@@ -97,13 +100,17 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize> 
         Self::write_metadata(self, metadata).map_err(StorageIoError::from)
     }
 
-    fn read_region(
+    fn read_region<R, F>(
         &mut self,
         region_index: u32,
         offset: usize,
-        buffer: &mut [u8],
-    ) -> Result<(), StorageIoError> {
-        Self::read_region(self, region_index, offset, buffer).map_err(StorageIoError::from)
+        len: usize,
+        read: F,
+    ) -> Result<R, StorageIoError>
+    where
+        F: FnOnce(&[u8]) -> R,
+    {
+        Self::read_region(self, region_index, offset, len, read).map_err(StorageIoError::from)
     }
 
     fn write_region(

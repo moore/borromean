@@ -13,6 +13,7 @@ use borromean::{
     StorageFormatConfig, StorageFormatError, StorageIoError, StorageMetadata, StoragePerfMetrics,
     WalRegionPrologue, WAL_V1_FORMAT,
 };
+use fjall::{Database as FjallDatabase, Keyspace as FjallKeyspace, KeyspaceCreateOptions};
 use heapless::Vec as HeaplessVec;
 use redb::{Builder as RedbBuilder, Database, Durability, ReadableDatabase, TableDefinition};
 use serde::{Deserialize, Serialize};
@@ -22,6 +23,7 @@ const MAX_COLLECTIONS: usize = 64;
 const MAX_PENDING_RECLAIMS: usize = 64;
 const MAX_INDEXES: usize = 128;
 const MAX_RUNS: usize = 128;
+const PERF_THREAD_STACK_BYTES: usize = 64 * 1024 * 1024;
 const REDB_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("kv");
 
 type PerfResult<T> = Result<T, String>;
@@ -36,6 +38,8 @@ struct PerfConfig {
     backing: BackingConfig,
     #[serde(default)]
     redb: RedbConfig,
+    #[serde(default)]
+    fjall: FjallConfig,
     #[serde(default)]
     storage: StorageConfig,
     #[serde(default)]
@@ -74,6 +78,7 @@ enum EngineKind {
     #[serde(rename = "borromean-memory")]
     BorromeanMemory,
     Redb,
+    Fjall,
 }
 
 impl EngineKind {
@@ -82,6 +87,7 @@ impl EngineKind {
             Self::Borromean => "borromean",
             Self::BorromeanMemory => "borromean-memory",
             Self::Redb => "redb",
+            Self::Fjall => "fjall",
         }
     }
 
@@ -90,7 +96,12 @@ impl EngineKind {
             Self::Borromean => "borromean-file",
             Self::BorromeanMemory => "borromean-memory",
             Self::Redb => "redb",
+            Self::Fjall => "fjall",
         }
+    }
+
+    fn include_in_user_comparison(self) -> bool {
+        !matches!(self, Self::BorromeanMemory)
     }
 }
 
@@ -170,6 +181,52 @@ impl From<RedbDurability> for Durability {
         match durability {
             RedbDurability::None => Self::None,
             RedbDurability::Immediate => Self::Immediate,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct FjallConfig {
+    path: PathBuf,
+    remove_existing: bool,
+    remove_after: bool,
+    #[serde(default)]
+    cache_size_bytes: Option<usize>,
+    persist_mode: FjallPersistMode,
+    manual_journal_persist: bool,
+    worker_threads: usize,
+}
+
+impl Default for FjallConfig {
+    fn default() -> Self {
+        Self {
+            path: PathBuf::from("target/perf/fjall.db"),
+            remove_existing: true,
+            remove_after: false,
+            cache_size_bytes: None,
+            persist_mode: FjallPersistMode::SyncData,
+            manual_journal_persist: true,
+            worker_threads: 1,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum FjallPersistMode {
+    Buffer,
+    #[default]
+    SyncData,
+    SyncAll,
+}
+
+impl From<FjallPersistMode> for fjall::PersistMode {
+    fn from(mode: FjallPersistMode) -> Self {
+        match mode {
+            FjallPersistMode::Buffer => Self::Buffer,
+            FjallPersistMode::SyncData => Self::SyncData,
+            FjallPersistMode::SyncAll => Self::SyncAll,
         }
     }
 }
@@ -367,6 +424,14 @@ struct PerfDiagnostics {
     memory: MemoryDiagnostics,
     redb_cache_size_bytes: Option<usize>,
     redb_stats: Option<RedbStorageStats>,
+    fjall_cache_size_bytes: Option<usize>,
+    fjall_persist_mode: Option<FjallPersistMode>,
+    fjall_persist_count: u64,
+    fjall_persist_nanos: u128,
+    fjall_disk_space_bytes: Option<u64>,
+    fjall_path_size_bytes: Option<u64>,
+    fjall_journal_count: Option<usize>,
+    fjall_keyspace_count: Option<usize>,
 }
 
 #[derive(Debug, Default, Clone, Copy, Serialize)]
@@ -378,6 +443,8 @@ struct IoDiagnostics {
     region_erases: u64,
     syncs: u64,
     bytes_read: u64,
+    borrowed_read_bytes: u64,
+    copied_read_bytes: u64,
     bytes_written: u64,
     bytes_erased: u64,
     read_region_nanos: u128,
@@ -818,9 +885,10 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize> PerfBacking
             aligned_dirty_bytes: report.aligned_dirty_bytes as u64,
             requested_mmap_flush_bytes: report.requested_mmap_flush_bytes as u64,
             flush_overreach_bytes: report.flush_overreach_bytes as u64,
-            file_sync_kind: Some(match report.file_sync_kind {
-                FileBackingFileSyncKind::SyncAll => SyncFileKind::SyncAll,
-            }),
+            file_sync_kind: match report.file_sync_kind {
+                FileBackingFileSyncKind::NoFileSync => None,
+                FileBackingFileSyncKind::SyncAll => Some(SyncFileKind::SyncAll),
+            },
         })
     }
 }
@@ -897,17 +965,20 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize> FlashIo
             .map_err(|_| StorageIoError::from(MockError::OutOfBounds))
     }
 
-    fn read_region(
+    fn read_region<R, F>(
         &mut self,
         region_index: u32,
         offset: usize,
-        buffer: &mut [u8],
-    ) -> Result<(), StorageIoError> {
+        len: usize,
+        read: F,
+    ) -> Result<R, StorageIoError>
+    where
+        F: FnOnce(&[u8]) -> R,
+    {
         let range = self
-            .region_range(region_index, offset, buffer.len())
+            .region_range(region_index, offset, len)
             .map_err(StorageIoError::from)?;
-        buffer.copy_from_slice(&self.storage[range]);
-        Ok(())
+        Ok(read(&self.storage[range]))
     }
 
     fn write_region(
@@ -1223,21 +1294,26 @@ where
         result
     }
 
-    fn read_region(
+    fn read_region<R, F>(
         &mut self,
         region_index: u32,
         offset: usize,
-        buffer: &mut [u8],
-    ) -> Result<(), StorageIoError> {
+        len: usize,
+        read: F,
+    ) -> Result<R, StorageIoError>
+    where
+        F: FnOnce(&[u8]) -> R,
+    {
         let start = Instant::now();
-        let result = self.inner.read_region(region_index, offset, buffer);
+        let result = self.inner.read_region(region_index, offset, len, read);
         let elapsed = start.elapsed().as_nanos();
         self.diagnostics.update(|state| {
             state.diagnostics.region_reads = state.diagnostics.region_reads.saturating_add(1);
-            state.diagnostics.bytes_read = state
+            state.diagnostics.bytes_read = state.diagnostics.bytes_read.saturating_add(len as u64);
+            state.diagnostics.borrowed_read_bytes = state
                 .diagnostics
-                .bytes_read
-                .saturating_add(buffer.len() as u64);
+                .borrowed_read_bytes
+                .saturating_add(len as u64);
             state.diagnostics.read_region_nanos =
                 state.diagnostics.read_region_nanos.saturating_add(elapsed);
         });
@@ -1494,13 +1570,23 @@ impl XorShift64 {
 }
 
 fn main() -> ExitCode {
-    match run() {
+    match run_on_sized_stack() {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("[file-backing-perf] {error}");
             ExitCode::FAILURE
         }
     }
+}
+
+fn run_on_sized_stack() -> PerfResult<()> {
+    std::thread::Builder::new()
+        .name("file-backing-perf".to_owned())
+        .stack_size(PERF_THREAD_STACK_BYTES)
+        .spawn(run)
+        .map_err(|error| format!("failed to spawn perf runner thread: {error}"))?
+        .join()
+        .map_err(|_| "perf runner thread panicked".to_owned())?
 }
 
 fn run() -> PerfResult<()> {
@@ -1597,6 +1683,9 @@ fn validate_config(config: &PerfConfig, region_count: usize) -> PerfResult<()> {
     if config.comparison.engines.contains(&EngineKind::Redb) {
         validate_redb_key_space(config.workload)?;
     }
+    if config.comparison.engines.contains(&EngineKind::Fjall) && config.fjall.worker_threads == 0 {
+        return Err("fjall.worker_threads must be greater than zero".to_owned());
+    }
     Ok(())
 }
 
@@ -1663,8 +1752,9 @@ where
         8192 => dispatch_count!(8192, region_count, config),
         16_384 => dispatch_count!(16_384, region_count, config),
         65_536 => dispatch_count!(65_536, region_count, config),
+        1_048_576 => dispatch_count!(1_048_576, region_count, config),
         other => Err(format!(
-            "unsupported region_size={other}; supported sizes are 4096, 8192, 16384, 65536"
+            "unsupported region_size={other}; supported sizes are 4096, 8192, 16384, 65536, 1048576"
         )),
     }
 }
@@ -1692,6 +1782,7 @@ where
                 run_borromean_memory_engine::<REGION_SIZE, REGION_COUNT, VALUE_BYTES>(config)?
             }
             EngineKind::Redb => run_redb_engine::<VALUE_BYTES>(config, geometry.file_len_bytes)?,
+            EngineKind::Fjall => run_fjall_engine::<VALUE_BYTES>(config, geometry.file_len_bytes)?,
         };
         engine_reports.push(engine_report);
     }
@@ -2319,6 +2410,196 @@ fn run_redb_engine<const VALUE_BYTES: usize>(
     })
 }
 
+fn run_fjall_engine<const VALUE_BYTES: usize>(
+    config: &PerfConfig,
+    borromean_file_len_bytes: usize,
+) -> PerfResult<EngineReport> {
+    let mut memory = MemoryTracker::start();
+    prepare_directory_path(&config.fjall.path, config.fjall.remove_existing)?;
+    let cache_size_bytes = config
+        .fjall
+        .cache_size_bytes
+        .filter(|bytes| *bytes != 0)
+        .unwrap_or(borromean_file_len_bytes);
+    let cache_size_bytes_u64 = u64::try_from(cache_size_bytes)
+        .map_err(|_| "fjall.cache_size_bytes does not fit in u64".to_owned())?;
+
+    eprintln!(
+        "[file-backing-perf] preparing fjall {} with value_size={} cache_size={} preload={} operations={} persist_mode={}",
+        config.fjall.path.display(),
+        VALUE_BYTES,
+        cache_size_bytes,
+        config.preload.count,
+        config.workload.operation_count,
+        format_fjall_persist_mode(config.fjall.persist_mode)
+    );
+    let create_format_start = Instant::now();
+    let db = FjallDatabase::builder(&config.fjall.path)
+        .cache_size(cache_size_bytes_u64)
+        .manual_journal_persist(config.fjall.manual_journal_persist)
+        .worker_threads(config.fjall.worker_threads)
+        .open()
+        .map_err(|error| format!("failed to open fjall database: {error}"))?;
+    let create_format = create_format_start.elapsed();
+    eprintln!(
+        "[file-backing-perf] fjall open complete in {}",
+        format_duration(create_format)
+    );
+
+    let setup_start = Instant::now();
+    let keyspaces = open_fjall_keyspaces(config, &db)?;
+    let setup = setup_start.elapsed();
+    eprintln!(
+        "[file-backing-perf] fjall keyspace setup complete in {}",
+        format_duration(setup)
+    );
+    memory.sample();
+
+    let mut diagnostics = PerfDiagnostics {
+        fjall_cache_size_bytes: Some(cache_size_bytes),
+        fjall_persist_mode: Some(config.fjall.persist_mode),
+        ..PerfDiagnostics::default()
+    };
+
+    let preload_start = Instant::now();
+    let mut preload_counters = WorkloadCounters::default();
+    let mut preload_timings = WorkloadTimings::default();
+    run_fjall_preload::<VALUE_BYTES>(
+        config,
+        &db,
+        &keyspaces,
+        &mut preload_counters,
+        &mut preload_timings,
+        &mut diagnostics,
+    )?;
+    let preload = preload_start.elapsed();
+    if config.preload.count != 0 {
+        eprintln!(
+            "[file-backing-perf] fjall preload complete in {}",
+            format_duration(preload)
+        );
+    }
+    memory.sample();
+
+    let mut rng = XorShift64::new(config.workload.seed);
+    let warmup_start = Instant::now();
+    let mut warmup_progress = ProgressReporter::new(
+        config.output.progress_interval,
+        config.workload.warmup_count,
+    );
+    for index in 0..config.workload.warmup_count {
+        execute_one_fjall_operation::<VALUE_BYTES>(
+            config,
+            &mut rng,
+            &db,
+            &keyspaces,
+            None,
+            None,
+            Some(&mut diagnostics),
+        )
+        .map_err(|error| format!("warmup operation {index} failed: {error}"))?;
+        warmup_progress.maybe_report("fjall warmup", index + 1, None, 0);
+    }
+    let warmup = warmup_start.elapsed();
+    if config.workload.warmup_count != 0 {
+        warmup_progress.report(
+            "fjall warmup complete",
+            config.workload.warmup_count,
+            None,
+            0,
+        );
+    }
+
+    diagnostics.operation_generation_nanos = 0;
+    diagnostics.read_lookup_nanos = 0;
+    diagnostics.write_apply_nanos = 0;
+    diagnostics.fjall_persist_count = 0;
+    diagnostics.fjall_persist_nanos = 0;
+
+    let mut counters = WorkloadCounters::default();
+    let mut workload_timings = WorkloadTimings::default();
+    let mut latency_samples = Vec::new();
+    let mut latency_samples_by_op = OperationLatencySamples::default();
+    let workload_start = Instant::now();
+    let mut workload_progress = ProgressReporter::new(
+        config.output.progress_interval,
+        config.workload.operation_count,
+    );
+    for index in 0..config.workload.operation_count {
+        let sample = should_sample_latency(config.output.latency_sample_interval, index);
+        let operation_start = sample.then(Instant::now);
+        let executed = execute_one_fjall_operation::<VALUE_BYTES>(
+            config,
+            &mut rng,
+            &db,
+            &keyspaces,
+            Some(&mut counters),
+            Some(&mut workload_timings),
+            Some(&mut diagnostics),
+        )
+        .map_err(|error| format!("workload operation {index} failed: {error}"))?;
+        if let Some(start) = operation_start {
+            let elapsed = start.elapsed().as_nanos();
+            latency_samples.push(elapsed);
+            push_latency_sample(&mut latency_samples_by_op, executed.operation, elapsed);
+        }
+        workload_progress.maybe_report(
+            "fjall workload",
+            index + 1,
+            Some(&counters),
+            latency_samples.len(),
+        );
+        maybe_sample_memory(&mut memory, config.output.progress_interval, index);
+    }
+    let workload = workload_start.elapsed();
+    workload_progress.report(
+        "fjall workload complete",
+        config.workload.operation_count,
+        Some(&counters),
+        latency_samples.len(),
+    );
+
+    diagnostics.operation_generation_nanos = workload_timings.operation_generation_nanos;
+    diagnostics.fjall_disk_space_bytes = db.disk_space().ok();
+    diagnostics.fjall_journal_count = Some(db.journal_count());
+    diagnostics.fjall_keyspace_count = Some(db.keyspace_count());
+
+    drop(keyspaces);
+    drop(db);
+    let path_size_bytes = path_disk_usage(&config.fjall.path).ok();
+    diagnostics.fjall_path_size_bytes = path_size_bytes;
+    let file_len_bytes = diagnostics
+        .fjall_disk_space_bytes
+        .or(path_size_bytes)
+        .unwrap_or(0);
+    if config.fjall.remove_after {
+        remove_path_if_present(&config.fjall.path)?;
+    }
+    diagnostics.memory = memory.finish();
+
+    Ok(EngineReport {
+        engine: EngineKind::Fjall,
+        path: config.fjall.path.clone(),
+        create_format_nanos: create_format.as_nanos(),
+        setup_nanos: setup.as_nanos(),
+        preload_nanos: preload.as_nanos(),
+        preload_counters,
+        warmup_nanos: warmup.as_nanos(),
+        workload_nanos: workload.as_nanos(),
+        operations_per_second: operations_per_second(config.workload.operation_count, workload),
+        counters,
+        workload_timings,
+        sampled_latency: summarize_latency(latency_samples),
+        sampled_latency_by_op: summarize_operation_latency(latency_samples_by_op),
+        diagnostics,
+        borromean_core_metrics: None,
+        sync_audit: None,
+        maintenance: MaintenanceReport::default(),
+        file_len_bytes,
+        logical_len_bytes: file_len_bytes,
+    })
+}
+
 fn prepare_db_path(backing: &BackingConfig) -> PerfResult<()> {
     prepare_path(&backing.path, backing.remove_existing)
 }
@@ -2326,6 +2607,17 @@ fn prepare_db_path(backing: &BackingConfig) -> PerfResult<()> {
 fn prepare_path(path: &Path, remove_existing: bool) -> PerfResult<()> {
     if remove_existing {
         remove_file_if_present(path)?;
+    }
+    if let Some(parent) = non_empty_parent(path) {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("failed to create {}: {error}", parent.display()))?;
+    }
+    Ok(())
+}
+
+fn prepare_directory_path(path: &Path, remove_existing: bool) -> PerfResult<()> {
+    if remove_existing {
+        remove_path_if_present(path)?;
     }
     if let Some(parent) = non_empty_parent(path) {
         fs::create_dir_all(parent)
@@ -2346,6 +2638,38 @@ fn remove_file_if_present(path: &Path) -> PerfResult<()> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(error) => Err(format!("failed to remove {}: {error}", path.display())),
     }
+}
+
+fn remove_path_if_present(path: &Path) -> PerfResult<()> {
+    match fs::metadata(path) {
+        Ok(metadata) if metadata.is_dir() => fs::remove_dir_all(path)
+            .map_err(|error| format!("failed to remove {}: {error}", path.display())),
+        Ok(_) => fs::remove_file(path)
+            .map_err(|error| format!("failed to remove {}: {error}", path.display())),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("failed to stat {}: {error}", path.display())),
+    }
+}
+
+fn path_disk_usage(path: &Path) -> PerfResult<u64> {
+    let metadata = fs::metadata(path)
+        .map_err(|error| format!("failed to stat {}: {error}", path.display()))?;
+    if metadata.is_file() {
+        return Ok(metadata.len());
+    }
+    if !metadata.is_dir() {
+        return Ok(0);
+    }
+
+    let mut total = 0u64;
+    let entries = fs::read_dir(path)
+        .map_err(|error| format!("failed to read directory {}: {error}", path.display()))?;
+    for entry in entries {
+        let entry = entry
+            .map_err(|error| format!("failed to read entry in {}: {error}", path.display()))?;
+        total = total.saturating_add(path_disk_usage(&entry.path())?);
+    }
+    Ok(total)
 }
 
 fn non_empty_parent(path: &Path) -> Option<&Path> {
@@ -2506,6 +2830,71 @@ fn run_redb_preload<const VALUE_BYTES: usize>(
         }
     }
     preload_progress.report("redb preload complete", preload_total, Some(counters), 0);
+    Ok(())
+}
+
+fn open_fjall_keyspaces(config: &PerfConfig, db: &FjallDatabase) -> PerfResult<Vec<FjallKeyspace>> {
+    let mut keyspaces = Vec::with_capacity(config.workload.map_count);
+    for map_index in 0..config.workload.map_count {
+        let name = format!("kv_{map_index}");
+        let manual_journal_persist = config.fjall.manual_journal_persist;
+        let keyspace = db
+            .keyspace(&name, || {
+                KeyspaceCreateOptions::default().manual_journal_persist(manual_journal_persist)
+            })
+            .map_err(|error| format!("failed to open fjall keyspace {name}: {error}"))?;
+        keyspaces.push(keyspace);
+    }
+    Ok(keyspaces)
+}
+
+fn run_fjall_preload<const VALUE_BYTES: usize>(
+    config: &PerfConfig,
+    db: &FjallDatabase,
+    keyspaces: &[FjallKeyspace],
+    counters: &mut WorkloadCounters,
+    timings: &mut WorkloadTimings,
+    diagnostics: &mut PerfDiagnostics,
+) -> PerfResult<()> {
+    if config.preload.count == 0 {
+        return Ok(());
+    }
+    let mut rng = XorShift64::new(config.workload.seed ^ 0xa076_1d64_78bd_642f);
+    let preload_total = config
+        .preload
+        .count
+        .checked_mul(
+            u64::try_from(config.workload.map_count)
+                .map_err(|_| "map count does not fit in u64".to_owned())?,
+        )
+        .ok_or_else(|| "preload operation count overflowed".to_owned())?;
+    let mut operation_index = 0u64;
+    let mut preload_progress =
+        ProgressReporter::new(config.output.progress_interval, preload_total);
+    for keyspace in keyspaces {
+        for key in 0..config.preload.count {
+            counters.sets = counters.sets.saturating_add(1);
+            counters.set_inserts_expected = counters.set_inserts_expected.saturating_add(1);
+            let value = next_value::<VALUE_BYTES>(&mut rng);
+            let encoded_key = encode_fjall_key(key);
+
+            let write_start = Instant::now();
+            let apply_start = Instant::now();
+            keyspace
+                .insert(encoded_key.as_slice(), value.as_slice())
+                .map_err(|error| format!("fjall preload insert failed: {error}"))?;
+            diagnostics.write_apply_nanos = diagnostics
+                .write_apply_nanos
+                .saturating_add(apply_start.elapsed().as_nanos());
+            persist_fjall(config, db, diagnostics)?;
+            timings.writes_nanos = timings
+                .writes_nanos
+                .saturating_add(write_start.elapsed().as_nanos());
+            operation_index = operation_index.saturating_add(1);
+            preload_progress.maybe_report("fjall preload", operation_index, Some(counters), 0);
+        }
+    }
+    preload_progress.report("fjall preload complete", preload_total, Some(counters), 0);
     Ok(())
 }
 
@@ -2820,6 +3209,122 @@ fn execute_one_redb_operation<const VALUE_BYTES: usize>(
     })
 }
 
+fn execute_one_fjall_operation<const VALUE_BYTES: usize>(
+    config: &PerfConfig,
+    rng: &mut XorShift64,
+    db: &FjallDatabase,
+    keyspaces: &[FjallKeyspace],
+    counters: Option<&mut WorkloadCounters>,
+    timings: Option<&mut WorkloadTimings>,
+    diagnostics: Option<&mut PerfDiagnostics>,
+) -> PerfResult<ExecutedOperation> {
+    let generation_start = Instant::now();
+    let step = next_workload_step::<VALUE_BYTES>(config, rng)?;
+    let generation_nanos = generation_start.elapsed().as_nanos();
+    let encoded_key = encode_fjall_key(step.key);
+    let keyspace = &keyspaces[step.map_index];
+    let mut counters = counters;
+    let mut timings = timings;
+    let mut diagnostics = diagnostics;
+    if let Some(timings) = timings.as_deref_mut() {
+        timings.operation_generation_nanos = timings
+            .operation_generation_nanos
+            .saturating_add(generation_nanos);
+    }
+    if let Some(diagnostics) = diagnostics.as_deref_mut() {
+        diagnostics.operation_generation_nanos = diagnostics
+            .operation_generation_nanos
+            .saturating_add(generation_nanos);
+    }
+
+    match step.operation {
+        WorkloadOp::Read => {
+            if let Some(counters) = counters.as_deref_mut() {
+                counters.reads += 1;
+                count_expected_read(counters, step.expected_presence);
+            }
+            let read_start = Instant::now();
+            let lookup_start = Instant::now();
+            let result = keyspace
+                .get(encoded_key.as_slice())
+                .map_err(|error| format!("fjall get failed: {error}"))?;
+            if let Some(diagnostics) = diagnostics.as_deref_mut() {
+                diagnostics.read_lookup_nanos = diagnostics
+                    .read_lookup_nanos
+                    .saturating_add(lookup_start.elapsed().as_nanos());
+            }
+            if let Some(timings) = timings.as_deref_mut() {
+                timings.reads_nanos = timings
+                    .reads_nanos
+                    .saturating_add(read_start.elapsed().as_nanos());
+            }
+            if result.is_none() {
+                if let Some(counters) = counters.as_deref_mut() {
+                    counters.misses += 1;
+                }
+            } else if let Some(counters) = counters.as_deref_mut() {
+                counters.hits += 1;
+            }
+        }
+        WorkloadOp::Set => {
+            if let Some(counters) = counters.as_deref_mut() {
+                counters.sets += 1;
+                count_expected_set(counters, step.expected_presence);
+            }
+            let value = step
+                .value
+                .ok_or_else(|| "set operation missing generated value".to_owned())?;
+            let write_start = Instant::now();
+            let apply_start = Instant::now();
+            keyspace
+                .insert(encoded_key.as_slice(), value.as_slice())
+                .map_err(|error| format!("fjall insert failed: {error}"))?;
+            if let Some(diagnostics) = diagnostics.as_deref_mut() {
+                diagnostics.write_apply_nanos = diagnostics
+                    .write_apply_nanos
+                    .saturating_add(apply_start.elapsed().as_nanos());
+                persist_fjall(config, db, diagnostics)?;
+            } else {
+                db.persist(config.fjall.persist_mode.into())
+                    .map_err(|error| format!("fjall persist failed: {error}"))?;
+            }
+            if let Some(timings) = timings.as_deref_mut() {
+                timings.writes_nanos = timings
+                    .writes_nanos
+                    .saturating_add(write_start.elapsed().as_nanos());
+            }
+        }
+        WorkloadOp::Delete => {
+            if let Some(counters) = counters.as_deref_mut() {
+                counters.deletes += 1;
+            }
+            let write_start = Instant::now();
+            let apply_start = Instant::now();
+            keyspace
+                .remove(encoded_key.as_slice())
+                .map_err(|error| format!("fjall remove failed: {error}"))?;
+            if let Some(diagnostics) = diagnostics.as_deref_mut() {
+                diagnostics.write_apply_nanos = diagnostics
+                    .write_apply_nanos
+                    .saturating_add(apply_start.elapsed().as_nanos());
+                persist_fjall(config, db, diagnostics)?;
+            } else {
+                db.persist(config.fjall.persist_mode.into())
+                    .map_err(|error| format!("fjall persist failed: {error}"))?;
+            }
+            if let Some(timings) = timings.as_deref_mut() {
+                timings.writes_nanos = timings
+                    .writes_nanos
+                    .saturating_add(write_start.elapsed().as_nanos());
+            }
+        }
+    }
+
+    Ok(ExecutedOperation {
+        operation: step.operation,
+    })
+}
+
 fn next_workload_step<const VALUE_BYTES: usize>(
     config: &PerfConfig,
     rng: &mut XorShift64,
@@ -2917,6 +3422,25 @@ fn encode_redb_key(workload: WorkloadConfig, map_index: usize, key: u64) -> Perf
         .checked_mul(workload.key_space)
         .and_then(|base| base.checked_add(key))
         .ok_or_else(|| "encoded redb key overflowed u64".to_owned())
+}
+
+fn encode_fjall_key(key: u64) -> [u8; 8] {
+    key.to_be_bytes()
+}
+
+fn persist_fjall(
+    config: &PerfConfig,
+    db: &FjallDatabase,
+    diagnostics: &mut PerfDiagnostics,
+) -> PerfResult<()> {
+    let persist_start = Instant::now();
+    db.persist(config.fjall.persist_mode.into())
+        .map_err(|error| format!("fjall persist failed: {error}"))?;
+    diagnostics.fjall_persist_count = diagnostics.fjall_persist_count.saturating_add(1);
+    diagnostics.fjall_persist_nanos = diagnostics
+        .fjall_persist_nanos
+        .saturating_add(persist_start.elapsed().as_nanos());
+    Ok(())
 }
 
 fn next_operation(config: WorkloadConfig, rng: &mut XorShift64) -> PerfResult<WorkloadOp> {
@@ -3266,10 +3790,16 @@ fn print_engine_report(report: &EngineReport) {
         nanos_to_millis(report.workload_nanos)
     );
     println!("  throughput: {:.2} ops/s", report.operations_per_second);
-    if report.engine == EngineKind::BorromeanMemory {
-        println!("  logical size: {} bytes", report.logical_len_bytes);
-    } else {
-        println!("  file size: {} bytes", report.file_len_bytes);
+    match report.engine {
+        EngineKind::BorromeanMemory => {
+            println!("  logical size: {} bytes", report.logical_len_bytes);
+        }
+        EngineKind::Fjall => {
+            println!("  disk size: {} bytes", report.file_len_bytes);
+        }
+        EngineKind::Borromean | EngineKind::Redb => {
+            println!("  file size: {} bytes", report.file_len_bytes);
+        }
     }
     if report.preload_counters.sets != 0 {
         print_counters("  preload counts", &report.preload_counters);
@@ -3365,7 +3895,7 @@ fn print_diagnostics(report: &EngineReport) {
     );
     if let Some(io) = diagnostics.borromean_io {
         println!(
-            "  io: metadata_reads={} metadata_writes={} region_reads={} region_writes={} region_erases={} syncs={} bytes_read={} bytes_written={} bytes_erased={} dirty_sync_bytes={} dirty_sync_regions={} dirty_sync_metadata_regions={} exact_dirty_range_bytes={} aligned_dirty_bytes={} requested_mmap_flush_bytes={} flush_overreach_bytes={} file_sync_kind={} read_time={} write_time={} erase_time={} sync_time={} mmap_flush={} file_sync={}",
+            "  io: metadata_reads={} metadata_writes={} region_reads={} region_writes={} region_erases={} syncs={} bytes_read={} borrowed_read_bytes={} copied_read_bytes={} bytes_written={} bytes_erased={} dirty_sync_bytes={} dirty_sync_regions={} dirty_sync_metadata_regions={} exact_dirty_range_bytes={} aligned_dirty_bytes={} requested_mmap_flush_bytes={} flush_overreach_bytes={} file_sync_kind={} read_time={} write_time={} erase_time={} sync_time={} mmap_flush={} file_sync={}",
             io.metadata_reads,
             io.metadata_writes,
             io.region_reads,
@@ -3373,6 +3903,8 @@ fn print_diagnostics(report: &EngineReport) {
             io.region_erases,
             io.syncs,
             io.bytes_read,
+            io.borrowed_read_bytes,
+            io.copied_read_bytes,
             io.bytes_written,
             io.bytes_erased,
             io.dirty_sync_bytes,
@@ -3411,6 +3943,25 @@ fn print_diagnostics(report: &EngineReport) {
             stats.metadata_bytes,
             stats.fragmented_bytes,
             stats.page_size
+        );
+    }
+    if let Some(cache_size) = diagnostics.fjall_cache_size_bytes {
+        println!(
+            "  fjall: cache_size={} persist_mode={} persists={} persist_time={} disk_space={} path_size={} journals={} keyspaces={}",
+            cache_size,
+            diagnostics
+                .fjall_persist_mode
+                .map_or("unknown", format_fjall_persist_mode),
+            diagnostics.fjall_persist_count,
+            format_nanos(diagnostics.fjall_persist_nanos),
+            format_optional_bytes(diagnostics.fjall_disk_space_bytes),
+            format_optional_bytes(diagnostics.fjall_path_size_bytes),
+            diagnostics
+                .fjall_journal_count
+                .map_or_else(|| "unknown".to_owned(), |count| count.to_string()),
+            diagnostics
+                .fjall_keyspace_count
+                .map_or_else(|| "unknown".to_owned(), |count| count.to_string())
         );
     }
 }
@@ -3489,6 +4040,33 @@ fn print_borromean_core_metrics(metrics: &StoragePerfMetrics) {
         format_nanos(metrics.file_sync_nanos)
     );
     println!(
+        "  borromean wal rotation: attempted={} completed={} total_time={} avg_time={} remaining_min={} remaining_avg={} reserve_avg={} alloc_begin_avg={} link_avg={}",
+        metrics.wal_rotations_attempted,
+        metrics.wal_rotations_completed,
+        format_nanos(metrics.wal_rotation_nanos),
+        format_average_nanos(metrics.wal_rotation_nanos, metrics.wal_rotations_completed),
+        format_min_bytes(
+            metrics.wal_rotation_remaining_bytes_min,
+            metrics.wal_rotations_attempted
+        ),
+        format_average_bytes(
+            metrics.wal_rotation_remaining_bytes_total,
+            metrics.wal_rotations_attempted
+        ),
+        format_average_bytes(
+            metrics.wal_rotation_reserve_bytes_total,
+            metrics.wal_rotations_attempted
+        ),
+        format_average_bytes(
+            metrics.wal_rotation_alloc_begin_bytes_total,
+            metrics.wal_rotations_attempted
+        ),
+        format_average_bytes(
+            metrics.wal_rotation_link_bytes_total,
+            metrics.wal_rotations_attempted
+        )
+    );
+    println!(
         "  borromean write path: full={} avg_write={} update_encode={} frontier_checkpoint={} frontier_apply={} overflow_flushes={} overflow_flush_time={}",
         format_nanos(metrics.full_write_path_nanos),
         format_average_nanos(metrics.full_write_path_nanos, write_ops),
@@ -3513,6 +4091,14 @@ fn print_borromean_core_metrics(metrics: &StoragePerfMetrics) {
         metrics.buffer_too_small_errors,
         metrics.wal_rotation_required,
         metrics.append_failures
+    );
+    println!(
+        "  borromean committed reads: segments_checked={} bounds_reads={} snapshot_ref_reads={} entry_reads={} full_region_reads={}",
+        metrics.committed_run_segments_checked,
+        metrics.committed_run_bounds_reads,
+        metrics.committed_run_snapshot_ref_reads,
+        metrics.committed_run_entry_reads,
+        metrics.committed_run_full_region_reads
     );
 }
 
@@ -3549,24 +4135,25 @@ fn print_workload_timing_split(report: &EngineReport) {
 
 fn build_comparison_reports(engine_reports: &[EngineReport]) -> Vec<EngineComparisonReport> {
     let mut comparisons = Vec::new();
-    push_comparison_report(
-        engine_reports,
-        &mut comparisons,
-        EngineKind::Borromean,
-        EngineKind::BorromeanMemory,
-    );
-    push_comparison_report(
-        engine_reports,
-        &mut comparisons,
-        EngineKind::BorromeanMemory,
-        EngineKind::Redb,
-    );
-    push_comparison_report(
-        engine_reports,
-        &mut comparisons,
-        EngineKind::Borromean,
-        EngineKind::Redb,
-    );
+    for left_index in 0..engine_reports.len() {
+        for right_index in left_index + 1..engine_reports.len() {
+            if !engine_reports[left_index]
+                .engine
+                .include_in_user_comparison()
+                || !engine_reports[right_index]
+                    .engine
+                    .include_in_user_comparison()
+            {
+                continue;
+            }
+            push_comparison_report(
+                engine_reports,
+                &mut comparisons,
+                engine_reports[left_index].engine,
+                engine_reports[right_index].engine,
+            );
+        }
+    }
     comparisons
 }
 
@@ -3679,6 +4266,14 @@ fn format_sync_file_kind(kind: Option<SyncFileKind>) -> &'static str {
     }
 }
 
+fn format_fjall_persist_mode(mode: FjallPersistMode) -> &'static str {
+    match mode {
+        FjallPersistMode::Buffer => "buffer",
+        FjallPersistMode::SyncData => "sync-data",
+        FjallPersistMode::SyncAll => "sync-all",
+    }
+}
+
 fn ratio_u64(numerator: u64, denominator: u64) -> Option<f64> {
     if denominator == 0 {
         return None;
@@ -3710,10 +4305,13 @@ fn latency_ratio(
 }
 
 fn sync_nanos(report: &EngineReport) -> u128 {
-    report
-        .diagnostics
-        .borromean_io
-        .map_or(report.diagnostics.commit_nanos, |io| io.sync_nanos)
+    if let Some(io) = report.diagnostics.borromean_io {
+        return io.sync_nanos;
+    }
+    if report.diagnostics.fjall_persist_count != 0 {
+        return report.diagnostics.fjall_persist_nanos;
+    }
+    report.diagnostics.commit_nanos
 }
 
 fn write_count(report: &EngineReport) -> u64 {
@@ -3743,6 +4341,20 @@ fn format_average_nanos(total_nanos: u128, count: u64) -> String {
         return "n/a".to_owned();
     }
     format_nanos(total_nanos / u128::from(count))
+}
+
+fn format_average_bytes(total_bytes: u64, count: u64) -> String {
+    if count == 0 {
+        return "n/a".to_owned();
+    }
+    format!("{:.1} bytes", total_bytes as f64 / count as f64)
+}
+
+fn format_min_bytes(bytes: u64, count: u64) -> String {
+    if count == 0 {
+        return "n/a".to_owned();
+    }
+    format!("{bytes} bytes")
 }
 
 fn format_optional_bytes(bytes: Option<u64>) -> String {

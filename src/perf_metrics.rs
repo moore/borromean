@@ -22,12 +22,27 @@ pub struct StoragePerfMetrics {
     pub wal_bytes: u64,
     pub wal_rotations_attempted: u64,
     pub wal_rotations_completed: u64,
+    pub runtime_reopens: u64,
+    pub wal_rotation_remaining_bytes_total: u64,
+    pub wal_rotation_remaining_bytes_min: u64,
+    pub wal_rotation_reserve_bytes_total: u64,
+    pub wal_rotation_alloc_begin_bytes_total: u64,
+    pub wal_rotation_link_bytes_total: u64,
     pub wal_syncs: u64,
+    pub wal_replay_reads: u64,
+    pub wal_replay_read_bytes: u64,
+    pub frontier_open_wal_scans: u64,
+    pub wal_head_reclaim_copied_records: u64,
     pub compaction_checks: u64,
     pub compactions_run: u64,
     pub flushes: u64,
     pub reclaim_starts: u64,
     pub reclaim_ends: u64,
+    pub committed_run_segments_checked: u64,
+    pub committed_run_bounds_reads: u64,
+    pub committed_run_snapshot_ref_reads: u64,
+    pub committed_run_entry_reads: u64,
+    pub committed_run_full_region_reads: u64,
     pub buffer_too_small_errors: u64,
     pub wal_rotation_required: u64,
     pub append_failures: u64,
@@ -101,7 +116,23 @@ impl StoragePerfMetrics {
             StoragePerfCounter::WalRotationsCompleted => {
                 self.wal_rotations_completed = self.wal_rotations_completed.saturating_add(value);
             }
+            StoragePerfCounter::RuntimeReopens => {
+                self.runtime_reopens = self.runtime_reopens.saturating_add(value);
+            }
             StoragePerfCounter::WalSyncs => self.wal_syncs = self.wal_syncs.saturating_add(value),
+            StoragePerfCounter::WalReplayReads => {
+                self.wal_replay_reads = self.wal_replay_reads.saturating_add(value);
+            }
+            StoragePerfCounter::WalReplayReadBytes => {
+                self.wal_replay_read_bytes = self.wal_replay_read_bytes.saturating_add(value);
+            }
+            StoragePerfCounter::FrontierOpenWalScans => {
+                self.frontier_open_wal_scans = self.frontier_open_wal_scans.saturating_add(value);
+            }
+            StoragePerfCounter::WalHeadReclaimCopiedRecords => {
+                self.wal_head_reclaim_copied_records =
+                    self.wal_head_reclaim_copied_records.saturating_add(value);
+            }
             StoragePerfCounter::CompactionChecks => {
                 self.compaction_checks = self.compaction_checks.saturating_add(value);
             }
@@ -114,6 +145,22 @@ impl StoragePerfMetrics {
             }
             StoragePerfCounter::ReclaimEnds => {
                 self.reclaim_ends = self.reclaim_ends.saturating_add(value);
+            }
+            StoragePerfCounter::CommittedRunSegmentsChecked => {
+                self.committed_run_segments_checked =
+                    self.committed_run_segments_checked.saturating_add(value);
+            }
+            StoragePerfCounter::CommittedRunBoundsReads => {
+                self.committed_run_bounds_reads =
+                    self.committed_run_bounds_reads.saturating_add(value);
+            }
+            StoragePerfCounter::CommittedRunSnapshotRefReads => {
+                self.committed_run_snapshot_ref_reads =
+                    self.committed_run_snapshot_ref_reads.saturating_add(value);
+            }
+            StoragePerfCounter::CommittedRunEntryReads => {
+                self.committed_run_entry_reads =
+                    self.committed_run_entry_reads.saturating_add(value);
             }
             StoragePerfCounter::BufferTooSmallErrors => {
                 self.buffer_too_small_errors = self.buffer_too_small_errors.saturating_add(value);
@@ -174,6 +221,32 @@ impl StoragePerfMetrics {
             }
         }
     }
+
+    pub(crate) fn observe_wal_rotation_window(
+        &mut self,
+        remaining_bytes: u64,
+        alloc_begin_bytes: u64,
+        link_bytes: u64,
+        reserve_bytes: u64,
+    ) {
+        self.wal_rotation_remaining_bytes_total = self
+            .wal_rotation_remaining_bytes_total
+            .saturating_add(remaining_bytes);
+        self.wal_rotation_remaining_bytes_min = if self.wal_rotation_remaining_bytes_min == 0 {
+            remaining_bytes
+        } else {
+            self.wal_rotation_remaining_bytes_min.min(remaining_bytes)
+        };
+        self.wal_rotation_alloc_begin_bytes_total = self
+            .wal_rotation_alloc_begin_bytes_total
+            .saturating_add(alloc_begin_bytes);
+        self.wal_rotation_link_bytes_total = self
+            .wal_rotation_link_bytes_total
+            .saturating_add(link_bytes);
+        self.wal_rotation_reserve_bytes_total = self
+            .wal_rotation_reserve_bytes_total
+            .saturating_add(reserve_bytes);
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -194,12 +267,21 @@ pub(crate) enum StoragePerfCounter {
     WalBytes,
     WalRotationsAttempted,
     WalRotationsCompleted,
+    RuntimeReopens,
     WalSyncs,
+    WalReplayReads,
+    WalReplayReadBytes,
+    FrontierOpenWalScans,
+    WalHeadReclaimCopiedRecords,
     CompactionChecks,
     CompactionsRun,
     Flushes,
     ReclaimStarts,
     ReclaimEnds,
+    CommittedRunSegmentsChecked,
+    CommittedRunBoundsReads,
+    CommittedRunSnapshotRefReads,
+    CommittedRunEntryReads,
     BufferTooSmallErrors,
     WalRotationRequired,
     AppendFailures,

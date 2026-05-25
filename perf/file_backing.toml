@@ -1,13 +1,13 @@
 [geometry]
-# Supported region sizes: 4096, 8192, 16384, 65536.
+# Supported region sizes: 4096, 8192, 16384, 65536, 1048576.
 # Supported region counts: 64, 256, 1024, 1599, 4096.
-# 4096 regions at 4 KiB keeps the file small while forcing run flushes
-# and compactions during a short perf run.
-region_size = 4096
-region_count = 4096
+# 64 regions at 1 MiB keeps the file around 65 MiB while using
+# more realistic LSM segment sizing for desktop/server comparisons.
+region_size = 1048576
+region_count = 64
 
 [comparison]
-engines = ["borromean", "borromean-memory", "redb"]
+engines = ["borromean", "borromean-memory", "redb", "fjall"]
 
 [backing]
 path = "target/perf/file_backing.db"
@@ -25,6 +25,15 @@ remove_after = false
 compact_interval = 0
 compact_after_workload = false
 durability = "immediate"
+
+[fjall]
+path = "target/perf/fjall.db"
+remove_existing = true
+remove_after = false
+cache_size_bytes = 0
+persist_mode = "sync-data"
+manual_journal_persist = true
+worker_threads = 1
 
 [preload]
 count = 0
@@ -46,7 +55,7 @@ delete_ratio = 0
 value_size_bytes = 64
 key_mode = "insert-range"
 compact_on_signal = true
-compaction_region_target = 64
+compaction_region_target = 16
 
 [maintenance]
 optimize_after_workload = false

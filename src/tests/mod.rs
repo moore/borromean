@@ -438,14 +438,18 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize> 
             .map_err(StorageIoError::from)
     }
 
-    fn read_region(
+    fn read_region<R, F>(
         &mut self,
         region_index: u32,
         offset: usize,
-        buffer: &mut [u8],
-    ) -> Result<(), StorageIoError> {
+        len: usize,
+        read: F,
+    ) -> Result<R, StorageIoError>
+    where
+        F: FnOnce(&[u8]) -> R,
+    {
         self.inner
-            .read_region(region_index, offset, buffer)
+            .read_region(region_index, offset, len, read)
             .map_err(StorageIoError::from)
     }
 
