@@ -2321,6 +2321,10 @@ where
 {
     /// Creates a new empty map frontier over `buffer`.
     pub fn new(id: CollectionId, buffer: &'a mut [u8]) -> Result<Self, MapError> {
+        if buffer.len() < ENTRY_COUNT_SIZE {
+            return Err(MapError::BufferTooSmall);
+        }
+
         let record_count = EntryCount(0);
         let next_record_offset = RecordOffset(ENTRY_COUNT_SIZE);
         let next_record_index = RecordIndex(0);
@@ -2884,11 +2888,14 @@ where
         }
 
         let run_count = self.runs.len();
-        if run_count <= run_target {
+        let frontier_run_count = usize::from(!self.frontier_is_empty());
+        let projected_run_count = run_count
+            .checked_add(frontier_run_count)
+            .ok_or(MapError::SerializationError)?;
+        if projected_run_count <= run_target {
             return Ok(None);
         }
 
-        let frontier_run_count = usize::from(!self.frontier_is_empty());
         let minimum_selected_runs = run_count
             .checked_add(1)
             .and_then(|count| count.checked_add(frontier_run_count))

@@ -30,6 +30,13 @@ pub enum MockFormatError {
         /// Requested minimum number of free regions.
         min_free_regions: u32,
     },
+    /// `REGION_SIZE` is too small for required metadata, WAL, or free-list bytes.
+    RegionSizeTooSmall {
+        /// Configured region size in bytes.
+        region_size: u32,
+        /// Minimum required region size in bytes.
+        min_region_size: u32,
+    },
     /// `REGION_COUNT` does not fit in a `u32`.
     RegionCountTooLarge,
     /// `REGION_SIZE` does not fit in a `u32`.
@@ -276,6 +283,19 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize>
             self.erased_byte,
             wal_record_magic,
         )?;
+        let wal_header_len = Header::ENCODED_LEN + WalRegionPrologue::ENCODED_LEN;
+        let wal_record_area_offset = metadata.wal_record_area_offset()?;
+        let min_region_size_usize = StorageMetadata::ENCODED_LEN
+            .max(wal_header_len)
+            .max(wal_record_area_offset)
+            .max(FreePointerFooter::ENCODED_LEN);
+        if REGION_SIZE < min_region_size_usize {
+            let min_region_size = u32::try_from(min_region_size_usize).unwrap_or(u32::MAX);
+            return Err(MockFormatError::RegionSizeTooSmall {
+                region_size,
+                min_region_size,
+            });
+        }
 
         self.write_metadata(metadata)?;
 

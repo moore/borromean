@@ -56,7 +56,7 @@ families:
 - snapshot payloads in WAL records
 - manifest and immutable run segment payloads in committed map regions
 
-`MAP_REGION_V1_FORMAT`, the earlier single-region committed map format, is
+`MAP_REGION_V2_FORMAT`, the earlier single-region committed map format, is
 retired. Helpers still cover its payload shape for historical tests, but a
 live map collection that uses it as the committed durable basis is rejected.
 

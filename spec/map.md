@@ -37,7 +37,7 @@ the parts it can treat as opaque bytes.
 
 Keys need a stable encoded form because committed runs are sorted,
 searched, merged, and compacted without keeping every decoded `K` in
-memory. The initial key trait is:
+memory. The key trait is:
 
 ```rust
 trait LsmKey {
@@ -46,16 +46,24 @@ trait LsmKey {
     fn decode_key(encoded: &[u8]) -> Result<Self, LsmKeyError>
     where
         Self: Sized;
+
+    fn compare_encoded_key(encoded: &[u8], key: &Self) -> Result<Ordering, LsmKeyError>
+    where
+        Self: Sized;
+
+    const COMPARES_ENCODED_KEY_WITHOUT_DECODE: bool = false;
 }
 ```
 
-`encode_key` produces the canonical durable key bytes. The current
-implementation still orders map entries and run bounds with `K: Ord`, while
-the encoded bytes provide the stable persisted key representation. For keys
-whose natural ordering is not lexicographic over their raw bytes, `K: Ord`
-must define the stable map ordering and the encoded representation must remain
-compatible with that ordering wherever committed run metadata uses decoded key
-bounds.
+`encode_key` produces the canonical durable key bytes. `decode_key`
+materializes owned key values when needed. `compare_encoded_key` compares
+stored key bytes against a lookup key; by default it decodes the stored key and
+uses `Ord`, but key types with order-preserving encodings can override it to
+avoid materialization and set `COMPARES_ENCODED_KEY_WITHOUT_DECODE` to `true`.
+For keys whose natural ordering is not lexicographic over their raw bytes,
+`K: Ord` must define the stable map ordering and the encoded representation
+must remain compatible with that ordering wherever committed run metadata uses
+decoded key bounds.
 
 Multipart keys should be represented as ordered, self-delimiting encoded
 parts inside the canonical key bytes. For example, a logical key such as
@@ -159,7 +167,7 @@ for durable map collections; in the current implementation it is
 collection kind in WAL and committed-head records. It is an internal
 storage discriminator, not a caller-facing map API argument, and it is
 distinct from map committed-region format codes such as
-`MAP_MANIFEST_V1_FORMAT` and `MAP_RUN_V1_FORMAT`.
+`MAP_MANIFEST_V2_FORMAT` and `MAP_RUN_V2_FORMAT`.
 
 The repository implementation also exposes lower-level storage bindings such
 as `Storage::create_map`, `Storage::open_map` with a frontier byte buffer,
@@ -240,13 +248,13 @@ inserted key unreachable while preserving older keys.
 
 ## Committed Head Format
 
-The supported committed map head is `MAP_MANIFEST_V1_FORMAT`. Its payload
+The supported committed map head is `MAP_MANIFEST_V2_FORMAT`. Its payload
 describes the live immutable run set for one map collection. The retired
-single-region snapshot format, historically named `MAP_REGION_V1_FORMAT`,
+single-region snapshot format, historically named `MAP_REGION_V2_FORMAT`,
 is not a supported durable map basis in this specification.
 
 1. `MAP-REGION-001` A committed map head with
-`collection_format = MAP_MANIFEST_V1_FORMAT` MUST encode a manifest that
+`collection_format = MAP_MANIFEST_V2_FORMAT` MUST encode a manifest that
 describes the live immutable map run set.
 2. `MAP-REGION-002` A live map collection MUST NOT use the retired
 single-region snapshot format as its committed durable basis.
@@ -503,7 +511,7 @@ point lookup.
 ## Manifest And Run Formats
 
 The committed map head for run-chain maps is a manifest region using
-`MAP_MANIFEST_V1_FORMAT`. The manifest describes the live run set for a
+`MAP_MANIFEST_V2_FORMAT`. The manifest describes the live run set for a
 map collection. It records enough metadata to recover read order,
 identify all physically live run regions, and choose later compaction
 work without scanning every segment payload first.
@@ -516,7 +524,7 @@ Each live run descriptor records:
 - approximate count of entries plus tombstones in the run
 - encoded lower and upper key bounds for the run
 
-The immutable run segment format is `MAP_RUN_V1_FORMAT`. A run can
+The immutable run segment format is `MAP_RUN_V2_FORMAT`. A run can
 occupy one region or a chain of regions. Each segment stores sorted key
 states and enough chain metadata for recovery to validate that the
 manifest's declared region count and first region describe the complete
@@ -527,8 +535,8 @@ The Duvet-backed requirements above currently cover the behavior that
 depends on these bytes: descriptor metadata preservation, segment
 payload parsing, chain traversal, manifest loading, lookup, reachability,
 and reclaim. A future specification pass can promote the exact field
-order and scalar widths for `MAP_MANIFEST_V1_FORMAT` and
-`MAP_RUN_V1_FORMAT` into `MAP-` byte-format requirements if those
+order and scalar widths for `MAP_MANIFEST_V2_FORMAT` and
+`MAP_RUN_V2_FORMAT` into `MAP-` byte-format requirements if those
 layouts need review separate from helper behavior.
 
 ## Flush And Manifest Commit Rules

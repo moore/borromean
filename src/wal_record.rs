@@ -28,6 +28,11 @@ pub enum WalRecordError {
     },
     /// An escaped byte sequence was malformed.
     InvalidEscapeSequence(u8),
+    /// A reserved physical byte appeared unescaped in a WAL record body.
+    InvalidUnescapedReservedByte {
+        /// Reserved byte found in the encoded record body.
+        found: u8,
+    },
     /// Padding bytes after a record were not valid escape padding.
     InvalidPadding(u8),
     /// The record type byte was unknown.
@@ -743,10 +748,10 @@ fn decode_logical_byte(
 ) -> Result<u8, WalRecordError> {
     let byte = read_u8(input, physical_offset)?;
     if byte == metadata.erased_byte {
-        return Ok(byte);
+        return Err(WalRecordError::InvalidUnescapedReservedByte { found: byte });
     }
     if byte == metadata.wal_record_magic {
-        return Ok(byte);
+        return Err(WalRecordError::InvalidUnescapedReservedByte { found: byte });
     }
 
     if byte != escape_codes.wal_escape_byte {

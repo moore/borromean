@@ -7,7 +7,7 @@ description = "Efficient multi-collection storage for flash devices."
 homepage = "https://github.com/moore/borromean"
 repository = "https://github.com/moore/borromean"
 readme = "README.md"
-keywords = ["embeded", "nostd", "storage", "flash", "collections"]
+keywords = ["embedded", "no-std", "storage", "flash", "collections"]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

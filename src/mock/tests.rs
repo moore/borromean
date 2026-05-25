@@ -207,6 +207,15 @@ fn requirement_format_empty_store_rejects_too_few_regions() {
             min_free_regions: 1,
         }
     );
+
+    let mut tiny = MockFlash::<7, 3, 16>::new(0xff);
+    assert_eq!(
+        tiny.format_empty_store(1, 8, 0xa5),
+        Err(MockFormatError::RegionSizeTooSmall {
+            region_size: 7,
+            min_region_size: 32,
+        })
+    );
 }
 
 //= spec/mock.md#mock-flash-requirements

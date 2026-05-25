@@ -118,6 +118,28 @@ fn requirement_logical_byte_encoding_escapes_reserved_physical_bytes() {
     );
 }
 
+//= spec/ring.md#wal-record-types
+//= type=test
+//# `RING-WAL-ENC-005` Every byte after the leading `record_magic` in a
+//# valid encoded WAL
+//# record therefore differs from both `erased_byte` and
+//# `wal_record_magic`.
+#[test]
+fn requirement_decode_rejects_unescaped_reserved_body_bytes() {
+    let metadata = metadata(8);
+
+    for reserved in [metadata.erased_byte, metadata.wal_record_magic] {
+        let (mut physical, encoded_len) = encode_physical(WalRecord::WalRecovery, metadata);
+        physical[1] = reserved;
+        let mut logical = [0u8; 128];
+
+        assert_eq!(
+            decode_record(&physical[..encoded_len], metadata, &mut logical),
+            Err(WalRecordError::InvalidUnescapedReservedByte { found: reserved })
+        );
+    }
+}
+
 //= spec/ring.md#encoding-helper-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-125` WAL record decoding MUST consume all encoded physical bytes and

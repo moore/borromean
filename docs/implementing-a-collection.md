@@ -34,8 +34,8 @@ Follow the same split that the map module uses:
 
 At minimum, a durable collection usually needs:
 
-- stable committed-region format constants like `MAP_MANIFEST_V1_FORMAT` and
-  `MAP_RUN_V1_FORMAT`
+- stable committed-region format constants like `MAP_MANIFEST_V2_FORMAT` and
+  `MAP_RUN_V2_FORMAT`
 - an empty snapshot byte sequence like `EMPTY_MAP_SNAPSHOT`
 - an `open_from_storage` helper that reconstructs the frontier from replay state
 - one or more helpers that turn typed operations into raw WAL payload bytes

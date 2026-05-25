@@ -717,7 +717,7 @@ fn requirement_object_lsm_map_compaction_signal_and_compact_preserve_visible_sta
         storage.flush_map(&mut frontier).unwrap();
     }
 
-    assert!(!map.set(&mut storage, 2, 20).unwrap());
+    assert!(map.set(&mut storage, 2, 20).unwrap());
     {
         let mut buffer = [0u8; 512];
         let mut frontier = storage
@@ -1431,6 +1431,19 @@ fn requirement_compaction_selection_accounts_for_dirty_frontier_run() {
     map.set(99, 100).unwrap();
 
     assert_eq!(map.selected_compaction_run_count(3).unwrap(), Some(3));
+
+    let mut exact_target_buffer = [0u8; 256];
+    let mut exact_target =
+        MapFrontier::<i32, i32, 8, 8>::new(CollectionId(103), &mut exact_target_buffer).unwrap();
+    push_test_run(&mut exact_target, 12, 1, 3);
+    push_test_run(&mut exact_target, 11, 1, 4);
+    push_test_run(&mut exact_target, 10, 1, 100);
+    exact_target.set(99, 100).unwrap();
+
+    assert_eq!(
+        exact_target.selected_compaction_run_count(3).unwrap(),
+        Some(2)
+    );
 }
 
 //= spec/map.md#map-compaction-requirements
@@ -1524,6 +1537,12 @@ fn requirement_frontier_range_region_and_checkpoint_helpers_accept_exact_buffers
     assert!(matches!(
         restored.load_region(&region[..REGION_SNAPSHOT_LEN_SIZE - 1]),
         Err(MapError::SerializationError)
+    ));
+
+    let mut undersized_buffer = [0u8; ENTRY_COUNT_SIZE - 1];
+    assert!(matches!(
+        MapFrontier::<i32, i32, 0>::new(CollectionId(98), &mut undersized_buffer),
+        Err(MapError::BufferTooSmall)
     ));
 }
 
