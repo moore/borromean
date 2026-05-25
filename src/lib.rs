@@ -579,7 +579,7 @@ fn compact_map_frontier_parts<
     dirty_frontiers: &mut Vec<CollectionId, MAX_COLLECTIONS>,
     collection_scratch: &'a mut [u8; REGION_SIZE],
     collection_id: CollectionId,
-    region_target: usize,
+    run_target: usize,
     mut opened: MapFrontier<'a, K, V, MAX_INDEXES, MAX_RUNS>,
 ) -> Result<
     (
@@ -593,11 +593,11 @@ where
     K: LsmKey,
     V: LsmValue,
 {
-    if region_target == 0 {
-        return Err(MapStorageError::InvalidRegionTarget);
+    if run_target == 0 {
+        return Err(MapStorageError::InvalidRunTarget);
     }
 
-    let Some(selected_runs) = opened.selected_compaction_run_count(region_target)? else {
+    let Some(selected_runs) = opened.selected_compaction_run_count(run_target)? else {
         return Ok((opened.into_state(), None));
     };
     let frontier_generation = opened.next_run_generation().saturating_add(1);
@@ -1787,7 +1787,7 @@ impl<
         V,
         const MAX_INDEXES: usize,
         const MAX_RUNS: usize,
-        const REGION_TARGET: usize,
+        const RUN_TARGET: usize,
     >(
         &mut self,
         collection_id: CollectionId,
@@ -1796,13 +1796,18 @@ impl<
         K: LsmKey,
         V: LsmValue,
     {
-        self.compact_map_with_target::<K, V, MAX_INDEXES, MAX_RUNS>(collection_id, REGION_TARGET)
+        self.compact_map_with_run_target::<K, V, MAX_INDEXES, MAX_RUNS>(collection_id, RUN_TARGET)
     }
 
-    pub(crate) fn compact_map_with_target<K, V, const MAX_INDEXES: usize, const MAX_RUNS: usize>(
+    pub(crate) fn compact_map_with_run_target<
+        K,
+        V,
+        const MAX_INDEXES: usize,
+        const MAX_RUNS: usize,
+    >(
         &mut self,
         collection_id: CollectionId,
-        region_target: usize,
+        run_target: usize,
     ) -> Result<Option<u32>, MapStorageError>
     where
         K: LsmKey,
@@ -1864,7 +1869,7 @@ impl<
                         &mut this.dirty_frontiers,
                         &mut this.collection_scratch,
                         collection_id,
-                        region_target,
+                        run_target,
                         opened,
                     )?;
                     Ok(manifest_region)
@@ -1973,7 +1978,7 @@ where
     K: LsmKey,
     V: LsmValue,
 {
-    fn default_compaction_region_target() -> usize {
+    fn default_compaction_run_target() -> usize {
         match MAX_RUNS.checked_sub(1) {
             Some(0) | None => 1,
             Some(target) => target,
@@ -2002,7 +2007,7 @@ where
         storage.create_map(collection_id)?;
         Ok(Self::from_collection_id(
             collection_id,
-            Self::default_compaction_region_target(),
+            Self::default_compaction_run_target(),
         ))
     }
 
@@ -2045,28 +2050,25 @@ where
             )?;
             Ok(Self::from_collection_id(
                 collection_id,
-                Self::default_compaction_region_target(),
+                Self::default_compaction_run_target(),
             ))
         })();
         storage.finish_mode();
         result
     }
 
-    /// Overrides the region-count threshold used by `set` and `delete`.
-    pub fn with_compaction_region_target(
-        mut self,
-        region_target: usize,
-    ) -> Result<Self, LsmMapError> {
-        if region_target == 0 {
-            return Err(MapStorageError::InvalidRegionTarget);
+    /// Overrides the live-run threshold used by `set` and `delete`.
+    pub fn with_compaction_run_target(mut self, run_target: usize) -> Result<Self, LsmMapError> {
+        if run_target == 0 {
+            return Err(MapStorageError::InvalidRunTarget);
         }
-        self.compaction_region_target = region_target;
+        self.compaction_run_target = run_target;
         Ok(self)
     }
 
-    /// Returns the configured compaction region threshold.
-    pub fn compaction_region_target(&self) -> usize {
-        self.compaction_region_target
+    /// Returns the configured live-run compaction threshold.
+    pub fn compaction_run_target(&self) -> usize {
+        self.compaction_run_target
     }
 
     /// Reads `key` and calls `f` once with the visible value when present.
@@ -2218,7 +2220,7 @@ where
                 #[cfg(feature = "perf-counters")]
                 let check_timer = StoragePerfTimerGuard::start();
                 let check_result =
-                    frontier.selected_compaction_run_count(self.compaction_region_target);
+                    frontier.selected_compaction_run_count(self.compaction_run_target);
                 #[cfg(feature = "perf-counters")]
                 let check_nanos = check_timer.elapsed_nanos();
                 #[cfg(feature = "perf-counters")]
@@ -2324,7 +2326,7 @@ where
                 #[cfg(feature = "perf-counters")]
                 let check_timer = StoragePerfTimerGuard::start();
                 let check_result =
-                    frontier.selected_compaction_run_count(self.compaction_region_target);
+                    frontier.selected_compaction_run_count(self.compaction_run_target);
                 #[cfg(feature = "perf-counters")]
                 let check_nanos = check_timer.elapsed_nanos();
                 #[cfg(feature = "perf-counters")]
@@ -2412,7 +2414,7 @@ where
                 &mut storage.dirty_frontiers,
                 &mut storage.collection_scratch,
                 self.collection_id,
-                self.compaction_region_target,
+                self.compaction_run_target,
                 opened,
             ) {
                 Ok((state, manifest_region)) => {

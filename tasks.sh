@@ -13,10 +13,15 @@ MEMORY_PROFILE_CONFIGS=(
 
 PERF_MATRIX_CONFIGS=(
     perf/file_backing.toml
+    perf/file_backing_4k.toml
     perf/file_backing_update_hot.toml
+    perf/file_backing_update_hot_4k.toml
     perf/file_backing_read_hits.toml
+    perf/file_backing_read_hits_4k.toml
     perf/file_backing_read_misses.toml
+    perf/file_backing_read_misses_4k.toml
     perf/file_backing_mixed_update.toml
+    perf/file_backing_mixed_update_4k.toml
 )
 
 run_verify() {
@@ -204,6 +209,31 @@ run_perf_matrix_summary() {
         "${json_paths[@]}"
 }
 
+run_perf_calibrate() {
+    local configs=()
+
+    if [ -n "${BORROMEAN_PERF_CALIBRATION_CONFIGS:-}" ]; then
+        read -r -a configs <<<"$BORROMEAN_PERF_CALIBRATION_CONFIGS"
+    else
+        configs=("${PERF_MATRIX_CONFIGS[@]}")
+    fi
+
+    echo "==> cargo build --release --features perf-tools --bin file_backing_perf"
+    cargo build --release --features perf-tools --bin file_backing_perf
+    echo "==> python3 scripts/calibrate_perf_matrix.py ${configs[*]}"
+    python3 scripts/calibrate_perf_matrix.py \
+        --binary target/release/file_backing_perf \
+        --repeats "${BORROMEAN_PERF_CALIBRATION_REPEATS:-3}" \
+        --read-counts "${BORROMEAN_PERF_CALIBRATION_READ_COUNTS:-3000,10000,30000,100000,300000}" \
+        --write-counts "${BORROMEAN_PERF_CALIBRATION_WRITE_COUNTS:-3000,10000}" \
+        --mixed-counts "${BORROMEAN_PERF_CALIBRATION_MIXED_COUNTS:-3000,10000}" \
+        "${configs[@]}"
+}
+
+run_perf_calibrate_summary() {
+    python3 scripts/calibrate_perf_matrix.py --summarize-only
+}
+
 run_bench() {
     echo "==> cargo bench --features file-backing --bench file_backing_mmap"
     cargo bench --features file-backing --bench file_backing_mmap
@@ -226,9 +256,13 @@ Tasks:
   perf-test
            Alias for perf
   perf-matrix
-           Run insert, update, read-hit, read-miss, and mixed perf comparison configs, then summarize them
+           Run 1 MiB and 4 KiB insert, update, read-hit, read-miss, and mixed comparison configs, then summarize them
   perf-matrix-summary
            Summarize generated perf matrix JSON reports as Markdown
+  perf-calibrate
+           Run repeated perf configs at increasing operation counts and recommend stable run sizes
+  perf-calibrate-summary
+           Summarize existing calibration JSON reports
   perf-profile
            Profile a release perf run with frame pointers (override config with BORROMEAN_PERF_PROFILE_CONFIG)
   perf-profile-memory
@@ -272,6 +306,12 @@ run_task() {
             ;;
         perf-matrix-summary)
             run_perf_matrix_summary
+            ;;
+        perf-calibrate)
+            run_perf_calibrate
+            ;;
+        perf-calibrate-summary)
+            run_perf_calibrate_summary
             ;;
         perf-profile)
             run_perf_profile

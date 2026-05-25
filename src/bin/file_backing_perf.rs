@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 
 const DEFAULT_CONFIG_PATH: &str = "perf/file_backing.toml";
 const MAX_COLLECTIONS: usize = 64;
-const MAX_PENDING_RECLAIMS: usize = 64;
+const MAX_PENDING_RECLAIMS: usize = 512;
 const MAX_INDEXES: usize = 128;
 const MAX_RUNS: usize = 128;
 const PERF_THREAD_STACK_BYTES: usize = 64 * 1024 * 1024;
@@ -313,7 +313,7 @@ struct WorkloadConfig {
     #[serde(default)]
     compact_interval: u64,
     #[serde(default)]
-    compaction_region_target: Option<usize>,
+    compaction_run_target: Option<usize>,
 }
 
 impl Default for WorkloadConfig {
@@ -331,7 +331,7 @@ impl Default for WorkloadConfig {
             key_mode: WorkloadKeyMode::default(),
             compact_on_signal: true,
             compact_interval: 0,
-            compaction_region_target: None,
+            compaction_run_target: None,
         }
     }
 }
@@ -1825,8 +1825,9 @@ where
                 1024 => run_geometry::<$region_size, 1024, VALUE_BYTES>($config),
                 1599 => run_geometry::<$region_size, 1599, VALUE_BYTES>($config),
                 4096 => run_geometry::<$region_size, 4096, VALUE_BYTES>($config),
+                16384 => run_geometry::<$region_size, 16384, VALUE_BYTES>($config),
                 other => Err(format!(
-                    "unsupported region_count={other}; supported counts are 64, 256, 1024, 1599, 4096"
+                    "unsupported region_count={other}; supported counts are 64, 256, 1024, 1599, 4096, 16384"
                 )),
             }
         };
@@ -1932,9 +1933,9 @@ where
         let mut map =
             LsmMap::<u64, HeaplessVec<u8, VALUE_BYTES>, MAX_INDEXES, MAX_RUNS>::new(&mut storage)
                 .map_err(|error| format!("failed to create map: {error:?}"))?;
-        if let Some(target) = config.workload.compaction_region_target {
+        if let Some(target) = config.workload.compaction_run_target {
             map = map
-                .with_compaction_region_target(target)
+                .with_compaction_run_target(target)
                 .map_err(|error| format!("failed to set compaction target: {error:?}"))?;
         }
         maps.push(map);
@@ -2151,9 +2152,9 @@ where
         let mut map =
             LsmMap::<u64, HeaplessVec<u8, VALUE_BYTES>, MAX_INDEXES, MAX_RUNS>::new(&mut storage)
                 .map_err(|error| format!("failed to create memory map: {error:?}"))?;
-        if let Some(target) = config.workload.compaction_region_target {
+        if let Some(target) = config.workload.compaction_run_target {
             map = map
-                .with_compaction_region_target(target)
+                .with_compaction_run_target(target)
                 .map_err(|error| format!("failed to set compaction target: {error:?}"))?;
         }
         maps.push(map);

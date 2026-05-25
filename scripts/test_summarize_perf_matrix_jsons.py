@@ -82,9 +82,23 @@ def engine(
 
 
 class PerfMatrixSummaryTests(unittest.TestCase):
-    def write_report(self, directory: Path, name: str, reports: list[dict[str, object]]) -> Path:
+    def write_report(
+        self,
+        directory: Path,
+        name: str,
+        reports: list[dict[str, object]],
+        *,
+        region_size: int = 1_048_576,
+    ) -> Path:
         path = directory / name
-        path.write_text(json.dumps({"engine_reports": reports}))
+        path.write_text(
+            json.dumps(
+                {
+                    "config": {"geometry": {"region_size": region_size}},
+                    "engine_reports": reports,
+                }
+            )
+        )
         return path
 
     def test_formats_throughput_and_ratios(self) -> None:
@@ -117,9 +131,9 @@ class PerfMatrixSummaryTests(unittest.TestCase):
             default_markdown = MODULE.render_markdown([path], hide_memory=True)
             included_markdown = MODULE.render_markdown([path], hide_memory=False)
 
-        self.assertIn("| scenario | borromean |", default_markdown)
+        self.assertIn("| scenario | borromean 1MiB |", default_markdown)
         self.assertNotIn("borromean-memory", default_markdown)
-        self.assertIn("| scenario | borromean | borromean-memory |", included_markdown)
+        self.assertIn("| scenario | borromean 1MiB | borromean-memory 1MiB |", included_markdown)
 
     def test_missing_latency_and_diagnostics_render_as_dash(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -142,7 +156,7 @@ class PerfMatrixSummaryTests(unittest.TestCase):
             markdown = MODULE.render_markdown([path], hide_memory=True)
 
         self.assertIn("| read_hits | - |", markdown)
-        self.assertIn("| read_hits | borromean | 0B | 0B | - | - | - |", markdown)
+        self.assertIn("| read_hits | borromean 1MiB | 0B | 0B | - | - | - |", markdown)
 
     def test_latency_bolds_lowest_value(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -159,6 +173,49 @@ class PerfMatrixSummaryTests(unittest.TestCase):
             markdown = MODULE.render_markdown([path], hide_memory=True)
 
         self.assertIn("| read_hits | 3.000us | **1.000us** | 2.000us |", markdown)
+
+    def test_uses_region_size_in_scenario_label(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            path = self.write_report(
+                Path(temp),
+                "file_backing_read_hits_4k.json",
+                [engine("borromean", 100.0)],
+                region_size=4096,
+            )
+
+            markdown = MODULE.render_markdown([path], hide_memory=True)
+
+        self.assertIn("| scenario | borromean 4KiB |", markdown)
+        self.assertIn("| read_hits | **100.0** |", markdown)
+
+    def test_groups_regions_as_columns_and_uses_one_comparison_run(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            path_1m = self.write_report(
+                directory,
+                "file_backing.json",
+                [
+                    engine("borromean", 100.0),
+                    engine("redb", 50.0),
+                    engine("fjall", 200.0),
+                ],
+            )
+            path_4k = self.write_report(
+                directory,
+                "file_backing_4k.json",
+                [
+                    engine("borromean", 25.0),
+                    engine("redb", 999.0),
+                    engine("fjall", 999.0),
+                ],
+                region_size=4096,
+            )
+
+            markdown = MODULE.render_markdown([path_1m, path_4k], hide_memory=True)
+
+        self.assertIn("| scenario | borromean 1MiB | borromean 4KiB | redb | fjall |", markdown)
+        self.assertIn("| insert | 100.0 | 25.0 | 50.0 | **200.0** |", markdown)
+        self.assertNotIn("999.0", markdown)
 
     def test_output_file_matches_stdout(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

@@ -704,7 +704,7 @@ fn requirement_object_lsm_map_compaction_signal_and_compact_preserve_visible_sta
             .unwrap();
     let mut map = LsmMap::<i32, i32, 8, 4>::new(&mut storage)
         .unwrap()
-        .with_compaction_region_target(1)
+        .with_compaction_run_target(1)
         .unwrap();
     map.compact(&mut storage).unwrap();
 
@@ -754,7 +754,7 @@ fn requirement_object_lsm_map_compaction_reuses_cached_frontier() {
             .unwrap();
     let mut map = LsmMap::<i32, i32, 8, 4>::new(&mut storage)
         .unwrap()
-        .with_compaction_region_target(1)
+        .with_compaction_run_target(1)
         .unwrap();
 
     map.set(&mut storage, 1, 10).unwrap();
@@ -1324,8 +1324,9 @@ fn requirement_loading_empty_snapshot_can_exactly_fill_frontier_header() {
 
 //= spec/map.md#run-manifest-and-committed-map-region-requirements
 //= type=test
-//# `RING-IMPL-REGRESSION-019` Map run selection and generation helpers MUST count only run-chain
-//# regions for live region totals, compaction selection, and next generation calculations.
+//# `RING-IMPL-REGRESSION-019` Map run selection and generation helpers MUST retain live region
+//# totals for allocation, select compaction by live run count, and compute next generation from
+//# run descriptors.
 #[test]
 fn requirement_run_descriptor_selection_and_generation_helpers_count_only_run_chains() {
     let mut buffer = [0u8; 128];
@@ -1356,14 +1357,111 @@ fn requirement_run_descriptor_selection_and_generation_helpers_count_only_run_ch
     assert_eq!(map.run_count(), 2);
     assert_eq!(map.live_run_region_count().unwrap(), 3);
     assert_eq!(map.next_run_generation(), 8);
-    assert_eq!(map.selected_compaction_run_count(3).unwrap(), None);
-    assert_eq!(map.selected_compaction_run_count(2).unwrap(), Some(2));
+    assert_eq!(map.selected_compaction_run_count(2).unwrap(), None);
+    assert_eq!(map.selected_compaction_run_count(1).unwrap(), Some(2));
     assert_eq!(map.selected_compaction_state_count(0).unwrap(), 0);
     assert_eq!(map.selected_compaction_state_count(2).unwrap(), 7);
     assert!(matches!(
         map.selected_compaction_state_count(3),
         Err(MapError::IndexOutOfBounds)
     ));
+}
+
+fn push_test_run<const MAX_INDEXES: usize, const MAX_RUNS: usize>(
+    map: &mut MapFrontier<i32, i32, MAX_INDEXES, MAX_RUNS>,
+    generation: u64,
+    region_count: u32,
+    approx_state_count: u32,
+) {
+    map.runs
+        .push(MapRunDescriptor {
+            source: MapRunSource::RunChain,
+            generation,
+            first_region: u32::try_from(generation).unwrap(),
+            region_count,
+            approx_state_count,
+            lower_key: Some(i32::try_from(generation).unwrap()),
+            upper_key: Some(i32::try_from(generation + 1).unwrap()),
+        })
+        .unwrap();
+}
+
+//= spec/map.md#map-compaction-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-136` Run-target then greedy map compaction MUST select by live run count
+//# rather than physical region count.
+#[test]
+fn requirement_compaction_selection_allows_one_run_spanning_many_regions() {
+    let mut buffer = [0u8; 128];
+    let mut map = MapFrontier::<i32, i32, 8, 4>::new(CollectionId(98), &mut buffer).unwrap();
+    push_test_run(&mut map, 10, 128, 10_000);
+
+    assert_eq!(map.live_run_region_count().unwrap(), 128);
+    assert_eq!(map.selected_compaction_run_count(1).unwrap(), None);
+}
+
+//= spec/map.md#map-compaction-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-137` Run-target then greedy map compaction MUST select enough newest runs
+//# to keep the post-compaction run manifest within the configured run target.
+#[test]
+fn requirement_compaction_selection_triggers_on_run_count_not_region_count() {
+    let mut buffer = [0u8; 128];
+    let mut map = MapFrontier::<i32, i32, 8, 8>::new(CollectionId(99), &mut buffer).unwrap();
+    push_test_run(&mut map, 10, 1, 3);
+    push_test_run(&mut map, 9, 1, 4);
+    push_test_run(&mut map, 8, 1, 100);
+
+    assert_eq!(map.live_run_region_count().unwrap(), 3);
+    assert_eq!(map.selected_compaction_run_count(2).unwrap(), Some(2));
+}
+
+//= spec/map.md#map-compaction-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-138` Run-target then greedy map compaction MUST account for a dirty
+//# frontier being flushed as an additional run during compaction.
+#[test]
+fn requirement_compaction_selection_accounts_for_dirty_frontier_run() {
+    let mut buffer = [0u8; 256];
+    let mut map = MapFrontier::<i32, i32, 8, 8>::new(CollectionId(100), &mut buffer).unwrap();
+    push_test_run(&mut map, 10, 1, 3);
+    push_test_run(&mut map, 9, 1, 4);
+    push_test_run(&mut map, 8, 1, 5);
+    push_test_run(&mut map, 7, 1, 100);
+    map.set(99, 100).unwrap();
+
+    assert_eq!(map.selected_compaction_run_count(3).unwrap(), Some(3));
+}
+
+//= spec/map.md#map-compaction-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-139` Run-target then greedy map compaction MUST stop when the next older
+//# run is at least twice the selected state count.
+#[test]
+fn requirement_compaction_selection_stops_at_half_size_heuristic() {
+    let mut buffer = [0u8; 128];
+    let mut map = MapFrontier::<i32, i32, 8, 8>::new(CollectionId(101), &mut buffer).unwrap();
+    push_test_run(&mut map, 10, 1, 5);
+    push_test_run(&mut map, 9, 1, 5);
+    push_test_run(&mut map, 8, 1, 20);
+    push_test_run(&mut map, 7, 1, 20);
+
+    assert_eq!(map.selected_compaction_run_count(3).unwrap(), Some(2));
+}
+
+//= spec/map.md#map-compaction-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-140` Run-target then greedy map compaction MUST merge equal-sized small
+//# runs into a larger tier instead of repeatedly selecting only the minimum count.
+#[test]
+fn requirement_compaction_selection_merges_equal_sized_small_runs() {
+    let mut buffer = [0u8; 128];
+    let mut map = MapFrontier::<i32, i32, 8, 8>::new(CollectionId(102), &mut buffer).unwrap();
+    for generation in (5..=10).rev() {
+        push_test_run(&mut map, generation, 1, 10);
+    }
+
+    assert_eq!(map.selected_compaction_run_count(4).unwrap(), Some(6));
 }
 
 //= spec/map.md#snapshot-frontier-and-logical-map-requirements

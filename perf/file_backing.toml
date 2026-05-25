@@ -1,6 +1,6 @@
 [geometry]
 # Supported region sizes: 4096, 8192, 16384, 65536, 1048576.
-# Supported region counts: 64, 256, 1024, 1599, 4096.
+# Supported region counts: 64, 256, 1024, 1599, 4096, 16384.
 # 64 regions at 1 MiB keeps the file around 65 MiB while using
 # more realistic LSM segment sizing for desktop/server comparisons.
 region_size = 1048576
@@ -45,7 +45,7 @@ wal_record_magic = 0xa5
 
 [workload]
 map_count = 1
-operation_count = 3000
+operation_count = 10000
 warmup_count = 0
 key_space = 100000
 seed = 0x123456789abcdef
@@ -55,7 +55,7 @@ delete_ratio = 0
 value_size_bytes = 64
 key_mode = "insert-range"
 compact_on_signal = true
-compaction_region_target = 16
+compaction_run_target = 16
 
 [maintenance]
 optimize_after_workload = false
@@ -63,4 +63,4 @@ optimize_after_workload = false
 [output]
 json_path = "target/perf/file_backing.json"
 latency_sample_interval = 250
-progress_interval = 250
+progress_interval = 1000

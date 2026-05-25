@@ -28,7 +28,7 @@ set_ratio = 65
 delete_ratio = 25
 compact_on_signal = true
 compact_interval = 500
-compaction_region_target = 8
+compaction_run_target = 8
 
 [output]
 json_path = "target/perf/file_backing_mixed.json"

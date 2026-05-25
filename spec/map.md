@@ -377,8 +377,9 @@ segment bytes, planning, writing, manifest commit, lookup, and reclaim.
    key bounds, and snapshot lookup semantics, and reject undersized or truncated payloads.
 4. `RING-IMPL-REGRESSION-017` Committed-region helpers MUST accept boundary-sized payload regions
    and snapshot helpers MUST decode exact empty-snapshot payloads.
-5. `RING-IMPL-REGRESSION-019` Map run selection and generation helpers MUST count only run-chain
-   regions for live region totals, compaction selection, and next generation calculations.
+5. `RING-IMPL-REGRESSION-019` Map run selection and generation helpers MUST retain live region
+   totals for allocation, select compaction by live run count, and compute next generation from
+   run descriptors.
 6. `RING-IMPL-REGRESSION-021` Manifest descriptor loading MUST preserve run metadata and reject too
    many runs, zero-length run chains, and truncated descriptor payloads.
 7. `RING-IMPL-REGRESSION-022` Snapshot run segment helpers MUST plan at least one region and encode
@@ -453,7 +454,7 @@ Compaction is a physical rewrite of immutable runs, not a logical map
 mutation. It is deferred and explicit rather than performed in the middle of a
 CRUD operation. The requirements therefore focus on the properties that make a
 separate compaction operation safe: selected runs are reduced according to the
-target-then-greedy policy, unselected runs remain live, duplicate keys resolve
+run-target-then-greedy policy, unselected runs remain live, duplicate keys resolve
 with newest-wins semantics, and tombstones continue masking older values.
 Streaming the replacement directly into run storage is necessary because the
 merged output can be larger than the mutable frontier. These properties are
@@ -461,13 +462,22 @@ sufficient for compaction correctness because after the replacement manifest
 commits, every visible lookup observes the same logical result while the
 physical run set has fewer or better-shaped runs.
 
-1. `RING-IMPL-REGRESSION-110` Targeted then greedy map compaction MUST reduce selected runs while
-   preserving unselected runs and all visible key/value lookups.
+1. `RING-IMPL-REGRESSION-110` Run-target then greedy map compaction MUST reduce selected runs
+   while preserving unselected runs and all visible key/value lookups.
 2. `RING-IMPL-REGRESSION-111` Map compaction MUST preserve tombstone masking so deleted keys remain
    absent and later live keys remain visible.
 3. `RING-IMPL-REGRESSION-112` Map compaction MUST stream replacements larger than frontier
-   capacity into a single run while preserving all visible key/value lookups across repeated
-   compaction.
+   capacity into a single run while preserving all visible key/value lookups.
+4. `RING-IMPL-REGRESSION-136` Run-target then greedy map compaction MUST select by live run count
+   rather than physical region count.
+5. `RING-IMPL-REGRESSION-137` Run-target then greedy map compaction MUST select enough newest runs
+   to keep the post-compaction run manifest within the configured run target.
+6. `RING-IMPL-REGRESSION-138` Run-target then greedy map compaction MUST account for a dirty
+   frontier being flushed as an additional run during compaction.
+7. `RING-IMPL-REGRESSION-139` Run-target then greedy map compaction MUST stop when the next older
+   run is at least twice the selected state count.
+8. `RING-IMPL-REGRESSION-140` Run-target then greedy map compaction MUST merge equal-sized small
+   runs into a larger tier instead of repeatedly selecting only the minimum count.
 
 ## Whole-Run LSM Model
 
@@ -542,14 +552,17 @@ selected runs in generation order, performs one sorted merge, drops
 obsolete older key states hidden by newer states, writes one replacement
 run chain, and commits a replacement manifest.
 
-The implemented selection policy is "Target Then Greedy":
+The implemented selection policy is "Run Target Then Greedy":
 
-1. Select newest runs until replacing them would move the collection
-   toward its configured live map-run region target.
-2. Continue including older runs while each older run's approximate
-   entry-plus-tombstone count is smaller than the accumulated selected
-   count.
-3. Stop when the next older run is not smaller than the accumulated
+1. If the committed run count is within the configured maximum live run
+   target, select nothing.
+2. Select newest runs until replacing them with one run, plus any dirty
+   frontier run that compaction must flush, would leave the manifest with
+   at most the configured maximum live run count.
+3. Continue including older runs while the next older run's approximate
+   entry-plus-tombstone count is less than twice the accumulated selected
+   entry-plus-tombstone count.
+4. Stop when the next older run is at least twice the accumulated
    selected count or when no older run remains.
 
 The sum of selected run entry-plus-tombstone counts is the conservative

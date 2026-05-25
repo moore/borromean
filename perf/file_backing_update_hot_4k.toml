@@ -1,12 +1,12 @@
 [geometry]
-region_size = 1048576
-region_count = 64
+region_size = 4096
+region_count = 16384
 
 [comparison]
-engines = ["borromean", "borromean-memory", "redb", "fjall"]
+engines = ["borromean", "borromean-memory"]
 
 [backing]
-path = "target/perf/file_backing_update_hot.db"
+path = "target/perf/file_backing_update_hot_4k.db"
 allocation_policy = "fallback-on-unsupported"
 madvise_policy = "normal"
 erased_byte = 0xff
@@ -15,7 +15,7 @@ remove_existing = true
 remove_after = false
 
 [redb]
-path = "target/perf/redb_update_hot.db"
+path = "target/perf/redb_update_hot_4k.db"
 remove_existing = true
 remove_after = false
 compact_interval = 0
@@ -23,7 +23,7 @@ compact_after_workload = false
 durability = "immediate"
 
 [fjall]
-path = "target/perf/fjall_update_hot.db"
+path = "target/perf/fjall_update_hot_4k.db"
 remove_existing = true
 remove_after = false
 cache_size_bytes = 0
@@ -57,6 +57,6 @@ compaction_run_target = 16
 optimize_after_workload = false
 
 [output]
-json_path = "target/perf/file_backing_update_hot.json"
+json_path = "target/perf/file_backing_update_hot_4k.json"
 latency_sample_interval = 250
 progress_interval = 1000

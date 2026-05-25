@@ -1,12 +1,14 @@
 [geometry]
-region_size = 1048576
-region_count = 64
+# 16,384 regions at 4 KiB keeps the file around 64 MiB, matching the
+# headline 1 MiB geometry while exercising small-region behavior.
+region_size = 4096
+region_count = 16384
 
 [comparison]
-engines = ["borromean", "borromean-memory", "redb", "fjall"]
+engines = ["borromean", "borromean-memory"]
 
 [backing]
-path = "target/perf/file_backing_update_hot.db"
+path = "target/perf/file_backing_4k.db"
 allocation_policy = "fallback-on-unsupported"
 madvise_policy = "normal"
 erased_byte = 0xff
@@ -15,7 +17,7 @@ remove_existing = true
 remove_after = false
 
 [redb]
-path = "target/perf/redb_update_hot.db"
+path = "target/perf/redb_4k.db"
 remove_existing = true
 remove_after = false
 compact_interval = 0
@@ -23,7 +25,7 @@ compact_after_workload = false
 durability = "immediate"
 
 [fjall]
-path = "target/perf/fjall_update_hot.db"
+path = "target/perf/fjall_4k.db"
 remove_existing = true
 remove_after = false
 cache_size_bytes = 0
@@ -32,7 +34,7 @@ manual_journal_persist = true
 worker_threads = 1
 
 [preload]
-count = 1000
+count = 0
 
 [storage]
 min_free_regions = 2
@@ -43,13 +45,13 @@ wal_record_magic = 0xa5
 map_count = 1
 operation_count = 10000
 warmup_count = 0
-key_space = 1000
+key_space = 100000
 seed = 0x123456789abcdef
 read_ratio = 0
 set_ratio = 100
 delete_ratio = 0
 value_size_bytes = 64
-key_mode = "preloaded"
+key_mode = "insert-range"
 compact_on_signal = true
 compaction_run_target = 16
 
@@ -57,6 +59,6 @@ compaction_run_target = 16
 optimize_after_workload = false
 
 [output]
-json_path = "target/perf/file_backing_update_hot.json"
+json_path = "target/perf/file_backing_4k.json"
 latency_sample_interval = 250
 progress_interval = 1000

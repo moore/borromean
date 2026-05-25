@@ -1309,7 +1309,7 @@ fn run_long_mixed_map_workload_preserves_collection_identity_across_reclaim_and_
         .unwrap();
     let mut map = LsmMap::<u64, u64, MAX_INDEXES, MAX_RUNS>::new(&mut storage)
         .unwrap()
-        .with_compaction_region_target(8)
+        .with_compaction_run_target(8)
         .unwrap();
     let mut rng = StressRng::new(0x0123_4567_89ab_cdef);
     let initial_wal_head = storage.wal_head();
@@ -1874,7 +1874,7 @@ fn requirement_storage_map_api_flushes_committed_region_basis() {
 
 //= spec/map.md#map-compaction-requirements
 //= type=test
-//# `RING-IMPL-REGRESSION-110` Targeted then greedy map compaction MUST reduce selected runs while
+//# `RING-IMPL-REGRESSION-110` Run-target then greedy map compaction MUST reduce selected runs while
 //# preserving unselected runs and all visible key/value lookups.
 #[test]
 fn requirement_storage_compact_map_target_then_greedy_preserves_unselected_runs() {
@@ -2043,7 +2043,7 @@ fn requirement_storage_compact_map_preserves_tombstone_masking() {
 //= spec/map.md#map-compaction-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-112` Map compaction MUST stream replacements larger than frontier capacity
-//# into a single run while preserving all visible key/value lookups across repeated compaction.
+//# into a single run while preserving all visible key/value lookups.
 #[test]
 fn requirement_storage_compact_map_streams_replacement_larger_than_frontier_capacity() {
     const REGION_SIZE: usize = 1024;
@@ -2109,7 +2109,7 @@ fn requirement_storage_compact_map_streams_replacement_larger_than_frontier_capa
     let second_manifest = storage
         .compact_map::<i32, i32, MAX_INDEXES, MAX_RUNS, 1>(CollectionId(72))
         .unwrap();
-    assert!(second_manifest.is_some());
+    assert_eq!(second_manifest, None);
 
     let mut second_buffer = [0u8; REGION_SIZE];
     let second = storage

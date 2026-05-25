@@ -436,8 +436,8 @@ pub enum MapStorageError {
         /// Maximum run descriptors available in the map handle.
         max_runs: usize,
     },
-    /// A compaction target of zero regions is invalid.
-    InvalidRegionTarget,
+    /// A compaction target of zero runs is invalid.
+    InvalidRunTarget,
 }
 
 impl From<MapError> for MapStorageError {
@@ -1704,7 +1704,7 @@ enum SearchResult {
 /// Small durable map handle used by the public object-level API.
 pub struct LsmMap<K, V, const MAX_INDEXES: usize, const MAX_RUNS: usize = MAX_INDEXES> {
     pub(crate) collection_id: CollectionId,
-    pub(crate) compaction_region_target: usize,
+    pub(crate) compaction_run_target: usize,
     pub(crate) cached_frontier: RefCell<Option<CachedMapFrontier<K, MAX_RUNS>>>,
     _phantom: PhantomData<(K, V)>,
 }
@@ -1717,11 +1717,11 @@ pub(crate) struct CachedMapFrontier<K, const MAX_RUNS: usize> {
 impl<K, V, const MAX_INDEXES: usize, const MAX_RUNS: usize> LsmMap<K, V, MAX_INDEXES, MAX_RUNS> {
     pub(crate) fn from_collection_id(
         collection_id: CollectionId,
-        compaction_region_target: usize,
+        compaction_run_target: usize,
     ) -> Self {
         Self {
             collection_id,
-            compaction_region_target,
+            compaction_run_target,
             cached_frontier: RefCell::new(None),
             _phantom: PhantomData,
         }
@@ -2858,6 +2858,7 @@ where
         Ok(LookupResult::NotFound)
     }
 
+    #[cfg(test)]
     pub(crate) fn live_run_region_count(&self) -> Result<usize, MapError> {
         let mut count = 0usize;
         for run in self.runs.iter() {
@@ -2876,36 +2877,34 @@ where
 
     pub(crate) fn selected_compaction_run_count(
         &self,
-        region_target: usize,
+        run_target: usize,
     ) -> Result<Option<usize>, MapError> {
-        let total_regions = self.live_run_region_count()?;
-        if total_regions <= region_target {
+        if run_target == 0 {
+            return Err(MapError::SerializationError);
+        }
+
+        let run_count = self.runs.len();
+        if run_count <= run_target {
             return Ok(None);
         }
 
+        let frontier_run_count = usize::from(!self.frontier_is_empty());
+        let minimum_selected_runs = run_count
+            .checked_add(1)
+            .and_then(|count| count.checked_add(frontier_run_count))
+            .and_then(|count| count.checked_sub(run_target))
+            .ok_or(MapError::SerializationError)?;
+        let minimum_selected_runs = minimum_selected_runs.min(run_count);
+
         let mut selected_runs = 0usize;
-        let mut selected_regions = 0usize;
         let mut accumulated_states = 0u64;
-        for run in self.runs.iter() {
+        for run in self.runs.iter().take(minimum_selected_runs) {
             selected_runs = selected_runs
                 .checked_add(1)
-                .ok_or(MapError::SerializationError)?;
-            selected_regions = selected_regions
-                .checked_add(
-                    usize::try_from(run.region_count).map_err(|_| MapError::SerializationError)?,
-                )
                 .ok_or(MapError::SerializationError)?;
             accumulated_states = accumulated_states
                 .checked_add(u64::from(run.approx_state_count))
                 .ok_or(MapError::SerializationError)?;
-
-            let estimated_regions_after_compaction = total_regions
-                .checked_sub(selected_regions)
-                .and_then(|count| count.checked_add(1))
-                .ok_or(MapError::SerializationError)?;
-            if estimated_regions_after_compaction <= region_target {
-                break;
-            }
         }
 
         if selected_runs == 0 {
@@ -2914,7 +2913,11 @@ where
 
         for run in self.runs.iter().skip(selected_runs) {
             let run_states = u64::from(run.approx_state_count);
-            if run_states >= accumulated_states {
+            if accumulated_states
+                .checked_mul(2)
+                .ok_or(MapError::SerializationError)?
+                <= run_states
+            {
                 break;
             }
             selected_runs = selected_runs

@@ -35,7 +35,7 @@ value_size_bytes = 8
 key_mode = "preloaded"
 compact_on_signal = false
 compact_interval = 0
-compaction_region_target = 128
+compaction_run_target = 128
 
 [maintenance]
 optimize_after_workload = false

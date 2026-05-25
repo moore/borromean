@@ -41,7 +41,7 @@ wal_record_magic = 0xa5
 
 [workload]
 map_count = 1
-operation_count = 3000
+operation_count = 300000
 warmup_count = 0
 key_space = 1000
 seed = 0x123456789abcdef
@@ -51,12 +51,12 @@ delete_ratio = 0
 value_size_bytes = 64
 key_mode = "preloaded"
 compact_on_signal = true
-compaction_region_target = 16
+compaction_run_target = 16
 
 [maintenance]
 optimize_after_workload = false
 
 [output]
 json_path = "target/perf/file_backing_read_hits.json"
-latency_sample_interval = 250
-progress_interval = 500
+latency_sample_interval = 1000
+progress_interval = 50000

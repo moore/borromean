@@ -347,7 +347,7 @@ fn run_map_lifecycle_preserves_model_across_compaction_reclaim_and_rollover() {
         .unwrap();
     let mut map = LsmMap::<u64, u64, MAX_INDEXES, MAX_RUNS>::new(&mut storage)
         .unwrap()
-        .with_compaction_region_target(8)
+        .with_compaction_run_target(8)
         .unwrap();
     let collection_id = map.collection_id();
     let mut expected = [None; KEY_SPACE];
