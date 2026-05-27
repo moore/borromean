@@ -3,8 +3,8 @@
 ## Purpose
 
 This specification defines the Rust implementation strategy for the
-low-level storage design in [spec/ring.md](ring.md).
-[spec/ring.md](ring.md) remains the source of truth for storage
+low-level storage design in [spec/ring/00-introduction.md](ring/00-introduction.md).
+[spec/ring/00-introduction.md](ring/00-introduction.md) remains the source of truth for storage
 semantics, crash ordering, and on-disk format. This document defines
 how those rules are to be realized in a `no_std`, `no_alloc`,
 runtime-agnostic Rust implementation.
@@ -38,7 +38,7 @@ Rust `alloc` crate.
 3. `RING-IMPL-CORE-003` The core library crate MUST NOT depend on an
 async runtime, executor, scheduler, or timer facility.
 4. `RING-IMPL-CORE-004` The implementation MUST preserve the durable
-behavior defined by [spec/ring.md](ring.md); this specification MAY
+behavior defined by [spec/ring/00-introduction.md](ring/00-introduction.md); this specification MAY
 constrain implementation structure but MUST NOT weaken ring-level
 correctness requirements.
 5. `RING-IMPL-CORE-005` All memory required for normal operation MUST
@@ -89,7 +89,7 @@ The implementation should separate three concerns:
 
 1. Durable-state logic: deciding what record, region write, reclaim
 step, or recovery step must happen next according to
-[spec/ring.md](ring.md).
+[spec/ring/00-introduction.md](ring/00-introduction.md).
 2. Encoding and decoding: translating between in-memory structures and
 the exact bytes defined by the storage spec.
 3. Backing execution: actually reading, writing, erasing, and syncing
@@ -101,7 +101,7 @@ make the boundary stricter by ensuring the public `Storage` facade owns
 the backing access and scratch buffers while the lower-level runtime
 state remains reviewable as explicit storage logic.
 
-The state-machine model in [spec/ring.md](ring.md) maps to an
+The state-machine model in [spec/ring/00-introduction.md](ring/00-introduction.md) maps to an
 implementation shape where `StorageRuntime`, or the storage context
 that owns it, carries one storage-mode enum. Complex operations use
 mode-specific sub-enums for their interstitial state. Format and open
@@ -150,7 +150,7 @@ dispatched by default.
 ### I/O Requirements
 
 1. `RING-IMPL-IO-001` The borromean backing abstraction MUST expose only
-the primitive operations needed to satisfy [spec/ring.md](ring.md):
+the primitive operations needed to satisfy [spec/ring/00-introduction.md](ring/00-introduction.md):
 region or metadata reads, writes, erases, and durability barriers.
 2. `RING-IMPL-IO-002` The borromean backing abstraction MUST be generic
 over the caller's concrete transport, flash driver, emulator, or
@@ -295,7 +295,7 @@ terminal result or remain safely resumable by further polling after
 any `Poll::Pending`.
 3. `RING-IMPL-OP-003` If an operation future is dropped before
 completion, any already-issued durable writes MUST still satisfy the
-crash-safety rules from [spec/ring.md](ring.md).
+crash-safety rules from [spec/ring/00-introduction.md](ring/00-introduction.md).
 4. `RING-IMPL-OP-004` Pure in-memory state mutations that make a later
 durable step mandatory MUST occur in an order that allows the same
 operation to be retried or reconstructed after reset.

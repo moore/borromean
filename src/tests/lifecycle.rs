@@ -248,7 +248,7 @@ fn assert_map_model<
     }
 }
 
-//= spec/ring.md#storage-runtime-state-requirements
+//= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-109` WAL lifecycle stress MUST rotate through every data region, reclaim
 //# WAL prefixes, reuse reclaimed regions, and reopen with live collection state intact.
@@ -334,7 +334,7 @@ fn requirement_wal_lifecycle_reuses_every_region_across_reclaim_cycles() {
     assert!(reopened.pending_reclaims().is_empty());
 }
 
-//= spec/ring.md#storage-runtime-state-requirements
+//= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-110` Map lifecycle stress MUST preserve modeled key/value state across
 //# writes, deletes, compactions, committed-region reclaims, WAL rollovers, and WAL-head reclaims.
@@ -456,7 +456,7 @@ fn run_map_lifecycle_preserves_model_across_compaction_reclaim_and_rollover() {
     >(&mut reopened, &mut reopened_map, &expected);
 }
 
-//= spec/ring.md#storage-runtime-state-requirements
+//= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-111` WAL-head reclaim capacity stress MUST reclaim a bounded WAL prefix
 //# when the full chain is longer than `MAX_PENDING_RECLAIMS`.

@@ -294,7 +294,7 @@ fn open_formatted_store_from_fresh_format() -> (StorageMetadata, StartupState<8,
     (metadata, state)
 }
 
-//= spec/ring.md#startup-replay-algorithm
+//= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
 //# RING-STARTUP-001 Read `StorageMetadata`, validate `metadata_checksum`, and validate static
 //# geometry (`region_size`, `region_count`, `min_free_regions`, `erased_byte`, `wal_write_granule`,
@@ -306,7 +306,7 @@ fn requirement_open_formatted_store_requires_metadata() {
     assert_eq!(error, StartupError::MissingMetadata);
 }
 
-//= spec/ring.md#startup-replay-algorithm
+//= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
 //# RING-STARTUP-003 Select WAL tail as the unique candidate WAL region with the largest valid
 //# sequence. If no candidate WAL region exists, or if multiple candidate WAL regions share that
@@ -329,7 +329,7 @@ fn requirement_open_formatted_store_rejects_duplicate_max_sequence_wal_candidate
     assert_eq!(error, StartupError::DuplicateWalTailSequence(0));
 }
 
-//= spec/ring.md#startup-replay-implementation-requirements
+//= spec/ring/06-startup-replay.md#startup-replay-implementation-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-046` Startup tail selection MUST ignore regions with nonzero collection_id
 //# even when their format is wal_v1 while still tracking max seen sequence.
@@ -345,7 +345,7 @@ fn requirement_open_formatted_store_ignores_nonzero_collection_with_wal_format_w
     assert_eq!(state.max_seen_sequence(), 9);
 }
 
-//= spec/ring.md#startup-replay-algorithm
+//= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
 //# RING-STARTUP-006 Parse records in WAL order (region order, then offset order).
 #[test]
@@ -360,7 +360,7 @@ fn requirement_open_formatted_store_rejects_post_corruption_record_at_the_next_w
     );
 }
 
-//= spec/ring.md#wal-record-types
+//= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
 //# `RING-WAL-VALID-022` Replay MAY recover only from checksum-invalid or torn aligned WAL
 //# slots. Replay tracks a pending WAL-recovery boundary from the first
@@ -378,7 +378,7 @@ fn requirement_open_formatted_store_requires_wal_recovery_before_accepting_later
     );
 }
 
-//= spec/ring.md#startup-replay-algorithm
+//= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
 //# RING-STARTUP-021 Reconstruct runtime `free_list_tail` by following free-pointer links starting
 //# at `last_free_list_head` until reaching a free region whose free-pointer slot is uninitialized.
@@ -403,7 +403,7 @@ fn requirement_open_formatted_store_rejects_invalid_free_list_chain() {
     );
 }
 
-//= spec/ring.md#startup-replay-algorithm
+//= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
 //# RING-STARTUP-011 On `alloc_begin(region_index, free_list_head_after)`: if `ready_region` is
 //# already set, return an error because replay found two unmatched allocation reservations. if
@@ -418,7 +418,7 @@ fn requirement_open_formatted_store_replays_alloc_begin_into_allocator_runtime_s
     assert_eq!(state.ready_region(), Some(1));
 }
 
-//= spec/ring.md#startup-replay-algorithm
+//= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
 //# RING-STARTUP-020 Initialize allocator state from `last_free_list_head`.
 #[test]
@@ -428,7 +428,7 @@ fn requirement_open_formatted_store_initializes_allocator_state_after_alloc_begi
     assert_eq!(state.free_list_tail(), Some(3));
 }
 
-//= spec/ring.md#startup-replay-algorithm
+//= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
 //# RING-STARTUP-022 If `ready_region` is set, hold it in memory as the next region to use before
 //# consuming another free-list entry.
@@ -439,7 +439,7 @@ fn requirement_open_formatted_store_keeps_replayed_ready_region_reserved_in_memo
     assert_eq!(state.last_free_list_head(), Some(2));
 }
 
-//= spec/ring.md#startup-replay-algorithm
+//= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
 //# `RING-STARTUP-RESULT-008` Ordered staged regions that have left
 //# `ready_region` but are not yet known to be free
@@ -449,7 +449,7 @@ fn requirement_open_formatted_store_reports_replayed_staged_regions() {
     assert_eq!(state.staged_regions(), &[1]);
 }
 
-//= spec/ring.md#startup-replay-algorithm
+//= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
 //# RING-STARTUP-011A On `stage_region(region_index)`: if
 //# `ready_region != region_index`, return an error. otherwise append
@@ -462,7 +462,7 @@ fn requirement_open_formatted_store_replays_stage_region_into_staged_state() {
     assert_eq!(state.last_free_list_head(), Some(2));
 }
 
-//= spec/ring.md#startup-replay-implementation-requirements
+//= spec/ring/06-startup-replay.md#startup-replay-implementation-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-047` Startup replay MUST preserve staged regions when a WAL head-control
 //# record is replayed.
@@ -504,7 +504,7 @@ fn requirement_open_formatted_store_keeps_staged_regions_when_wal_head_control_i
     assert_eq!(state.staged_regions(), &[1]);
 }
 
-//= spec/ring.md#startup-replay-implementation-requirements
+//= spec/ring/06-startup-replay.md#startup-replay-implementation-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-048` Startup replay MUST preserve staged regions when non-map collection
 //# head and drop records are replayed.
@@ -555,7 +555,7 @@ fn requirement_open_formatted_store_keeps_staged_regions_when_non_map_head_is_re
     assert_eq!(state.staged_regions(), &[1]);
 }
 
-//= spec/ring.md#wal-record-types
+//= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
 //# `RING-WAL-VALID-028` `stage_region(region_index)` MUST be preceded by
 //# an unmatched valid `alloc_begin(region_index, free_list_head_after)`
@@ -583,7 +583,7 @@ fn requirement_open_formatted_store_rejects_stage_region_without_matching_ready_
     );
 }
 
-//= spec/ring.md#wal-record-types
+//= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
 //# `RING-WAL-ENC-010` The recovered append point for the tail region
 //# MUST be the first aligned
@@ -598,7 +598,7 @@ fn requirement_open_formatted_store_recovers_append_point_after_replayed_alloc_b
     assert_eq!(state.wal_tail(), 0);
 }
 
-//= spec/ring.md#durability-and-crash-semantics
+//= spec/ring/08-durability-formatting.md#durability-and-crash-semantics
 //= type=test
 //# `RING-DURABILITY-003` Replay MUST treat partially written records as
 //# torn and ignore them using checksum validation and WAL tail recovery
@@ -612,7 +612,7 @@ fn requirement_open_formatted_store_ignores_torn_tail_slots_after_wal_recovery()
     assert!(!state.pending_wal_recovery_boundary());
 }
 
-//= spec/ring.md#wal-record-types
+//= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
 //# `RING-CHECKSUM-005` An implementation MUST ensure that even
 //# intentionally corrupted storage eventually produces a reported error
@@ -629,7 +629,7 @@ fn requirement_open_formatted_store_reports_an_error_for_intentionally_corrupted
     ));
 }
 
-//= spec/ring.md#collection-head-state-machine
+//= spec/ring/03-collection-lifecycle.md#collection-head-state-machine
 //= type=test
 //# `RING-FORMAT-006` A `WALSnapshotClean` basis MUST be loadable into RAM
 //# before that collection accepts further mutations.
@@ -668,7 +668,7 @@ fn requirement_open_formatted_store_tracks_live_collection_snapshot_basis() {
     assert!(state.pending_reclaims().is_empty());
 }
 
-//= spec/ring.md#startup-replay-implementation-requirements
+//= spec/ring/06-startup-replay.md#startup-replay-implementation-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-049` Startup replay MUST count multiple live collections independently.
 #[test]
@@ -701,7 +701,7 @@ fn requirement_open_formatted_store_counts_multiple_live_collections() {
     assert_eq!(state.tracked_user_collection_count(), 2);
 }
 
-//= spec/ring.md#core-requirements
+//= spec/ring/01-theory.md#core-requirements
 //= type=test
 //# `RING-CORE-006` For a live user collection, the earliest retained
 //# type-bearing record seen during replay MUST establish the
@@ -749,7 +749,7 @@ fn requirement_open_formatted_store_rejects_later_type_bearing_records_with_mism
     );
 }
 
-//= spec/ring.md#startup-replay-implementation-requirements
+//= spec/ring/06-startup-replay.md#startup-replay-implementation-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-050` Startup replay MUST accept a committed-region head basis and recover
 //# the collection basis, collection type, and max seen sequence from that region.
@@ -788,7 +788,7 @@ fn requirement_open_formatted_store_accepts_committed_region_head_basis() {
     assert_eq!(state.max_seen_sequence(), 4);
 }
 
-//= spec/ring.md#startup-replay-implementation-requirements
+//= spec/ring/06-startup-replay.md#startup-replay-implementation-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-051` Startup replay MUST accept a reclaimed historical head after
 //# replacement and recover the live replacement head with no pending reclaim.
@@ -855,7 +855,7 @@ fn requirement_open_formatted_store_accepts_reclaimed_historical_head_after_repl
     assert_eq!(state.free_list_tail(), Some(1));
 }
 
-//= spec/ring.md#startup-replay-implementation-requirements
+//= spec/ring/06-startup-replay.md#startup-replay-implementation-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-052` Startup replay MUST track pending updates on an empty collection
 //# basis and preserve their count.
@@ -907,7 +907,7 @@ fn requirement_open_formatted_store_tracks_pending_updates_on_empty_collection_b
     assert_eq!(state.collections()[0].pending_update_count(), 2);
 }
 
-//= spec/ring.md#startup-replay-implementation-requirements
+//= spec/ring/06-startup-replay.md#startup-replay-implementation-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-053` Startup replay MUST reject update records that appear after a
 //# collection drop tombstone for the same collection.
@@ -940,7 +940,7 @@ fn requirement_open_formatted_store_rejects_update_after_drop_collection() {
     assert_eq!(error, StartupError::DroppedCollection(CollectionId(7)));
 }
 
-//= spec/ring.md#wal-record-types
+//= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
 //# `RING-WAL-VALID-026` `reclaim_begin(region_index)` and
 //# `reclaim_end(region_index)` MUST appear in WAL order and are matched
@@ -977,7 +977,7 @@ fn requirement_open_formatted_store_tracks_pending_reclaims_in_order() {
     assert_eq!(state.pending_reclaims(), &[2]);
 }
 
-//= spec/ring.md#collection-head-state-machine
+//= spec/ring/03-collection-lifecycle.md#collection-head-state-machine
 //= type=test
 //# `RING-FORMAT-015` An implementation MUST NOT open a database successfully if replay yields a
 //# live collection whose `collection_type` is unsupported by that implementation.
@@ -1002,7 +1002,7 @@ fn requirement_open_formatted_store_rejects_unsupported_live_collection_type() {
     assert_eq!(error, StartupError::UnsupportedLiveCollectionType(0x1234));
 }
 
-//= spec/ring.md#startup-replay-algorithm
+//= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
 //# `RING-STARTUP-026` If replay yields a live collection whose
 //# `collection_type` is unsupported by the implementation, startup MUST
@@ -1028,7 +1028,7 @@ fn requirement_open_formatted_store_fails_startup_for_unsupported_live_collectio
     assert_eq!(error, StartupError::UnsupportedLiveCollectionType(0x1234));
 }
 
-//= spec/ring.md#startup-replay-algorithm
+//= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
 //# `RING-STARTUP-028` A dropped tombstone whose old
 //# `collection_type` is unsupported MAY remain as inert metadata and
@@ -1045,7 +1045,7 @@ fn requirement_validate_live_collection_types_ignores_unsupported_dropped_tombst
     assert_eq!(validate_live_collection_types(&collections), Ok(()));
 }
 
-//= spec/ring.md#startup-replay-implementation-requirements
+//= spec/ring/06-startup-replay.md#startup-replay-implementation-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-054` Strict WAL-region reads MUST reject regions whose collection_id is
 //# nonzero even if collection_format is wal_v1.
@@ -1062,7 +1062,7 @@ fn requirement_read_strict_wal_region_rejects_nonzero_collection_id_even_with_wa
     );
 }
 
-//= spec/ring.md#startup-replay-implementation-requirements
+//= spec/ring/06-startup-replay.md#startup-replay-implementation-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-055` WAL target validation MUST require both collection_id 0 and
 //# collection_format wal_v1.
@@ -1091,7 +1091,7 @@ fn requirement_has_valid_wal_target_requires_both_wal_collection_id_and_format()
     );
 }
 
-//= spec/ring.md#startup-replay-implementation-requirements
+//= spec/ring/06-startup-replay.md#startup-replay-implementation-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-056` Live committed-region basis validation MUST reject a region whose
 //# header belongs to a different collection.
@@ -1122,7 +1122,7 @@ fn requirement_validate_live_region_bases_rejects_committed_region_for_different
     );
 }
 
-//= spec/ring.md#startup-replay-implementation-requirements
+//= spec/ring/06-startup-replay.md#startup-replay-implementation-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-057` Region index validation MUST reject a region_index equal to
 //# region_count.
@@ -1134,7 +1134,7 @@ fn requirement_ensure_region_index_in_range_rejects_region_count_boundary() {
     );
 }
 
-//= spec/ring.md#startup-replay-algorithm
+//= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
 //# RING-STARTUP-005 Walk the WAL region chain from the resulting WAL head to tail using `link`
 //# records.
@@ -1145,7 +1145,7 @@ fn requirement_open_formatted_store_follows_completed_link_to_the_next_wal_tail(
     assert_eq!(state.wal_tail(), 1);
 }
 
-//= spec/ring.md#startup-replay-algorithm
+//= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
 //# RING-STARTUP-013 On `link(next_region_index, expected_sequence)`: if `ready_region =
 //# next_region_index`, clear `ready_region`.
@@ -1155,7 +1155,7 @@ fn requirement_open_formatted_store_clears_ready_region_when_link_matches_it() {
     assert_eq!(state.ready_region(), None);
 }
 
-//= spec/ring.md#startup-replay-implementation-requirements
+//= spec/ring/06-startup-replay.md#startup-replay-implementation-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-058` Startup replay MUST recover a WAL rotation after a durable link by
 //# selecting the linked tail, resetting tail append offset, updating allocator state, and advancing
@@ -1200,7 +1200,7 @@ fn requirement_open_formatted_store_recovers_rotation_after_link() {
     assert_eq!(state.max_seen_sequence(), 1);
 }
 
-//= spec/ring.md#startup-replay-implementation-requirements
+//= spec/ring/06-startup-replay.md#startup-replay-implementation-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-059` Startup replay MUST recover a WAL rotation when alloc_begin is
 //# durable but link is absent and only rotation reserve remains.
@@ -1262,7 +1262,7 @@ fn requirement_open_formatted_store_recovers_rotation_before_link() {
     assert_eq!(state.max_seen_sequence(), 1);
 }
 
-//= spec/ring.md#startup-replay-implementation-requirements
+//= spec/ring/06-startup-replay.md#startup-replay-implementation-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-060` Startup replay MUST recover a WAL rotation when only the link record
 //# fits after alloc_begin at the tail boundary.
@@ -1327,7 +1327,7 @@ fn requirement_open_formatted_store_recovers_rotation_when_only_the_link_record_
     assert_eq!(state.max_seen_sequence(), 1);
 }
 
-//= spec/ring.md#startup-replay-implementation-requirements
+//= spec/ring/06-startup-replay.md#startup-replay-implementation-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-061` Startup replay MUST reject an unrecovered corrupt boundary in a
 //# non-tail WAL region as a broken WAL chain.
@@ -1356,7 +1356,7 @@ fn requirement_open_formatted_store_rejects_unrecovered_boundary_in_non_tail_wal
     assert_eq!(error, StartupError::BrokenWalChain { region_index: 0 });
 }
 
-//= spec/ring.md#startup-replay-algorithm
+//= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
 //# RING-STARTUP-018 On `wal_recovery()`: if `pending_wal_recovery_boundary` is clear, return an
 //# error. otherwise clear `pending_wal_recovery_boundary`.
@@ -1369,7 +1369,7 @@ fn requirement_open_formatted_store_clears_pending_recovery_boundary_when_wal_re
     assert_eq!(state.last_free_list_head(), Some(2));
 }
 
-//= spec/ring.md#startup-replay-algorithm
+//= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
 //# RING-STARTUP-002 Scan all regions, collect candidate WAL regions (`collection_id == 0` plus
 //# `collection_format = wal_v1`) with valid headers, and track `max_seen_sequence` as the largest
@@ -1382,7 +1382,7 @@ fn requirement_open_formatted_store_scans_fresh_store_geometry_for_wal_candidate
     assert_eq!(state.wal_tail(), 0);
 }
 
-//= spec/ring.md#startup-replay-algorithm
+//= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
 //# RING-STARTUP-004 Read and validate the `WalRegionPrologue` stored at the start of the tail
 //# region's user-data area, and use its `wal_head_region_index` as the initial WAL-head candidate.
@@ -1393,7 +1393,7 @@ fn requirement_open_formatted_store_uses_the_tail_prologue_as_the_initial_wal_he
     assert_eq!(state.wal_tail(), 0);
 }
 
-//= spec/ring.md#startup-replay-implementation-requirements
+//= spec/ring/06-startup-replay.md#startup-replay-implementation-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-062` Opening a freshly formatted store MUST initialize allocator free-list
 //# head and tail from the formatted free-list chain.
@@ -1404,7 +1404,7 @@ fn requirement_open_formatted_store_initializes_allocator_state_for_a_fresh_stor
     assert_eq!(state.free_list_tail(), Some(3));
 }
 
-//= spec/ring.md#startup-replay-algorithm
+//= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
 //# RING-STARTUP-023 Keep `max_seen_sequence` as the runtime source of the next region sequence.
 #[test]
@@ -1413,7 +1413,7 @@ fn requirement_open_formatted_store_keeps_max_seen_sequence_for_the_next_region_
     assert_eq!(state.max_seen_sequence(), 0);
 }
 
-//= spec/ring.md#startup-replay-algorithm
+//= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
 //# `RING-STARTUP-027` If replay yields a live collection with unsupported or invalid retained
 //# collection data under that collection's normative specification, startup MUST fail before open

@@ -4,7 +4,7 @@
 
 Borromean splits storage behavior into three layers:
 
-- ring-level storage rules in [../spec/ring.md](../spec/ring.md)
+- ring-level storage rules in [../spec/ring/00-introduction.md](../spec/ring/00-introduction.md)
 - implementation architecture and API constraints in
   [../spec/implementation.md](../spec/implementation.md)
 - collection-specific payload rules such as [../spec/map.md](../spec/map.md)

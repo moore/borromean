@@ -98,7 +98,7 @@ fn requirement_startup_open_paths_complete_without_heap_allocation() {
 #[test]
 fn todo_startup_uses_storage_context_decode_scratch() {}
 
-//= spec/ring.md#startup-replay-algorithm
+//= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=todo
 //# `RING-STARTUP-024` After live collection type and retained data
 //# validation has succeeded, process each pending reclaim in WAL order:

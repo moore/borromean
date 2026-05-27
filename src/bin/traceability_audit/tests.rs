@@ -128,7 +128,7 @@ fn requirement_format_rejects_test_name_placeholder_requirements() {
 #[test]
 fn requirement_ring_impl_test_001_accepts_single_requirement_and_todo_tests() {
     let source = format!(
-        "\n{eq} spec/ring.md#anchor\n{eq} type=test\n{quote} `RING-EXAMPLE-001` The parser MUST parse things.\n#[test]\nfn requirement_parses_things() {{}}\n\n{eq} spec/ring.md#later\n{eq} type=todo\n{quote} `RING-EXAMPLE-002` The compiler MUST do later work.\n#[test]\nfn todo_later_work() {{}}\n",
+        "\n{eq} spec/ring/00-introduction.md#anchor\n{eq} type=test\n{quote} `RING-EXAMPLE-001` The parser MUST parse things.\n#[test]\nfn requirement_parses_things() {{}}\n\n{eq} spec/ring/00-introduction.md#later\n{eq} type=todo\n{quote} `RING-EXAMPLE-002` The compiler MUST do later work.\n#[test]\nfn todo_later_work() {{}}\n",
         eq = "//=",
         quote = "//#"
     );
@@ -150,7 +150,7 @@ fn requirement_ring_impl_test_001_accepts_single_requirement_and_todo_tests() {
 #[test]
 fn rejects_blocks_missing_exactly_one_spec_type_or_quote() {
     let source = format!(
-        "\n{eq} spec/ring.md#anchor\n{quote} `RING-EXAMPLE-001` The parser MUST parse things.\n#[test]\nfn requirement_missing_type() {{}}\n\n{eq} type=test\n{quote} `RING-EXAMPLE-002` The parser MUST parse things.\n#[test]\nfn requirement_missing_spec() {{}}\n\n{eq} spec/ring.md#anchor\n{eq} type=test\n#[test]\nfn requirement_missing_quote() {{}}\n",
+        "\n{eq} spec/ring/00-introduction.md#anchor\n{quote} `RING-EXAMPLE-001` The parser MUST parse things.\n#[test]\nfn requirement_missing_type() {{}}\n\n{eq} type=test\n{quote} `RING-EXAMPLE-002` The parser MUST parse things.\n#[test]\nfn requirement_missing_spec() {{}}\n\n{eq} spec/ring/00-introduction.md#anchor\n{eq} type=test\n#[test]\nfn requirement_missing_quote() {{}}\n",
         eq = "//=",
         quote = "//#"
     );
@@ -168,7 +168,7 @@ fn rejects_blocks_missing_exactly_one_spec_type_or_quote() {
 #[test]
 fn rejects_todo_trace_without_todo_prefix() {
     let source = format!(
-        "\n{eq} spec/ring.md#anchor\n{eq} type=todo\n{quote} `RING-EXAMPLE-001` Later work MUST happen.\n#[test]\nfn requirement_later_work() {{}}\n",
+        "\n{eq} spec/ring/00-introduction.md#anchor\n{eq} type=todo\n{quote} `RING-EXAMPLE-001` Later work MUST happen.\n#[test]\nfn requirement_later_work() {{}}\n",
         eq = "//=",
         quote = "//#"
     );
@@ -187,7 +187,7 @@ fn rejects_todo_trace_without_todo_prefix() {
 #[test]
 fn requirement_ring_impl_test_002_rejects_multi_requirement_tests() {
     let source = format!(
-        "\n{eq} spec/ring.md#anchor\n{eq} type=test\n{quote} `RING-EXAMPLE-001` The parser MUST parse things.\n{quote} `RING-EXAMPLE-002` The parser MUST parse other things.\n#[test]\nfn requirement_parses_things() {{}}\n",
+        "\n{eq} spec/ring/00-introduction.md#anchor\n{eq} type=test\n{quote} `RING-EXAMPLE-001` The parser MUST parse things.\n{quote} `RING-EXAMPLE-002` The parser MUST parse other things.\n#[test]\nfn requirement_parses_things() {{}}\n",
         eq = "//=",
         quote = "//#"
     );
@@ -209,7 +209,7 @@ fn requirement_ring_impl_test_002_rejects_multi_requirement_tests() {
 #[test]
 fn requirement_ring_impl_test_003_rejects_traced_helpers() {
     let source = format!(
-        "\n{eq} spec/ring.md#anchor\n{eq} type=test\n{quote} `RING-EXAMPLE-001` The parser MUST parse things.\nfn helper() {{}}\n",
+        "\n{eq} spec/ring/00-introduction.md#anchor\n{eq} type=test\n{quote} `RING-EXAMPLE-001` The parser MUST parse things.\nfn helper() {{}}\n",
         eq = "//=",
         quote = "//#"
     );
@@ -291,7 +291,7 @@ fn requirement_ring_impl_test_006_rejects_untraced_functional_test_entries() {
 #[test]
 fn functional_untraced_test_checker_accepts_traced_entries_and_tooling_tests() {
     let source = format!(
-        "\n{eq} spec/ring.md#anchor\n{eq} type=test\n{quote} `RING-EXAMPLE-001` The storage layer MUST preserve data.\n#[test]\nfn requirement_storage_regression() {{}}\n",
+        "\n{eq} spec/ring/00-introduction.md#anchor\n{eq} type=test\n{quote} `RING-EXAMPLE-001` The storage layer MUST preserve data.\n#[test]\nfn requirement_storage_regression() {{}}\n",
         eq = "//=",
         quote = "//#"
     );
@@ -308,7 +308,7 @@ fn functional_untraced_test_checker_accepts_traced_entries_and_tooling_tests() {
 #[test]
 fn rejects_detached_annotations() {
     let source = format!(
-        "\n{eq} spec/ring.md#anchor\n\n{eq} type=test\n\n{quote} `RING-EXAMPLE-001` Detached quote.\n",
+        "\n{eq} spec/ring/00-introduction.md#anchor\n\n{eq} type=test\n\n{quote} `RING-EXAMPLE-001` Detached quote.\n",
         eq = "//=",
         quote = "//#"
     );
@@ -326,7 +326,7 @@ fn rejects_detached_annotations() {
 #[test]
 fn rejects_duplicate_requirement_traces() {
     let source = format!(
-        "\n{eq} spec/ring.md#anchor\n{eq} type=test\n{quote} `RING-EXAMPLE-001` The parser MUST parse things.\n#[test]\nfn requirement_one() {{}}\n\n{eq} spec/ring.md#anchor\n{eq} type=test\n{quote} `RING-EXAMPLE-001` The parser MUST parse things.\n#[test]\nfn requirement_two() {{}}\n",
+        "\n{eq} spec/ring/00-introduction.md#anchor\n{eq} type=test\n{quote} `RING-EXAMPLE-001` The parser MUST parse things.\n#[test]\nfn requirement_one() {{}}\n\n{eq} spec/ring/00-introduction.md#anchor\n{eq} type=test\n{quote} `RING-EXAMPLE-001` The parser MUST parse things.\n#[test]\nfn requirement_two() {{}}\n",
         eq = "//=",
         quote = "//#"
     );
@@ -344,7 +344,7 @@ fn rejects_duplicate_requirement_traces() {
 #[test]
 fn rejects_duplicate_requirement_traces_with_only_wrapping_differences() {
     let source = format!(
-        "\n{eq} spec/ring.md#anchor\n{eq} type=test\n{quote} `RING-EXAMPLE-001` The parser MUST parse wrapped citations.\n#[test]\nfn requirement_one() {{}}\n\n{eq} spec/ring.md#anchor\n{eq} type=test\n{quote} `RING-EXAMPLE-001` The parser MUST parse\n{quote} wrapped citations.\n#[test]\nfn requirement_two() {{}}\n",
+        "\n{eq} spec/ring/00-introduction.md#anchor\n{eq} type=test\n{quote} `RING-EXAMPLE-001` The parser MUST parse wrapped citations.\n#[test]\nfn requirement_one() {{}}\n\n{eq} spec/ring/00-introduction.md#anchor\n{eq} type=test\n{quote} `RING-EXAMPLE-001` The parser MUST parse\n{quote} wrapped citations.\n#[test]\nfn requirement_two() {{}}\n",
         eq = "//=",
         quote = "//#"
     );
@@ -361,13 +361,13 @@ fn rejects_duplicate_requirement_traces_with_only_wrapping_differences() {
 #[test]
 fn accepts_spec_quotes_with_only_wrapping_differences() {
     let source = format!(
-        "\n{eq} spec/ring.md#anchor\n{eq} type=test\n{quote} `RING-EXAMPLE-001` The parser MUST parse\n{quote} wrapped citations.\n#[test]\nfn requirement_wrapped_quote() {{}}\n",
+        "\n{eq} spec/ring/00-introduction.md#anchor\n{eq} type=test\n{quote} `RING-EXAMPLE-001` The parser MUST parse\n{quote} wrapped citations.\n#[test]\nfn requirement_wrapped_quote() {{}}\n",
         eq = "//=",
         quote = "//#"
     );
     let workspace = TempWorkspace::new(&source);
     workspace.write_spec(
-        "spec/ring.md",
+        "spec/ring/00-introduction.md",
         "1. `RING-EXAMPLE-001` The parser MUST parse wrapped citations.\n",
     );
     let mut errors = Vec::new();
@@ -380,7 +380,7 @@ fn accepts_spec_quotes_with_only_wrapping_differences() {
 #[test]
 fn rejects_missing_requirement_prefix() {
     let source = format!(
-        "\n{eq} spec/ring.md#anchor\n{eq} type=test\n{quote} `RING-EXAMPLE-001` The parser MUST parse things.\n#[test]\nfn parses_things() {{}}\n",
+        "\n{eq} spec/ring/00-introduction.md#anchor\n{eq} type=test\n{quote} `RING-EXAMPLE-001` The parser MUST parse things.\n#[test]\nfn parses_things() {{}}\n",
         eq = "//=",
         quote = "//#"
     );
@@ -397,7 +397,7 @@ fn rejects_missing_requirement_prefix() {
 #[test]
 fn rejects_trace_quotes_that_are_test_name_placeholders() {
     let source = format!(
-        "\n{eq} spec/ring.md#anchor\n{eq} type=test\n{quote} `RING-EXAMPLE-001` The implementation MUST preserve the functional behavior exercised by the requirement_example regression test.\n#[test]\nfn requirement_example() {{}}\n",
+        "\n{eq} spec/ring/00-introduction.md#anchor\n{eq} type=test\n{quote} `RING-EXAMPLE-001` The implementation MUST preserve the functional behavior exercised by the requirement_example regression test.\n#[test]\nfn requirement_example() {{}}\n",
         eq = "//=",
         quote = "//#"
     );
@@ -415,7 +415,7 @@ fn rejects_trace_quotes_that_are_test_name_placeholders() {
 fn preserves_line_numbers_for_attached_annotation_blocks() {
     let lines = [
         "",
-        "//= spec/ring.md#anchor",
+        "//= spec/ring/00-introduction.md#anchor",
         "",
         "//= type=test",
         "//# `RING-EXAMPLE-001` Requirement text.",

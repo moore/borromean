@@ -152,7 +152,7 @@ fn requirement_core_api_remains_usable_without_executor_or_framework_helpers() {
     assert_eq!(reopened.collections()[0].collection_id(), CollectionId(85));
 }
 
-//= spec/ring.md#storage-api-requirements
+//= spec/ring/02-state-machines.md#storage-api-requirements
 //= type=test
 //# `RING-API-001` `Storage` MUST be the public database context that owns logical runtime state,
 //# replay state, configuration, dirty-frontier tracking, and bounded reusable scratch memory needed
@@ -184,7 +184,7 @@ fn requirement_storage_context_owns_operation_scratch() {
     assert_eq!(map.get_frontier(&3).unwrap(), Some(30));
 }
 
-//= spec/ring.md#storage-api-requirements
+//= spec/ring/02-state-machines.md#storage-api-requirements
 //= type=test
 //# `RING-API-002` `Storage` MUST own exclusive access to the backing object for the lifetime of an
 //# opened database, either by owning the backing value or by holding a mutable reference to it.
@@ -203,7 +203,7 @@ fn requirement_storage_owns_backing_access() {
     assert_eq!(reopened.metadata().region_count, 5);
 }
 
-//= spec/ring.md#storage-api-requirements
+//= spec/ring/02-state-machines.md#storage-api-requirements
 //= type=test
 //# `RING-API-003` Public operations that may touch backing media MUST use the backing object
 //# through `Storage` rather than requiring a separate backing argument on each operation.
@@ -224,7 +224,7 @@ fn requirement_operations_use_storage_backing() {
     storage.drop_map(CollectionId(13)).unwrap();
 }
 
-//= spec/ring.md#storage-api-requirements
+//= spec/ring/02-state-machines.md#storage-api-requirements
 //= type=todo
 //# `RING-API-004` Public normal collection operations MUST NOT require callers to provide
 //# collection frontier buffers, payload serialization buffers, or a `StorageWorkspace`; that
@@ -233,7 +233,7 @@ fn requirement_operations_use_storage_backing() {
 #[test]
 fn todo_collection_operations_use_storage_owned_buffers() {}
 
-//= spec/ring.md#storage-api-requirements
+//= spec/ring/02-state-machines.md#storage-api-requirements
 //= type=todo
 //# `RING-API-005` Any shared-device synchronization required by a platform MUST be encapsulated by
 //# the backing implementation rather than by Borromean core requiring a specific mutex, executor,
@@ -241,7 +241,7 @@ fn todo_collection_operations_use_storage_owned_buffers() {}
 #[test]
 fn todo_shared_backing_synchronization_stays_behind_backing_trait() {}
 
-//= spec/ring.md#ring-state-machine-requirements
+//= spec/ring/02-state-machines.md#ring-state-machine-requirements
 //= type=test
 //# `RING-MACHINE-001` Storage runtime MUST expose a single active storage mode so that at most
 //# one read, collection, WAL, allocation, region-write, rotation, reclaim, formatting, or opening
@@ -271,7 +271,7 @@ fn requirement_storage_runtime_exposes_single_active_mode() {
     assert_eq!(storage.mode(), StorageMode::Idle);
 }
 
-//= spec/ring.md#ring-state-machine-requirements
+//= spec/ring/02-state-machines.md#ring-state-machine-requirements
 //= type=test
 //# `RING-MACHINE-002` Stable replayed runtime state MUST be kept separate from
 //# operation-specific progress state owned by the active mode.
@@ -297,7 +297,7 @@ fn requirement_runtime_state_is_separate_from_operation_progress() {
     storage.finish_mode();
 }
 
-//= spec/ring.md#ring-state-machine-requirements
+//= spec/ring/02-state-machines.md#ring-state-machine-requirements
 //= type=test
 //# `RING-MACHINE-003` Public steady-state operations MUST validate that the storage context is
 //# in a valid source mode, normally `Idle`, before beginning their transition sequence.
@@ -325,7 +325,7 @@ fn requirement_public_operations_validate_source_mode() {
     storage.create_map(CollectionId(15)).unwrap();
 }
 
-//= spec/ring.md#ring-state-machine-requirements
+//= spec/ring/02-state-machines.md#ring-state-machine-requirements
 //= type=todo
 //# `RING-MACHINE-004` Every durable write that changes replay-visible state MUST be represented
 //# as a named transition edge with defined preconditions, durable effect, runtime effect, replay
@@ -333,7 +333,7 @@ fn requirement_public_operations_validate_source_mode() {
 #[test]
 fn todo_durable_writes_are_named_transition_edges() {}
 
-//= spec/ring.md#ring-state-machine-requirements
+//= spec/ring/02-state-machines.md#ring-state-machine-requirements
 //= type=test
 //# `RING-MACHINE-005` Normal foreground operation, startup replay, and crash recovery MUST use
 //# the same `ApplyWalRecord` semantics for every retained durable WAL record.
@@ -361,7 +361,7 @@ fn requirement_foreground_replay_and_recovery_share_wal_record_semantics() {
     assert_eq!(reopened.wal_append_offset(), foreground_append_offset);
 }
 
-//= spec/ring.md#ring-state-machine-requirements
+//= spec/ring/02-state-machines.md#ring-state-machine-requirements
 //= type=todo
 //# `RING-MACHINE-006` Startup and recovery modes MUST compose the same collection, allocator,
 //# WAL-chain, and reclaim submachine transitions used by normal operation rather than defining
@@ -369,7 +369,7 @@ fn requirement_foreground_replay_and_recovery_share_wal_record_semantics() {
 #[test]
 fn todo_startup_and_recovery_compose_normal_submachines() {}
 
-//= spec/ring.md#ring-state-machine-requirements
+//= spec/ring/02-state-machines.md#ring-state-machine-requirements
 //= type=todo
 //# `RING-MACHINE-007` State-machine transition rules MUST use named operation identifiers, and
 //# each named operation MUST define its source state, active mode, durable edge sequence, and

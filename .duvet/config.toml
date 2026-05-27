@@ -4,7 +4,43 @@
 pattern = "src/**/*.rs"
 
 [[specification]]
-source = "spec/ring.md"
+source = "spec/ring/00-introduction.md"
+format = "markdown"
+
+[[specification]]
+source = "spec/ring/01-theory.md"
+format = "markdown"
+
+[[specification]]
+source = "spec/ring/02-state-machines.md"
+format = "markdown"
+
+[[specification]]
+source = "spec/ring/03-collection-lifecycle.md"
+format = "markdown"
+
+[[specification]]
+source = "spec/ring/04-wal-records.md"
+format = "markdown"
+
+[[specification]]
+source = "spec/ring/05-disk-format.md"
+format = "markdown"
+
+[[specification]]
+source = "spec/ring/06-startup-replay.md"
+format = "markdown"
+
+[[specification]]
+source = "spec/ring/07-reclaim.md"
+format = "markdown"
+
+[[specification]]
+source = "spec/ring/08-durability-formatting.md"
+format = "markdown"
+
+[[specification]]
+source = "spec/ring/09-implementation-coverage.md"
 format = "markdown"
 
 [[specification]]

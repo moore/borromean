@@ -75,7 +75,7 @@ In both styles the ownership model stays the same:
 
 ## Documentation Map
 
-- Storage format and crash semantics: [spec/ring.md](spec/ring.md)
+- Storage format and crash semantics: [spec/ring/00-introduction.md](spec/ring/00-introduction.md)
 - Implementation architecture and API constraints: [spec/implementation.md](spec/implementation.md)
 - Durable map collection format, current validation rules, and implemented
   whole-run LSM design: [spec/map.md](spec/map.md)
@@ -87,18 +87,18 @@ In both styles the ownership model stays the same:
 
 ## Requirement Traceability
 
-The storage spec in [spec/ring.md](spec/ring.md) now keeps normative requirements next to the
-motivating text. Each requirement uses a stable identifier such as `RING-WAL-ENC-001` so Duvet
-annotations can point at local spec text instead of a requirements appendix.
+The storage spec under [spec/ring/](spec/ring/00-introduction.md) keeps normative requirements next
+to the motivating text. Each requirement uses a stable identifier such as `RING-WAL-ENC-001` so
+Duvet annotations can point at local spec text instead of a requirements appendix.
 
 Example Rust annotation:
 
 ```rust
-// = spec/ring.md#startup-replay-algorithm
+// = spec/ring/06-startup-replay.md#startup-replay-algorithm
 // # RING-STARTUP-003 Select WAL tail as the unique candidate WAL region with the largest valid sequence.
 ```
 
 The implementation docs follow the same pattern. `spec/implementation.md` captures architecture and
 API constraints, while concrete functional behavior lives in storage, collection, or support
-specifications such as [spec/ring.md](spec/ring.md), [spec/map.md](spec/map.md),
+specifications such as [spec/ring/](spec/ring/00-introduction.md), [spec/map.md](spec/map.md),
 [spec/channel.md](spec/channel.md), and [spec/mock.md](spec/mock.md).

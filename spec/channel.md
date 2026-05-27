@@ -4,7 +4,8 @@
 
 This specification defines the current behavior of the experimental channel collection surface. The
 channel module is exported, but it is not yet integrated as a durable storage collection. Shared
-storage ordering and committed-region mechanics remain defined by [spec/ring.md](ring.md).
+storage ordering and committed-region mechanics remain defined by
+[spec/ring/00-introduction.md](ring/00-introduction.md).
 
 ## Channel State And Member Sequences
 

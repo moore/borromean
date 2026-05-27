@@ -402,7 +402,7 @@ fn requirement_perf_metrics_set_delete_record_write_path() {
 }
 
 #[cfg(feature = "perf-counters")]
-//= spec/ring.md#storage-api-requirements
+//= spec/ring/02-state-machines.md#storage-api-requirements
 //= type=test
 //# `Storage` MUST be the public database context that owns logical
 //# runtime state, replay state, configuration, dirty-frontier tracking,
@@ -2855,7 +2855,7 @@ fn requirement_snapshot_encoding_records_entry_count_and_entry_bytes_len() {
     assert_snapshot_encoding_stores_header_compact_entries_and_refs();
 }
 
-//= spec/ring.md#collection-head-state-machine
+//= spec/ring/03-collection-lifecycle.md#collection-head-state-machine
 //= type=test
 //# `RING-FORMAT-013` That collection specification MUST define, at
 //# minimum: the empty logical state established by `new_collection`; the
@@ -3046,7 +3046,7 @@ fn assert_region_round_trip_restores_logical_state() {
     assert_eq!(restored.run_count(), 1);
 }
 
-//= spec/ring.md#collection-head-state-machine
+//= spec/ring/03-collection-lifecycle.md#collection-head-state-machine
 //= type=test
 //# `RING-FORMAT-014` For non-WAL collections, the pair `(collection_type, collection_format)` MUST
 //# identify a unique committed region payload format.
@@ -3122,7 +3122,7 @@ fn requirement_region_loading_matches_embedded_snapshot_loading() {
     assert_region_round_trip_restores_logical_state();
 }
 
-//= spec/ring.md#core-requirements
+//= spec/ring/01-theory.md#core-requirements
 //= type=test
 //# `RING-CORE-002` Each collection MUST be implemented as an
 //# append-only data structure whose new writes are added to the head
@@ -3247,7 +3247,7 @@ fn assert_open_from_storage_rejects_live_collections_with_a_non_map_collection_t
     ));
 }
 
-//= spec/ring.md#collection-head-state-machine
+//= spec/ring/03-collection-lifecycle.md#collection-head-state-machine
 //= type=test
 //# `RING-FORMAT-008` Every later retained type-bearing record for that
 //# collection MUST carry the same `collection_type`, otherwise replay
@@ -3351,7 +3351,7 @@ fn requirement_load_snapshot_rejects_overlapping_entry_refs() {
     ));
 }
 
-//= spec/ring.md#core-requirements
+//= spec/ring/01-theory.md#core-requirements
 //= type=test
 //# `RING-CORE-015` Each collection's mutable in-memory update frontier
 //# MUST have a bounded configured capacity.
@@ -3488,7 +3488,7 @@ fn requirement_later_retained_map_updates_override_durable_basis_values() {
     assert_storage_snapshot_replay_restores_map_frontier();
 }
 
-//= spec/ring.md#collection-head-state-machine
+//= spec/ring/03-collection-lifecycle.md#collection-head-state-machine
 //= type=test
 //# `RING-FORMAT-003` The frontier MUST take precedence over older values in the durable basis.
 #[test]
@@ -3681,7 +3681,7 @@ fn requirement_open_from_storage_rejects_invalid_retained_region_snapshot_and_up
     );
 }
 
-//= spec/ring.md#collection-head-state-machine
+//= spec/ring/03-collection-lifecycle.md#collection-head-state-machine
 //= type=test
 //# `RING-FORMAT-016` An implementation MUST NOT open a database
 //# successfully if replay yields a live collection whose retained
@@ -3849,7 +3849,7 @@ fn assert_storage_region_flush_restores_map_basis() {
     );
 }
 
-//= spec/ring.md#collection-head-state-machine
+//= spec/ring/03-collection-lifecycle.md#collection-head-state-machine
 //= type=test
 //# `RING-FORMAT-005` Every user collection MUST remain log-structured:
 //# flushing mutable state writes new immutable committed region state

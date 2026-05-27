@@ -5,7 +5,7 @@
 This specification defines repository traceability policy and
 documentation-format rules for the borromean implementation
 specifications and their verification harnesses.
-[spec/ring.md](ring.md) and
+[spec/ring/00-introduction.md](ring/00-introduction.md) and
 [spec/implementation.md](implementation.md) remain the source of truth for
 storage semantics and executable implementation constraints. Collection
 and support specifications own concrete functional behavior for their

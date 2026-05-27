@@ -3,8 +3,9 @@ use super::*;
 //= spec/implementation.md#i-o-requirements
 //= type=test
 //# `RING-IMPL-IO-001` The borromean backing abstraction MUST expose only
-//# the primitive operations needed to satisfy [spec/ring.md](ring.md):
-//# region or metadata reads, writes, erases, and durability barriers.
+//# the primitive operations needed to satisfy
+//# [spec/ring/00-introduction.md](ring/00-introduction.md): region or metadata reads, writes,
+//# erases, and durability barriers.
 #[test]
 fn requirement_flash_io_trait_exposes_only_primitive_storage_operations() {
     struct SurfaceCheckedFlash;

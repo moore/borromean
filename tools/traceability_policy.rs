@@ -12,7 +12,7 @@ const REQUIREMENT_NORMATIVE_LANGUAGE_POLICY: () = ();
 
 //= spec/implementation-policy.md#verification-requirements
 //# `RING-IMPL-TEST-001` Every normative requirement in
-//# [spec/ring.md](ring.md) or [spec/implementation.md](implementation.md)
+//# [spec/ring/00-introduction.md](ring/00-introduction.md) or [spec/implementation.md](implementation.md)
 //# MUST have at least one dedicated automated test function or dedicated
 //# compile-time test case whose primary purpose is to verify that single
 //# requirement.

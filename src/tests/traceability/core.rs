@@ -56,8 +56,8 @@ fn requirement_core_library_thread_and_worker_policy_is_enforced_by_clippy_verif
 //= spec/implementation.md#core-requirements
 //= type=test
 //# `RING-IMPL-CORE-004` The implementation MUST preserve the durable
-//# behavior defined by [spec/ring.md](ring.md); this specification MAY
-//# constrain implementation structure but MUST NOT weaken ring-level
+//# behavior defined by [spec/ring/00-introduction.md](ring/00-introduction.md); this specification
+//# MAY constrain implementation structure but MUST NOT weaken ring-level
 //# correctness requirements.
 #[test]
 fn requirement_storage_facade_preserves_ring_behavior_through_delegating_entry_points() {

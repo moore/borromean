@@ -62,15 +62,41 @@ fn main() -> ExitCode {
 fn check_requirements(repo_root: &Path) -> Result<Summary, Vec<String>> {
     let mut failures = Vec::new();
 
-    for (spec_path, prefixes) in [
-        ("spec/implementation.md", &["RING-IMPL-"][..]),
-        ("spec/implementation-policy.md", &["RING-IMPL-"][..]),
-        ("spec/ring.md", &["RING-"][..]),
-        ("spec/map.md", &["MAP-", "RING-IMPL-REGRESSION-"][..]),
-        ("spec/channel.md", &["RING-IMPL-REGRESSION-"][..]),
-        ("spec/mock.md", &["RING-IMPL-REGRESSION-"][..]),
+    for (spec_path, prefixes, allow_empty) in [
+        ("spec/implementation.md", &["RING-IMPL-"][..], false),
+        ("spec/implementation-policy.md", &["RING-IMPL-"][..], false),
+        ("spec/ring/00-introduction.md", &["RING-"][..], true),
+        ("spec/ring/01-theory.md", &["RING-"][..], false),
+        ("spec/ring/02-state-machines.md", &["RING-"][..], false),
+        (
+            "spec/ring/03-collection-lifecycle.md",
+            &["RING-"][..],
+            false,
+        ),
+        ("spec/ring/04-wal-records.md", &["RING-"][..], false),
+        ("spec/ring/05-disk-format.md", &["RING-"][..], false),
+        ("spec/ring/06-startup-replay.md", &["RING-"][..], false),
+        ("spec/ring/07-reclaim.md", &["RING-"][..], false),
+        (
+            "spec/ring/08-durability-formatting.md",
+            &["RING-"][..],
+            false,
+        ),
+        (
+            "spec/ring/09-implementation-coverage.md",
+            &["RING-"][..],
+            false,
+        ),
+        ("spec/map.md", &["MAP-", "RING-IMPL-REGRESSION-"][..], false),
+        ("spec/channel.md", &["RING-IMPL-REGRESSION-"][..], false),
+        ("spec/mock.md", &["RING-IMPL-REGRESSION-"][..], false),
     ] {
-        match spec_requirement_format_offenders(repo_root, spec_path, prefixes) {
+        match spec_requirement_format_offenders_with_options(
+            repo_root,
+            spec_path,
+            prefixes,
+            allow_empty,
+        ) {
             Ok(Some(message)) => {
                 failures.push(format!("{spec_path}#requirements-format: {message}"));
             }
@@ -294,14 +320,32 @@ fn load_spec_requirement_ids(
     ))
 }
 
+#[cfg(test)]
 fn spec_requirement_format_offenders(
     repo_root: &Path,
     relative_spec_path: &str,
     expected_prefixes: &[&str],
 ) -> Result<Option<String>, String> {
+    spec_requirement_format_offenders_with_options(
+        repo_root,
+        relative_spec_path,
+        expected_prefixes,
+        false,
+    )
+}
+
+fn spec_requirement_format_offenders_with_options(
+    repo_root: &Path,
+    relative_spec_path: &str,
+    expected_prefixes: &[&str],
+    allow_empty: bool,
+) -> Result<Option<String>, String> {
     let spec_path = repo_root.join(relative_spec_path);
     let items = collect_normative_requirement_items(&spec_path)?;
     if items.is_empty() {
+        if allow_empty {
+            return Ok(None);
+        }
         return Ok(Some(format!(
             "no normative requirement items found in {relative_spec_path}"
         )));

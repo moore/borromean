@@ -18,7 +18,7 @@ fn encode_logical(record: WalRecord<'_>) -> ([u8; 128], usize) {
     (logical, logical_len)
 }
 
-//= spec/ring.md#encoding-helper-requirements
+//= spec/ring/04-wal-records.md#encoding-helper-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-123` WAL byte helpers MUST advance offsets for byte and byte-slice reads
 //# and writes and report BufferTooSmall with needed and available sizes on short buffers.
@@ -62,7 +62,7 @@ fn requirement_wal_byte_helpers_advance_offsets_and_reject_short_buffers() {
     ));
 }
 
-//= spec/ring.md#encoding-helper-requirements
+//= spec/ring/04-wal-records.md#encoding-helper-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-124` Logical WAL byte encoding MUST escape erased byte, record magic, and
 //# escape byte with distinct derived escape codes.
@@ -118,7 +118,7 @@ fn requirement_logical_byte_encoding_escapes_reserved_physical_bytes() {
     );
 }
 
-//= spec/ring.md#wal-record-types
+//= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
 //# `RING-WAL-ENC-005` Every byte after the leading `record_magic` in a
 //# valid encoded WAL
@@ -140,7 +140,7 @@ fn requirement_decode_rejects_unescaped_reserved_body_bytes() {
     }
 }
 
-//= spec/ring.md#encoding-helper-requirements
+//= spec/ring/04-wal-records.md#encoding-helper-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-125` WAL record decoding MUST consume all encoded physical bytes and
 //# report encoded and logical lengths for decoded records.
@@ -164,7 +164,7 @@ fn requirement_decode_record_consumes_all_logical_bytes_and_reports_lengths() {
     );
 }
 
-//= spec/ring.md#encoding-helper-requirements
+//= spec/ring/04-wal-records.md#encoding-helper-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-126` WAL record decoding MUST wait until all payload-header bytes are
 //# available before reading payload metadata.
@@ -183,7 +183,7 @@ fn requirement_decode_record_does_not_read_payload_header_before_all_header_byte
     assert_eq!(decoded.record, record);
 }
 
-//= spec/ring.md#encoding-helper-requirements
+//= spec/ring/04-wal-records.md#encoding-helper-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-127` WAL record decoding MUST reject an empty logical scratch buffer
 //# before writing the first decoded logical byte.
@@ -201,7 +201,7 @@ fn requirement_decode_record_rejects_empty_logical_scratch_before_writing_first_
     ));
 }
 
-//= spec/ring.md#canonical-on-disk-encoding
+//= spec/ring/05-disk-format.md#canonical-on-disk-encoding
 //= type=test
 //# `RING-DISK-002` The canonical scalar widths are:
 //# `region_index: u32`, `region_size: u32`, `region_count: u32`,
@@ -269,7 +269,7 @@ fn requirement_canonical_scalar_widths_match_storage_header_and_wal_field_sizes(
     );
 }
 
-//= spec/ring.md#canonical-on-disk-encoding
+//= spec/ring/05-disk-format.md#canonical-on-disk-encoding
 //= type=test
 //# `RING-DISK-003` `collection_type` is a stable global `u16`
 //# namespace recorded durably in WAL records. Borromean core reserves
@@ -300,7 +300,7 @@ fn requirement_collection_type_codes_use_reserved_global_namespace() {
     assert_eq!(crate::CollectionType::MAP_CODE, 2);
 }
 
-//= spec/ring.md#encoding-helper-requirements
+//= spec/ring/04-wal-records.md#encoding-helper-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-128` Logical WAL record encoding MUST serialize fixed-width fields
 //# little-endian in canonical order.
@@ -337,7 +337,7 @@ fn requirement_logical_wal_records_encode_fixed_width_fields_little_endian() {
     );
 }
 
-//= spec/ring.md#canonical-on-disk-encoding
+//= spec/ring/05-disk-format.md#canonical-on-disk-encoding
 //= type=test
 //# `RING-DISK-005` Optional region indexes carried inside logical WAL
 //# records MUST be encoded as `OptRegionIndex`, a one-byte tag followed,
@@ -373,7 +373,7 @@ fn requirement_optional_region_indexes_use_a_tag_then_little_endian_region_index
     );
 }
 
-//= spec/ring.md#encoding-helper-requirements
+//= spec/ring/04-wal-records.md#encoding-helper-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-129` Logical WAL record checksums MUST use CRC-32C over logical prefix
 //# bytes and store the checksum little-endian.
@@ -395,7 +395,7 @@ fn requirement_logical_record_checksums_use_crc32c_and_store_little_endian_bytes
     );
 }
 
-//= spec/ring.md#canonical-on-disk-encoding
+//= spec/ring/05-disk-format.md#canonical-on-disk-encoding
 //= type=test
 //# `RING-DISK-007` Unless a structure explicitly says otherwise, the
 //# checksum for that structure MUST cover the exact logical bytes of every
@@ -444,7 +444,7 @@ fn requirement_record_checksums_cover_prior_logical_bytes_but_exclude_checksum_a
     );
 }
 
-//= spec/ring.md#wal-record-types
+//= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
 //# RING-WAL-ENC-003 After the leading `record_magic`, the rest of the physical WAL record is
 //# encoded with deterministic byte-stuffing over the logical WAL record bytes:
@@ -462,7 +462,7 @@ fn requirement_escape_codes_use_first_ascending_distinct_values() {
     );
 }
 
-//= spec/ring.md#wal-record-types
+//= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
 //# `RING-WAL-ENC-001` Every physical WAL record MUST begin with a
 //# one-byte `record_magic`.
@@ -473,7 +473,7 @@ fn requirement_encoded_record_begins_with_record_magic() {
     assert_eq!(physical[0], 0xa5);
 }
 
-//= spec/ring.md#wal-record-types
+//= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
 //# `RING-WAL-ENC-002` `record_magic` MUST equal the storage's configured
 //# `wal_record_magic`, and `wal_record_magic` must not equal
@@ -499,7 +499,7 @@ fn requirement_wal_record_magic_must_match_storage_configuration_and_differ_from
     );
 }
 
-//= spec/ring.md#wal-record-types
+//= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
 //# RING-WAL-ENC-006 After the full logical record through `record_checksum` has been decoded, any
 //# remaining bytes up to the aligned physical record end are padding. Those padding bytes MUST all
@@ -520,7 +520,7 @@ fn requirement_decode_rejects_non_escape_padding_bytes() {
     assert_eq!(error, WalRecordError::InvalidPadding(0x00));
 }
 
-//= spec/ring.md#wal-record-types
+//= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
 //# `RING-WAL-ENC-008` The encoded size of every WAL record MUST be
 //# rounded up to a multiple of
@@ -538,7 +538,7 @@ fn requirement_encoded_record_len_is_rounded_to_wal_write_granule() {
     assert_eq!(encoded_len % 16, 0);
 }
 
-//= spec/ring.md#wal-record-types
+//= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
 //# `RING-WAL-ENC-007` Every WAL record start offset within a WAL region
 //# MUST be aligned to `wal_write_granule`, the smallest writable unit
@@ -560,7 +560,7 @@ fn requirement_consecutive_wal_record_start_offsets_stay_aligned_to_wal_write_gr
     assert_eq!((initial_offset + first_len + second_len) % 16, 0);
 }
 
-//= spec/ring.md#encoding-helper-requirements
+//= spec/ring/04-wal-records.md#encoding-helper-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-130` Update WAL records MUST round-trip through physical escaping,
 //# padding, and decoding without changing payload bytes.
@@ -577,7 +577,7 @@ fn requirement_update_record_round_trips_with_escaping_and_padding() {
     assert_eq!(decoded.record, record);
 }
 
-//= spec/ring.md#wal-record-types
+//= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
 //# `RING-WAL-LAYOUT-005` Record types whose payload is empty
 //# (`new_collection`, `drop_collection`, and `wal_recovery`) MUST still
@@ -602,7 +602,7 @@ fn requirement_empty_payload_record_types_encode_zero_payload_len() {
     assert_eq!(wal_recovery_len, 9);
 }
 
-//= spec/ring.md#encoding-helper-requirements
+//= spec/ring/04-wal-records.md#encoding-helper-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-131` Free-list-head WAL records with no region index MUST round-trip
 //# through physical encoding and decoding.
@@ -616,7 +616,7 @@ fn requirement_free_list_head_none_round_trips() {
     assert_eq!(decoded.record, record);
 }
 
-//= spec/ring.md#wal-record-types
+//= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
 //# `RING-WAL-ENC-004` During decoding, any `wal_escape_byte` in the
 //# encoded body MUST be
@@ -647,7 +647,7 @@ fn requirement_decode_rejects_invalid_escape_sequence() {
     assert_eq!(error, WalRecordError::InvalidEscapeSequence(0xfe));
 }
 
-//= spec/ring.md#wal-record-types
+//= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
 //# `RING-WAL-LAYOUT-001` `record_type` MUST use these canonical byte
 //# codes:
@@ -686,7 +686,7 @@ fn requirement_record_types_use_canonical_byte_codes() {
     }
 }
 
-//= spec/ring.md#wal-record-types
+//= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
 //# `RING-WAL-LAYOUT-002` The logical field order before byte-stuffing
 //# MUST be exactly the order shown above.
@@ -711,7 +711,7 @@ fn requirement_logical_record_fields_follow_canonical_order() {
     assert_eq!(&logical[..checksum_offset], expected_prefix.as_slice());
 }
 
-//= spec/ring.md#wal-record-types
+//= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
 //# `RING-WAL-LAYOUT-003` `payload_len` MUST equal the number of logical
 //# payload bytes only.
@@ -728,7 +728,7 @@ fn requirement_payload_len_counts_only_logical_payload_bytes() {
     );
 }
 
-//= spec/ring.md#wal-record-types
+//= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
 //# It MUST exclude omitted optional fields,
 //# `record_checksum`, the physical leading `record_magic`, and any
@@ -745,7 +745,7 @@ fn requirement_payload_len_excludes_omitted_fields_checksum_magic_and_padding() 
     assert!(encoded_len > logical_len);
 }
 
-//= spec/ring.md#wal-record-types
+//= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
 //# `RING-WAL-LAYOUT-004` `record_checksum` MUST be CRC-32C over the
 //# logical WAL record bytes from `record_type` through the final byte of
@@ -766,7 +766,7 @@ fn requirement_record_checksum_covers_logical_prefix_bytes() {
     assert_eq!(u32::from_le_bytes(checksum_bytes), expected_checksum);
 }
 
-//= spec/ring.md#encoding-helper-requirements
+//= spec/ring/04-wal-records.md#encoding-helper-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-132` Alloc-begin WAL records MUST round-trip free_list_head_after through
 //# physical encoding and decoding.
@@ -783,7 +783,7 @@ fn requirement_alloc_begin_round_trips_free_list_head_after() {
     assert_eq!(decoded.record, record);
 }
 
-//= spec/ring.md#wal-record-types
+//= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
 //# `RING-WAL-LAYOUT-006` Payload bytes are encoded canonically by record
 //# type:

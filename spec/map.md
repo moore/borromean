@@ -5,7 +5,7 @@
 This specification defines the logical API and durable payload semantics
 for the Borromean map collection. Shared storage ordering, replay,
 reclaim, WAL layout, and committed-region mechanics remain defined by
-[spec/ring.md](ring.md). Implementation-level architecture and API
+[spec/ring/00-introduction.md](ring/00-introduction.md). Implementation-level architecture and API
 constraints remain defined by
 [spec/implementation.md](implementation.md).
 
