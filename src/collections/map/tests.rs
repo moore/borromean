@@ -3124,9 +3124,10 @@ fn requirement_region_loading_matches_embedded_snapshot_loading() {
 
 //= spec/ring/01-theory.md#core-requirements
 //= type=test
-//# `RING-CORE-002` Each collection MUST be implemented as an
-//# append-only data structure whose new writes are added to the head
-//# region and whose storage can only be freed by truncating the tail.
+//# `RING-CORE-002` Each collection MUST be represented as
+//# log-structured state: new durable collection state is written to WAL
+//# records or fresh committed regions, and live committed collection
+//# regions MUST NOT be rewritten in place.
 #[test]
 fn requirement_map_updates_append_new_head_records_and_replacement_reclaims_the_old_tail_region() {
     const REGION_SIZE: usize = 512;

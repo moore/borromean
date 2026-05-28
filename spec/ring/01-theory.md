@@ -27,19 +27,19 @@ If we used an RTOS this might be achievable with a file system, but
 finder is planned for an embassy/bare-metal approach without that
 option.
 
-## Design Proof Outline
+## Design Principles
 
 Borromean is built from a small set of mutually reinforcing choices:
 
 - Region alignment makes every durable object reclaimable without
   rewriting neighboring data.
-- Append-only collection state avoids hot stable locations and gives
+- Log-structured collection state avoids hot stable locations and gives
   reclaim a clear oldest-first direction.
 - The WAL serializes collection, allocator, reclaim, and WAL-chain
   decisions into one replay order.
 - Checkpointing partially filled frontiers to the WAL lets the store
   support more live collections than available in-memory frontier
-  buffers.
+  buffers, within the configured collection limit.
 - Every region allocation is made durable before use, so a reset cannot
   lose a removed free-list head.
 - Every region free is bracketed by reclaim records, so a reset can
@@ -58,13 +58,10 @@ after a newer durable basis no longer references them. For each
 collection, borromean tracks a stable collection id and the latest
 durable basis selected by replay.
 
-Before being written to storage, updates to a collection are kept in
-memory. To persist mutations before a full region flush or snapshot,
-each mutation is also written to a global write-ahead log (WAL)
-shared by all collections.
-Normal mutations are appended and synced to the WAL before the
-corresponding in-memory frontier is allowed to represent the current
-collection state.
+Collection updates accumulate in bounded in-memory frontiers, but a
+normal mutation is appended and synced to the global write-ahead log
+(WAL) before the corresponding frontier is advanced to represent the
+current collection state.
 Per-collection WAL entries contain a stable collection id and bytes
 whose meaning is defined by the corresponding collection-specific
 specification; those bytes are opaque to borromean core. Collection ids
@@ -94,7 +91,7 @@ survives elsewhere in the WAL or in committed regions. Replay therefore
 distinguishes historical validity from retained basis: after reclaim,
 the earliest retained basis record for a user collection may be
 `snapshot`, `head`, or `drop_collection` even though `new_collection`
-was required at inilization.
+was required at initialization.
 
 Borromean tracks the current collection type for each live collection
 in WAL replay state. Any durable record that carries
@@ -107,32 +104,26 @@ record for that collection must carry the same `collection_type`. A
 drop-only retained tombstone does not by itself re-establish a live
 `collection_type`; it only reserves the dropped `collection_id`.
 
-A collection can be flushed either as a full region write or
-as a partial state snapshot into the WAL. A WAL snapshot is a durable
-staging point: when that collection is mutated again, the snapshot is
-loaded into RAM, later mutations are still appended to the WAL as
-`update` records, and the in-memory state is allowed to accumulate
-enough change to eventually justify writing a full region. Allowing
-snapshots to the WAL prevents many partially filled regions and low
-effective storage utilization because partial snapshots can be
-intermixed with other WAL entries and more easily collected when
-stale.
-A WAL snapshot can also checkpoint a dirty frontier so its bounded
-working memory can be reused by later collection operations without
-forcing an underfilled committed region.
+A collection can checkpoint a dirty frontier as a partial state snapshot
+in the WAL or flush it into collection-defined committed state. A WAL
+snapshot is a durable staging point: when that collection is mutated
+again, the snapshot is loaded into RAM, later mutations are still
+appended to the WAL as `update` records, and the in-memory state can
+accumulate enough change to eventually justify writing committed
+regions. WAL snapshots avoid many underfilled committed regions because
+partial state can be intermixed with other WAL entries and collected
+when stale. They also let the store support more live collections than
+resident in-memory frontier buffers, within the configured collection
+limit.
 
-Further snapshotting to the WAL allows bounded RAM usage with an
-unbounded number of collections. However, each collection's mutable
-in-memory update frontier is bounded. If applying another update would
-overflow that frontier, the implementation flushes the current logical
-frontier into collection-defined committed state, commits a new durable
-head, clears the in-memory frontier, and continues accepting later
-updates into RAM over the new committed head. For simple collections the
-head may be the newly written data region itself. For manifest-based
-collections the head may be a manifest region that makes one or more
-data-region segments live. Collections therefore remain log-structured:
-a flush creates new immutable committed region state, analogous to an
-LSM SSTable, instead of rewriting existing live region state in place.
+Each collection's mutable in-memory update frontier is bounded. If
+applying another update would overflow that frontier, the implementation
+flushes the current logical frontier into collection-defined committed
+state, commits a new durable head, clears the in-memory frontier, and
+continues accepting later updates into RAM over the new committed head.
+Collections therefore remain log-structured: a flush creates new
+immutable committed state instead of rewriting existing live committed
+state in place.
 
 In a completed WAL rotation, the last record of the old WAL tail is
 `link(next_region_index, expected_sequence)`, which points to the next
@@ -141,30 +132,19 @@ tail ends earlier; startup recovery finishes that rotation before
 resuming normal appends.
 
 A WAL region can be reclaimed when the number of live records drops
-below a configurable threshold. During reclaim, we write the current
-live state for each affected uncommitted collection into a new WAL
-region by snapshotting that collection into the current WAL tail
-region, rotating to a new tail region first if needed. If a
-collection's data is not in memory, that implies its current snapshot
-is already in the WAL. If a current snapshot is in the region being
-collected, it can be copied directly to the WAL tail while updating
-the head pointer to the new location. Here "WAL head" means the
-logical oldest live WAL region in the chain; new WAL records are always
-appended at the WAL tail.
+below a configurable threshold. During reclaim, the implementation
+preserves replay-visible state by copying any WAL-resident basis or
+update records that must survive the reclaimed region into the current
+WAL tail, rotating to a new tail region first if needed. Here "WAL head"
+means the logical oldest live WAL region in the chain; new WAL records
+are always appended at the WAL tail.
 
-Once collection data is flushed from a WAL head being reclaimed, any
-current user-collection basis records that must remain live are
-rewritten to the WAL tail. If reclaim advances the WAL head, a normal
+If reclaim advances the WAL head, a normal
 `head(collection_id = 0, collection_type = wal, region_index =
-new_head)` control record is appended in the current WAL tail pointing
-to the new WAL head, and the old WAL head is added to the free list.
-Startup step 4 derives the WAL head only from the current tail
-region's `WalRegionPrologue` plus the last valid tail-local
-`head(collection_id = 0, ...)` override, so reclaim and rotation must
-preserve the effective WAL head in one of those two forms before the
-older representation becomes unreachable. The WAL does not have a
-separate WAL-only head-record type; it uses the same `head` record as
-every other collection.
+new_head)` control record is appended in the current WAL tail before
+the old WAL head becomes unreachable. The WAL does not have a separate
+WAL-only head-record type; it uses the same `head` record as every
+other collection.
 
 Any reclaim that frees a region is a WAL-tracked transaction. Before
 removing a region from live collection or WAL state, borromean writes
@@ -189,7 +169,7 @@ durably reserve that region with
 `link`, or `stage_region` record that uses that region consumes the
 single ready-region reservation. A staged region remains allocated, but
 it is not live collection state unless a later committed collection
-format, such as a manifest, references it. That reservation exists to
+format references it. That reservation exists to
 prevent a free region from being leaked across a crash between
 allocation and consumption; once the region has been durably consumed,
 replay no longer needs the historical `alloc_begin` for
@@ -230,10 +210,11 @@ facts.
 
 Oldest-first freeing is necessary for wear leveling, but borromean
 cannot reclaim old bytes merely because they are old. A region remains
-live while a collection basis, manifest, WAL-chain link, ready-region
-reservation, staged-region entry, pending reclaim, or free-list link can
-still require it during replay. The rest of this specification defines
-the operations that make those reachability decisions explicit.
+live while a collection basis, collection-defined region reference,
+WAL-chain link, ready-region reservation, staged-region entry, pending
+reclaim, or free-list link can still require it during replay. The rest
+of this specification defines the operations that make those
+reachability decisions explicit.
 
 This is why the WAL is collection `0`: it is the single replay order for
 state that would otherwise need stable mutable roots. Startup finds the
@@ -247,9 +228,10 @@ regions, pending reclaims, and recovery boundaries.
 1. `RING-CORE-001` Region starts and region sizes MUST be aligned to
 the backing flash erase-block size so every region can be erased
 independently.
-2. `RING-CORE-002` Each collection MUST be implemented as an
-append-only data structure whose new writes are added to the head
-region and whose storage can only be freed by truncating the tail.
+2. `RING-CORE-002` Each collection MUST be represented as
+log-structured state: new durable collection state is written to WAL
+records or fresh committed regions, and live committed collection
+regions MUST NOT be rewritten in place.
 3. `RING-CORE-003` Borromean MUST reserve `collection_id = 0` for the
 WAL, and all user collection identifiers MUST be nonzero stable 64-bit
 nonces that are never recycled.
