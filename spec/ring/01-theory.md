@@ -5,24 +5,6 @@ regions provide erase granularity, bounded memory holds mutable
 frontiers, and the WAL records every durable state transition needed to
 recover after reset.
 
-## Design Proof Outline
-
-Borromean is built from a small set of mutually reinforcing choices:
-
-- Region alignment makes every durable object reclaimable without
-  rewriting neighboring data.
-- Append-only collection state avoids hot stable locations and gives
-  reclaim a clear oldest-first direction.
-- The WAL serializes collection, allocator, reclaim, and WAL-chain
-  decisions into one replay order.
-- Bounded frontiers let many collections stay open while still forcing
-  large or old frontiers into snapshots or committed regions.
-- Every region allocation is made durable before use, so a reset cannot
-  lose a removed free-list head.
-- Every region free is bracketed by reclaim records, so a reset can
-  complete or discard incomplete free-list work without duplicating a
-  region.
-
 ## Motivation
 
 When using built-in flash storage on small microcontrollers, some
@@ -45,20 +27,44 @@ If we used an RTOS this might be achievable with a file system, but
 finder is planned for an embassy/bare-metal approach without that
 option.
 
+## Design Proof Outline
+
+Borromean is built from a small set of mutually reinforcing choices:
+
+- Region alignment makes every durable object reclaimable without
+  rewriting neighboring data.
+- Append-only collection state avoids hot stable locations and gives
+  reclaim a clear oldest-first direction.
+- The WAL serializes collection, allocator, reclaim, and WAL-chain
+  decisions into one replay order.
+- Checkpointing partially filled frontiers to the WAL lets the store
+  support more live collections than available in-memory frontier
+  buffers.
+- Every region allocation is made durable before use, so a reset cannot
+  lose a removed free-list head.
+- Every region free is bracketed by reclaim records, so a reset can
+  complete or discard incomplete free-list work without duplicating a
+  region.
+
 ## Overview
 
 To solve these challenges, borromean divides flash into equal-size
 regions. Region starts and sizes must be aligned to the backing
 flash's erase-block size so every region can be erased independently.
-Each collection is implemented as an append-only data
-structure where new writes are added to the head region and data can
-only be freed by truncating the tail. For each collection, borromean
-tracks a collection id and current head.
+Collections are log-structured rather than updated in place. New
+durable collection state is written to fresh WAL records or fresh
+committed regions, and old committed regions become reclaimable only
+after a newer durable basis no longer references them. For each
+collection, borromean tracks a stable collection id and the latest
+durable basis selected by replay.
 
 Before being written to storage, updates to a collection are kept in
 memory. To persist mutations before a full region flush or snapshot,
 each mutation is also written to a global write-ahead log (WAL)
 shared by all collections.
+Normal mutations are appended and synced to the WAL before the
+corresponding in-memory frontier is allowed to represent the current
+collection state.
 Per-collection WAL entries contain a stable collection id and bytes
 whose meaning is defined by the corresponding collection-specific
 specification; those bytes are opaque to borromean core. Collection ids
@@ -79,10 +85,8 @@ storage state.
 
 A collection head may refer either to a committed region or to a
 WAL-resident snapshot. The data payload in each committed region is
-defined by the corresponding collection specification. Some collection
-formats may use that committed region as a manifest whose payload names
-additional committed regions that remain live collection state. For
-user collections, append-time validity requires a successful
+defined by the corresponding collection specification. For user
+collections, append-time validity requires a successful
 `new_collection(collection_id, collection_type)` before any later record
 for that collection may be appended. WAL reclaim may later remove that
 `new_collection` record once a newer durable basis for the collection
@@ -90,7 +94,7 @@ survives elsewhere in the WAL or in committed regions. Replay therefore
 distinguishes historical validity from retained basis: after reclaim,
 the earliest retained basis record for a user collection may be
 `snapshot`, `head`, or `drop_collection` even though `new_collection`
-was required historically.
+was required at inilization.
 
 Borromean tracks the current collection type for each live collection
 in WAL replay state. Any durable record that carries
@@ -113,6 +117,9 @@ snapshots to the WAL prevents many partially filled regions and low
 effective storage utilization because partial snapshots can be
 intermixed with other WAL entries and more easily collected when
 stale.
+A WAL snapshot can also checkpoint a dirty frontier so its bounded
+working memory can be reused by later collection operations without
+forcing an underfilled committed region.
 
 Further snapshotting to the WAL allows bounded RAM usage with an
 unbounded number of collections. However, each collection's mutable

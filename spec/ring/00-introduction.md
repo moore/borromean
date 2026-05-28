@@ -1,5 +1,37 @@
 # Low Level Storage
 
+Borromean's low-level storage layer provides a bounded-memory,
+log-structured database core over fixed-size erase regions. It is
+designed to run without a heap allocator by using statically bounded
+memory, so storage operations do not fail due to dynamic allocation
+exhaustion. Completed durable operations must remain recoverable after
+an unexpected halt. Recovery must also preserve allocator integrity:
+regions may be temporarily staged or pending reclaim, but storage space
+must not be permanently leaked by an interrupted operation.
+
+A collection's visible state is reconstructed from three layers:
+
+1. A bounded in-memory frontier containing recent changes.
+2. Durable update and control records appended to the write-ahead log
+   (WAL).
+3. Immutable committed regions that hold compacted collection data.
+
+The backing store is divided into one static metadata region followed by
+equal-sized data regions. Data regions may be used as WAL regions,
+committed collection regions, or free-list members.
+
+Borromean can host multiple collections in the same store, subject to
+compile-time capacity limits such as maximum live collections, pending
+reclaims, and collection-specific runtime state. These limits keep core
+memory usage explicit and avoid heap allocation in the storage layer.
+
+TODO: Remove pending reclaims as a compile-time capacity limit.
+
+The current implementation exposes `Map<K, V>` as the supported
+high-level collection. The storage format itself is typed by collection
+identifier, collection type, and collection format so additional
+collection implementations can be added later.
+
 ## Table Of Contents
 
 This document is organized from the conceptual model toward the concrete mechanisms that make the
@@ -30,10 +62,10 @@ includes a requirement identifier.
 
 ## Reader Model
 
-Read this specification as an operation-first storage model. The
-system is defined by stable state, named operations that may change
-that state, durable edges inside those operations, and replay rules
-that reconstruct the same state after reset.
+Read this specification as a crash-recovery model. The system is
+defined by durable state, named operations that change that state, the
+writes that make each operation durable, and replay rules that
+reconstruct the same state after reset.
 
 Glossary:
 
@@ -51,9 +83,9 @@ Glossary:
 - **Frontier**: bounded in-memory collection state containing mutations
   newer than the durable basis.
 - **Clean / dirty collection state**: clean means the durable basis is
-  sufficient to reconstruct the collection. Dirty means retained
-  post-basis updates and possibly a materialized frontier are also
-  needed.
+  enough to load the collection. Dirty means newer WAL updates must
+  also be replayed over that basis. A dirty collection may also have
+  those updates loaded into an in-memory frontier.
 - **Ready region**: a region removed from the free-list head by
   `alloc_begin` but not yet consumed by `head`, `link`, or
   `stage_region`.
