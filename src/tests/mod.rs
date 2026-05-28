@@ -1753,7 +1753,10 @@ fn requirement_storage_map_api_restores_snapshot_and_updates() {
 //= spec/ring/01-theory.md#core-requirements
 //= type=test
 //# `RING-CORE-012` The implementation MUST maintain
-//# `min_free_regions >= max_in_memory_dirty_collections + 1`.
+//# `min_free_regions >= max_in_memory_dirty_collections + 1` so every
+//# storage-managed dirty frontier can be preserved using one committed
+//# region while one additional region remains reserved for WAL rotation,
+//# reclaim bookkeeping, or crash recovery.
 #[test]
 fn requirement_storage_map_frontiers_do_not_exceed_the_configured_dirty_collection_reserve() {
     const REGION_SIZE: usize = 512;
@@ -2758,9 +2761,10 @@ fn requirement_storage_reopen_after_replacement_recovers_reclaim_idempotently() 
 
 //= spec/ring/01-theory.md#core-requirements
 //= type=test
-//# `RING-CORE-014` If reclaim cannot restore at least
-//# `min_free_regions` free regions, the database MUST treat ordinary
-//# writes as out of space until space is freed or the store is migrated.
+//# `RING-CORE-014` If space-recovery operations cannot restore more
+//# than `min_free_regions` free regions, the database MUST treat
+//# ordinary writes as out of space until space is freed or the store is
+//# migrated.
 #[test]
 fn requirement_storage_map_flush_rejects_consuming_min_free_region_reserve() {
     let mut flash = MockFlash::<512, 7, 2048>::new(0xff);
@@ -2837,8 +2841,10 @@ fn requirement_storage_map_flush_completes_detached_reclaims_before_using_reserv
 
 //= spec/ring/01-theory.md#core-requirements
 //= type=test
-//# `RING-CORE-013` Ordinary foreground allocations MUST NOT consume the
-//# last `min_free_regions` free regions.
+//# `RING-CORE-013` While the free-list contains at most
+//# `min_free_regions` free regions, ordinary foreground mutations MUST
+//# NOT be accepted unless they are part of a space-recovery operation
+//# that makes regions reclaimable or completes reclaim.
 #[test]
 fn requirement_storage_map_flush_reclaims_wal_head_before_consuming_min_free_region_reserve() {
     let mut flash = MockFlash::<512, 8, 4096>::new(0xff);

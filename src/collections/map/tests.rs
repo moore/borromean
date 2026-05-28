@@ -3354,8 +3354,9 @@ fn requirement_load_snapshot_rejects_overlapping_entry_refs() {
 
 //= spec/ring/01-theory.md#core-requirements
 //= type=test
-//# `RING-CORE-015` Each collection's mutable in-memory update frontier
-//# MUST have a bounded configured capacity.
+//# `RING-CORE-015` Each storage-managed resident mutable collection
+//# frontier MUST have usable byte capacity exactly equal to the
+//# committed-region payload capacity of one configured durable region.
 #[test]
 fn requirement_mutable_map_frontier_capacity_is_bounded_by_its_configured_buffer() {
     let min_capacity_for_three_updates = (ENTRY_COUNT_SIZE..256)

@@ -116,7 +116,12 @@ when stale. They also let the store support more live collections than
 resident in-memory frontier buffers, within the configured collection
 limit.
 
-Each collection's mutable in-memory update frontier is bounded. If
+Each collection's storage-managed resident update frontier has exactly
+the committed-region payload capacity for the configured region size:
+the region size minus the region header and free-pointer footer. That
+keeps dirty frontier memory aligned with the amount of collection data
+that can be written to one committed region and prevents undersized
+resident buffers from causing avoidable region underutilization. If
 applying another update would overflow that frontier, the implementation
 flushes the current logical frontier into collection-defined committed
 state, commits a new durable head, clears the in-memory frontier, and
@@ -178,26 +183,28 @@ region-consumption validity.
 Borromean must also maintain a configured `min_free_regions` reserve.
 Let `max_in_memory_dirty_collections` be the maximum number of dirty
 collections that may simultaneously have in-memory working state.
-Each such dirty in-memory collection must be preservable using at most
-one newly allocated region before reclaim frees any region: either by
-writing a WAL snapshot if that snapshot fits in the available WAL
-space, or by writing a normal collection region instead if the
-snapshot would not fit efficiently in the WAL.
+This reserve calculation relies on each storage-managed dirty frontier
+having exactly one committed-region payload of usable capacity. Each
+such dirty in-memory collection must be preservable using at most one
+newly allocated region before reclaim frees any region: either by
+writing a WAL snapshot if that snapshot fits in the available WAL space,
+or by writing a normal collection region instead if the snapshot would
+not fit efficiently in the WAL.
 Under that assumption, `min_free_regions` must be at least
 `max_in_memory_dirty_collections + 1`. The extra `+1` region is
 reserved so WAL rotation, reclaim bookkeeping, or crash recovery can
 still make forward progress before the first region is freed.
-Ordinary foreground allocations must not consume the last
-`min_free_regions` free regions; those regions are reserved so reclaim,
-WAL rotation, and crash recovery can always make forward progress
-instead of deadlocking while trying to free space. If an ordinary write
-would require consuming that reserve, the implementation must first try
-to reclaim regions. If, after such reclaim attempts, the free-list
-still contains fewer than `min_free_regions` free regions, the database
-must be treated as full for purposes of accepting further ordinary
-writes. At that point, more drastic action such as dropping or
-truncating collections, or migrating/reformatting onto a larger backing
-store, is required before additional ordinary writes may be accepted.
+While the free-list contains at most `min_free_regions` free regions,
+ordinary foreground mutations must not be accepted unless they are part
+of space-recovery work: operations that make regions reclaimable,
+or complete reclaim. If accepting an ordinary foreground mutation would
+leave the store at or below the reserve, the implementation must first
+attempt such space-recovery work. If space-recovery operations cannot
+restore more than `min_free_regions` free regions, the database must be
+treated as full for purposes of accepting further ordinary writes. At
+that point, more drastic action such as dropping or truncating
+collections, or migrating/reformatting onto a larger backing store, is
+required before additional ordinary writes may be accepted.
 
 ## Design Constraints
 
@@ -262,14 +269,20 @@ consume the oldest free regions first.
 MUST first durably reserve that region with
 `alloc_begin(region_index, free_list_head_after)`.
 12. `RING-CORE-012` The implementation MUST maintain
-`min_free_regions >= max_in_memory_dirty_collections + 1`.
-13. `RING-CORE-013` Ordinary foreground allocations MUST NOT consume
-the last `min_free_regions` free regions.
-14. `RING-CORE-014` If reclaim cannot restore at least
-`min_free_regions` free regions, the database MUST treat ordinary
+`min_free_regions >= max_in_memory_dirty_collections + 1` so every
+storage-managed dirty frontier can be preserved using one committed
+region while one additional region remains reserved for WAL rotation,
+reclaim bookkeeping, or crash recovery.
+13. `RING-CORE-013` While the free-list contains at most
+`min_free_regions` free regions, ordinary foreground mutations MUST NOT
+be accepted unless they are part of a space-recovery operation that
+makes regions reclaimable or completes reclaim.
+14. `RING-CORE-014` If space-recovery operations cannot restore more
+than `min_free_regions` free regions, the database MUST treat ordinary
 writes as out of space until space is freed or the store is migrated.
-15. `RING-CORE-015` Each collection's mutable in-memory update frontier
-MUST have a bounded configured capacity.
+15. `RING-CORE-015` Each storage-managed resident mutable collection
+frontier MUST have usable byte capacity exactly equal to the
+committed-region payload capacity of one configured durable region.
 16. `RING-CORE-016` If applying another update would exceed that
 capacity, the implementation MUST flush the collection's current
 logical frontier into collection-defined committed state, durably commit
