@@ -106,7 +106,7 @@ implementation shape where `StorageRuntime`, or the storage context
 that owns it, carries one storage-mode enum. Complex operations use
 mode-specific sub-enums for their interstitial state. Format and open
 paths may use bounded builder or startup state until the recovered
-runtime vector exists; after that point operation progress belongs in
+runtime state exists; after that point operation progress belongs in
 the active mode rather than in unrelated runtime fields or hidden
 long-lived globals.
 

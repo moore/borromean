@@ -1,14 +1,14 @@
 # Chapter 2: Storage Context And State Machines
 
 This chapter defines the public storage context, the stable runtime
-vector, the active operation mode, and the named operation and durable
+state, the active operation mode, and the named operation and durable
 edge vocabulary used by later chapters.
 
 ## How To Read The State Machine
 
 The storage model has three layers:
 
-- **Stable vector**: replayed facts such as WAL head/tail, allocator
+- **Stable runtime state**: replayed facts such as WAL head/tail, allocator
   head/tail, collection states, staged regions, and pending reclaims.
 - **Active mode**: the single in-flight operation and its local progress
   state.
@@ -18,8 +18,8 @@ The storage model has three layers:
 Public operations enter from `Idle`, move through one active mode, and
 return to `Idle` after their durable edge sequence reaches a terminal
 state. Some low-level operations intentionally expose a stable
-intermediate vector, such as a reserved `ready_region`; that vector is
-not an in-flight mode and is replayable after reset.
+intermediate runtime state, such as a reserved `ready_region`; that
+state is not an in-flight mode and is replayable after reset.
 
 The named operation table is the index for later chapters. Collection,
 WAL, allocator, reclaim, format, and open chapters should use those
@@ -102,12 +102,12 @@ policy, or sharing primitive.
 ## Core Ring State Machine
 
 The ring is a hierarchical state machine. The long-lived runtime state
-is the replayed database vector, while the active mode records the
-single operation currently advancing that vector. This keeps durable
+is the replayed database state, while the active mode records the
+single operation currently advancing that state. This keeps durable
 state, operation progress, replay, and recovery described with the
 same vocabulary.
 
-The stable runtime vector contains:
+The stable runtime state contains:
 
 - `metadata`, including immutable geometry and WAL encoding
   parameters.
@@ -131,7 +131,7 @@ The stable runtime vector contains:
 replay result. This includes dirty-frontier accounting and any
 collection-defined in-memory frontier materialized from retained
 post-basis updates. Startup can reconstruct equivalent volatile
-collection state from the stable vector and retained WAL payloads, but
+collection state from stable runtime state and retained WAL payloads, but
 dirty-frontier bookkeeping is not a separate durable fact.
 
 Operation-specific progress is distinct from both stable replayed state
@@ -167,20 +167,20 @@ enum StorageMode {
 `Idle` is the only steady-state mode. Public operations enter from
 `Idle`, transition through one operation mode, and return to `Idle`
 after reaching a terminal result. Mutating operations may change the
-stable runtime vector through named durable transition edges. Read-only
+stable runtime state through named durable transition edges. Read-only
 operations may scan WAL or committed regions and materialize volatile
 views, but they do not write durable transition edges. While a mode is
 active, its sub-state owns the operation's interstitial data and the
-stable runtime vector remains the replayable state that a reset would
+stable runtime state remains the replayable state that a reset would
 recover from durable media.
 
 Some low-level APIs expose individual transition edges rather than a
 whole collection operation. For example, an allocation-start call may
 return successfully after `ReserveRegion`, leaving `ready_region` in
-the stable runtime vector, and a reclaim-start call may return
+stable runtime state, and a reclaim-start call may return
 successfully after `BeginReclaim`, leaving an ordered pending reclaim.
-Those are not lingering active modes; they are replayable stable-vector
-states that later public calls may consume from `Idle`.
+Those are not lingering active modes; they are replayable stable
+runtime states that later public calls may consume from `Idle`.
 
 `Opening(OpenMode)` has these phases:
 
@@ -193,7 +193,7 @@ states that later public calls may consume from `Idle`.
   to the selected tail.
 - `ReplayWalRecords`: scan reachable WAL records in order and apply
   each durable record through `ApplyWalRecord`.
-- `BuildRuntimeState`: construct the stable runtime vector from the
+- `BuildRuntimeState`: construct the stable runtime state from the
   replay tracker and reconstructed free-list tail.
 - `ValidateLiveCollections`: let supported collection implementations
   validate retained live bases and payloads needed for reads and
@@ -247,7 +247,7 @@ The main operation modes are transition sequences over the same table:
 - `AppendingWal(WalAppendMode)` validates the source state, ensures the
   tail has room or asks `RotatingWal` to make room, writes and syncs one
   WAL record, then applies `ApplyWalRecord` to the stable runtime
-  vector.
+  state.
 - `AllocatingRegion(AllocationMode)` completes safe foreground reclaim
   if needed, preserves the minimum free-region reserve, writes and
   syncs `alloc_begin`, then leaves the selected region in
@@ -346,7 +346,7 @@ Named durable edges for replay-visible durable writes:
 Formatting is modeled as `Formatting(FormatMode)` until the freshly
 initialized metadata, initial WAL region, and initial free-list chain
 are durable. Opening is modeled as `Opening(OpenMode)` until replay and
-post-replay recovery produce the stable runtime vector. After format or
+post-replay recovery produce stable runtime state. After format or
 open succeeds, the storage context is in `Idle`.
 
 ### Ring State Machine Requirements

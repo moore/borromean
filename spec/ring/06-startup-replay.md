@@ -7,7 +7,7 @@ recovery work.
 
 Mechanism review:
 
-- **Purpose**: turn durable media into the stable runtime vector without
+- **Purpose**: turn durable media into stable runtime state without
   inventing recovery-specific collection or allocator semantics.
 - **State**: scanned region headers, WAL chain, replay tracker,
   pending WAL-recovery boundary, staged regions, pending reclaims, and
@@ -27,7 +27,7 @@ Mechanism review:
 ## Startup Replay Algorithm
 
 Startup recovery is the concrete `Opening(OpenMode)` procedure. It
-reconstructs the stable runtime vector by scanning durable media,
+reconstructs stable runtime state by scanning durable media,
 walking the WAL chain, and applying each retained WAL record through
 `ApplyWalRecord`. The detailed steps below define validation,
 discovery, and recovery behavior that surrounds those shared

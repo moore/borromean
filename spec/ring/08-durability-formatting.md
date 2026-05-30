@@ -9,7 +9,7 @@ Mechanism review:
 - **Purpose**: state exactly when an operation becomes durable and what
   replay must do for each crash prefix.
 - **State**: the operation-local write/sync sequence plus the stable
-  vector prefix that has become replay-visible.
+  runtime state prefix that has become replay-visible.
 - **Named operations**: `ApplyCollectionUpdate`,
   `CommitCollectionSnapshot`, `CommitCollectionRegion`,
   `DropCollection`, `RotateWalTail`, `ReclaimRegion`,
