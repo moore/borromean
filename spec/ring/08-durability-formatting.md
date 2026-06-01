@@ -12,9 +12,8 @@ Mechanism review:
   runtime state prefix that has become replay-visible.
 - **Named operations**: `ApplyCollectionUpdate`,
   `CommitCollectionSnapshot`, `CommitCollectionRegion`,
-  `DropCollection`, `RotateWalTail`, `ReclaimRegion`,
-  `ReclaimWalHead`, `CommitWalRecovery`, `FormatStorage`, and
-  `OpenStorage`.
+  `DropCollection`, `RotateWalTail`, `ReclaimWalHead`, `FreeRegion`,
+  `CommitWalRecovery`, `FormatStorage`, and `OpenStorage`.
 - **Durable edge sequence**: each operation is expressed as ordered
   writes and syncs; write order alone is not a durability guarantee.
 - **Replay effect**: replay observes only synced durable edges and
@@ -49,22 +48,23 @@ Required write and sync ordering:
 3. `RING-ORDER-003` `DropCollection` transition:
 `W(drop_collection(collection_id)) -> S(drop_collection)`.
 4. `RING-ORDER-004` `CommitCollectionRegion` transition:
-if the target is not already reserved or staged by an earlier stable
-operation,
-`W(alloc_begin(region_index, free_list_head_after)) -> S(alloc_begin) ->`;
+if the target is not already reserved by an earlier stable operation,
+`W(alloc_begin(collection_id, region_index, free_list_head_after)) -> S(alloc_begin) ->`;
 in all cases,
 `erase/init reserved region if needed -> W(region header+data) -> S(region) ->`
 `W(head(collection_id, collection_type, ref=region_index)) -> S(head)`.
 5. `RING-ORDER-005` `RotateWalTail` transition:
-`W(alloc_begin(next_region_index, free_list_head_after)) -> S(alloc_begin) ->`
+`W(alloc_begin(collection_id = 0, next_region_index, free_list_head_after)) -> S(alloc_begin) ->`
 `W(link(next_region_index, expected_sequence)) -> S(link) ->`
 `W(new_wal_region_init(sequence=expected_sequence, wal_head_region_index=current_wal_head)) ->`
 `S(new_wal_region_init)`.
-6. `RING-ORDER-006` `ReclaimRegion` or `ReclaimWalHead` transition:
-`W(reclaim_begin(region_index)) -> S(reclaim_begin) ->`
+6. `RING-ORDER-006` transaction transition for stable-head replacement, drop cleanup, or
+`ReclaimWalHead`:
+`W(begin_transaction(collection_id)) -> S(begin_transaction) ->`
 `W(replacement_live_state_and_new_links) -> S(replacement_state) ->`
-`append old region to free list (write+sync) -> W(reclaim_end(region_index)) ->`
-`S(reclaim_end)`.
+`W(commit_transaction(collection_id)) -> S(commit_transaction) ->`
+`append old regions to free list with free_region records ->`
+`W(transaction_finished(collection_id)) -> S(transaction_finished)`.
 7. `RING-ORDER-007` `CommitWalRecovery` transition:
 `W(wal_recovery()) -> S(wal_recovery) -> W(next_normal_wal_record) -> S(next_normal_wal_record)`.
 
@@ -83,8 +83,8 @@ CommitDropCollection`"]
 ReserveRegion -> WriteCommittedRegion -> CommitRegionHead`"]
     Rotation["`RotateWalTail
 StartWalRotation -> RotateWalLink -> InitializeRotatedWalRegion`"]
-    Reclaim["`ReclaimRegion / ReclaimWalHead
-BeginReclaim -> replacement edges -> free-list edge -> EndReclaim`"]
+    Reclaim["`Collection transaction
+BeginTransaction -> replacement edges -> CommitTransaction -> cleanup frees -> FinishTransaction`"]
     Recovery["`CommitWalRecovery
 CommitWalRecoveryBoundary -> next AppendRawWalRecord`"]
     Durable([Durable boundary reached])
@@ -95,14 +95,14 @@ CommitWalRecoveryBoundary -> next AppendRawWalRecord`"]
     Kind -->|DropCollection| Drop --> Durable
     Kind -->|CommitCollectionRegion| RegionCommit --> Durable
     Kind -->|RotateWalTail| Rotation --> Durable
-    Kind -->|ReclaimRegion / ReclaimWalHead| Reclaim --> Durable
+    Kind -->|transactional cleanup| Reclaim --> Durable
     Kind -->|CommitWalRecovery| Recovery --> Durable
 ```
 
 General region-allocation rule:
 
 1. `RING-ALLOC-001` Any operation that writes a newly allocated region MUST first make
-`alloc_begin(region_index, free_list_head_after)` durable.
+`alloc_begin(collection_id, region_index, free_list_head_after)` durable.
 2. `RING-ALLOC-002` Erasing or initializing the reserved region is allowed only after
 `S(alloc_begin)`.
 3. `RING-ALLOC-003` If crash occurs after `S(alloc_begin)` but before a durable `head`
@@ -137,7 +137,8 @@ unless a later durable `head` consumes it.
 7. `RING-CRASH-007` Crash after `S(head(collection_id, collection_type, region_index))`:
 region head transition is durable and consumes the reserved
 `ready_region`.
-8. `RING-CRASH-008` Crash after `S(alloc_begin(next_region_index, free_list_head_after))`
+8. `RING-CRASH-008` Crash after
+`S(alloc_begin(collection_id = 0, next_region_index, free_list_head_after))`
 for WAL rotation but before any durable matching `link`:
 if that `alloc_begin` occupies the reserve window that only a
 rotation-start record may occupy, startup treats it as an incomplete
@@ -166,14 +167,18 @@ append point, the first durable later record must be `wal_recovery()`.
 An aligned tail slot whose first byte is still `erased_byte` is not a
 torn record; it is an unwritten slot that marks end of the written
 portion of the tail region.
-12. `RING-CRASH-012` Crash after `S(reclaim_begin)` but before the region is detached
-from all live state:
-startup sees an incomplete reclaim, but the region is still live and
-must not be freed.
-13. `RING-CRASH-013` Crash after the region is detached from live state but before
-`S(reclaim_end)`:
-startup sees an incomplete reclaim and must complete the free-list
-append idempotently if the region is not already free.
+12. `RING-CRASH-012` Crash after `S(begin_transaction(collection_id))`
+but before `S(commit_transaction(collection_id))`:
+startup runs data recovery for the transaction, preserves the
+pre-transaction collection state, and appends
+`rollback_transaction(collection_id)`.
+13. `RING-CRASH-013` Crash after `S(commit_transaction(collection_id))`
+but before `S(transaction_finished(collection_id))`:
+startup preserves the committed collection state, completes cleanup
+frees idempotently, and appends `transaction_finished(collection_id)`.
+14. `RING-CRASH-014` Crash after
+`S(transaction_finished(collection_id))`:
+startup replays the full transaction interval in original order.
 
 ## Operations
 
@@ -269,7 +274,7 @@ Expected replay outcome on first open:
 4. Replay therefore yields:
 no tracked user collections,
 `pending_updates = empty`,
-`pending_reclaims = empty`,
+no transaction recovery work,
 and durable `last_free_list_head = Some(1)` iff `region_count >= 2`,
 otherwise `None`, inherited from the formatted initial free-list root.
 5. Normal replay reconstruction then yields
@@ -278,11 +283,11 @@ otherwise `None`, inherited from the formatted initial free-list root.
 `region_count >= 2`, otherwise `None`,
 `collections = empty`,
 `pending_updates = empty`,
-and `pending_reclaims = empty`.
+and no transaction recovery work.
 
 This is not a special-case bootstrap. Replay always starts with the
 formatted initial durable free-list head and then applies later
-`alloc_begin` / `free_list_head` decisions in WAL order. `free_list_tail`
+`alloc_begin` / `free_region` decisions in WAL order. `free_list_tail`
 is always reconstructed by walking the free-pointer chain from the
 recovered durable free-list head; it is not found by scanning WAL
 regions.

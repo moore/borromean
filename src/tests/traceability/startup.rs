@@ -98,25 +98,10 @@ fn requirement_startup_open_paths_complete_without_heap_allocation() {
 #[test]
 fn todo_startup_uses_storage_context_decode_scratch() {}
 
-//= spec/ring/06-startup-replay.md#startup-replay-algorithm
-//= type=todo
-//# `RING-STARTUP-024` After live collection type and retained data
-//# validation has succeeded, process each pending reclaim in WAL order:
-//# if the target region is still reachable from any live collection head
-//# or the WAL chain, leave it allocated because the reclaim did not reach
-//# the detach point durably.
-//# If the target region is unreachable from live state and not yet in the
-//# free-list chain, complete the free-list append using the Region
-//# Reclaim procedure.
-//# If the target region is already reachable from the free-list chain,
-//# finish the reclaim transaction by appending `reclaim_end(region_index)`.
-#[test]
-fn todo_startup_validates_live_collections_before_reachability_reclaim() {}
-
 //= spec/implementation.md#startup-requirements
 //= type=test
 //# `RING-IMPL-STARTUP-004` Recovery of incomplete WAL rotation,
-//# allocation, or reclaim state MUST be expressible through the same
+//# allocation, or transaction cleanup state MUST be expressible through the same
 //# operation framework used for normal foreground work.
 #[test]
 fn requirement_blocking_and_future_open_recover_the_same_pending_reclaim_state() {
@@ -162,3 +147,83 @@ fn requirement_blocking_and_future_open_recover_the_same_pending_reclaim_state()
         reopened_blocking.pending_reclaims()
     );
 }
+
+//= spec/ring/07-reclaim.md#transaction-cleanup-recovery
+//= type=todo
+//# `RING-TX-RECOVERY-001` If startup reaches WAL end before
+//# `commit_transaction(collection_id)`, it MUST run data recovery for that
+//# transaction and append `rollback_transaction(collection_id)`.
+#[test]
+fn todo_startup_recovers_uncommitted_transaction_with_rollback_marker() {}
+
+//= spec/ring/07-reclaim.md#transaction-cleanup-recovery
+//= type=todo
+//# `RING-TX-RECOVERY-002` If startup reaches WAL end after
+//# `commit_transaction(collection_id)` but before
+//# `transaction_finished(collection_id)`, it MUST preserve the committed
+//# collection state, finish cleanup frees derived from durable
+//# collection-specific state, and append
+//# `transaction_finished(collection_id)`.
+#[test]
+fn todo_startup_finishes_post_commit_transaction_cleanup() {}
+
+//= spec/ring/07-reclaim.md#transaction-cleanup-recovery
+//= type=todo
+//# `RING-TX-RECOVERY-003` Both data recovery and cleanup recovery MUST
+//# be idempotent if startup crashes before the terminal marker is durable.
+#[test]
+fn todo_transaction_recovery_is_idempotent() {}
+
+//= spec/ring/07-reclaim.md#transaction-cleanup-recovery
+//= type=todo
+//# `RING-TX-RECOVERY-004` The configured minimum free-region reserve MUST leave enough WAL
+//# capacity for startup recovery to append a required terminal transaction
+//# record.
+#[test]
+fn todo_min_free_region_reserve_covers_transaction_terminal_records() {}
+
+//= spec/ring/04-wal-records.md#wal-record-types
+//= type=todo
+//# `RING-WAL-PAYLOAD-010` `begin_transaction`
+//# Starts a WAL transaction interval for `collection_id`. Until the
+//# matching terminal marker is found or WAL end is reached, replay scans
+//# ordinary records for that collection without applying them on the first
+//# pass.
+#[test]
+fn todo_wal_begin_transaction_record_starts_collection_interval() {}
+
+//= spec/ring/04-wal-records.md#wal-record-types
+//= type=todo
+//# `RING-WAL-PAYLOAD-011` `commit_transaction`
+//# Ends the transaction update phase for `collection_id`. Before this
+//# marker, recovery abandons the collection-state update. After this
+//# marker, recovery preserves the collection-state update and finishes
+//# allocator cleanup.
+#[test]
+fn todo_wal_commit_transaction_record_marks_update_phase() {}
+
+//= spec/ring/04-wal-records.md#wal-record-types
+//= type=todo
+//# `RING-WAL-PAYLOAD-012` `transaction_finished`
+//# Ends the cleanup phase for `collection_id`. Both the collection-state
+//# update and allocator cleanup are complete, so replay can apply the full
+//# transaction interval in original order.
+#[test]
+fn todo_wal_transaction_finished_record_closes_cleanup_phase() {}
+
+//= spec/ring/04-wal-records.md#wal-record-types
+//= type=todo
+//# `RING-WAL-PAYLOAD-013` `rollback_transaction`
+//# Records that pre-commit recovery for `collection_id` has completed.
+//# Replay skips transaction-scoped records in the interval and does not
+//# repeat recovery.
+#[test]
+fn todo_wal_rollback_transaction_record_closes_data_recovery() {}
+
+//= spec/ring/07-reclaim.md#free-region
+//= type=todo
+//# `RING-FREE-REGION-PRE-003` The owning collection's committed
+//# transaction state MUST contain enough durable information for cleanup
+//# recovery to derive that `region_index` must be freed.
+#[test]
+fn todo_collection_state_contains_cleanup_free_plan() {}

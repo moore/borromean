@@ -459,7 +459,7 @@ fn run_map_lifecycle_preserves_model_across_compaction_reclaim_and_rollover() {
 //= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-111` WAL-head reclaim capacity stress MUST reclaim a bounded WAL prefix
-//# when the full chain is longer than `MAX_PENDING_RECLAIMS`.
+//# when the full chain is longer than the cleanup batch capacity.
 #[test]
 fn requirement_wal_head_reclaim_capacity_stress_reclaims_bounded_prefix() {
     std::thread::Builder::new()

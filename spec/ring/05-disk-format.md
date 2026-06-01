@@ -11,8 +11,8 @@ Mechanism review:
 - **State**: storage metadata, region header sequence and ownership,
   user payload area, free-pointer footer, and WAL-region prologue.
 - **Named operations**: `FormatStorage`, `CommitCollectionRegion`,
-  `RotateWalTail`, `ReclaimRegion`, and `OpenStorage` all depend on
-  these physical layouts.
+  `RotateWalTail`, `FreeRegion`, and `OpenStorage` all depend on these
+  physical layouts.
 - **Durable edge sequence**: physical structures are written and synced
   by the durable edges named in the state-machine chapter.
 - **Replay effect**: startup trusts locally valid checksums at the layer

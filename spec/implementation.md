@@ -357,7 +357,7 @@ crate MUST remain usable without them.
 Startup is likely the most complex borromean operation. It must read
 metadata, locate the effective WAL tail and WAL head, replay the live
 collection state, rebuild bounded in-memory indexes, and detect any
-incomplete reclaim or rotation that must be resumed. That is exactly
+incomplete transaction cleanup or rotation that must be resumed. That is exactly
 the kind of logic that benefits from an explicit async phase machine:
 each phase can request reads, parse the result, update bounded replay
 state, and continue.
@@ -373,7 +373,7 @@ same no-allocation rule as steady-state operation.
 that storage MUST come from the `Storage` context or bounded storage
 supplied when that context is constructed.
 4. `RING-IMPL-STARTUP-004` Recovery of incomplete WAL rotation,
-allocation, or reclaim state MUST be expressible through the same
+allocation, or transaction cleanup state MUST be expressible through the same
 operation framework used for normal foreground work.
 
 ## Collection Strategy

@@ -40,11 +40,12 @@ Borromean is built from a small set of mutually reinforcing choices:
 - Checkpointing partially filled frontiers to the WAL lets the store
   support more live collections than available in-memory frontier
   buffers, within the configured collection limit.
-- Every region allocation is made durable before use, so a reset cannot
-  lose a removed free-list head.
-- Every region free is bracketed by reclaim records, so a reset can
-  complete or discard incomplete free-list work without duplicating a
-  region.
+- Every region allocation is made durable before use and tagged with
+  the owning collection, so a reset cannot lose a removed free-list
+  head.
+- Multi-step collection changes use WAL transactions so replay can
+  distinguish uncommitted updates from committed updates that still
+  need allocator cleanup.
 
 ## Overview
 
@@ -151,34 +152,32 @@ the old WAL head becomes unreachable. The WAL does not have a separate
 WAL-only head-record type; it uses the same `head` record as every
 other collection.
 
-Any reclaim that frees a region is a WAL-tracked transaction. Before
-removing a region from live collection or WAL state, borromean writes
-and syncs `reclaim_begin(region_index)`. After the region is no longer
-live, it is appended to the free list. Reclaim completes only after
-`reclaim_end(region_index)` is written and synced. Startup replay treats
-any `reclaim_begin` without a matching `reclaim_end` as an incomplete,
-idempotent reclaim operation that must either be completed or proven
-unnecessary before open succeeds.
+Multi-step collection operations that replace durable state use
+collection-scoped WAL transactions. A transaction begins with
+`begin_transaction(collection_id)`. Before
+`commit_transaction(collection_id)`, replay can abandon the collection
+state update and recover transaction-private allocation effects. After
+`commit_transaction(collection_id)`, replay must keep the new collection
+state and finish any allocator cleanup. The transaction is complete only
+after `transaction_finished(collection_id)` is durable; if pre-commit
+recovery has already cleaned up an abandoned transaction, replay records
+that fact with `rollback_transaction(collection_id)`.
 
 The storage system also keeps a free list of regions that are
 available to satisfy new allocations. This list is FIFO (First In,
 First Out), to support wear leveling. The durable free-list head
 is tracked in WAL replay order so every durable allocator-head change
 is replayed exactly once. Allocations advance the durable free-list
-head through `alloc_begin(..., free_list_head_after)`. Reclaim or
-recovery steps that make a region the new free-list head without
-consuming one use an explicit `free_list_head(region_index_or_none)`
-record. Any operation that writes a newly allocated region must first
-durably reserve that region with
-`alloc_begin(region_index, free_list_head_after)`. The later `head`,
-`link`, or `stage_region` record that uses that region consumes the
-single ready-region reservation. A staged region remains allocated, but
-it is not live collection state unless a later committed collection
-format references it. That reservation exists to
-prevent a free region from being leaked across a crash between
-allocation and consumption; once the region has been durably consumed,
-replay no longer needs the historical `alloc_begin` for
-region-consumption validity.
+head through `alloc_begin(collection_id, region_index,
+free_list_head_after)`. Any operation that writes a newly allocated
+region must first durably reserve that region with the owning
+collection id; WAL rotation uses `collection_id = 0`. The later `head`
+or `link` record that uses that region consumes the single ready-region
+reservation. Freeing a region appends
+`free_region(collection_id, region_index)`, where the collection id is
+the collection that is losing that region. The free record mutates
+global allocator state, but it remains collection-scoped because it
+removes a region from that collection.
 
 Borromean must also maintain a configured `min_free_regions` reserve.
 Let `max_in_memory_dirty_collections` be the maximum number of dirty
@@ -212,23 +211,22 @@ The flash constraint driving the design is that repeatedly rewriting a
 small set of stable locations would wear those regions out before the
 rest of the backing media. Borromean therefore treats stable state as
 log-structured state: collection heads, allocator decisions, WAL-chain
-movement, and reclaim bookkeeping are all represented by append-only
-facts.
+movement, and transaction phase markers are all represented by
+append-only facts.
 
 Oldest-first freeing is necessary for wear leveling, but borromean
 cannot reclaim old bytes merely because they are old. A region remains
 live while a collection basis, collection-defined region reference,
-WAL-chain link, ready-region reservation, staged-region entry, pending
-reclaim, or free-list link can still require it during replay. The rest
-of this specification defines the operations that make those
-reachability decisions explicit.
+WAL-chain link, ready-region reservation, open transaction, or free-list
+link can still require it during replay. The rest of this specification
+defines the operations that make those reachability decisions explicit.
 
 This is why the WAL is collection `0`: it is the single replay order for
 state that would otherwise need stable mutable roots. Startup finds the
 WAL tail by sequence number, derives the effective WAL head from the
 tail prologue and tail-local WAL-head control records, then replays
-retained records to rebuild collection state, allocator state, staged
-regions, pending reclaims, and recovery boundaries.
+retained records to rebuild collection state, allocator state,
+transaction recovery state, and recovery boundaries.
 
 ## Core Requirements
 
@@ -260,19 +258,20 @@ once they are no longer physically reachable from live state.
 8. `RING-CORE-008` Borromean MUST model WAL-head movement as ordinary
 `head(collection_id = 0, collection_type = wal, region_index = ...)`
 records rather than a WAL-specific head record type.
-9. `RING-CORE-009` Any reclaim that frees a region MUST be tracked as a
-WAL transaction bounded by durable `reclaim_begin(region_index)` and
-`reclaim_end(region_index)` records.
+9. `RING-CORE-009` Any multi-step collection operation that commits a
+new durable basis and frees old regions MUST be tracked as a
+collection-scoped WAL transaction with durable begin, commit, cleanup,
+and terminal markers.
 10. `RING-CORE-010` The durable free list MUST be FIFO so allocations
 consume the oldest free regions first.
 11. `RING-CORE-011` Any operation that writes a newly allocated region
 MUST first durably reserve that region with
-`alloc_begin(region_index, free_list_head_after)`.
+`alloc_begin(collection_id, region_index, free_list_head_after)`.
 12. `RING-CORE-012` The implementation MUST maintain
 `min_free_regions >= max_in_memory_dirty_collections + 1` so every
 storage-managed dirty frontier can be preserved using one committed
 region while one additional region remains reserved for WAL rotation,
-reclaim bookkeeping, or crash recovery.
+transaction terminal records, or crash recovery.
 13. `RING-CORE-013` While the free-list contains at most
 `min_free_regions` free regions, ordinary foreground mutations MUST NOT
 be accepted unless they are part of a space-recovery operation that

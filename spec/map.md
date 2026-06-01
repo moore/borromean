@@ -423,17 +423,17 @@ These requirements cover the map collection's integration with shared storage re
 and reopen behavior.
 
 The storage runtime knows collection ids, WAL order, region allocation,
-and reclaim transactions; the map layer knows how to interpret map
+and collection-scoped transactions; the map layer knows how to interpret map
 payloads. The integration requirements are the boundary contract between
 those layers. Opening must filter WAL records by collection id so one
 collection's update or drop cannot affect another. Storage visitation
 must preserve typed durable order so map replay can select the correct
 basis and post-basis updates. Flush and drop then have to respect the
-shared allocator and reclaim protocol: a replacement basis preserves
+shared allocator and transaction cleanup protocol: a replacement basis preserves
 lookups while detaching old regions, a dropped committed basis becomes
-reclaimable, and a WAL-snapshot basis has no committed region to reclaim.
-The crash-reopen cases are necessary because reclaim is transactional;
-they show which pending reclaims are completed, reconstructed, or
+freeable, and a WAL-snapshot basis has no committed region to free.
+The crash-reopen cases are necessary because cleanup is transactional;
+they show which incomplete cleanup work is completed, reconstructed, or
 discarded depending on whether the live basis was already detached.
 
 1. `RING-IMPL-REGRESSION-030` Opening a map from storage MUST replay only WAL records for the
@@ -444,24 +444,23 @@ discarded depending on whether the live basis was already detached.
    updates when opening a map.
 4. `RING-IMPL-REGRESSION-109` Storage map flush API MUST write a committed region basis, clear
    ready_region, and preserve flushed key/value lookups.
-5. `RING-IMPL-REGRESSION-113` Reopening after a map replacement flush MUST complete pending
-   reclaim of the replaced region and preserve the replacement map value.
+5. `RING-IMPL-REGRESSION-113` Reopening after a map replacement flush MUST complete transaction
+   cleanup of the replaced region and preserve the replacement map value.
 6. `RING-IMPL-REGRESSION-114` Reopening after replacement with an empty free list MUST initialize
    free-list head from the recovered reclaimed region.
 7. `RING-IMPL-REGRESSION-115` Reopening after replacement with an empty free list MUST reconstruct
    free-list tail from the recovered reclaimed region.
-8. `RING-IMPL-REGRESSION-116` Map flush MUST complete detached pending reclaims before allocating
-   from the minimum free-region reserve.
-9. `RING-IMPL-REGRESSION-117` Reopening after a premature reclaim_begin before replacement
-   detaches the old head MUST discard the pending reclaim and preserve the old map basis and
-   value.
-10. `RING-IMPL-REGRESSION-118` Dropping a map with committed-region basis MUST start reclaim for
-    that region, tombstone the collection, complete reclaim on reopen, and reject reopening the
-    dropped map.
-11. `RING-IMPL-REGRESSION-119` Reopening after a premature reclaim_begin before drop detaches the
-    live region MUST discard the pending reclaim and preserve the live map basis and value.
+8. `RING-IMPL-REGRESSION-116` Map flush MUST complete detached transaction cleanup before
+   allocating from the minimum free-region reserve.
+9. `RING-IMPL-REGRESSION-117` Reopening after a premature cleanup marker before replacement
+   detaches the old head MUST discard that cleanup and preserve the old map basis and value.
+10. `RING-IMPL-REGRESSION-118` Dropping a map with committed-region basis MUST free that region
+    through transaction cleanup, tombstone the collection, complete cleanup on reopen, and reject
+    reopening the dropped map.
+11. `RING-IMPL-REGRESSION-119` Reopening after a premature cleanup marker before drop detaches the
+    live region MUST discard that cleanup and preserve the live map basis and value.
 12. `RING-IMPL-REGRESSION-120` Dropping a map whose basis is a WAL snapshot MUST tombstone the
-    collection without starting a region reclaim.
+    collection without starting committed-region cleanup.
 
 ## Map Compaction Requirements
 

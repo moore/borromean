@@ -9,7 +9,8 @@ edge vocabulary used by later chapters.
 The storage model has three layers:
 
 - **Stable runtime state**: replayed facts such as WAL head/tail, allocator
-  head/tail, collection states, staged regions, and pending reclaims.
+  head/tail, collection states, ready allocation state, and transaction
+  recovery state.
 - **Active mode**: the single in-flight operation and its local progress
   state.
 - **Durable edge**: one replay-visible write/sync boundary inside a
@@ -120,10 +121,10 @@ The stable runtime state contains:
 - The replayed collection table, including each collection id,
   collection type, durable basis, dropped state, and retained
   post-basis update count or WAL record locations.
-- Ordered `staged_regions` that left `ready_region` but are not yet
-  known to be live or free.
-- Ordered `pending_reclaims` that have a durable `reclaim_begin` but
-  no durable matching `reclaim_end`.
+- Optional transaction recovery state: active transaction collection id,
+  WAL interval start, whether `commit_transaction` has been seen, and
+  whether the interval ended with `transaction_finished`,
+  `rollback_transaction`, or WAL end.
 - The `pending_wal_recovery_boundary` flag used when valid tail
   records were found after a torn or corrupt tail span.
 
@@ -165,8 +166,8 @@ enum StorageMode {
   AllocatingRegion(AllocationMode),
   WritingCommittedRegion(CommittedRegionWriteMode),
   RotatingWal(WalRotationMode),
-  ReclaimingRegion(RegionReclaimMode),
   ReclaimingWalHead(WalHeadReclaimMode),
+  TransactionRecovery(TransactionRecoveryMode),
   SnapshottingCollection(CollectionSnapshotMode),
   FlushingCollection(CollectionFlushMode),
   CompactingCollection(CollectionCompactionMode),
@@ -187,10 +188,9 @@ recover from durable media.
 Some low-level APIs expose individual transition edges rather than a
 whole collection operation. For example, an allocation-start call may
 return successfully after `ReserveRegion`, leaving `ready_region` in
-stable runtime state, and a reclaim-start call may return
-successfully after `BeginReclaim`, leaving an ordered pending reclaim.
-Those are not lingering active modes; they are replayable stable
-runtime states that later public calls may consume from `Idle`.
+stable runtime state. That is not a lingering active mode; it is
+replayable stable runtime state that later public calls may consume
+from `Idle`.
 
 `Opening(OpenMode)` has these phases:
 
@@ -208,10 +208,8 @@ runtime states that later public calls may consume from `Idle`.
 - `ValidateLiveCollections`: let supported collection implementations
   validate retained live bases and payloads needed for reads and
   reachability decisions.
-- `RecoverPendingReclaims`: complete or discard ordered pending
-  reclaims according to live reachability and free-list membership.
-- `RecoverStagedRegions`: reclaim abandoned staged regions that are
-  not reachable from live state.
+- `RecoverTransactions`: finish or roll back incomplete collection
+  transactions before exposing recovered runtime state.
 - `Finish`: expose a `Storage` context whose mode is `Idle`.
 
 `ApplyWalRecord` is the shared transition table for durable WAL record
@@ -226,15 +224,16 @@ effect after a record is durable:
 | `new_collection(collection_id, collection_type)` | Create a collection entry and move its collection submachine from `NoCollection` to `EmptyClean`. |
 | `update(collection_id, payload)` | Require an existing non-dropped collection, retain the update after that collection's current durable basis, and move `EmptyClean` to `EmptyDirty`, `WALSnapshotClean` to `WALSnapshotDirty`, or `RegionClean` to `RegionDirty`; an already dirty collection remains in the matching dirty state. |
 | `snapshot(collection_id, collection_type, payload)` | If this is the first retained basis record for the collection, create replay state and set the collection type from this record; otherwise require `collection_type` to match the replay-tracked type. Move the collection submachine to `WALSnapshotClean` and discard older pending updates for that collection. |
-| `alloc_begin(region_index, free_list_head_after)` | Advance `last_free_list_head` to `free_list_head_after` and set `ready_region = region_index`. |
-| `stage_region(region_index)` | Require `ready_region = region_index`, append the region to `staged_regions`, and clear `ready_region`. |
-| `head(collection_id, collection_type, region_index)` for a user collection | Create or validate the collection type, move the collection submachine to `RegionClean`, discard older pending updates for that collection, and consume matching `ready_region` or staged state. |
+| `alloc_begin(collection_id, region_index, free_list_head_after)` | Advance `last_free_list_head` to `free_list_head_after` and set `ready_region = (collection_id, region_index)`. |
+| `head(collection_id, collection_type, region_index)` for a user collection | Create or validate the collection type, move the collection submachine to `RegionClean`, discard older pending updates for that collection, and consume a matching `ready_region`. |
 | `head(collection_id = 0, collection_type = wal, region_index)` | As a WAL-chain control record, update the effective WAL head in foreground operation. During startup, the last valid tail-local control record selects the effective WAL head before main replay; during the main user-collection replay pass it has no collection-basis effect. |
-| `link(next_region_index, expected_sequence)` | Preserve WAL-chain reachability and consume matching `ready_region` or staged state for the linked WAL region. |
+| `link(next_region_index, expected_sequence)` | Preserve WAL-chain reachability and consume matching `ready_region` for the linked WAL region. |
 | `drop_collection(collection_id)` | Move the collection submachine to `Dropped`, clear retained pending updates and volatile frontier state, and leave the collection id reserved. |
-| `free_list_head(region_index_or_none)` | Set the replayed durable free-list head. |
-| `reclaim_begin(region_index)` | Add an ordered pending reclaim and remove the region from `staged_regions` if present. |
-| `reclaim_end(region_index)` | Remove the matching ordered pending reclaim. |
+| `free_region(collection_id, region_index)` | Add a region removed from `collection_id` to the durable free-list chain and refresh allocator head/tail state. |
+| `begin_transaction(collection_id)` | Start a collection-scoped transaction interval. |
+| `commit_transaction(collection_id)` | Mark the transaction update phase committed; recovery must preserve the new collection state after this marker. |
+| `transaction_finished(collection_id)` | Close a committed transaction after cleanup is complete. |
+| `rollback_transaction(collection_id)` | Close a pre-commit recovery interval whose transaction effects have already been cleaned up. |
 | `wal_recovery()` | Clear the WAL recovery boundary opened by a prior torn or corrupt tail span. |
 
 The main operation modes are transition sequences over the same table:
@@ -261,9 +260,9 @@ The main operation modes are transition sequences over the same table:
   state.
 - `AllocatingRegion(AllocationMode)` completes safe foreground reclaim
   if needed, preserves the minimum free-region reserve, writes and
-  syncs `alloc_begin`, then leaves the selected region in
-  `ready_region` until a later `head`, `link`, or `stage_region`
-  consumes it.
+  syncs `alloc_begin(collection_id, region_index, free_list_head_after)`,
+  then leaves the selected region in `ready_region` until a later
+  `head` or `link` consumes it.
 - `WritingCommittedRegion(CommittedRegionWriteMode)` reserves a region,
   erases and writes a committed-region header plus payload, syncs the
   region, appends and syncs the user `head` record, then applies that
@@ -272,29 +271,29 @@ The main operation modes are transition sequences over the same table:
   `alloc_begin` in the reserved tail window, writes and syncs `link`,
   initializes and syncs the new WAL region, then makes the linked region
   the append tail.
-- `ReclaimingRegion(RegionReclaimMode)` ensures `reclaim_begin` is
-  durable, detaches the target from live collection or WAL state,
-  appends the target to the free-list tail or records a new free-list
-  head, and then appends `reclaim_end`.
 - `ReclaimingWalHead(WalHeadReclaimMode)` plans the old and new WAL
-  heads, begins reclaim for the old head, preserves allocator state,
-  copies or rewrites live records from the old head, commits the new
-  WAL head, and completes region reclaim for the old head.
+  heads, preserves allocator state, copies or rewrites live records from
+  the old head, commits the new WAL head, and frees the old head inside
+  the collection-scoped transaction for the WAL collection.
+- `TransactionRecovery(TransactionRecoveryMode)` scans an incomplete
+  transaction interval during open, selects data recovery or cleanup
+  recovery based on whether `commit_transaction` is present, and writes
+  the matching terminal transaction marker.
 - `SnapshottingCollection(CollectionSnapshotMode)` serializes the
   collection's current logical state into a WAL `snapshot`, appends and
   syncs that record, clears superseded post-basis updates, and returns
   the collection to a clean WAL-snapshot basis.
 - `FlushingCollection(CollectionFlushMode)` writes collection-defined
   committed state into one or more allocated regions, appends and syncs
-  the user `head`, clears superseded post-basis updates, and records any
-  region-basis reclaim work needed for the old basis.
+  the user `head`, clears superseded post-basis updates, and uses a
+  collection transaction when old basis regions must be freed.
 - `CompactingCollection(CollectionCompactionMode)` reads the current
   committed layout, writes replacement committed layout, commits a new
-  user `head`, and records reclaim work for committed regions made stale
-  by the compaction. The logical collection state remains clean.
-- `DroppingCollection(CollectionDropMode)` optionally begins reclaim for
-  a live committed basis, appends and syncs `drop_collection`, clears
-  volatile collection state, and leaves the id reserved as `Dropped`.
+  user `head`, and frees committed regions made stale by the compaction
+  during transaction cleanup. The logical collection state remains clean.
+- `DroppingCollection(CollectionDropMode)` appends and syncs
+  `drop_collection`, clears volatile collection state, and frees old
+  basis regions through transaction cleanup when needed.
 
 State-machine operations are named transition labels. Diagrams and
 transition rules use the operation identifier, with arguments omitted
@@ -314,16 +313,15 @@ inside that transition.
 | `CreateCollection` | `CreatingCollection(CollectionCreateMode)` | `NoCollection` | `CreateCollection` | `EmptyClean` |
 | `ApplyCollectionUpdate` | `UpdatingCollection(CollectionUpdateMode)` | any live clean or dirty collection state | `AppendUpdate` | matching dirty collection state |
 | `CommitCollectionSnapshot` | `SnapshottingCollection(CollectionSnapshotMode)` | any live collection state | `CommitSnapshotHead` | `WALSnapshotClean` |
-| `CommitCollectionRegion` | `FlushingCollection(CollectionFlushMode)`, `CompactingCollection(CollectionCompactionMode)`, or `WritingCommittedRegion(CommittedRegionWriteMode)` | any live collection state | optional `ReserveRegion`, optional `StageRegion`, `WriteCommittedRegion`, `CommitRegionHead` | `RegionClean` |
-| `DropCollection` | `DroppingCollection(CollectionDropMode)` | any live collection state | optional `BeginReclaim`, `CommitDropCollection` | `Dropped` |
+| `CommitCollectionRegion` | `FlushingCollection(CollectionFlushMode)`, `CompactingCollection(CollectionCompactionMode)`, or `WritingCommittedRegion(CommittedRegionWriteMode)` | any live collection state | optional transaction edges, optional `ReserveRegion`, `WriteCommittedRegion`, `CommitRegionHead`, optional cleanup frees | `RegionClean` |
+| `DropCollection` | `DroppingCollection(CollectionDropMode)` | any live collection state | optional transaction edges, `CommitDropCollection`, optional cleanup frees | `Dropped` |
 | `ReplayRetainedSnapshotBasis` | `Opening(OpenMode)` or `ReclaimingWalHead(WalHeadReclaimMode)` | `NoCollection` | none during replay; `CopyRetainedWalRecord` when preserving the record into a new WAL head | `WALSnapshotClean` |
 | `ReplayRetainedRegionBasis` | `Opening(OpenMode)` or `ReclaimingWalHead(WalHeadReclaimMode)` | `NoCollection` | none during replay; `CopyRetainedWalRecord` when preserving the record into a new WAL head | `RegionClean` |
 | `ReplayRetainedDropTombstone` | `Opening(OpenMode)` or `ReclaimingWalHead(WalHeadReclaimMode)` | `NoCollection` | none during replay; `CopyRetainedWalRecord` when preserving the record into a new WAL head | `Dropped` |
 | `ReserveRegionForUse` | `AllocatingRegion(AllocationMode)` | `Idle` with free-list capacity above reserve | `ReserveRegion` | stable `ready_region` set |
-| `StageReadyRegion` | `AppendingWal(WalAppendMode)` | stable `ready_region` matching the staged target | `StageRegion` | target moved to `staged_regions` |
 | `RotateWalTail` | `RotatingWal(WalRotationMode)` | current WAL tail in rotation window | `StartWalRotation`, `RotateWalLink`, `InitializeRotatedWalRegion` | WAL tail moves to linked region |
-| `ReclaimRegion` | `ReclaimingRegion(RegionReclaimMode)` | detached or safely detachable region | `BeginReclaim`, optional replacement-state edges, `LinkFreeTail` or `CommitFreeListHead`, `EndReclaim` | region enters durable free-list chain |
-| `ReclaimWalHead` | `ReclaimingWalHead(WalHeadReclaimMode)` | reclaimable WAL head | `BeginReclaim`, preservation edges, `CommitWalHeadControl`, free-list edge, `EndReclaim` | WAL head moves and old head enters free-list chain |
+| `FreeRegion` | transaction cleanup mode | region detached from its owning collection | `LinkFreeTail`, `CommitFreeRegion` | region enters durable free-list chain |
+| `ReclaimWalHead` | `ReclaimingWalHead(WalHeadReclaimMode)` | reclaimable WAL head | transaction edges, preservation edges, `CommitWalHeadControl`, cleanup frees | WAL head moves and old head enters free-list chain |
 | `CommitWalRecovery` | `AppendingWal(WalAppendMode)` | pending WAL recovery boundary | `CommitWalRecoveryBoundary` | boundary cleared so normal append may resume |
 | `AppendRawWalRecord` | `AppendingWal(WalAppendMode)` | valid record-specific source state | one record-specific durable edge from the table below | `ApplyWalRecord` effect for that record |
 
@@ -339,7 +337,6 @@ Named durable edges for replay-visible durable writes:
 | `CommitSnapshotHead` | Write and sync `snapshot`. | `ApplyWalRecord`, `RING-ORDER-002`, `RING-CRASH-001` through `RING-CRASH-002` |
 | `ReserveRegion` | Write and sync `alloc_begin`. | `ApplyWalRecord`, `RING-ALLOC-*`, `RING-CRASH-005` through `RING-CRASH-008` |
 | `StartWalRotation` | Write and sync the rotation-window `alloc_begin` that only a matching `link` may follow in that tail. | `ApplyWalRecord`, `RING-WAL-ENC-014`, `RING-CRASH-008` |
-| `StageRegion` | Write and sync `stage_region`. | `ApplyWalRecord`, startup replay staged-region rules, WAL reclaim liveness rules |
 | `WriteCommittedRegion` | Erase, write, and sync a committed-region header and payload. | `RING-ORDER-004`, `Header`, collection-format requirements |
 | `CommitRegionHead` | Write and sync a user-collection `head`. | `ApplyWalRecord`, `RING-ORDER-004`, `RING-CRASH-006` through `RING-CRASH-007` |
 | `RotateWalLink` | Write and sync WAL `link`. | `ApplyWalRecord`, `RING-ORDER-005`, `RING-CRASH-008` through `RING-CRASH-010` |
@@ -347,10 +344,12 @@ Named durable edges for replay-visible durable writes:
 | `CommitWalHeadControl` | Write and sync `head(collection_id = 0, collection_type = wal, ...)`. | `ApplyWalRecord`, WAL reclaim postconditions, startup WAL-head discovery |
 | `CopyRetainedWalRecord` | Copy and sync a retained WAL record into the new WAL head during WAL-head reclaim. | `ApplyWalRecord`, WAL reclaim liveness rules |
 | `RewriteRetainedEmptyBasis` | Write and sync a retained `snapshot` basis that represents an empty live collection whose original `new_collection` record would otherwise be reclaimed. | `ApplyWalRecord`, WAL reclaim liveness rules |
-| `CommitFreeListHead` | Write and sync `free_list_head`. | `ApplyWalRecord`, `Region Reclaim` |
-| `BeginReclaim` | Write and sync `reclaim_begin`. | `ApplyWalRecord`, `RING-ORDER-006`, `Region Reclaim` |
-| `LinkFreeTail` | Write and sync the previous free-list tail footer. | `Region Reclaim`, `Free-Pointer Footer` |
-| `EndReclaim` | Write and sync `reclaim_end`. | `ApplyWalRecord`, `RING-ORDER-006`, `Region Reclaim` |
+| `BeginTransaction` | Write and sync `begin_transaction(collection_id)`. | `ApplyWalRecord`, transaction recovery |
+| `CommitTransaction` | Write and sync `commit_transaction(collection_id)`. | `ApplyWalRecord`, transaction recovery |
+| `FinishTransaction` | Write and sync `transaction_finished(collection_id)`. | `ApplyWalRecord`, transaction recovery |
+| `RollbackTransaction` | Write and sync `rollback_transaction(collection_id)`. | `ApplyWalRecord`, transaction recovery |
+| `LinkFreeTail` | Write and sync the previous free-list tail footer. | `Free Region`, `Free-Pointer Footer` |
+| `CommitFreeRegion` | Write and sync `free_region(collection_id, region_index)`. | `ApplyWalRecord`, `Free Region` |
 | `CommitWalRecoveryBoundary` | Write and sync `wal_recovery`. | `ApplyWalRecord`, `RING-ORDER-007`, `RING-CRASH-011` |
 | `CommitDropCollection` | Write and sync `drop_collection`. | `ApplyWalRecord`, `Collection Head Submachine` |
 
@@ -380,9 +379,9 @@ crash-cut result.
 crash recovery MUST use the same `ApplyWalRecord` semantics for every
 retained durable WAL record.
 6. `RING-MACHINE-006` Startup and recovery modes MUST compose the same
-collection, allocator, WAL-chain, and reclaim submachine transitions
-used by normal operation rather than defining separate incompatible
-transition rules.
+collection, allocator, WAL-chain, and transaction submachine
+transitions used by normal operation rather than defining separate
+incompatible transition rules.
 7. `RING-MACHINE-007` State-machine transition rules MUST use named
 operation identifiers, and each named operation MUST define its source
 state, active mode, durable edge sequence, and target state or runtime

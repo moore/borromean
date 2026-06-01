@@ -136,8 +136,8 @@ different retained WAL snapshot without changing logical content.
 10. `EmptyClean | EmptyDirty | WALSnapshotClean | WALSnapshotDirty | RegionClean | RegionDirty
 --CommitCollectionRegion--> RegionClean`
 `CommitCollectionRegion(collection_id, region_index, payload)` runs the
-region-commit operation: reserve or stage a target region as needed,
-write the committed collection region, then append the user
+region-commit operation: reserve a target region as needed, write the
+committed collection region, then append the user
 `head(collection_id, collection_type, region_index)` through
 `CommitRegionHead`.
 Durable after the `head` record is durable. The committed region becomes
@@ -145,12 +145,15 @@ the new durable basis, older post-basis updates are superseded, and the
 dirty frontier is clear. Clean-source committed writes are allowed for
 snapshot materialization, manifest rewrite, or compaction where the
 logical state is unchanged but the retained committed layout changes.
+If the operation makes old regions unreachable, it uses a collection
+transaction so the new basis is recovered only with the required cleanup
+mode.
 
 11. `EmptyClean | EmptyDirty | WALSnapshotClean | WALSnapshotDirty | RegionClean | RegionDirty
 --DropCollection--> Dropped`
 `DropCollection(collection_id)` appends `drop_collection(collection_id)`
-through `CommitDropCollection`, after any required detachment or reclaim
-setup represented by the operation's edge sequence.
+through `CommitDropCollection`, inside a collection transaction when
+old regions must be freed.
 Durable after the `drop_collection` record is durable. Any pending WAL
 updates and volatile frontier state for that collection are discarded
 from the durable basis, the collection leaves the live namespace, and no
@@ -286,7 +289,8 @@ collection is logically absent from the live namespace and any older
 durable basis or update bytes for that collection are reclaimable once
 they are no longer physically reachable. Any region associated with
 that dropped collection may then be added to the free list if it is
-not already in the free-list chain.
+not already in the free-list chain, using
+`free_region(collection_id, region_index)`.
 5. `RING-INVARIANT-005` Historical append validity and retained replay basis are distinct:
 `new_collection` is required before later user-collection records are
 appended, but reclaim may later remove it so replay reconstructs from

@@ -15,8 +15,10 @@ Design history and exploratory ideas live in [journal.md](journal.md).
 ## Medium Priority
 
 - Resolve or retire the Duvet `todo` requirements around storage ownership, startup scratch,
-  collection buffers, shared-device synchronization, named transition edges, and pending reclaim
-  ordering.
+  collection buffers, shared-device synchronization, named transition edges, and transaction
+  recovery ordering.
+- Implement collection-scoped WAL transactions in the storage core, replacing staged-region and
+  pending-reclaim runtime state.
 - Refine the explicit state machine so durable transitions have named preconditions, durable
   effects, runtime effects, replay effects, and crash-cut outcomes.
 - Continue reducing low-level public map APIs that require caller-provided frontier buffers in

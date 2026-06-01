@@ -6,8 +6,8 @@ designed to run without a heap allocator by using statically bounded
 memory, so storage operations do not fail due to dynamic allocation
 exhaustion. Completed durable operations must remain recoverable after
 an unexpected halt. Recovery must also preserve allocator integrity:
-regions may be temporarily staged or pending reclaim, but storage space
-must not be permanently leaked by an interrupted operation.
+partially completed collection transactions must either be finished or
+rolled back without permanently leaking storage space.
 
 A collection's visible state is reconstructed from three layers:
 
@@ -21,11 +21,9 @@ equal-sized data regions. Data regions may be used as WAL regions,
 committed collection regions, or free-list members.
 
 Borromean can host multiple collections in the same store, subject to
-compile-time capacity limits such as maximum live collections, pending
-reclaims, and collection-specific runtime state. These limits keep core
-memory usage explicit and avoid heap allocation in the storage layer.
-
-TODO: Remove pending reclaims as a compile-time capacity limit.
+compile-time capacity limits such as maximum live collections and
+collection-specific runtime state. These limits keep core memory usage
+explicit and avoid heap allocation in the storage layer.
 
 The current implementation exposes `Map<K, V>` as the supported
 high-level collection. The storage format itself is typed by collection
@@ -87,12 +85,12 @@ Glossary:
   also be replayed over that basis. A dirty collection may also have
   those updates loaded into an in-memory frontier.
 - **Ready region**: a region removed from the free-list head by
-  `alloc_begin` but not yet consumed by `head`, `link`, or
-  `stage_region`.
-- **Staged region**: a ready region durably moved out of the ready slot
-  but not yet proven live or free.
-- **Pending reclaim**: a region with durable `reclaim_begin` and no
-  matching durable `reclaim_end`.
+  `alloc_begin` but not yet consumed by `head` or `link`.
+- **Collection transaction**: a WAL interval started by
+  `begin_transaction(collection_id)` for one collection. The interval
+  may commit collection-state updates, perform allocator cleanup, and
+  finish with `transaction_finished(collection_id)` or
+  `rollback_transaction(collection_id)`.
 - **Crash cut**: a point in a multi-step operation where reset may leave
   only the durable prefix of that operation visible to replay.
 

@@ -363,9 +363,10 @@ fn requirement_foreground_replay_and_recovery_share_wal_record_semantics() {
 
 //= spec/ring/02-state-machines.md#ring-state-machine-requirements
 //= type=todo
-//# `RING-MACHINE-006` Startup and recovery modes MUST compose the same collection, allocator,
-//# WAL-chain, and reclaim submachine transitions used by normal operation rather than defining
-//# separate incompatible transition rules.
+//# `RING-MACHINE-006` Startup and recovery modes MUST compose the same
+//# collection, allocator, WAL-chain, and transaction submachine
+//# transitions used by normal operation rather than defining separate
+//# incompatible transition rules.
 #[test]
 fn todo_startup_and_recovery_compose_normal_submachines() {}
 

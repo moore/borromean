@@ -580,8 +580,8 @@ fn requirement_update_record_round_trips_with_escaping_and_padding() {
 //= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
 //# `RING-WAL-LAYOUT-005` Record types whose payload is empty
-//# (`new_collection`, `drop_collection`, and `wal_recovery`) MUST still
-//# encode `payload_len = 0`.
+//# (`new_collection`, `drop_collection`, `wal_recovery`, and transaction
+//# marker records) MUST still encode `payload_len = 0`.
 #[test]
 fn requirement_empty_payload_record_types_encode_zero_payload_len() {
     let (new_collection_logical, new_collection_len) = encode_logical(WalRecord::NewCollection {
@@ -604,7 +604,7 @@ fn requirement_empty_payload_record_types_encode_zero_payload_len() {
 
 //= spec/ring/04-wal-records.md#encoding-helper-requirements
 //= type=test
-//# `RING-IMPL-REGRESSION-131` Free-list-head WAL records with no region index MUST round-trip
+//# `RING-IMPL-REGRESSION-131` Transaction marker WAL records with no payload MUST round-trip
 //# through physical encoding and decoding.
 #[test]
 fn requirement_free_list_head_none_round_trips() {
@@ -658,11 +658,12 @@ fn requirement_decode_rejects_invalid_escape_sequence() {
 //# `head = 0x05`,
 //# `drop_collection = 0x06`,
 //# `link = 0x07`,
-//# `free_list_head = 0x08`,
-//# `reclaim_begin = 0x09`,
-//# `reclaim_end = 0x0a`,
 //# `wal_recovery = 0x0b`,
-//# `stage_region = 0x0c`.
+//# `free_region = 0x0c`,
+//# `begin_transaction = 0x0d`,
+//# `commit_transaction = 0x0e`,
+//# `transaction_finished = 0x0f`,
+//# `rollback_transaction = 0x10`.
 #[test]
 fn requirement_record_types_use_canonical_byte_codes() {
     let canonical_codes = [
@@ -788,8 +789,8 @@ fn requirement_alloc_begin_round_trips_free_list_head_after() {
 //# `RING-WAL-LAYOUT-006` Payload bytes are encoded canonically by record
 //# type:
 //# `update` and `snapshot` payloads are opaque collection-defined bytes;
-//# `alloc_begin`, `stage_region`, `head`, `reclaim_begin`, and
-//# `reclaim_end` payloads are a single `u32 region_index`;
+//# `alloc_begin`, `head`, and `free_region` payloads are a single
+//# `u32 region_index`;
 #[test]
 fn requirement_stage_region_round_trips_region_index() {
     let metadata = metadata(4);

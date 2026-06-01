@@ -242,7 +242,7 @@ fn requirement_storage_facade_accessors_reflect_runtime_state() {
 //= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-094` Storage facade raw WAL wrapper methods MUST update runtime
-//# collection, allocator, free-list, and reclaim state.
+//# collection, allocator, free-list, and transaction state.
 #[test]
 fn requirement_storage_facade_raw_wal_wrappers_update_runtime_state() {
     let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
@@ -1167,8 +1167,9 @@ fn requirement_storage_reclaim_wal_head_updates_runtime_head_to_next_region() {
 
 //= spec/ring/07-reclaim.md#wal-reclaim-eligibility
 //= type=test
-//# `RING-WAL-RECLAIM-013` `stage_region(region_index)` record:
-//# live while replay needs it to reconstruct `region_index` as staged.
+//# `RING-WAL-RECLAIM-013` Transaction-scoped records are live while
+//# replay needs them to preserve or recover an unfinished transaction
+//# interval.
 #[test]
 fn requirement_storage_reclaim_wal_head_blocks_on_live_staged_region() {
     let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
@@ -1260,11 +1261,8 @@ fn requirement_storage_reclaim_wal_head_returns_old_head_region_to_free_list_tai
 
 //= spec/ring/07-reclaim.md#wal-reclaim-eligibility
 //= type=test
-//# `RING-WAL-RECLAIM-PRE-002` For every live record in the candidate,
-//# an equivalent live state MUST be already represented durably outside
-//# the candidate (typically by newer `snapshot`, `drop_collection`, or
-//# by `head(collection_id, collection_type, region_index)` plus newer
-//# updates).
+//# `RING-WAL-RECLAIM-PRE-002` For every live record in the candidate, an equivalent live state MUST
+//# already be represented durably outside the candidate.
 #[test]
 fn requirement_storage_reclaim_wal_head_copies_live_snapshot_basis_to_tail() {
     let mut flash = MockFlash::<512, 6, 4096>::new(0xff);
@@ -1568,9 +1566,9 @@ fn requirement_storage_reclaim_wal_head_reopen_keeps_the_wal_chain_walkable() {
 //# `RING-WAL-RECLAIM-SAFE-001` Reclaim MUST NOT change replay result:
 //# the recovered collection submachine state and pending updates for
 //# every collection, the recovered `last_free_list_head`, reserved
-//# `ready_region`, ordered staged regions, ordered incomplete reclaim
-//# state, and reconstructed `free_list_tail`, after reclaim must match
-//# the pre-reclaim logical state.
+//# `ready_region`, transaction recovery state, and reconstructed
+//# `free_list_tail`, after reclaim must match the pre-reclaim logical
+//# state.
 #[test]
 fn requirement_storage_reclaim_wal_head_reopen_preserves_replay_result() {
     let mut flash = MockFlash::<512, 6, 4096>::new(0xff);
@@ -1756,7 +1754,7 @@ fn requirement_storage_map_api_restores_snapshot_and_updates() {
 //# `min_free_regions >= max_in_memory_dirty_collections + 1` so every
 //# storage-managed dirty frontier can be preserved using one committed
 //# region while one additional region remains reserved for WAL rotation,
-//# reclaim bookkeeping, or crash recovery.
+//# transaction terminal records, or crash recovery.
 #[test]
 fn requirement_storage_map_frontiers_do_not_exceed_the_configured_dirty_collection_reserve() {
     const REGION_SIZE: usize = 512;
@@ -2386,8 +2384,9 @@ fn requirement_storage_compact_map_streams_replacement_larger_than_frontier_capa
 
 //= spec/ring/07-reclaim.md#region-reclaim
 //= type=test
-//# `RING-REGION-RECLAIM-PRE-001` `reclaim_begin(r)` MUST be durable in
-//# the WAL before any live metadata is updated to stop referencing `r`.
+//# `RING-REGION-RECLAIM-PRE-001` Transaction cleanup MUST make the
+//# transaction begin marker durable before durable collection metadata
+//# stops referencing regions that cleanup may free.
 #[test]
 fn requirement_storage_map_replacement_flush_records_reclaim_after_new_head() {
     let mut flash = MockFlash::<512, 7, 2048>::new(0xff);
@@ -2452,8 +2451,8 @@ fn requirement_storage_map_replacement_flush_records_reclaim_after_new_head() {
 
 //= spec/map.md#map-storage-integration-requirements
 //= type=test
-//# `RING-IMPL-REGRESSION-113` Reopening after a map replacement flush MUST complete pending reclaim
-//# of the replaced region and preserve the replacement map value.
+//# `RING-IMPL-REGRESSION-113` Reopening after a map replacement flush MUST complete transaction
+//# cleanup of the replaced region and preserve the replacement map value.
 #[test]
 fn requirement_storage_map_replacement_flush_is_completed_during_reopen() {
     let mut flash = MockFlash::<512, 7, 2048>::new(0xff);
@@ -2602,8 +2601,7 @@ fn requirement_storage_reopen_after_replacement_reconstructs_free_list_tail() {
 //# RING-STARTUP-007 Maintain replay state: per collection optional live
 //# `collection_type`, explicit collection state, `basis_pos`, and
 //# `pending_updates`, plus global `last_free_list_head`, optional
-//# reserved `ready_region`, ordered staged regions, ordered pending
-//# region reclaims, and the replay-local
+//# reserved `ready_region`, transaction scan state, and the replay-local
 //# `pending_wal_recovery_boundary`.
 #[test]
 fn requirement_storage_reopen_after_replacement_recovers_collection_and_reclaim_state() {
@@ -2642,8 +2640,9 @@ fn requirement_storage_reopen_after_replacement_recovers_collection_and_reclaim_
 
 //= spec/ring/07-reclaim.md#region-reclaim
 //= type=test
-//# `RING-REGION-RECLAIM-PRE-002` After the detach step, the reclaimed region `r` MUST no longer be
-//# reachable from any live collection head or live WAL state.
+//# `RING-REGION-RECLAIM-PRE-002` After the committed collection-state
+//# update, a region selected for cleanup MUST no longer be reachable from
+//# any live collection head, WAL chain, or ready allocation state.
 #[test]
 fn requirement_storage_replacement_flush_detaches_reclaimed_region_from_live_state() {
     let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
@@ -2659,8 +2658,9 @@ fn requirement_storage_replacement_flush_detaches_reclaimed_region_from_live_sta
 
 //= spec/ring/07-reclaim.md#region-reclaim
 //= type=test
-//# `RING-REGION-RECLAIM-PRE-003` `r` MUST NOT already be reachable from the free-list chain, unless
-//# this procedure is being re-entered during crash recovery.
+//# `RING-REGION-RECLAIM-PRE-003` A cleanup target MUST NOT already be
+//# reachable from the free-list chain unless startup is re-entering
+//# idempotent recovery.
 #[test]
 fn requirement_storage_replacement_flush_keeps_detached_region_out_of_free_list_chain() {
     let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
@@ -2675,9 +2675,9 @@ fn requirement_storage_replacement_flush_keeps_detached_region_out_of_free_list_
 
 //= spec/ring/07-reclaim.md#region-reclaim
 //= type=test
-//# `RING-REGION-RECLAIM-SEM-003` If `t_prev = none`, reclaim MUST NOT write any predecessor link
-//# and MUST durably append `free_list_head(r)` and set `free_list_head = r` and `free_list_tail =
-//# r`.
+//# `RING-REGION-RECLAIM-SEM-003` If no free-list tail exists, cleanup
+//# MUST make the freed region the durable free-list head through the
+//# `free_region(collection_id, region_index)` record.
 #[test]
 fn requirement_storage_reopen_after_replacement_recovers_singleton_free_list_for_reclaimed_region()
 {
@@ -2701,10 +2701,9 @@ fn requirement_storage_reopen_after_replacement_recovers_singleton_free_list_for
 
 //= spec/ring/07-reclaim.md#region-reclaim
 //= type=test
-//# `RING-REGION-RECLAIM-004` Establish `r` as a free region without
-//# erasing it. In particular,
-//# `r.free_pointer.next_tail` MUST still be uninitialized when `r` is
-//# about to become the new free-list tail.
+//# `RING-REGION-RECLAIM-004` Cleanup MUST leave the newly freed region's
+//# free-pointer successor uninitialized so it is recognizable as the
+//# free-list tail.
 #[test]
 fn requirement_storage_reopen_after_replacement_leaves_new_free_list_tail_uninitialized() {
     let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
@@ -2722,8 +2721,8 @@ fn requirement_storage_reopen_after_replacement_leaves_new_free_list_tail_uninit
 
 //= spec/ring/07-reclaim.md#region-reclaim
 //= type=test
-//# `RING-REGION-RECLAIM-ORDER-005` The reclaim procedure MUST be idempotent across crashes between
-//# any two steps above.
+//# `RING-REGION-RECLAIM-ORDER-005` Transaction cleanup MUST be
+//# idempotent across crashes between any two cleanup steps.
 #[test]
 fn requirement_storage_reopen_after_replacement_recovers_reclaim_idempotently() {
     let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
@@ -2802,8 +2801,8 @@ fn requirement_storage_map_flush_rejects_consuming_min_free_region_reserve() {
 
 //= spec/map.md#map-storage-integration-requirements
 //= type=test
-//# `RING-IMPL-REGRESSION-116` Map flush MUST complete detached pending reclaims before allocating
-//# from the minimum free-region reserve.
+//# `RING-IMPL-REGRESSION-116` Map flush MUST complete detached transaction cleanup before
+//# allocating from the minimum free-region reserve.
 #[test]
 fn requirement_storage_map_flush_completes_detached_reclaims_before_using_reserve() {
     let mut flash = MockFlash::<512, 9, 4096>::new(0xff);
@@ -2915,9 +2914,9 @@ fn requirement_storage_map_flush_reclaims_wal_head_before_consuming_min_free_reg
 
 //= spec/ring/07-reclaim.md#region-reclaim
 //= type=test
-//# `RING-REGION-RECLAIM-SEM-002` If `t_prev != none`, reclaim MUST
-//# durably write `t_prev.free_pointer.next_tail = r` when freeing region
-//# `r`.
+//# `RING-REGION-RECLAIM-SEM-002` If a prior free-list tail exists,
+//# cleanup MUST durably write that tail's `next_tail` pointer to the freed
+//# region.
 #[test]
 fn requirement_storage_complete_pending_reclaim_writes_the_previous_tail_next_pointer() {
     let result = complete_pending_reclaim_returns_old_map_region_to_free_list_result();
@@ -2946,8 +2945,9 @@ fn requirement_storage_complete_pending_reclaim_preserves_fifo_free_list_order()
 
 //= spec/ring/07-reclaim.md#region-reclaim
 //= type=test
-//# `RING-REGION-RECLAIM-POST-002` Exactly one new region (`r`) MUST be
-//# appended to the tail.
+//# `RING-REGION-RECLAIM-POST-002` Cleanup MUST append exactly one
+//# newly freed region for each `free_region(collection_id, region_index)`
+//# record.
 #[test]
 fn requirement_storage_complete_pending_reclaim_appends_exactly_one_region_to_the_tail() {
     let result = complete_pending_reclaim_returns_old_map_region_to_free_list_result();
@@ -2969,8 +2969,10 @@ fn requirement_storage_complete_pending_reclaim_appends_exactly_one_region_to_th
 
 //= spec/ring/07-reclaim.md#region-reclaim
 //= type=test
-//# `RING-REGION-RECLAIM-POST-003` If a prior tail existed, its
-//# `next_tail` pointer MUST now reference `r`.
+//# `RING-REGION-RECLAIM-POST-003` If a prior free-list tail existed,
+//# its
+//# `next_tail` pointer MUST reference the newly freed region after
+//# cleanup.
 #[test]
 fn requirement_storage_complete_pending_reclaim_points_the_previous_tail_at_the_reclaimed_region() {
     let result = complete_pending_reclaim_returns_old_map_region_to_free_list_result();
@@ -2979,8 +2981,8 @@ fn requirement_storage_complete_pending_reclaim_points_the_previous_tail_at_the_
 
 //= spec/ring/07-reclaim.md#region-reclaim
 //= type=test
-//# `RING-REGION-RECLAIM-POST-004` `r.free_pointer.next_tail` MUST
-//# remain uninitialized after reclaim.
+//# `RING-REGION-RECLAIM-POST-004` The newly freed region's
+//# free-pointer successor MUST remain uninitialized after cleanup.
 #[test]
 fn requirement_storage_complete_pending_reclaim_keeps_the_reclaimed_tail_footer_uninitialized() {
     let result = complete_pending_reclaim_returns_old_map_region_to_free_list_result();
@@ -2989,9 +2991,9 @@ fn requirement_storage_complete_pending_reclaim_keeps_the_reclaimed_tail_footer_
 
 //= spec/ring/07-reclaim.md#region-reclaim
 //= type=test
-//# `RING-REGION-RECLAIM-POST-005` If a prior tail existed, replay of free pointers MUST follow
-//# `... -> t_prev -> r`, and `r` is recognized as the tail because its
-//# free-pointer slot is uninitialized.
+//# `RING-REGION-RECLAIM-POST-005` Replay of free pointers MUST follow
+//# the previous tail to the newly freed region when a prior free-list tail
+//# existed.
 #[test]
 fn requirement_storage_complete_pending_reclaim_links_the_previous_tail_to_the_reclaimed_region() {
     let result = complete_pending_reclaim_returns_old_map_region_to_free_list_result();
@@ -3005,10 +3007,9 @@ fn requirement_storage_complete_pending_reclaim_links_the_previous_tail_to_the_r
 
 //= spec/ring/07-reclaim.md#region-reclaim
 //= type=test
-//# `RING-REGION-RECLAIM-ORDER-002` Before any durable write makes `r`
-//# reachable from `t_prev.next_tail`, the implementation MUST ensure
-//# that `r` already has the correct free-list-tail footer state, namely
-//# an uninitialized `r.free_pointer.next_tail`.
+//# `RING-REGION-RECLAIM-ORDER-002` Before any durable write links a
+//# freed region from the previous free-list tail, the freed region MUST
+//# already have the correct uninitialized free-list-tail footer state.
 #[test]
 fn requirement_storage_complete_pending_reclaim_prepares_the_reclaimed_footer_before_syncing_the_tail_link(
 ) {
@@ -3041,9 +3042,9 @@ fn requirement_storage_complete_pending_reclaim_prepares_the_reclaimed_footer_be
 
 //= spec/ring/07-reclaim.md#region-reclaim
 //= type=test
-//# `RING-REGION-RECLAIM-ORDER-003` If `t_prev = none`,
-//# `free_list_head(r)` MUST be durable before `reclaim_end(r)` is
-//# acknowledged.
+//# `RING-REGION-RECLAIM-ORDER-003` If the free list was empty, the
+//# `free_region(collection_id, region_index)` record MUST be durable before
+//# cleanup can be considered finished.
 #[test]
 fn requirement_storage_complete_pending_reclaim_records_free_list_head_before_reclaim_end_when_the_list_was_empty(
 ) {
@@ -3084,9 +3085,10 @@ fn requirement_storage_complete_pending_reclaim_records_free_list_head_before_re
 
 //= spec/ring/07-reclaim.md#region-reclaim
 //= type=test
-//# `RING-REGION-RECLAIM-ORDER-004` If `t_prev` exists, the
-//# `t_prev.next_tail = r` write MUST be synced before `reclaim_end(r)`
-//# is acknowledged.
+//# `RING-REGION-RECLAIM-ORDER-004` If a prior free-list tail exists,
+//# the
+//# tail-link footer write MUST be synced before cleanup can be
+//# considered finished.
 #[test]
 fn requirement_storage_complete_pending_reclaim_syncs_the_tail_link_before_reclaim_end() {
     let result = complete_pending_reclaim_returns_old_map_region_to_free_list_result();
@@ -3132,8 +3134,8 @@ fn requirement_storage_complete_pending_reclaim_syncs_the_tail_link_before_recla
 
 //= spec/map.md#map-storage-integration-requirements
 //= type=test
-//# `RING-IMPL-REGRESSION-117` Reopening after a premature reclaim_begin before replacement detaches
-//# the old head MUST discard the pending reclaim and preserve the old map basis and value.
+//# `RING-IMPL-REGRESSION-117` Reopening after a premature cleanup marker before replacement
+//# detaches the old head MUST discard that cleanup and preserve the old map basis and value.
 #[test]
 fn requirement_storage_reopen_discards_reclaim_begin_before_replacement_detaches_old_head() {
     let mut flash = MockFlash::<512, 7, 2048>::new(0xff);
@@ -3186,9 +3188,9 @@ fn requirement_storage_reopen_discards_reclaim_begin_before_replacement_detaches
 
 //= spec/map.md#map-storage-integration-requirements
 //= type=test
-//# `RING-IMPL-REGRESSION-118` Dropping a map with committed-region basis MUST start reclaim for
-//# that region, tombstone the collection, complete reclaim on reopen, and reject reopening the
-//# dropped map.
+//# `RING-IMPL-REGRESSION-118` Dropping a map with committed-region basis MUST free that region
+//# through transaction cleanup, tombstone the collection, complete cleanup on reopen, and reject
+//# reopening the dropped map.
 #[test]
 fn requirement_storage_drop_map_starts_reclaim_for_committed_region_basis() {
     let mut flash = MockFlash::<512, 7, 2048>::new(0xff);
@@ -3245,8 +3247,8 @@ fn requirement_storage_drop_map_starts_reclaim_for_committed_region_basis() {
 
 //= spec/map.md#map-storage-integration-requirements
 //= type=test
-//# `RING-IMPL-REGRESSION-119` Reopening after a premature reclaim_begin before drop detaches the
-//# live region MUST discard the pending reclaim and preserve the live map basis and value.
+//# `RING-IMPL-REGRESSION-119` Reopening after a premature cleanup marker before drop detaches the
+//# live region MUST discard that cleanup and preserve the live map basis and value.
 #[test]
 fn requirement_storage_reopen_discards_reclaim_begin_before_drop_detaches_live_region() {
     let mut flash = MockFlash::<512, 7, 2048>::new(0xff);
@@ -3299,8 +3301,9 @@ fn requirement_storage_reopen_discards_reclaim_begin_before_drop_detaches_live_r
 
 //= spec/ring/07-reclaim.md#region-reclaim
 //= type=test
-//# `RING-REGION-RECLAIM-ORDER-001` `reclaim_begin(r)` MUST be durable
-//# before any live metadata stops referencing `r`.
+//# `RING-REGION-RECLAIM-ORDER-001` Transaction cleanup MUST not make a
+//# region free until the committed collection state no longer references
+//# that region.
 #[test]
 fn requirement_storage_drop_map_records_reclaim_before_drop() {
     let mut flash = MockFlash::<512, 7, 2048>::new(0xff);
@@ -3359,7 +3362,7 @@ fn requirement_storage_drop_map_records_reclaim_before_drop() {
 //= spec/map.md#map-storage-integration-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-120` Dropping a map whose basis is a WAL snapshot MUST tombstone the
-//# collection without starting a region reclaim.
+//# collection without starting committed-region cleanup.
 #[test]
 fn requirement_storage_drop_map_from_snapshot_basis_has_no_region_reclaim() {
     let mut flash = MockFlash::<512, 7, 2048>::new(0xff);

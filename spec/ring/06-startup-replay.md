@@ -10,14 +10,14 @@ Mechanism review:
 - **Purpose**: turn durable media into stable runtime state without
   inventing recovery-specific collection or allocator semantics.
 - **State**: scanned region headers, WAL chain, replay tracker,
-  pending WAL-recovery boundary, staged regions, pending reclaims, and
-  live collection validation state.
+  pending WAL-recovery boundary, transaction recovery state, and live
+  collection validation state.
 - **Named operations**: `OpenStorage` orchestrates replay and may invoke
   recovery sub-operations such as `RotateWalTail` completion and
-  `ReclaimRegion`.
+  transaction recovery.
 - **Durable edge sequence**: normal replay is read-only; recovery writes
   only the edges required to finish an incomplete rotation, close a WAL
-  recovery boundary, or complete safe reclaim work.
+  recovery boundary, or close incomplete transaction work.
 - **Replay effect**: retained WAL records are applied by the same
   `ApplyWalRecord` table used by foreground operation.
 - **Crash cuts**: opening can be retried after reset because every
@@ -45,10 +45,10 @@ after the durable free-list head is known
 6. `RING-STARTUP-RESULT-006` Runtime `max_seen_sequence`, initially the largest `sequence`
 observed in any valid region header during region scan, then advanced
 further if startup recovery initializes an incomplete WAL rotation
-7. `RING-STARTUP-RESULT-007` Ordered incomplete reclaim transactions that still need post-replay
-recovery work
-8. `RING-STARTUP-RESULT-008` Ordered staged regions that have left
-`ready_region` but are not yet known to be free
+7. `RING-STARTUP-RESULT-007` Incomplete transaction recovery work, if the reachable WAL ends
+inside a collection transaction interval
+8. `RING-STARTUP-RESULT-008` Transaction terminal records written during recovery, if recovery
+needed to close an incomplete interval
 
 Algorithm:
 
@@ -81,7 +81,7 @@ missing/corrupt or has the wrong sequence, treat this as an incomplete
 rotation after `link`. Use the known tail as replay tail until that
 recovery finishes.
 If instead the known tail's last valid record is an
-`alloc_begin(next_region_index, free_list_head_after)` whose aligned
+`alloc_begin(collection_id = 0, next_region_index, free_list_head_after)` whose aligned
 end offset leaves at least `wal_link_reserve` and fewer than
 `wal_rotation_reserve` unwritten bytes in that region, treat this as
 an incomplete rotation before `link`. That reserve-window placement is
@@ -132,14 +132,13 @@ aligned slot whose first byte is `erased_byte` after the last valid
 replayed tail record. If no such slot exists, the tail region is full.
 7. `RING-STARTUP-007` Maintain replay state:
 per collection optional live `collection_type`, explicit collection
-state, `basis_pos`, and
-`pending_updates`, plus global `last_free_list_head`, optional
-reserved `ready_region`, ordered staged regions, ordered pending region reclaims, and the
-replay-local `pending_wal_recovery_boundary`.
+state, `basis_pos`, and `pending_updates`, plus global
+`last_free_list_head`, optional reserved `ready_region`, transaction
+scan state, and the replay-local `pending_wal_recovery_boundary`.
 Initialize `last_free_list_head` to `Some(1)` iff `region_count >= 2`,
 otherwise `None`, because format establishes that as the initial
-durable free-list head. Later `alloc_begin` and `free_list_head`
-records override this baseline in replay order.
+durable free-list head. Later `alloc_begin` and `free_region` records
+override this baseline in replay order.
 8. `RING-STARTUP-008` On `new_collection(collection_id, collection_type)`:
 if `collection_id` is already tracked, return an error.
 otherwise create replay state for that collection with durable basis
@@ -160,7 +159,7 @@ if this record's `collection_type` does not match the tracked
 set collection state to `WALSnapshotClean`, set `basis_pos` to this
 record's WAL position, and clear older pending updates for that
 collection at WAL positions up to and including this snapshot.
-11. `RING-STARTUP-011` On `alloc_begin(region_index, free_list_head_after)`:
+11. `RING-STARTUP-011` On `alloc_begin(collection_id, region_index, free_list_head_after)`:
 if `ready_region` is already set, return an error because replay found
 two unmatched allocation reservations.
 if `last_free_list_head = none`, return an error because allocation
@@ -168,11 +167,12 @@ cannot consume an empty durable free list.
 if `last_free_list_head != region_index`, return an error because
 `alloc_begin` did not consume the current durable free-list head.
 set durable `last_free_list_head` to `free_list_head_after`.
-set `ready_region = region_index`.
-12. `RING-STARTUP-011A` On `stage_region(region_index)`:
-if `ready_region != region_index`, return an error.
-otherwise append `region_index` to staged regions and clear
-`ready_region`.
+set `ready_region = (collection_id, region_index)`.
+12. `RING-STARTUP-011A` On transaction interval scan:
+if replay reaches `begin_transaction(collection_id)`, it MUST scan to
+`transaction_finished(collection_id)`, `rollback_transaction(collection_id)`,
+or WAL end before applying ordinary records for that collection in the
+interval.
 13. `RING-STARTUP-012` On `head(collection_id, collection_type, region_index)`:
 if `collection_id = 0`, this is a WAL-head control record. Its replay
 effect was already consumed in step 4 while determining the WAL-head
@@ -195,21 +195,18 @@ stored `collection_format` is one it understands.
 set collection state to `RegionClean`, set `basis_pos` to this
 record's WAL position, and clear WAL updates/snapshots older than this
 basis decision.
-if `ready_region = region_index`, clear `ready_region`;
+if `ready_region = (collection_id, region_index)`, clear
+`ready_region`;
 otherwise leave `ready_region` unchanged because this `head` either
 retargeted the collection to an already allocated existing region or
 refers to a region whose historical `alloc_begin` was already consumed
 and later reclaimed.
-If `region_index` is in staged regions, remove it from staged regions
-because the head directly makes that region live.
 14. `RING-STARTUP-013` On `link(next_region_index, expected_sequence)`:
-if `ready_region = next_region_index`, clear `ready_region`.
+if `ready_region = (collection_id = 0, next_region_index)`, clear
+`ready_region`.
 otherwise leave `ready_region` unchanged because this `link` may refer
 to a WAL-region allocation whose historical `alloc_begin` was already
 consumed and later reclaimed.
-If `next_region_index` is in staged regions, remove it from staged
-regions because the link directly makes that region part of the WAL
-chain.
 15. `RING-STARTUP-014` On `drop_collection(collection_id)`:
 if `collection_id` is not tracked, create replay state for that
 collection because older retained basis records may already have been
@@ -221,18 +218,40 @@ return an error.
 otherwise set collection state to `Dropped`, set `basis_pos` to this
 record's WAL position, and clear all pending updates for that
 collection.
-16. `RING-STARTUP-015` On `free_list_head(region_index_or_none)`:
-set tentative durable `last_free_list_head` to `region_index_or_none`.
-17. `RING-STARTUP-016` On `reclaim_begin(region_index)`:
-append `region_index` to pending reclaims unless a later matching
-`reclaim_end` removes it. If `region_index` is in staged regions,
-remove it from staged regions because reclaim now owns the cleanup.
-18. `RING-STARTUP-017` On `reclaim_end(region_index)`:
-mark the matching pending reclaim as finished.
-19. `RING-STARTUP-018` On `wal_recovery()`:
+16. `RING-STARTUP-015` On `free_region(collection_id, region_index)`:
+verify that the region was removed from the named collection's live
+state before the free is applied. If the free list was non-empty,
+validate that the previous free-list tail footer durably points to
+`region_index`; if it was empty, set `last_free_list_head =
+Some(region_index)`. In all cases update runtime free-list tail state
+so `region_index` is the tail.
+17. `RING-STARTUP-016` On `begin_transaction(collection_id)`:
+record the transaction start WAL position and scan forward to
+`transaction_finished(collection_id)`, `rollback_transaction(collection_id)`,
+or WAL end before applying ordinary records in that interval.
+18. `RING-STARTUP-017` On `commit_transaction(collection_id)` during
+transaction interval scan:
+remember that the transaction update phase committed, but do not jump
+back or apply the interval yet.
+19. `RING-STARTUP-018` On `transaction_finished(collection_id)`:
+jump back to the matching `begin_transaction(collection_id)`, apply the
+full transaction interval in original order, and then continue replay
+after `transaction_finished`.
+20. `RING-STARTUP-019` On `rollback_transaction(collection_id)`:
+jump back to the matching `begin_transaction(collection_id)`, replay
+only commands outside that collection's transaction scope, and then
+continue replay after `rollback_transaction`.
+21. `RING-STARTUP-020` On `wal_recovery()`:
 if `pending_wal_recovery_boundary` is clear, return an error.
 otherwise clear `pending_wal_recovery_boundary`.
-20. `RING-STARTUP-019` After replay, for each collection:
+22. `RING-STARTUP-021` If WAL end is reached inside a transaction
+without a matching terminal marker:
+if `commit_transaction(collection_id)` was not seen, run idempotent data
+recovery for that collection and append
+`rollback_transaction(collection_id)`; if commit was seen, preserve the
+committed collection state, run idempotent cleanup recovery, and append
+`transaction_finished(collection_id)`.
+23. `RING-STARTUP-022` After replay and transaction recovery, for each collection:
 reconstruct its durable basis from the collection state. If the state
 is `EmptyClean` or `EmptyDirty`, the basis is the empty collection
 declared by `new_collection`; if that collection has post-basis
@@ -248,8 +267,8 @@ may remain dormant until the next mutation, but it must be loaded into
 RAM before accepting that mutation. If the state is `Dropped`, do not
 reconstruct mutable state for that collection and do not accept
 further mutations for that collection id.
-21. `RING-STARTUP-020` Initialize allocator state from `last_free_list_head`.
-22. `RING-STARTUP-021` Reconstruct runtime `free_list_tail` by following free-pointer
+24. `RING-STARTUP-023` Initialize allocator state from `last_free_list_head`.
+25. `RING-STARTUP-024` Reconstruct runtime `free_list_tail` by following free-pointer
 links starting at `last_free_list_head` until reaching a free region
 whose free-pointer slot is uninitialized.
 If this walk encounters a checksum-invalid or malformed free-pointer
@@ -259,27 +278,13 @@ visited regions before reaching an uninitialized tail slot, return an
 error because the
 durable free-list head does not name a valid free-list chain.
 If `last_free_list_head = none`, then `free_list_tail = none`.
-23. `RING-STARTUP-022` If `ready_region` is set, hold it in memory as the next region to
+26. `RING-STARTUP-025` If `ready_region` is set, hold it in memory as the next region to
 use before consuming another free-list entry.
-24. `RING-STARTUP-023` Keep `max_seen_sequence` as the runtime source of the next region
+27. `RING-STARTUP-026` Keep `max_seen_sequence` as the runtime source of the next region
 sequence. The next newly allocated region must use
 `max_seen_sequence + 1` as its header `sequence`, then update
 `max_seen_sequence` in memory to that new value.
-25. `RING-STARTUP-024` After live collection type and retained data
-validation has succeeded, process each pending reclaim in WAL order:
-if the target region is still reachable from any live collection head
-or the WAL chain, leave it allocated because the reclaim did not reach
-the detach point durably.
-If the target region is unreachable from live state and not yet in the
-free-list chain, complete the free-list append using the Region
-Reclaim procedure.
-If the target region is already reachable from the free-list chain,
-finish the reclaim transaction by appending `reclaim_end(region_index)`.
-If an ordered staged region is not reachable from validated live
-collection state or the WAL chain, recover it through the same
-WAL-tracked reclaim procedure; if it is reachable, remove it from
-staged runtime state.
-26. `RING-STARTUP-025` If replay encountered a torn or checksum-invalid tail record,
+28. `RING-STARTUP-027` If replay encountered a torn or checksum-invalid tail record,
 retain all state recovered from earlier complete records. The WAL head
 is unchanged. Replay may still recover and apply later valid tail
 records that begin after the torn bytes, but the first such later valid
@@ -288,15 +293,14 @@ aligned slot whose first byte is `erased_byte` after the last valid
 replayed tail record, so later WAL appends may resume there while the
 ignored corrupt span before that point remains uninterpreted until that
 region is reclaimed or erased for reuse.
-27. `RING-STARTUP-026` If replay yields a live collection whose
+29. `RING-STARTUP-028` If replay yields a live collection whose
 `collection_type` is unsupported by the implementation, startup MUST
-fail before any pending reclaim or abandoned staged region is freed
-based on collection reachability.
-28. `RING-STARTUP-027` If replay yields a live collection with unsupported or invalid retained
+fail before transaction cleanup frees any region based on collection
+reachability.
+30. `RING-STARTUP-029` If replay yields a live collection with unsupported or invalid retained
     collection data under that collection's normative specification, startup MUST fail before open
-    succeeds and before any pending reclaim or abandoned staged region is freed based on
-    collection reachability.
-29. `RING-STARTUP-028` A dropped tombstone whose old
+    succeeds and before transaction cleanup frees any region based on collection reachability.
+31. `RING-STARTUP-030` A dropped tombstone whose old
 `collection_type` is unsupported MAY remain as inert metadata and does
 not by itself require startup failure.
 
@@ -306,15 +310,15 @@ These requirements cover implemented startup replay edge cases and validation he
 
 1. `RING-IMPL-REGRESSION-046` Startup tail selection MUST ignore regions with nonzero collection_id
    even when their format is wal_v1 while still tracking max seen sequence.
-2. `RING-IMPL-REGRESSION-047` Startup replay MUST preserve staged regions when a WAL head-control
-   record is replayed.
-3. `RING-IMPL-REGRESSION-048` Startup replay MUST preserve staged regions when non-map collection
-   head and drop records are replayed.
+2. `RING-IMPL-REGRESSION-047` Startup replay MUST preserve transaction recovery state when a WAL
+   head-control record is replayed.
+3. `RING-IMPL-REGRESSION-048` Startup replay MUST preserve transaction recovery state when
+   non-map collection head and drop records are replayed.
 4. `RING-IMPL-REGRESSION-049` Startup replay MUST count multiple live collections independently.
 5. `RING-IMPL-REGRESSION-050` Startup replay MUST accept a committed-region head basis and recover
    the collection basis, collection type, and max seen sequence from that region.
-6. `RING-IMPL-REGRESSION-051` Startup replay MUST accept a reclaimed historical head after
-   replacement and recover the live replacement head with no pending reclaim.
+6. `RING-IMPL-REGRESSION-051` Startup replay MUST accept a replaced historical head and recover the
+   live replacement head with no incomplete transaction work.
 7. `RING-IMPL-REGRESSION-052` Startup replay MUST track pending updates on an empty collection
    basis and preserve their count.
 8. `RING-IMPL-REGRESSION-053` Startup replay MUST reject update records that appear after a
@@ -353,7 +357,7 @@ flowchart TD
     RecoverRotate["`Recover missing link or finish target WAL init`"]
     Replay["`Replay reachable WAL records in WAL order`"]
     Rebuild["`Rebuild collection state allocator state and free list tail`"]
-    FinishReclaims["`Finish pending reclaims that detached durably`"]
+    FinishTransactions["`Finish or roll back incomplete transactions`"]
     OpenReady([Open complete])
 
     OpenStore --> ReadMeta --> ScanRegions --> TailOk
@@ -363,7 +367,7 @@ flowchart TD
     ChainOk -->|yes| Rotate
     Rotate -->|yes| RecoverRotate --> Replay
     Rotate -->|no| Replay
-    Replay --> Rebuild --> FinishReclaims --> OpenReady
+    Replay --> Rebuild --> FinishTransactions --> OpenReady
 ```
 
 ## Why Reclaimed WAL Regions Cannot Confuse Startup
@@ -457,13 +461,18 @@ pub struct PendingUpdateRef {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct PendingReclaim {
-  pub region_index: RegionIndex,
+pub enum TransactionTerminal {
+  Finished,
+  RolledBack,
+  WalEnd,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct StagedRegion {
-  pub region_index: RegionIndex,
+pub struct TransactionReplayState {
+  pub collection_id: CollectionId,
+  pub begin_pos: WalPosition,
+  pub commit_seen: bool,
+  pub terminal: TransactionTerminal,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -471,8 +480,8 @@ pub struct FreeListTracker {
   // Durable allocator cursor reconstructed from replay decisions.
   pub last_free_list_head: Option<RegionIndex>,
   // Region reserved by `alloc_begin` but not yet consumed by a durable
-  // `head`, `link`, or `stage_region` record.
-  pub ready_region: Option<RegionIndex>,
+  // `head` or `link` record.
+  pub ready_region: Option<(CollectionId, RegionIndex)>,
   // Runtime-only convenience for append-on-free operations.
   pub free_list_tail: Option<RegionIndex>,
 }
@@ -480,14 +489,12 @@ pub struct FreeListTracker {
 pub struct ReplayTracker<
   const MAX_COLLECTIONS: usize,
   const MAX_PENDING_UPDATES: usize,
-  const MAX_PENDING_RECLAIMS: usize,
 > {
   pub free_list: FreeListTracker,
   pub max_seen_sequence: RegionSequence,
   pub collections: Vec<CollectionReplayState, MAX_COLLECTIONS>,
   pub pending_updates: Vec<PendingUpdateRef, MAX_PENDING_UPDATES>,
-  pub staged_regions: Vec<StagedRegion, MAX_PENDING_RECLAIMS>,
-  pub pending_reclaims: Vec<PendingReclaim, MAX_PENDING_RECLAIMS>,
+  pub transaction: Option<TransactionReplayState>,
 }
 ```
 
@@ -517,14 +524,11 @@ tombstone whose older type-bearing records were reclaimed.
 `last_free_list_head`.
 6. `FreeListTracker.ready_region` maps to replay `ready_region`.
 7. `FreeListTracker.free_list_tail` is runtime state reconstructed by
-walking the free-pointer chain from `last_free_list_head`; reclaim uses
-it to link `t_prev.next_tail = r`.
-8. `ReplayTracker.staged_regions` maps to replay's ordered staged
-regions that are allocated but no longer occupy `ready_region`.
-9. `ReplayTracker.pending_reclaims` maps to replay's ordered pending
-region reclaims that remain incomplete after WAL replay and are
-processed during post-replay recovery.
-10. `ReplayTracker.max_seen_sequence` is initialized from the largest
+walking the free-pointer chain from `last_free_list_head`; transaction
+cleanup uses it to link `t_prev.next_tail = r`.
+8. `ReplayTracker.transaction` maps to an incomplete transaction
+interval found during replay.
+9. `ReplayTracker.max_seen_sequence` is initialized from the largest
 region `sequence` value observed during startup region scan, and may be
 advanced further if startup recovery initializes an incomplete WAL
 rotation. Each newly allocated region uses the next value

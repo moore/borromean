@@ -102,16 +102,16 @@ rotation.
 encoded size needed
 in the current tail region to append the two WAL records required to
 start and complete rotation to a new tail region:
-`alloc_begin(next_region_index, free_list_head_after)` followed by
+`alloc_begin(collection_id = 0, next_region_index, free_list_head_after)` followed by
 `link(next_region_index, expected_sequence)`.
 13. `RING-WAL-ENC-013` Appending any WAL record to the current tail
 region, other than the
-specific `alloc_begin(next_region_index, free_list_head_after)` that
-starts WAL rotation or the trailing `link`, is invalid if doing so
-would leave fewer than `wal_rotation_reserve` unwritten bytes in that
-region.
+specific `alloc_begin(collection_id = 0, next_region_index,
+free_list_head_after)` that starts WAL rotation or the trailing `link`,
+is invalid if doing so would leave fewer than `wal_rotation_reserve`
+unwritten bytes in that region.
 14. `RING-WAL-ENC-014` Appending the
-`alloc_begin(next_region_index, free_list_head_after)`
+`alloc_begin(collection_id = 0, next_region_index, free_list_head_after)`
 that starts WAL rotation is invalid unless its aligned end offset still
 leaves at least `wal_link_reserve` and fewer than
 `wal_rotation_reserve` unwritten bytes in that region. This
@@ -123,19 +123,20 @@ valid later WAL record in that region is the matching trailing `link`.
 Each WAL record encodes the following fields:
 
 1. `RING-WAL-FIELD-001` `record_type`: one of `new_collection`, `update`, `snapshot`,
-`alloc_begin`, `stage_region`, `head`, `drop_collection`, `link`,
-`free_list_head`, `reclaim_begin`, `reclaim_end`, `wal_recovery`
+`alloc_begin`, `head`, `drop_collection`, `link`, `wal_recovery`,
+`free_region`, `begin_transaction`, `commit_transaction`,
+`transaction_finished`, or `rollback_transaction`
 2. `RING-WAL-FIELD-002` `collection_id`: required for `new_collection`, `update`,
-`snapshot`, `head`, and `drop_collection`
+`snapshot`, `alloc_begin`, `head`, `drop_collection`, `free_region`,
+`begin_transaction`, `commit_transaction`, `transaction_finished`, and
+`rollback_transaction`
 3. `RING-WAL-FIELD-003` `collection_type`: required for `new_collection`, `snapshot`, and
-`head`; omitted for `update`, `alloc_begin`, `stage_region`,
-`drop_collection`, `link`, `free_list_head`, `reclaim_begin`,
-`reclaim_end`, and `wal_recovery`
+`head`; omitted for `update`, `alloc_begin`, `drop_collection`, `link`,
+`wal_recovery`, `free_region`, and transaction marker records
 4. `RING-WAL-FIELD-004` `payload_len`: payload size in bytes
 5. `RING-WAL-FIELD-005` `payload`: opaque bytes defined by `record_type`
 6. `RING-WAL-FIELD-006` `free_list_head_after`: required for `alloc_begin`; omitted for
-`update`, `snapshot`, `stage_region`, `head`, `drop_collection`, `link`,
-`free_list_head`, `reclaim_begin`, `reclaim_end`, and `wal_recovery`
+all other record types
 7. `RING-WAL-FIELD-007` `record_checksum`: checksum covering the full logical record before
 byte-stuffing encoding
 8. `RING-WAL-FIELD-008` `padding`: zero or more trailing `wal_escape_code_escape` bytes so
@@ -163,11 +164,12 @@ codes:
 `head = 0x05`,
 `drop_collection = 0x06`,
 `link = 0x07`,
-`free_list_head = 0x08`,
-`reclaim_begin = 0x09`,
-`reclaim_end = 0x0a`,
 `wal_recovery = 0x0b`,
-`stage_region = 0x0c`.
+`free_region = 0x0c`,
+`begin_transaction = 0x0d`,
+`commit_transaction = 0x0e`,
+`transaction_finished = 0x0f`,
+`rollback_transaction = 0x10`.
 2. `RING-WAL-LAYOUT-002` The logical field order before byte-stuffing
 MUST be exactly the order shown above.
 3. `RING-WAL-LAYOUT-003` `payload_len` MUST equal the number of logical
@@ -178,18 +180,17 @@ physical padding.
 logical WAL record bytes from `record_type` through the final byte of
 the last field preceding `record_checksum`.
 5. `RING-WAL-LAYOUT-005` Record types whose payload is empty
-(`new_collection`, `drop_collection`, and `wal_recovery`) MUST still
-encode `payload_len = 0`.
+(`new_collection`, `drop_collection`, `wal_recovery`, and transaction
+marker records) MUST still encode `payload_len = 0`.
 6. `RING-WAL-LAYOUT-006` Payload bytes are encoded canonically by record
 type:
 `update` and `snapshot` payloads are opaque collection-defined bytes;
-`alloc_begin`, `stage_region`, `head`, `reclaim_begin`, and
-`reclaim_end` payloads are a single `u32 region_index`;
+`alloc_begin`, `head`, and `free_region` payloads are a single
+`u32 region_index`;
 `link` payload is `next_region_index:u32` followed by
 `expected_sequence:u64`;
-`free_list_head` payload is `OptRegionIndex`;
-`new_collection`, `drop_collection`, and `wal_recovery` payloads are
-empty.
+`new_collection`, `drop_collection`, `wal_recovery`, and transaction
+marker payloads are empty.
 
 The record payloads are:
 
@@ -208,8 +209,8 @@ the collection type for that snapshot basis. Supersedes older `update`
 records for that collection that appear before the snapshot.
 
 4. `RING-WAL-PAYLOAD-004` `alloc_begin`
-Reserves the current free-list head region for imminent use. The
-payload contains the reserved `region_index`.
+Reserves the current free-list head region for imminent use by
+`collection_id`. The payload contains the reserved `region_index`.
 The record stores `free_list_head_after`, the next free region after
 removing `region_index` from the free list. Once `alloc_begin` is
 durable, allocator replay state advances even if the reserved region
@@ -217,8 +218,8 @@ is erased before a later `head` or `link` record uses it.
 When written, `region_index` must equal the durable free-list head in
 replay order, and `free_list_head_after` must be the successor that was
 observed from that head's free-pointer chain at allocation time.
-`alloc_begin(region_index, free_list_head_after)` has two replay-visible
-effects:
+`alloc_begin(collection_id, region_index, free_list_head_after)` has
+two replay-visible effects:
 
 - It advances the durable free-list head to `free_list_head_after`.
 - It reserves `region_index` as `ready_region` until a matching durable
@@ -226,7 +227,7 @@ effects:
   consumes it. This reservation exists only to preserve crash-safe
   allocator state until consumption so the allocated region cannot leak.
 
-7. `RING-WAL-PAYLOAD-005` `head`
+5. `RING-WAL-PAYLOAD-005` `head`
 Commits a collection to a durable region head. Payload contains
 the target `region_index`. The record also carries the collection type for
 that durable region basis. When `collection_id = 0`, this record
@@ -244,56 +245,60 @@ interpretation. Replay does not revalidate that not-free append-time
 invariant; this is an intentional application of the checksum trust
 model defined below.
 
-8. `RING-WAL-PAYLOAD-006` `drop_collection`
+6. `RING-WAL-PAYLOAD-006` `drop_collection`
 Payload is empty. Durably tombstones a user collection. The record
 detaches that collection's current durable basis from the live
 namespace, discards any pending WAL updates for that collection, and
 forbids any later WAL record for the same `collection_id`.
 Previously live WAL snapshots or committed regions for that collection
-become reclaimable once region reclaim removes any remaining physical
-references to them. Any region associated with that dropped collection
-may be added to the free list through normal reclaim processing if it
-is not already reachable from the free-list chain.
+become reclaimable once collection-specific cleanup removes any
+remaining physical references to them. Any region associated with that
+dropped collection may be added to the free list through
+`free_region(collection_id, region_index)` if it is not already
+reachable from the free-list chain.
 
-9. `RING-WAL-PAYLOAD-007` `link`
+7. `RING-WAL-PAYLOAD-007` `link`
 Points from a full WAL region to the next WAL region. Payload contains
 `next_region_index` and `expected_sequence` for the next WAL region
 header.
 
-10. `RING-WAL-PAYLOAD-008` `free_list_head`
-Commits a new durable free-list head. Payload contains the new
-`region_index` or `none` if the free list is empty. This record is used
-when reclaim or crash recovery changes the durable allocator head
-without consuming the prior head through `alloc_begin`. If the payload
-is `region_index`, that region must be the start of a durable
-free-pointer chain whose walk reaches an
-uninitialized tail slot in at most `region_count` visited regions. If
-the payload is `none`, the record asserts that the durable free list is
-empty.
-
-11. `RING-WAL-PAYLOAD-009` `reclaim_begin`
-Marks the start of reclaim for `region_index`. The payload contains the
-region being freed. This record does not itself make the region free;
-it only makes the reclaim intent durable before any live references to
-that region are removed.
-
-12. `RING-WAL-PAYLOAD-010` `reclaim_end`
-Marks successful completion of reclaim for `region_index`. The payload
-contains the same `region_index` as the matching `reclaim_begin`.
-
-13. `RING-WAL-PAYLOAD-011` `wal_recovery`
+8. `RING-WAL-PAYLOAD-008` `wal_recovery`
 Payload is empty. Marks that replay or a prior open detected and
 intentionally skipped one or more corrupt/torn aligned WAL slots before
 resuming WAL appends. `wal_recovery` has no direct collection or
 allocator effect; it only makes that recovery boundary explicit and
 durable.
 
-14. `RING-WAL-PAYLOAD-012` `stage_region`
-Detaches the current `ready_region` from the single allocator slot
-without committing a collection head. The payload contains the staged
-`region_index`. Replay keeps the region allocated and unavailable for
-reuse until a later collection-specific reachability rule makes it live
-or a later reclaim transaction proves it can be freed.
+9. `RING-WAL-PAYLOAD-009` `free_region`
+Adds `region_index` to the durable free-list chain after it has been
+removed from the collection named by `collection_id`. The record
+mutates global allocator state, but it is collection-scoped because the
+region is leaving that collection. If the free list was non-empty, the
+previous tail footer must already durably point at `region_index` before
+this record is acknowledged. If the free list was empty, this record
+makes `region_index` the durable free-list head.
+
+10. `RING-WAL-PAYLOAD-010` `begin_transaction`
+Starts a WAL transaction interval for `collection_id`. Until the
+matching terminal marker is found or WAL end is reached, replay scans
+ordinary records for that collection without applying them on the first
+pass.
+
+11. `RING-WAL-PAYLOAD-011` `commit_transaction`
+Ends the transaction update phase for `collection_id`. Before this
+marker, recovery abandons the collection-state update. After this
+marker, recovery preserves the collection-state update and finishes
+allocator cleanup.
+
+12. `RING-WAL-PAYLOAD-012` `transaction_finished`
+Ends the cleanup phase for `collection_id`. Both the collection-state
+update and allocator cleanup are complete, so replay can apply the full
+transaction interval in original order.
+
+13. `RING-WAL-PAYLOAD-013` `rollback_transaction`
+Records that pre-commit recovery for `collection_id` has completed.
+Replay skips transaction-scoped records in the interval and does not
+repeat recovery.
 
 Ordering and validity rules:
 
@@ -348,14 +353,16 @@ missing or corrupt, is treated as an incomplete rotation rather than
 corruption; startup may finish initializing the target region using
 `expected_sequence`.
 13. `RING-WAL-VALID-013` A WAL record in the current tail region, other than the specific
-`alloc_begin(next_region_index, free_list_head_after)` that starts WAL
-rotation or the matching trailing `link`, is invalid if its aligned end
-offset leaves fewer than `wal_rotation_reserve` bytes of currently
+`alloc_begin(collection_id = 0, next_region_index,
+free_list_head_after)` that starts WAL rotation or the matching
+trailing `link`, is invalid if its aligned end offset leaves fewer than
+`wal_rotation_reserve` bytes of currently unwritten space remaining in
+that WAL region.
+14. `RING-WAL-VALID-014` The
+`alloc_begin(collection_id = 0, next_region_index,
+free_list_head_after)` that starts WAL rotation is invalid unless its
+aligned end offset leaves at least `wal_link_reserve` bytes of currently
 unwritten space remaining in that WAL region.
-14. `RING-WAL-VALID-014` The `alloc_begin(next_region_index, free_list_head_after)` that
-starts WAL rotation is invalid unless its aligned end offset leaves at
-least `wal_link_reserve` bytes of currently unwritten space remaining
-in that WAL region.
 15. `RING-WAL-VALID-015` For non-WAL collections (`collection_id != 0`), `update`
 records that appear before replay has seen a retained basis decision
 for that collection have no replay effect. Implementations MUST NOT
@@ -368,17 +375,16 @@ a prior valid `drop_collection(collection_id)` for that collection.
 `new_collection(collection_id, collection_type)` record is also invalid
 if replay has already seen a prior valid
 `drop_collection(collection_id)` for that collection.
-18. `RING-WAL-VALID-018` An `alloc_begin(region_index, free_list_head_after)` record is invalid
-if `free_list_head_after` is missing or corrupt, if replay's current
-durable `last_free_list_head` is `none`, or if `region_index` does not
-equal that durable free-list head.
-19. `RING-WAL-VALID-019` A `free_list_head(region_index_or_none)` record is invalid if the
-payload is corrupt. If `region_index_or_none = region_index`, the
-record makes `region_index` the tentative durable free-list head in
-replay order. Replay does not validate the referenced free-pointer
-chain immediately; startup validates only the final recovered
-`last_free_list_head` after replay. If `region_index_or_none = none`,
-the record asserts that the durable free list is empty.
+18. `RING-WAL-VALID-018` An
+`alloc_begin(collection_id, region_index, free_list_head_after)` record
+is invalid if `free_list_head_after` is missing or corrupt, if replay's
+current durable `last_free_list_head` is `none`, or if `region_index`
+does not equal that durable free-list head.
+19. `RING-WAL-VALID-019` A `free_region(collection_id, region_index)` record is invalid if
+`region_index` is missing or corrupt, if `collection_id` does not name
+the collection whose transaction or operation is freeing the region, or
+if the region is already reachable from the durable free-list chain
+before this free operation.
 20. `RING-WAL-VALID-020` A `head(collection_id, collection_type, region_index)` or
 `link(next_region_index, ...)` record that commits a newly allocated
 region is append-valid only if it historically followed a matching
@@ -386,8 +392,8 @@ earlier `alloc_begin` for the same region index. Replay requires a
 prior unmatched `alloc_begin` only when reconstructing a still
 unconsumed `ready_region`; after a durable `head` or `link` has
 consumed that region, the historical `alloc_begin` may be reclaimed.
-21. `RING-WAL-VALID-021` Durable allocator-head advance happens at `alloc_begin` or
-`free_list_head`, not at `head` or `link`.
+21. `RING-WAL-VALID-021` Durable allocator-head advance happens at `alloc_begin`; durable
+allocator-tail extension happens at `free_region`.
 22. `RING-WAL-VALID-022` Replay MAY recover only from checksum-invalid or torn aligned WAL
 slots. Replay tracks a pending WAL-recovery boundary from the first
 ignored corrupt/torn aligned slot until a later valid `wal_recovery`
@@ -407,14 +413,22 @@ duplicate `new_collection`, collection-type mismatch, two unmatched
 `alloc_begin` reservations, any record after a valid
 `drop_collection` for the same collection, broken non-tail WAL chain
 links, and committed-region/header mismatch.
-26. `RING-WAL-VALID-026` `reclaim_begin(region_index)` and `reclaim_end(region_index)` MUST appear
-in WAL order and are matched by `region_index`.
-27. `RING-WAL-VALID-027` `reclaim_end(region_index)` is only valid if preceded by a valid
-`reclaim_begin(region_index)`.
-28. `RING-WAL-VALID-028` `stage_region(region_index)` MUST be preceded by
-an unmatched valid `alloc_begin(region_index, free_list_head_after)`
-for the same region. Replay MUST treat `stage_region` without that
-matching `ready_region` as corruption.
+26. `RING-WAL-VALID-026` `begin_transaction(collection_id)` is invalid if another transaction is
+already open. Nested and concurrent transactions are not supported.
+27. `RING-WAL-VALID-027` `commit_transaction(collection_id)`,
+`transaction_finished(collection_id)`, and
+`rollback_transaction(collection_id)` are valid only when they match
+the currently open transaction's collection id.
+28. `RING-WAL-VALID-028` A transaction interval may contain ordinary commands for its
+`collection_id` and region allocation/free commands carrying that
+collection id. Mutating commands for other collections are valid inside
+the interval only if they do not depend on transaction-private storage
+or allocator effects.
+29. `RING-WAL-VALID-029` `transaction_finished(collection_id)` is valid only after a matching
+`commit_transaction(collection_id)` in the same transaction interval.
+30. `RING-WAL-VALID-030` `rollback_transaction(collection_id)` is valid only when it closes a
+transaction interval whose pre-commit recovery was completed by a prior
+open.
 
 Checksum trust model:
 
@@ -452,14 +466,16 @@ exclude both reserved byte values from record bodies.
 An aligned slot whose first byte is `erased_byte` marks end of the
 written portion of that WAL region.
 4. `RING-REPLAY-ASSUME-004` Any operation that consumes a free-list head MUST first make the
-allocator advance durable with `alloc_begin(region_index,
-free_list_head_after)`.
-5. `RING-REPLAY-ASSUME-005` If replay ends with an unmatched `alloc_begin(region_index, ...)`, that
-region is treated as a reserved `ready_region` for the next allocation
-instead of being returned to the free list. If replay sees a matching
-`stage_region(region_index)`, the region leaves `ready_region` but
-remains allocated until collection-specific reachability or reclaim
-handles it.
+allocator advance durable with
+`alloc_begin(collection_id, region_index, free_list_head_after)`.
+5. `RING-REPLAY-ASSUME-005` If replay ends with an unmatched
+`alloc_begin(collection_id, region_index, ...)`, that region is treated
+as a reserved `ready_region` for the next allocation instead of being
+returned to the free list.
+6. `RING-REPLAY-ASSUME-006` Transaction recovery must be idempotent:
+if storage open crashes before appending `rollback_transaction` or
+`transaction_finished`, the next open may repeat the same recovery mode
+without leaking or duplicating any region.
 
 ## Encoding Helper Requirements
 
@@ -485,7 +501,7 @@ These requirements cover implemented byte-level helpers for canonical disk and W
    bytes and store the checksum little-endian.
 10. `RING-IMPL-REGRESSION-130` Update WAL records MUST round-trip through physical escaping,
     padding, and decoding without changing payload bytes.
-11. `RING-IMPL-REGRESSION-131` Free-list-head WAL records with no region index MUST round-trip
+11. `RING-IMPL-REGRESSION-131` Transaction marker WAL records with no payload MUST round-trip
     through physical encoding and decoding.
 12. `RING-IMPL-REGRESSION-132` Alloc-begin WAL records MUST round-trip free_list_head_after through
     physical encoding and decoding.

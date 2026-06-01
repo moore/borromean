@@ -380,7 +380,7 @@ fn requirement_open_formatted_store_requires_wal_recovery_before_accepting_later
 
 //= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
-//# RING-STARTUP-021 Reconstruct runtime `free_list_tail` by following free-pointer links starting
+//# RING-STARTUP-024 Reconstruct runtime `free_list_tail` by following free-pointer links starting
 //# at `last_free_list_head` until reaching a free region whose free-pointer slot is uninitialized.
 #[test]
 fn requirement_open_formatted_store_rejects_invalid_free_list_chain() {
@@ -405,12 +405,12 @@ fn requirement_open_formatted_store_rejects_invalid_free_list_chain() {
 
 //= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
-//# RING-STARTUP-011 On `alloc_begin(region_index, free_list_head_after)`: if `ready_region` is
+//# RING-STARTUP-011 On `alloc_begin(collection_id, region_index, free_list_head_after)`: if `ready_region` is
 //# already set, return an error because replay found two unmatched allocation reservations. if
 //# `last_free_list_head = none`, return an error because allocation cannot consume an empty durable
 //# free list. if `last_free_list_head != region_index`, return an error because `alloc_begin` did
 //# not consume the current durable free-list head. set durable `last_free_list_head` to
-//# `free_list_head_after`. set `ready_region = region_index`.
+//# `free_list_head_after`. set `ready_region = (collection_id, region_index)`.
 #[test]
 fn requirement_open_formatted_store_replays_alloc_begin_into_allocator_runtime_state() {
     let (_next_offset, state) = open_formatted_store_after_replayed_alloc_begin();
@@ -420,7 +420,7 @@ fn requirement_open_formatted_store_replays_alloc_begin_into_allocator_runtime_s
 
 //= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
-//# RING-STARTUP-020 Initialize allocator state from `last_free_list_head`.
+//# RING-STARTUP-023 Initialize allocator state from `last_free_list_head`.
 #[test]
 fn requirement_open_formatted_store_initializes_allocator_state_after_alloc_begin() {
     let (_next_offset, state) = open_formatted_store_after_replayed_alloc_begin();
@@ -430,7 +430,7 @@ fn requirement_open_formatted_store_initializes_allocator_state_after_alloc_begi
 
 //= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
-//# RING-STARTUP-022 If `ready_region` is set, hold it in memory as the next region to use before
+//# RING-STARTUP-025 If `ready_region` is set, hold it in memory as the next region to use before
 //# consuming another free-list entry.
 #[test]
 fn requirement_open_formatted_store_keeps_replayed_ready_region_reserved_in_memory() {
@@ -440,22 +440,24 @@ fn requirement_open_formatted_store_keeps_replayed_ready_region_reserved_in_memo
 }
 
 //= spec/ring/06-startup-replay.md#startup-replay-algorithm
-//= type=test
-//# `RING-STARTUP-RESULT-008` Ordered staged regions that have left
-//# `ready_region` but are not yet known to be free
+//= type=todo
+//# `RING-STARTUP-RESULT-007` Incomplete transaction recovery work, if the reachable WAL ends
+//# inside a collection transaction interval
 #[test]
-fn requirement_open_formatted_store_reports_replayed_staged_regions() {
+fn todo_open_formatted_store_reports_replayed_staged_regions() {
     let (_next_offset, state) = open_formatted_store_after_replayed_stage_region();
     assert_eq!(state.staged_regions(), &[1]);
 }
 
 //= spec/ring/06-startup-replay.md#startup-replay-algorithm
-//= type=test
-//# RING-STARTUP-011A On `stage_region(region_index)`: if
-//# `ready_region != region_index`, return an error. otherwise append
-//# `region_index` to staged regions and clear `ready_region`.
+//= type=todo
+//# `RING-STARTUP-011A` On transaction interval scan:
+//# if replay reaches `begin_transaction(collection_id)`, it MUST scan to
+//# `transaction_finished(collection_id)`, `rollback_transaction(collection_id)`,
+//# or WAL end before applying ordinary records for that collection in the
+//# interval.
 #[test]
-fn requirement_open_formatted_store_replays_stage_region_into_staged_state() {
+fn todo_open_formatted_store_replays_stage_region_into_staged_state() {
     let (_next_offset, state) = open_formatted_store_after_replayed_stage_region();
     assert_eq!(state.ready_region(), None);
     assert_eq!(state.staged_regions(), &[1]);
@@ -464,8 +466,8 @@ fn requirement_open_formatted_store_replays_stage_region_into_staged_state() {
 
 //= spec/ring/06-startup-replay.md#startup-replay-implementation-requirements
 //= type=test
-//# `RING-IMPL-REGRESSION-047` Startup replay MUST preserve staged regions when a WAL head-control
-//# record is replayed.
+//# `RING-IMPL-REGRESSION-047` Startup replay MUST preserve transaction recovery state when a WAL
+//# head-control record is replayed.
 #[test]
 fn requirement_open_formatted_store_keeps_staged_regions_when_wal_head_control_is_replayed() {
     let mut flash = MockFlash::<256, 4, 128>::new(0xff);
@@ -506,8 +508,8 @@ fn requirement_open_formatted_store_keeps_staged_regions_when_wal_head_control_i
 
 //= spec/ring/06-startup-replay.md#startup-replay-implementation-requirements
 //= type=test
-//# `RING-IMPL-REGRESSION-048` Startup replay MUST preserve staged regions when non-map collection
-//# head and drop records are replayed.
+//# `RING-IMPL-REGRESSION-048` Startup replay MUST preserve transaction recovery state when
+//# non-map collection head and drop records are replayed.
 #[test]
 fn requirement_open_formatted_store_keeps_staged_regions_when_non_map_head_is_replayed() {
     let mut flash = MockFlash::<256, 4, 128>::new(0xff);
@@ -557,9 +559,9 @@ fn requirement_open_formatted_store_keeps_staged_regions_when_non_map_head_is_re
 
 //= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
-//# `RING-WAL-VALID-028` `stage_region(region_index)` MUST be preceded by
-//# an unmatched valid `alloc_begin(region_index, free_list_head_after)`
-//# for the same region.
+//# `RING-WAL-VALID-028` A transaction interval may contain ordinary commands for its
+//# `collection_id` and region allocation/free commands carrying that
+//# collection id.
 #[test]
 fn requirement_open_formatted_store_rejects_stage_region_without_matching_ready_region() {
     let mut flash = MockFlash::<256, 4, 64>::new(0xff);
@@ -790,8 +792,8 @@ fn requirement_open_formatted_store_accepts_committed_region_head_basis() {
 
 //= spec/ring/06-startup-replay.md#startup-replay-implementation-requirements
 //= type=test
-//# `RING-IMPL-REGRESSION-051` Startup replay MUST accept a reclaimed historical head after
-//# replacement and recover the live replacement head with no pending reclaim.
+//# `RING-IMPL-REGRESSION-051` Startup replay MUST accept a replaced historical head and recover the
+//# live replacement head with no incomplete transaction work.
 #[test]
 fn requirement_open_formatted_store_accepts_reclaimed_historical_head_after_replacement() {
     let mut flash = MockFlash::<256, 5, 128>::new(0xff);
@@ -942,9 +944,8 @@ fn requirement_open_formatted_store_rejects_update_after_drop_collection() {
 
 //= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
-//# `RING-WAL-VALID-026` `reclaim_begin(region_index)` and
-//# `reclaim_end(region_index)` MUST appear in WAL order and are matched
-//# by `region_index`.
+//# `RING-WAL-VALID-026` `begin_transaction(collection_id)` is invalid if another transaction is
+//# already open. Nested and concurrent transactions are not supported.
 #[test]
 fn requirement_open_formatted_store_tracks_pending_reclaims_in_order() {
     let mut flash = MockFlash::<128, 4, 96>::new(0xff);
@@ -1004,9 +1005,10 @@ fn requirement_open_formatted_store_rejects_unsupported_live_collection_type() {
 
 //= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
-//# `RING-STARTUP-026` If replay yields a live collection whose
+//# `RING-STARTUP-028` If replay yields a live collection whose
 //# `collection_type` is unsupported by the implementation, startup MUST
-//# fail.
+//# fail before transaction cleanup frees any region based on collection
+//# reachability.
 #[test]
 fn requirement_open_formatted_store_fails_startup_for_unsupported_live_collection_type() {
     let mut flash = MockFlash::<128, 4, 96>::new(0xff);
@@ -1030,7 +1032,7 @@ fn requirement_open_formatted_store_fails_startup_for_unsupported_live_collectio
 
 //= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
-//# `RING-STARTUP-028` A dropped tombstone whose old
+//# `RING-STARTUP-030` A dropped tombstone whose old
 //# `collection_type` is unsupported MAY remain as inert metadata and
 //# does not by itself require startup failure.
 #[test]
@@ -1148,7 +1150,7 @@ fn requirement_open_formatted_store_follows_completed_link_to_the_next_wal_tail(
 //= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
 //# RING-STARTUP-013 On `link(next_region_index, expected_sequence)`: if `ready_region =
-//# next_region_index`, clear `ready_region`.
+//# (collection_id = 0, next_region_index)`, clear `ready_region`.
 #[test]
 fn requirement_open_formatted_store_clears_ready_region_when_link_matches_it() {
     let state = open_formatted_store_after_completed_wal_rotation();
@@ -1358,7 +1360,7 @@ fn requirement_open_formatted_store_rejects_unrecovered_boundary_in_non_tail_wal
 
 //= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
-//# RING-STARTUP-018 On `wal_recovery()`: if `pending_wal_recovery_boundary` is clear, return an
+//# RING-STARTUP-020 On `wal_recovery()`: if `pending_wal_recovery_boundary` is clear, return an
 //# error. otherwise clear `pending_wal_recovery_boundary`.
 #[test]
 fn requirement_open_formatted_store_clears_pending_recovery_boundary_when_wal_recovery_is_replayed()
@@ -1406,7 +1408,7 @@ fn requirement_open_formatted_store_initializes_allocator_state_for_a_fresh_stor
 
 //= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
-//# RING-STARTUP-023 Keep `max_seen_sequence` as the runtime source of the next region sequence.
+//# RING-STARTUP-026 Keep `max_seen_sequence` as the runtime source of the next region sequence.
 #[test]
 fn requirement_open_formatted_store_keeps_max_seen_sequence_for_the_next_region_header() {
     let (_metadata, state) = open_formatted_store_from_fresh_format();
@@ -1415,9 +1417,9 @@ fn requirement_open_formatted_store_keeps_max_seen_sequence_for_the_next_region_
 
 //= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
-//# `RING-STARTUP-027` If replay yields a live collection with unsupported or invalid retained
+//# `RING-STARTUP-029` If replay yields a live collection with unsupported or invalid retained
 //# collection data under that collection's normative specification, startup MUST fail before open
-//# succeeds.
+//# succeeds and before transaction cleanup frees any region based on collection reachability.
 #[test]
 fn requirement_storage_open_path_rejects_invalid_retained_map_region_snapshot_and_update_payloads()
 {

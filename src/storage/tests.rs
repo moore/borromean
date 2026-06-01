@@ -309,7 +309,7 @@ fn requirement_reserve_next_region_consumes_the_oldest_free_regions_first() {
 //= type=test
 //# `RING-CORE-011` Any operation that writes a newly allocated region
 //# MUST first durably reserve that region with
-//# `alloc_begin(region_index, free_list_head_after)`.
+//# `alloc_begin(collection_id, region_index, free_list_head_after)`.
 #[test]
 fn requirement_committed_region_write_uses_a_region_previously_reserved_by_alloc_begin() {
     let mut flash = MockFlash::<512, 5, 256>::new(0xff);
@@ -412,7 +412,8 @@ fn requirement_write_committed_region_accepts_payload_that_exactly_fills_committ
 //= spec/ring/08-durability-formatting.md#durability-and-crash-semantics
 //= type=test
 //# `RING-ALLOC-001` Any operation that writes a newly allocated region
-//# MUST first make `alloc_begin(region_index, free_list_head_after)`
+//# MUST first make
+//# `alloc_begin(collection_id, region_index, free_list_head_after)`
 //# durable.
 #[test]
 fn requirement_committed_region_write_waits_for_alloc_begin_sync() {
@@ -478,7 +479,7 @@ fn requirement_committed_region_write_waits_for_alloc_begin_sync() {
 //= type=test
 //# `RING-REPLAY-ASSUME-004` Any operation that consumes a free-list
 //# head MUST first make the allocator advance durable with
-//# `alloc_begin(region_index, free_list_head_after)`.
+//# `alloc_begin(collection_id, region_index, free_list_head_after)`.
 #[test]
 fn requirement_reopen_after_alloc_begin_recovers_the_advanced_allocator_state() {
     let mut flash = MockFlash::<512, 5, 256>::new(0xff);
@@ -505,7 +506,7 @@ fn requirement_reopen_after_alloc_begin_recovers_the_advanced_allocator_state() 
 //= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-064` Formatting storage MUST return fresh runtime state with metadata, WAL
-//# head/tail, allocator, collection, and reclaim fields initialized.
+//# head/tail, allocator, and collection fields initialized.
 #[test]
 fn requirement_format_returns_fresh_runtime_state() {
     let mut flash = MockFlash::<128, 4, 64>::new(0xff);
@@ -739,8 +740,8 @@ fn requirement_open_returns_replayed_collection_runtime_state() {
 
 //= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
 //= type=test
-//# `RING-IMPL-REGRESSION-067` Opening storage MUST complete reclaims for regions already on the
-//# free list and clear pending reclaim state.
+//# `RING-IMPL-REGRESSION-067` Opening storage MUST complete transaction cleanup for regions already
+//# on the free list and clear incomplete transaction state.
 #[test]
 fn requirement_open_completes_reclaims_already_on_the_free_list() {
     let mut flash = MockFlash::<256, 4, 96>::new(0xff);
@@ -774,7 +775,7 @@ fn requirement_open_completes_reclaims_already_on_the_free_list() {
 
 //= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
 //= type=test
-//# `RING-IMPL-REGRESSION-068` Opening storage MUST discard pending reclaim records for regions
+//# `RING-IMPL-REGRESSION-068` Opening storage MUST discard incomplete cleanup records for regions
 //# still reachable from live collection state.
 #[test]
 fn requirement_open_discards_pending_reclaims_for_still_live_regions() {
@@ -993,9 +994,10 @@ fn requirement_drop_collection_tombstones_the_collection_forbids_later_records_a
 
 //= spec/ring/01-theory.md#core-requirements
 //= type=test
-//# `RING-CORE-009` Any reclaim that frees a region MUST be tracked as a
-//# WAL transaction bounded by durable `reclaim_begin(region_index)` and
-//# `reclaim_end(region_index)` records.
+//# `RING-CORE-009` Any multi-step collection operation that commits a
+//# new durable basis and frees old regions MUST be tracked as a
+//# collection-scoped WAL transaction with durable begin, commit, cleanup,
+//# and terminal markers.
 #[test]
 fn requirement_append_alloc_and_reclaim_methods_refresh_runtime_state() {
     let mut flash = MockFlash::<256, 4, 128>::new(0xff);
@@ -1022,7 +1024,7 @@ fn requirement_append_alloc_and_reclaim_methods_refresh_runtime_state() {
 //= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-072` Appending WAL recovery MUST clear pending recovery boundary and
-//# advance append offset; appending free-list-head MUST refresh allocator head and tail.
+//# advance append offset; appending allocator cleanup records MUST refresh allocator head and tail.
 #[test]
 fn requirement_append_free_list_head_and_wal_recovery_refresh_runtime_state() {
     let mut flash = MockFlash::<256, 4, 128>::new(0xff);
@@ -1118,8 +1120,8 @@ fn requirement_control_record_appends_refresh_runtime_without_reopen() {
 
 //= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
 //= type=test
-//# `RING-IMPL-REGRESSION-134` Completing reclaim MUST refresh the free-list tail from footers,
-//# not by reopening the store.
+//# `RING-IMPL-REGRESSION-134` Completing transaction cleanup MUST refresh the free-list tail from
+//# footers, not by reopening the store.
 #[test]
 fn requirement_reclaim_end_refreshes_free_list_tail_without_reopen() {
     let mut flash = MockFlash::<512, 6, 4096>::new(0xff);
@@ -1164,7 +1166,7 @@ fn requirement_reclaim_end_refreshes_free_list_tail_without_reopen() {
 //= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-073` WAL rotation start/finish appends MUST reserve the next free region,
-//# advance allocator state, then move WAL tail to the new region and clear ready_region.
+//# advance allocator state, then move WAL tail to the new region and clear ready allocation state.
 #[test]
 fn requirement_append_rotation_start_and_finish_move_to_new_tail() {
     let mut flash = MockFlash::<128, 4, 128>::new(0xff);
@@ -1316,13 +1318,12 @@ fn requirement_stale_footer_bytes_do_not_make_a_reserved_region_free() {
     assert_eq!(state.ready_region(), Some(reserved_region));
 }
 
-//= spec/ring/04-wal-records.md#wal-record-types
-//= type=test
-//# `RING-WAL-PAYLOAD-012` `stage_region` detaches the current
-//# `ready_region` from the single allocator slot without committing a
-//# collection head.
+//= spec/ring/06-startup-replay.md#startup-replay-algorithm
+//= type=todo
+//# `RING-STARTUP-RESULT-008` Transaction terminal records written during recovery, if recovery
+//# needed to close an incomplete interval
 #[test]
-fn requirement_stage_ready_region_detaches_ready_region_and_allows_next_allocation() {
+fn todo_stage_ready_region_detaches_ready_region_and_allows_next_allocation() {
     let mut flash = MockFlash::<512, 5, 512>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut state = format::<512, 5, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
@@ -1369,8 +1370,8 @@ fn requirement_stage_ready_region_detaches_ready_region_and_allows_next_allocati
 
 //= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
 //= type=test
-//# `RING-IMPL-REGRESSION-075` Reopening with uncommitted staged regions MUST reclaim staged regions
-//# and leave no ready or staged regions live.
+//# `RING-IMPL-REGRESSION-075` Reopening with incomplete transaction allocation state MUST recover
+//# allocated regions and leave no abandoned ready regions live.
 #[test]
 fn requirement_staged_regions_are_reclaimed_on_reopen_when_uncommitted() {
     let mut flash = MockFlash::<512, 5, 512>::new(0xff);
@@ -1407,8 +1408,8 @@ fn requirement_staged_regions_are_reclaimed_on_reopen_when_uncommitted() {
 
 //= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
 //= type=test
-//# `RING-IMPL-REGRESSION-076` Staging a region MUST reject region indexes that do not match the
-//# current ready_region.
+//# `RING-IMPL-REGRESSION-076` Allocation cleanup MUST reject region indexes that do not match the
+//# current ready allocation state.
 #[test]
 fn requirement_stage_ready_region_rejects_non_ready_region() {
     let mut flash = MockFlash::<512, 5, 256>::new(0xff);
@@ -1759,8 +1760,8 @@ fn requirement_ensure_head_append_room_with_rotation_rotates_when_tail_lacks_hea
 
 //= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
 //= type=test
-//# `RING-IMPL-REGRESSION-080` Stage-region append room checks MUST reject staging when allocator
-//# state no longer matches the target region.
+//# `RING-IMPL-REGRESSION-080` Transaction cleanup append room checks MUST reject cleanup when
+//# allocator state no longer matches the target region.
 #[test]
 fn requirement_ensure_stage_region_append_room_with_rotation_rotates_when_tail_lacks_stage_room() {
     let mut flash = MockFlash::<256, 6, 2048>::new(0xff);
@@ -2124,8 +2125,8 @@ fn requirement_region_reachable_from_live_state_follows_map_head_references_to_r
 
 //= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
 //= type=test
-//# `RING-IMPL-REGRESSION-089` Dropping a staged region in memory MUST remove only the matching
-//# staged region and preserve other staged regions.
+//# `RING-IMPL-REGRESSION-089` Dropping a transaction-owned region in memory MUST remove only the
+//# matching region and preserve other transaction recovery state.
 #[test]
 fn requirement_drop_staged_region_in_memory_removes_only_the_matching_region() {
     let mut flash = MockFlash::<128, 4, 128>::new(0xff);
