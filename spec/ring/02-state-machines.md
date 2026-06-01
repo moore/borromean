@@ -119,7 +119,7 @@ The stable runtime state contains:
   sequence.
 - The replayed collection table, including each collection id,
   collection type, durable basis, dropped state, and retained
-  post-basis update count or references.
+  post-basis update count or WAL record locations.
 - Ordered `staged_regions` that left `ready_region` but are not yet
   known to be live or free.
 - Ordered `pending_reclaims` that have a durable `reclaim_begin` but
@@ -133,6 +133,16 @@ collection-defined in-memory frontier materialized from retained
 post-basis updates. Startup can reconstruct equivalent volatile
 collection state from stable runtime state and retained WAL payloads, but
 dirty-frontier bookkeeping is not a separate durable fact.
+
+Outside storage open, retained WAL `update` records are not an unloaded
+collection storage form. A live collection is operationally either dirty
+and resident in RAM, clean with a WAL snapshot basis, or clean with a
+committed-region basis. If a dirty resident collection must leave RAM,
+the implementation first checkpoints it as a WAL snapshot or flushes it
+as committed region state. Borromean has no separate clean-shutdown
+path; every open is a recovery pass. Retained WAL updates become the
+effective collection state only during storage open, where replay
+reconstructs the dirty resident frontier that existed before reset.
 
 Operation-specific progress is distinct from both stable replayed state
 and volatile collection state. It belongs to the active mode: planned
@@ -215,7 +225,7 @@ effect after a record is durable:
 | --- | --- |
 | `new_collection(collection_id, collection_type)` | Create a collection entry and move its collection submachine from `NoCollection` to `EmptyClean`. |
 | `update(collection_id, payload)` | Require an existing non-dropped collection, retain the update after that collection's current durable basis, and move `EmptyClean` to `EmptyDirty`, `WALSnapshotClean` to `WALSnapshotDirty`, or `RegionClean` to `RegionDirty`; an already dirty collection remains in the matching dirty state. |
-| `snapshot(collection_id, collection_type, payload)` | Create or validate the collection type, move the collection submachine to `WALSnapshotClean`, and discard older pending updates for that collection. |
+| `snapshot(collection_id, collection_type, payload)` | If this is the first retained basis record for the collection, create replay state and set the collection type from this record; otherwise require `collection_type` to match the replay-tracked type. Move the collection submachine to `WALSnapshotClean` and discard older pending updates for that collection. |
 | `alloc_begin(region_index, free_list_head_after)` | Advance `last_free_list_head` to `free_list_head_after` and set `ready_region = region_index`. |
 | `stage_region(region_index)` | Require `ready_region = region_index`, append the region to `staged_regions`, and clear `ready_region`. |
 | `head(collection_id, collection_type, region_index)` for a user collection | Create or validate the collection type, move the collection submachine to `RegionClean`, discard older pending updates for that collection, and consume matching `ready_region` or staged state. |
@@ -231,12 +241,13 @@ The main operation modes are transition sequences over the same table:
 
 - `ReadingStorage(ReadMode)` visits WAL records, collection bases, or
   committed regions without changing durable state. It may use bounded
-  scratch and may materialize volatile read views, then returns to
-  `Idle`.
+  memory for decoding or region reads and may materialize volatile read
+  views, then returns to `Idle`.
 - `LoadingCollection(CollectionLoadMode)` validates an existing live
-  collection, loads its retained basis and post-basis update records,
-  and constructs the collection-specific handle or frontier without
-  appending records.
+  collection and constructs the collection-specific handle or resident
+  frontier from its current durable basis. It may materialize volatile
+  collection state, but it does not append records or change durable
+  state.
 - `CreatingCollection(CollectionCreateMode)` reserves a new collection
   id, appends and syncs `new_collection`, applies the `EmptyClean`
   transition, and returns a collection handle for the new empty basis.
