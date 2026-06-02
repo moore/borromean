@@ -126,20 +126,11 @@ fn requirement_public_decode_and_open_paths_expose_explicit_error_results() {
     // and the returned map value while still checking that the return
     // type is `Result<..., ...>`.
     fn assert_open_map_signature<'db, 'mem, 'a>(_: OpenMapFn<'db, 'mem, 'a>) {}
-    fn assert_map_new_signature<'a>(
-        _: fn(
-            CollectionId,
-            &'a mut [u8],
-            &'a mut MapFrontierMemory<u16, 8>,
-        ) -> Result<Map<'a>, MapError>,
-    ) {
-    }
     fn assert_map_set_signature<'a>(_: fn(&mut Map<'a>, u16, u16) -> Result<(), MapError>) {}
     fn assert_map_load_snapshot_signature<'a>(_: fn(&mut Map<'a>, &[u8]) -> Result<(), MapError>) {}
     fn assert_open_from_storage_signature<'a>(_: OpenFromStorageFn<'a>) {}
 
     assert_open_map_signature(Storage::<Flash, 256, 5, 8>::open_map::<u16, u16, 8, 8>);
-    assert_map_new_signature(MapFrontier::<u16, u16, 8>::new);
     assert_map_set_signature(MapFrontier::<u16, u16, 8>::set);
     assert_map_load_snapshot_signature(MapFrontier::<u16, u16, 8>::load_snapshot);
     assert_open_from_storage_signature(

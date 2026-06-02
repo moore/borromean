@@ -182,10 +182,11 @@ as `Storage::create_map`, `Storage::open_map` with a frontier byte buffer
 and `MapFrontierMemory`,
 `update_map_frontier`, `append_map_update`, `snapshot_map`, `flush_map`,
 `compact_map`, and `drop_map`. Those APIs are advanced plumbing around
-`MapFrontier` and the shared runtime; normal map use should prefer the
-object-level `LsmMap` API above. The `*_future` methods are caller-driven
-future variants of the same lower-level operations and do not define separate
-logical behavior.
+storage-returned `MapFrontier` values and the shared runtime; normal creation
+of a new durable map should use the object-level `LsmMap::new` API above so
+storage assigns a unique collection id and appends `new_collection`. The
+`*_future` methods are caller-driven future variants of the same lower-level
+operations and do not define separate logical behavior.
 
 ## Empty Logical State
 

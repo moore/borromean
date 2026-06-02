@@ -46,7 +46,8 @@ raw write volume.
   [`StorageMemory`](src/lib.rs); `Storage` is a small handle that borrows both while normal
   operations run.
 - The only user collection type that is supported durably today is the map collection implemented by
-  [`LsmMap`](src/collections/map/mod.rs).
+  [`LsmMap`](src/collections/map/mod.rs). New durable maps should be created with `LsmMap::new`;
+  low-level frontier APIs are for opening or updating existing storage collections.
 - The exported channel module is still experimental. It is documented as a public API surface, but
   it is not yet a durably integrated storage collection.
 
@@ -57,7 +58,7 @@ while the concrete device driver remains caller-provided through the `FlashIo` t
 Callers can drive the same operations in two styles:
 
 - Blocking entry points such as `Storage::format(backing, config, &mut storage_memory)`,
-  `Storage::open(backing, &mut storage_memory)`, `Storage::create_map`, and `Storage::flush_map`.
+  `Storage::open(backing, &mut storage_memory)`, `LsmMap::new`, and `Storage::flush_map`.
 - Future-returning entry points such as
   `Storage::format_future(backing, config, &mut storage_memory)`,
   `Storage::open_future(backing, &mut storage_memory)`, `Storage::create_map_future`,

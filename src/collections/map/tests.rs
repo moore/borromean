@@ -156,7 +156,38 @@ fn requirement_object_lsm_map_new_open_get_set_delete_use_storage_owned_scratch(
     let second = LsmMap::<u16, u16, 8>::new(&mut storage, crate::test_lsm_map_memory()).unwrap();
     assert_eq!(second.collection_id(), CollectionId(2));
 
-    let collection_id = map.collection_id();
+    let first_collection_id = map.collection_id();
+    let second_collection_id = second.collection_id();
+    let mut saw_first_new_collection = false;
+    let mut saw_second_new_collection = false;
+    storage
+        .with_runtime_io_workspace(|runtime, flash, workspace| {
+            runtime.visit_wal_records::<512, _, (), _>(flash, workspace, |_flash, record| {
+                match record {
+                    crate::WalRecord::NewCollection {
+                        collection_id,
+                        collection_type,
+                    } if collection_id == first_collection_id => {
+                        assert_eq!(collection_type, crate::CollectionType::MAP_CODE);
+                        saw_first_new_collection = true;
+                    }
+                    crate::WalRecord::NewCollection {
+                        collection_id,
+                        collection_type,
+                    } if collection_id == second_collection_id => {
+                        assert_eq!(collection_type, crate::CollectionType::MAP_CODE);
+                        saw_second_new_collection = true;
+                    }
+                    _ => {}
+                }
+                Ok(())
+            })
+        })
+        .unwrap();
+    assert!(saw_first_new_collection);
+    assert!(saw_second_new_collection);
+
+    let collection_id = first_collection_id;
     drop(storage);
     let mut reopened =
         Storage::<_, 512, 8>::open(&mut flash, crate::test_storage_memory()).unwrap();

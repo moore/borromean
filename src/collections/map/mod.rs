@@ -2410,7 +2410,7 @@ where
     V: LsmValue,
 {
     /// Creates a new empty map frontier over `buffer`.
-    pub fn new(
+    pub(crate) fn new(
         id: CollectionId,
         buffer: &'a mut [u8],
         memory: &'a mut MapFrontierMemory<K, MAX_RUNS>,
