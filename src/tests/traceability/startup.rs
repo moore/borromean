@@ -11,8 +11,8 @@ use std::task::Poll;
 fn requirement_open_future_preserves_replay_context_across_pending_polls() {
     let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
-    let mut format_memory = StorageMemory::<512, 5, 8, 4>::new();
-    let mut storage = Storage::<_, 512, 5, 8, 4>::format(
+    let mut format_memory = StorageMemory::<512, 5, 8>::new();
+    let mut storage = Storage::<_, 512, 5, 8>::format(
         &mut flash,
         StorageFormatConfig::new(1, 8, 0xa5),
         &mut format_memory,
@@ -27,8 +27,7 @@ fn requirement_open_future_preserves_replay_context_across_pending_polls() {
     drop(storage);
 
     let mut reopened = {
-        let future =
-            Storage::<_, 512, 5, 8, 4>::open_future(&mut flash, crate::test_storage_memory());
+        let future = Storage::<_, 512, 5, 8>::open_future(&mut flash, crate::test_storage_memory());
         let mut future = pin!(future);
 
         assert!(matches!(
@@ -61,7 +60,7 @@ fn requirement_open_future_preserves_replay_context_across_pending_polls() {
 fn requirement_startup_open_paths_complete_without_heap_allocation() {
     let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
-    let mut storage = Storage::<_, 512, 5, 8, 4>::format(
+    let mut storage = Storage::<_, 512, 5, 8>::format(
         &mut flash,
         StorageFormatConfig::new(1, 8, 0xa5),
         crate::test_storage_memory(),
@@ -72,17 +71,16 @@ fn requirement_startup_open_paths_complete_without_heap_allocation() {
     storage.append_update(CollectionId(84), &[1, 2, 3]).unwrap();
     drop(storage);
 
-    let mut blocking_memory = StorageMemory::<512, 5, 8, 4>::new();
+    let mut blocking_memory = StorageMemory::<512, 5, 8>::new();
     assert_no_alloc("blocking open", || {
-        let mut reopened =
-            Storage::<_, 512, 5, 8, 4>::open(&mut flash, &mut blocking_memory).unwrap();
+        let mut reopened = Storage::<_, 512, 5, 8>::open(&mut flash, &mut blocking_memory).unwrap();
         assert_eq!(reopened.collections()[0].collection_id(), CollectionId(84));
     });
 
-    let mut future_memory = StorageMemory::<512, 5, 8, 4>::new();
+    let mut future_memory = StorageMemory::<512, 5, 8>::new();
     assert_no_alloc("future open", || {
         let reopened = super::super::poll_until_ready(
-            Storage::<_, 512, 5, 8, 4>::open_future(&mut flash, &mut future_memory),
+            Storage::<_, 512, 5, 8>::open_future(&mut flash, &mut future_memory),
             8,
         )
         .unwrap();
@@ -105,20 +103,18 @@ fn todo_startup_uses_storage_context_decode_scratch() {}
 //# operation framework used for normal foreground work.
 #[test]
 fn requirement_blocking_and_future_open_recover_the_same_pending_reclaim_state() {
-    let mut blocking_flash = MockFlash::<512, 5, 2048>::new(0xff);
+    let mut blocking_flash = MockFlash::<512, 6, 2048>::new(0xff);
     let (storage, first_region, second_region) =
-        super::super::replace_map_into_pending_reclaim_with_empty_free_list(&mut blocking_flash);
+        super::super::replace_map_and_free_old_manifest(&mut blocking_flash);
     drop(storage);
     let reopened_blocking =
-        Storage::<_, 512, 5, 8, 4>::open(&mut blocking_flash, crate::test_storage_memory())
-            .unwrap();
+        Storage::<_, 512, 6, 8>::open(&mut blocking_flash, crate::test_storage_memory()).unwrap();
 
-    let mut future_flash = MockFlash::<512, 5, 2048>::new(0xff);
-    let (future_storage, _, _) =
-        super::super::replace_map_into_pending_reclaim_with_empty_free_list(&mut future_flash);
+    let mut future_flash = MockFlash::<512, 6, 2048>::new(0xff);
+    let (future_storage, _, _) = super::super::replace_map_and_free_old_manifest(&mut future_flash);
     drop(future_storage);
     let reopened_future = super::super::poll_until_ready(
-        Storage::<_, 512, 5, 8, 4>::open_future(&mut future_flash, crate::test_storage_memory()),
+        Storage::<_, 512, 6, 8>::open_future(&mut future_flash, crate::test_storage_memory()),
         8,
     )
     .unwrap();
@@ -127,8 +123,7 @@ fn requirement_blocking_and_future_open_recover_the_same_pending_reclaim_state()
         reopened_blocking.collections()[0].basis(),
         StartupCollectionBasis::Region(second_region)
     );
-    assert_eq!(reopened_blocking.last_free_list_head(), Some(first_region));
-    assert!(reopened_blocking.pending_reclaims().is_empty());
+    assert_eq!(reopened_blocking.free_list_tail(), Some(first_region));
 
     assert_eq!(
         reopened_future.collections(),
@@ -141,10 +136,6 @@ fn requirement_blocking_and_future_open_recover_the_same_pending_reclaim_state()
     assert_eq!(
         reopened_future.free_list_tail(),
         reopened_blocking.free_list_tail()
-    );
-    assert_eq!(
-        reopened_future.pending_reclaims(),
-        reopened_blocking.pending_reclaims()
     );
 }
 

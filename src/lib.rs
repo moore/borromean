@@ -25,8 +25,8 @@
 //! const REGION_COUNT: usize = 4;
 //!
 //! let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 1024>::new(0xff);
-//! let mut memory = StorageMemory::<REGION_SIZE, REGION_COUNT, 8, 4>::new();
-//! let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT, 8, 4>::format(
+//! let mut memory = StorageMemory::<REGION_SIZE, REGION_COUNT, 8>::new();
+//! let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT, 8>::format(
 //!     &mut flash,
 //!     StorageFormatConfig::new(2, 8, 0xa5),
 //!     &mut memory,
@@ -69,9 +69,7 @@ pub(crate) fn test_storage_memory<
     const REGION_SIZE: usize,
     const REGION_COUNT: usize,
     const MAX_COLLECTIONS: usize,
-    const MAX_PENDING_RECLAIMS: usize,
->() -> &'static mut StorageMemory<REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>
-{
+>() -> &'static mut StorageMemory<REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS> {
     std::boxed::Box::leak(std::boxed::Box::new(StorageMemory::new()))
 }
 
@@ -277,31 +275,27 @@ pub struct Storage<
     IO: FlashIo,
     const REGION_SIZE: usize,
     const REGION_COUNT: usize,
-    const MAX_COLLECTIONS: usize,
-    const MAX_PENDING_RECLAIMS: usize,
+    const MAX_COLLECTIONS: usize = 8,
 > {
     pub(crate) backing: &'db mut IO,
-    pub(crate) memory:
-        &'mem mut StorageMemory<REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+    pub(crate) memory: &'mem mut StorageMemory<REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
 }
 
 /// Caller-owned memory borrowed by [`Storage`] and its operation futures.
 pub struct StorageMemory<
     const REGION_SIZE: usize,
     const REGION_COUNT: usize,
-    const MAX_COLLECTIONS: usize,
-    const MAX_PENDING_RECLAIMS: usize,
+    const MAX_COLLECTIONS: usize = 8,
 > {
     pub(crate) workspace: StorageWorkspace<REGION_SIZE>,
-    pub(crate) state: StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+    pub(crate) state: StorageRuntime<MAX_COLLECTIONS>,
     pub(crate) dirty_frontiers: Vec<CollectionId, MAX_COLLECTIONS>,
     pub(crate) payload_scratch: [u8; REGION_SIZE],
     pub(crate) checkpoint_scratch: [u8; REGION_SIZE],
     pub(crate) collection_scratch: [u8; REGION_SIZE],
     pub(crate) open_scratch: [u8; REGION_SIZE],
     pub(crate) frontier_buffer_owner: FrontierBufferOwner,
-    pub(crate) open_plan:
-        crate::startup::StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+    pub(crate) open_plan: crate::startup::StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS>,
     pub(crate) reclaim_plan: crate::storage::WalHeadReclaimPlan<MAX_COLLECTIONS>,
     pub(crate) reclaim_source_regions: Vec<u32, REGION_COUNT>,
     pub(crate) active_collections: Vec<CollectionId, MAX_COLLECTIONS>,
@@ -311,12 +305,8 @@ pub struct StorageMemory<
     pub(crate) mode: StorageMode,
 }
 
-impl<
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        const MAX_COLLECTIONS: usize,
-        const MAX_PENDING_RECLAIMS: usize,
-    > StorageMemory<REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>
+impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_COLLECTIONS: usize>
+    StorageMemory<REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>
 {
     /// Allocates caller-owned storage memory.
     pub fn new() -> Self {
@@ -341,12 +331,8 @@ impl<
     }
 }
 
-impl<
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        const MAX_COLLECTIONS: usize,
-        const MAX_PENDING_RECLAIMS: usize,
-    > Default for StorageMemory<REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>
+impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_COLLECTIONS: usize> Default
+    for StorageMemory<REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>
 {
     fn default() -> Self {
         Self::new()
@@ -390,11 +376,8 @@ fn dirty_frontier_is_active_in<const MAX_COLLECTIONS: usize>(
     dirty_frontiers.contains(&collection_id)
 }
 
-fn ensure_dirty_frontier_budget_for<
-    const MAX_COLLECTIONS: usize,
-    const MAX_PENDING_RECLAIMS: usize,
->(
-    state: &StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+fn ensure_dirty_frontier_budget_for<const MAX_COLLECTIONS: usize>(
+    state: &StorageRuntime<MAX_COLLECTIONS>,
     dirty_frontiers: &Vec<CollectionId, MAX_COLLECTIONS>,
     collection_id: CollectionId,
 ) -> Result<(), StorageRuntimeError> {
@@ -458,11 +441,10 @@ fn update_map_frontier_parts<
     const REGION_SIZE: usize,
     const REGION_COUNT: usize,
     const MAX_COLLECTIONS: usize,
-    const MAX_PENDING_RECLAIMS: usize,
     const MAX_INDEXES: usize,
     const MAX_RUNS: usize,
 >(
-    state: &mut StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+    state: &mut StorageRuntime<MAX_COLLECTIONS>,
     backing: &mut IO,
     workspace: &mut StorageWorkspace<REGION_SIZE>,
     dirty_frontiers: &mut Vec<CollectionId, MAX_COLLECTIONS>,
@@ -471,7 +453,7 @@ fn update_map_frontier_parts<
     reclaim_source_regions: &mut Vec<u32, REGION_COUNT>,
     active_collections: &mut Vec<CollectionId, MAX_COLLECTIONS>,
     reclaim_plan: &mut storage::WalHeadReclaimPlan<MAX_COLLECTIONS>,
-    open_plan: &mut startup::StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+    open_plan: &mut startup::StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS>,
     #[cfg(feature = "perf-counters")] perf_metrics: &mut StoragePerfMetrics,
     map: &mut MapFrontier<'_, K, V, MAX_INDEXES, MAX_RUNS>,
     update: &MapUpdate<K, V>,
@@ -573,21 +555,16 @@ where
 
                     #[cfg(feature = "perf-counters")]
                     let flush_timer = StoragePerfTimerGuard::start();
-                    let flush_result = map.flush_to_storage::<
-                        REGION_SIZE,
-                        REGION_COUNT,
-                        IO,
-                        MAX_COLLECTIONS,
-                        MAX_PENDING_RECLAIMS,
-                    >(
-                        state,
-                        backing,
-                        workspace,
-                        reclaim_source_regions,
-                        active_collections,
-                        reclaim_plan,
-                        open_plan,
-                    );
+                    let flush_result = map
+                        .flush_to_storage::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
+                            state,
+                            backing,
+                            workspace,
+                            reclaim_source_regions,
+                            active_collections,
+                            reclaim_plan,
+                            open_plan,
+                        );
                     #[cfg(feature = "perf-counters")]
                     {
                         let flush_nanos = flush_timer.elapsed_nanos();
@@ -677,11 +654,10 @@ fn compact_map_frontier_parts<
     const REGION_SIZE: usize,
     const REGION_COUNT: usize,
     const MAX_COLLECTIONS: usize,
-    const MAX_PENDING_RECLAIMS: usize,
     const MAX_INDEXES: usize,
     const MAX_RUNS: usize,
 >(
-    state: &mut StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+    state: &mut StorageRuntime<MAX_COLLECTIONS>,
     backing: &mut IO,
     workspace: &mut StorageWorkspace<REGION_SIZE>,
     dirty_frontiers: &mut Vec<CollectionId, MAX_COLLECTIONS>,
@@ -689,7 +665,7 @@ fn compact_map_frontier_parts<
     reclaim_source_regions: &mut Vec<u32, REGION_COUNT>,
     active_collections: &mut Vec<CollectionId, MAX_COLLECTIONS>,
     reclaim_plan: &mut storage::WalHeadReclaimPlan<MAX_COLLECTIONS>,
-    open_plan: &mut startup::StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+    open_plan: &mut startup::StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS>,
     collection_id: CollectionId,
     run_target: usize,
     mut opened: MapFrontier<'a, K, V, MAX_INDEXES, MAX_RUNS>,
@@ -728,11 +704,6 @@ where
                 crate::collections::map::MapError::SerializationError,
             ))?;
     }
-    let additional_allocations = if state.ready_region().is_some() {
-        planned_allocations.saturating_sub(1)
-    } else {
-        planned_allocations
-    };
     state.ensure_foreground_allocation_headroom_for::<REGION_SIZE, REGION_COUNT, IO>(
         backing,
         workspace,
@@ -740,38 +711,32 @@ where
         active_collections,
         reclaim_plan,
         open_plan,
-        additional_allocations,
+        planned_allocations,
     )?;
-
-    let replacement_run = opened.write_compacted_run_to_storage::<
-        REGION_SIZE,
-        REGION_COUNT,
-        IO,
-        MAX_COLLECTIONS,
-        MAX_PENDING_RECLAIMS,
-    >(
-        state,
+    state.begin_collection_transaction::<REGION_SIZE, REGION_COUNT, IO>(
         backing,
         workspace,
-        reclaim_source_regions,
-        active_collections,
-        reclaim_plan,
-        open_plan,
-        selected_runs,
-        compaction_cursors,
-        duplicate_indices,
-        compaction_segment_entries,
+        collection_id,
     )?;
+
+    let replacement_run = opened
+        .write_compacted_run_to_storage::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
+            state,
+            backing,
+            workspace,
+            reclaim_source_regions,
+            active_collections,
+            reclaim_plan,
+            open_plan,
+            selected_runs,
+            compaction_cursors,
+            duplicate_indices,
+            compaction_segment_entries,
+        )?;
     let frontier_run = if opened.frontier_is_empty() {
         None
     } else {
-        opened.write_frontier_run_to_storage::<
-            REGION_SIZE,
-            REGION_COUNT,
-            IO,
-            MAX_COLLECTIONS,
-            MAX_PENDING_RECLAIMS,
-        >(
+        opened.write_frontier_run_to_storage::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
             state,
             backing,
             workspace,
@@ -791,29 +756,25 @@ where
         replacement.push_retained_run(run)?;
     }
     opened.move_unselected_runs_into(selected_runs, &mut replacement)?;
-    let manifest_region = replacement.commit_manifest_to_storage::<
-        REGION_SIZE,
-        REGION_COUNT,
-        IO,
-        MAX_COLLECTIONS,
-        MAX_PENDING_RECLAIMS,
-    >(
-        state,
+    let manifest_region = replacement
+        .commit_manifest_to_storage::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
+            state,
+            backing,
+            workspace,
+            reclaim_source_regions,
+            active_collections,
+            reclaim_plan,
+            open_plan,
+            frontier_run,
+        )?;
+    opened.reclaim_run_regions::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
+        state, backing, workspace,
+    )?;
+    state.finish_collection_transaction::<REGION_SIZE, REGION_COUNT, IO>(
         backing,
         workspace,
-        reclaim_source_regions,
-        active_collections,
-        reclaim_plan,
-        open_plan,
-        frontier_run,
+        collection_id,
     )?;
-    opened.reclaim_run_regions::<
-        REGION_SIZE,
-        REGION_COUNT,
-        IO,
-        MAX_COLLECTIONS,
-        MAX_PENDING_RECLAIMS,
-    >(state, backing, workspace)?;
     opened.clear_retained_runs();
     replacement.move_unselected_runs_into(0, &mut opened)?;
     clear_dirty_frontier_in(dirty_frontiers, collection_id);
@@ -827,28 +788,14 @@ impl<
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
         const MAX_COLLECTIONS: usize,
-        const MAX_PENDING_RECLAIMS: usize,
-    > Storage<'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>
+    > Storage<'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>
 {
     /// Formats an empty store and returns it as a caller-driven future.
     pub fn format_future(
         backing: &'db mut IO,
         config: StorageFormatConfig,
-        memory: &'mem mut StorageMemory<
-            REGION_SIZE,
-            REGION_COUNT,
-            MAX_COLLECTIONS,
-            MAX_PENDING_RECLAIMS,
-        >,
-    ) -> FormatStorageFuture<
-        'db,
-        'mem,
-        IO,
-        REGION_SIZE,
-        REGION_COUNT,
-        MAX_COLLECTIONS,
-        MAX_PENDING_RECLAIMS,
-    > {
+        memory: &'mem mut StorageMemory<REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
+    ) -> FormatStorageFuture<'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS> {
         FormatStorageFuture::new(backing, config, memory)
     }
 
@@ -856,14 +803,9 @@ impl<
     pub fn format(
         backing: &'db mut IO,
         config: StorageFormatConfig,
-        memory: &'mem mut StorageMemory<
-            REGION_SIZE,
-            REGION_COUNT,
-            MAX_COLLECTIONS,
-            MAX_PENDING_RECLAIMS,
-        >,
+        memory: &'mem mut StorageMemory<REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
     ) -> Result<Self, StorageRuntimeError> {
-        storage::format_into::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>(
+        storage::format_into::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
             backing,
             &mut memory.workspace,
             &mut memory.state,
@@ -878,46 +820,21 @@ impl<
     /// Opens an already formatted store as a caller-driven future.
     pub fn open_future(
         backing: &'db mut IO,
-        memory: &'mem mut StorageMemory<
-            REGION_SIZE,
-            REGION_COUNT,
-            MAX_COLLECTIONS,
-            MAX_PENDING_RECLAIMS,
-        >,
-    ) -> OpenStorageFuture<
-        'db,
-        'mem,
-        IO,
-        REGION_SIZE,
-        REGION_COUNT,
-        MAX_COLLECTIONS,
-        MAX_PENDING_RECLAIMS,
-    > {
-        OpenStorageFuture::<
-            IO,
-            REGION_SIZE,
-            REGION_COUNT,
-            MAX_COLLECTIONS,
-            MAX_PENDING_RECLAIMS,
-        >::new(backing, memory)
+        memory: &'mem mut StorageMemory<REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
+    ) -> OpenStorageFuture<'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS> {
+        OpenStorageFuture::<IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>::new(backing, memory)
     }
 
     /// Opens an already formatted store and validates live collections.
     pub fn open(
         backing: &'db mut IO,
-        memory: &'mem mut StorageMemory<
-            REGION_SIZE,
-            REGION_COUNT,
-            MAX_COLLECTIONS,
-            MAX_PENDING_RECLAIMS,
-        >,
+        memory: &'mem mut StorageMemory<REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
     ) -> Result<Self, StorageOpenError> {
         storage::reopen_without_reclaim_recovery_into::<
             REGION_SIZE,
             REGION_COUNT,
             IO,
             MAX_COLLECTIONS,
-            MAX_PENDING_RECLAIMS,
         >(
             backing,
             &mut memory.workspace,
@@ -926,20 +843,6 @@ impl<
         )?;
         let storage = Self::from_initialized_memory(backing, memory)?;
         storage.validate_live_collections()?;
-        storage
-            .memory
-            .state
-            .recover_pending_reclaims::<REGION_SIZE, REGION_COUNT, IO>(
-                storage.backing,
-                &mut storage.memory.workspace,
-            )?;
-        storage
-            .memory
-            .state
-            .recover_abandoned_staged_regions::<REGION_SIZE, REGION_COUNT, IO>(
-                storage.backing,
-                &mut storage.memory.workspace,
-            )?;
         Ok(storage)
     }
 
@@ -1095,7 +998,6 @@ impl<
             REGION_COUNT,
             IO,
             MAX_COLLECTIONS,
-            MAX_PENDING_RECLAIMS,
         >(
             &self.memory.state,
             self.backing,
@@ -1112,7 +1014,6 @@ impl<
             REGION_COUNT,
             IO,
             MAX_COLLECTIONS,
-            MAX_PENDING_RECLAIMS,
         >(
             &self.memory.state,
             self.backing,
@@ -1149,15 +1050,13 @@ impl<
     }
 
     /// Returns the advanced runtime state backing this [`Storage`] value.
-    pub fn runtime(&self) -> &StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS> {
+    pub fn runtime(&self) -> &StorageRuntime<MAX_COLLECTIONS> {
         &self.memory.state
     }
 
     /// Consumes the facade and returns the underlying runtime state.
     #[cfg(test)]
-    pub(crate) fn into_runtime(
-        self,
-    ) -> &'mem mut StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS> {
+    pub(crate) fn into_runtime(self) -> &'mem mut StorageRuntime<MAX_COLLECTIONS> {
         &mut self.memory.state
     }
 
@@ -1165,7 +1064,7 @@ impl<
     pub(crate) fn with_runtime_io_workspace<T>(
         &mut self,
         operation: impl FnOnce(
-            &mut StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+            &mut StorageRuntime<MAX_COLLECTIONS>,
             &mut IO,
             &mut StorageWorkspace<REGION_SIZE>,
         ) -> T,
@@ -1245,16 +1144,6 @@ impl<
         Ok(CollectionId(next))
     }
 
-    /// Returns regions awaiting reclaim completion.
-    pub fn pending_reclaims(&self) -> &[u32] {
-        self.memory.state.pending_reclaims()
-    }
-
-    /// Returns allocated regions staged outside the single ready-region slot.
-    pub fn staged_regions(&self) -> &[u32] {
-        self.memory.state.staged_regions()
-    }
-
     /// Returns whether replay left an open WAL recovery boundary.
     pub fn pending_wal_recovery_boundary(&self) -> bool {
         self.memory.state.pending_wal_recovery_boundary()
@@ -1286,12 +1175,7 @@ impl<
 
     pub(crate) fn from_initialized_memory(
         backing: &'db mut IO,
-        memory: &'mem mut StorageMemory<
-            REGION_SIZE,
-            REGION_COUNT,
-            MAX_COLLECTIONS,
-            MAX_PENDING_RECLAIMS,
-        >,
+        memory: &'mem mut StorageMemory<REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
     ) -> Result<Self, StorageRuntimeError> {
         memory.dirty_frontiers.clear();
         memory.payload_scratch.fill(0);
@@ -1484,6 +1368,7 @@ impl<
                     .append_alloc_begin::<REGION_SIZE, REGION_COUNT, IO>(
                         this.backing,
                         &mut this.memory.workspace,
+                        CollectionId(0),
                         region_index,
                         free_list_head_after,
                     )
@@ -1534,93 +1419,6 @@ impl<
         )
     }
 
-    /// Appends `stage_region` for the current ready region.
-    pub fn stage_ready_region(&mut self, region_index: u32) -> Result<(), StorageRuntimeError> {
-        self.run_storage_operation(StorageMode::AppendingWal(WalAppendMode::Running), |this| {
-            this.memory
-                .state
-                .stage_ready_region::<REGION_SIZE, REGION_COUNT, IO>(
-                    this.backing,
-                    &mut this.memory.workspace,
-                    region_index,
-                )
-        })
-    }
-
-    /// Appends a `free_list_head` WAL record.
-    pub fn append_free_list_head(
-        &mut self,
-        region_index: Option<u32>,
-    ) -> Result<(), StorageRuntimeError> {
-        self.run_storage_operation(StorageMode::AppendingWal(WalAppendMode::Running), |this| {
-            this.memory
-                .state
-                .append_free_list_head::<REGION_SIZE, REGION_COUNT, IO>(
-                    this.backing,
-                    &mut this.memory.workspace,
-                    region_index,
-                )
-        })
-    }
-
-    /// Appends a `reclaim_begin` WAL record for a detached region.
-    pub fn append_reclaim_begin(&mut self, region_index: u32) -> Result<(), StorageRuntimeError> {
-        #[cfg(feature = "perf-counters")]
-        {
-            self.memory
-                .perf_metrics
-                .increment(StoragePerfCounter::ReclaimStarts);
-        }
-        #[cfg(feature = "perf-counters")]
-        let reclaim_timer = StoragePerfTimerGuard::start();
-        let result = self.run_storage_operation(
-            StorageMode::ReclaimingRegion(RegionReclaimMode::Running),
-            |this| {
-                this.memory
-                    .state
-                    .append_reclaim_begin::<REGION_SIZE, REGION_COUNT, IO>(
-                        this.backing,
-                        &mut this.memory.workspace,
-                        region_index,
-                    )
-            },
-        );
-        #[cfg(feature = "perf-counters")]
-        self.memory
-            .perf_metrics
-            .add_nanos(StoragePerfTimer::Reclaim, reclaim_timer.elapsed_nanos());
-        result
-    }
-
-    /// Appends a `reclaim_end` WAL record for a previously detached region.
-    pub fn append_reclaim_end(&mut self, region_index: u32) -> Result<(), StorageRuntimeError> {
-        #[cfg(feature = "perf-counters")]
-        {
-            self.memory
-                .perf_metrics
-                .increment(StoragePerfCounter::ReclaimEnds);
-        }
-        #[cfg(feature = "perf-counters")]
-        let reclaim_timer = StoragePerfTimerGuard::start();
-        let result = self.run_storage_operation(
-            StorageMode::ReclaimingRegion(RegionReclaimMode::Running),
-            |this| {
-                this.memory
-                    .state
-                    .append_reclaim_end::<REGION_SIZE, REGION_COUNT, IO>(
-                        this.backing,
-                        &mut this.memory.workspace,
-                        region_index,
-                    )
-            },
-        );
-        #[cfg(feature = "perf-counters")]
-        self.memory
-            .perf_metrics
-            .add_nanos(StoragePerfTimer::Reclaim, reclaim_timer.elapsed_nanos());
-        result
-    }
-
     /// Reclaims the current WAL head region and returns the new head.
     pub fn reclaim_wal_head(&mut self) -> Result<u32, StorageRuntimeError> {
         #[cfg(feature = "perf-counters")]
@@ -1667,58 +1465,10 @@ impl<
     /// Reclaims the current WAL head region as a caller-driven future.
     pub fn reclaim_wal_head_future<'a>(
         &'a mut self,
-    ) -> ReclaimWalHeadFuture<
-        'a,
-        'db,
-        'mem,
-        IO,
-        REGION_SIZE,
-        REGION_COUNT,
-        MAX_COLLECTIONS,
-        MAX_PENDING_RECLAIMS,
-    > {
-        ReclaimWalHeadFuture::<
-            'a,
-            'db,
-            'mem,
-            IO,
-            REGION_SIZE,
-            REGION_COUNT,
-            MAX_COLLECTIONS,
-            MAX_PENDING_RECLAIMS,
-        >::new(self)
-    }
-
-    /// Completes physical reclaim for a region already marked pending.
-    pub fn complete_pending_reclaim(
-        &mut self,
-        region_index: u32,
-    ) -> Result<(), StorageRuntimeError> {
-        #[cfg(feature = "perf-counters")]
-        {
-            self.memory
-                .perf_metrics
-                .increment(StoragePerfCounter::ReclaimEnds);
-        }
-        #[cfg(feature = "perf-counters")]
-        let reclaim_timer = StoragePerfTimerGuard::start();
-        let result = self.run_storage_operation(
-            StorageMode::ReclaimingRegion(RegionReclaimMode::Running),
-            |this| {
-                this.memory
-                    .state
-                    .complete_pending_reclaim::<REGION_SIZE, REGION_COUNT, IO>(
-                        this.backing,
-                        &mut this.memory.workspace,
-                        region_index,
-                    )
-            },
-        );
-        #[cfg(feature = "perf-counters")]
-        self.memory
-            .perf_metrics
-            .add_nanos(StoragePerfTimer::Reclaim, reclaim_timer.elapsed_nanos());
-        result
+    ) -> ReclaimWalHeadFuture<'a, 'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS> {
+        ReclaimWalHeadFuture::<'a, 'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>::new(
+            self,
+        )
     }
 
     /// Appends a `wal_recovery` record when replay requires one.
@@ -1772,8 +1522,7 @@ impl<
         collection_id: CollectionId,
     ) -> impl Future<Output = Result<(), StorageRuntimeError>>
            + 'a
-           + use<'a, 'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>
-    {
+           + use<'a, 'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS> {
         run_once(move || self.create_map(collection_id))
     }
 
@@ -1785,13 +1534,7 @@ impl<
         K: LsmKey,
         V: LsmValue,
     {
-        let region_index = map.flush_to_storage::<
-            REGION_SIZE,
-            REGION_COUNT,
-            IO,
-            MAX_COLLECTIONS,
-            MAX_PENDING_RECLAIMS,
-        >(
+        let region_index = map.flush_to_storage::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
             &mut self.memory.state,
             self.backing,
             &mut self.memory.workspace,
@@ -1817,13 +1560,7 @@ impl<
         self.run_map_operation(
             StorageMode::SnapshottingCollection(CollectionSnapshotMode::Running),
             |this| {
-                map.write_snapshot_to_storage::<
-                    REGION_SIZE,
-                    REGION_COUNT,
-                    IO,
-                    MAX_COLLECTIONS,
-                    MAX_PENDING_RECLAIMS,
-                >(
+                map.write_snapshot_to_storage::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
                     &mut this.memory.state,
                     this.backing,
                     &mut this.memory.workspace,
@@ -1842,19 +1579,7 @@ impl<
         map: &'a MapFrontier<'a, K, V, MAX_INDEXES>,
     ) -> impl Future<Output = Result<(), MapStorageError>>
            + 'a
-           + use<
-        'a,
-        'db,
-        'mem,
-        K,
-        V,
-        MAX_INDEXES,
-        IO,
-        REGION_SIZE,
-        REGION_COUNT,
-        MAX_COLLECTIONS,
-        MAX_PENDING_RECLAIMS,
-    >
+           + use<'a, 'db, 'mem, K, V, MAX_INDEXES, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>
     where
         K: LsmKey,
         V: LsmValue,
@@ -1939,7 +1664,6 @@ impl<
             REGION_SIZE,
             REGION_COUNT,
             MAX_COLLECTIONS,
-            MAX_PENDING_RECLAIMS,
             MAX_INDEXES,
             MAX_RUNS,
         >(
@@ -1973,19 +1697,7 @@ impl<
         update: &'a MapUpdate<K, V>,
     ) -> impl Future<Output = Result<(), MapStorageError>>
            + 'a
-           + use<
-        'a,
-        'db,
-        'mem,
-        K,
-        V,
-        MAX_INDEXES,
-        IO,
-        REGION_SIZE,
-        REGION_COUNT,
-        MAX_COLLECTIONS,
-        MAX_PENDING_RECLAIMS,
-    >
+           + use<'a, 'db, 'mem, K, V, MAX_INDEXES, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>
     where
         K: LsmKey,
         V: LsmValue,
@@ -2020,7 +1732,6 @@ impl<
         REGION_SIZE,
         REGION_COUNT,
         MAX_COLLECTIONS,
-        MAX_PENDING_RECLAIMS,
         K,
         V,
         MAX_INDEXES,
@@ -2038,7 +1749,6 @@ impl<
             REGION_SIZE,
             REGION_COUNT,
             MAX_COLLECTIONS,
-            MAX_PENDING_RECLAIMS,
             K,
             V,
             MAX_INDEXES,
@@ -2098,7 +1808,6 @@ impl<
                             REGION_COUNT,
                             IO,
                             MAX_COLLECTIONS,
-                            MAX_PENDING_RECLAIMS,
                         >(
                             &this.memory.state,
                             this.backing,
@@ -2115,7 +1824,6 @@ impl<
                         REGION_COUNT,
                         IO,
                         MAX_COLLECTIONS,
-                        MAX_PENDING_RECLAIMS,
                     >(
                         &this.memory.state,
                         this.backing,
@@ -2132,7 +1840,6 @@ impl<
                         REGION_SIZE,
                         REGION_COUNT,
                         MAX_COLLECTIONS,
-                        MAX_PENDING_RECLAIMS,
                         MAX_INDEXES,
                         MAX_RUNS,
                     >(
@@ -2221,8 +1928,7 @@ impl<
         collection_id: CollectionId,
     ) -> impl Future<Output = Result<Option<u32>, MapStorageError>>
            + 'a
-           + use<'a, 'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>
-    {
+           + use<'a, 'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS> {
         run_once(move || self.drop_map(collection_id))
     }
 
@@ -2244,7 +1950,6 @@ impl<
             REGION_COUNT,
             IO,
             MAX_COLLECTIONS,
-            MAX_PENDING_RECLAIMS,
         >(
             &self.memory.state,
             self.backing,
@@ -2280,17 +1985,8 @@ where
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
         const MAX_COLLECTIONS: usize,
-        const MAX_PENDING_RECLAIMS: usize,
     >(
-        storage: &mut Storage<
-            'db,
-            'mem,
-            IO,
-            REGION_SIZE,
-            REGION_COUNT,
-            MAX_COLLECTIONS,
-            MAX_PENDING_RECLAIMS,
-        >,
+        storage: &mut Storage<'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
         memory: &'map mut LsmMapMemory<K, V, MAX_INDEXES, MAX_RUNS>,
     ) -> Result<Self, LsmMapError> {
         let collection_id = storage.allocate_map_collection_id()?;
@@ -2310,18 +2006,9 @@ where
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
         const MAX_COLLECTIONS: usize,
-        const MAX_PENDING_RECLAIMS: usize,
     >(
         collection_id: CollectionId,
-        storage: &mut Storage<
-            'db,
-            'mem,
-            IO,
-            REGION_SIZE,
-            REGION_COUNT,
-            MAX_COLLECTIONS,
-            MAX_PENDING_RECLAIMS,
-        >,
+        storage: &mut Storage<'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
         memory: &'map mut LsmMapMemory<K, V, MAX_INDEXES, MAX_RUNS>,
     ) -> Result<Self, LsmMapError> {
         storage
@@ -2333,7 +2020,6 @@ where
                 REGION_COUNT,
                 IO,
                 MAX_COLLECTIONS,
-                MAX_PENDING_RECLAIMS,
             >(
                 &storage.memory.state,
                 storage.backing,
@@ -2378,18 +2064,9 @@ where
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
         const MAX_COLLECTIONS: usize,
-        const MAX_PENDING_RECLAIMS: usize,
     >(
         &mut self,
-        storage: &mut Storage<
-            'db,
-            'mem,
-            IO,
-            REGION_SIZE,
-            REGION_COUNT,
-            MAX_COLLECTIONS,
-            MAX_PENDING_RECLAIMS,
-        >,
+        storage: &mut Storage<'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
         key: &K,
         f: F,
     ) -> Result<Option<R>, LsmMapError>
@@ -2462,18 +2139,9 @@ where
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
         const MAX_COLLECTIONS: usize,
-        const MAX_PENDING_RECLAIMS: usize,
     >(
         &mut self,
-        storage: &mut Storage<
-            'db,
-            'mem,
-            IO,
-            REGION_SIZE,
-            REGION_COUNT,
-            MAX_COLLECTIONS,
-            MAX_PENDING_RECLAIMS,
-        >,
+        storage: &mut Storage<'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
         key: K,
         value: V,
     ) -> Result<bool, LsmMapError> {
@@ -2515,7 +2183,6 @@ where
                 REGION_SIZE,
                 REGION_COUNT,
                 MAX_COLLECTIONS,
-                MAX_PENDING_RECLAIMS,
                 MAX_INDEXES,
                 MAX_RUNS,
             >(
@@ -2581,18 +2248,9 @@ where
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
         const MAX_COLLECTIONS: usize,
-        const MAX_PENDING_RECLAIMS: usize,
     >(
         &mut self,
-        storage: &mut Storage<
-            'db,
-            'mem,
-            IO,
-            REGION_SIZE,
-            REGION_COUNT,
-            MAX_COLLECTIONS,
-            MAX_PENDING_RECLAIMS,
-        >,
+        storage: &mut Storage<'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
         key: K,
     ) -> Result<bool, LsmMapError> {
         storage
@@ -2633,7 +2291,6 @@ where
                 REGION_SIZE,
                 REGION_COUNT,
                 MAX_COLLECTIONS,
-                MAX_PENDING_RECLAIMS,
                 MAX_INDEXES,
                 MAX_RUNS,
             >(
@@ -2699,18 +2356,9 @@ where
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
         const MAX_COLLECTIONS: usize,
-        const MAX_PENDING_RECLAIMS: usize,
     >(
         &mut self,
-        storage: &mut Storage<
-            'db,
-            'mem,
-            IO,
-            REGION_SIZE,
-            REGION_COUNT,
-            MAX_COLLECTIONS,
-            MAX_PENDING_RECLAIMS,
-        >,
+        storage: &mut Storage<'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
     ) -> Result<bool, LsmMapError> {
         storage
             .enter_mode(StorageMode::CompactingCollection(
@@ -2742,7 +2390,6 @@ where
                 REGION_SIZE,
                 REGION_COUNT,
                 MAX_COLLECTIONS,
-                MAX_PENDING_RECLAIMS,
                 MAX_INDEXES,
                 MAX_RUNS,
             >(
@@ -2805,22 +2452,12 @@ where
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
         const MAX_COLLECTIONS: usize,
-        const MAX_PENDING_RECLAIMS: usize,
     >(
         &mut self,
-        storage: &mut Storage<
-            'db,
-            'mem,
-            IO,
-            REGION_SIZE,
-            REGION_COUNT,
-            MAX_COLLECTIONS,
-            MAX_PENDING_RECLAIMS,
-        >,
+        storage: &mut Storage<'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
     ) -> Result<(), LsmMapError> {
-        let _ = self.compact_and_report::<IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>(
-            storage,
-        )?;
+        let _ =
+            self.compact_and_report::<IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>(storage)?;
         Ok(())
     }
 }

@@ -5,25 +5,19 @@ use crate::disk::{FreePointerFooter, Header};
 use crate::wal_record::{encode_record_into, encoded_record_len, WalRecord};
 use crate::{
     MapError, MapStorageError, MockFlash, Storage, StorageFormatConfig, StorageWorkspace,
-    MAP_REGION_V2_FORMAT,
+    MAP_MANIFEST_V2_FORMAT, MAP_REGION_V2_FORMAT,
 };
 
 fn open_formatted_store<
     const REGION_SIZE: usize,
     const REGION_COUNT: usize,
     const MAX_LOG: usize,
-    const MAX_COLLECTIONS: usize,
-    const MAX_PENDING_RECLAIMS: usize,
 >(
     flash: &mut MockFlash<REGION_SIZE, REGION_COUNT, MAX_LOG>,
-) -> Result<StartupState<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>, StartupError> {
+) -> Result<StartupState<8>, StartupError> {
     let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
-    let mut plan = StartupOpenPlan::<REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>::empty();
-    super::open_formatted_store::<REGION_SIZE, REGION_COUNT, _, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>(
-        flash,
-        &mut workspace,
-        &mut plan,
-    )
+    let mut plan = StartupOpenPlan::<REGION_COUNT, 8>::empty();
+    super::open_formatted_store::<REGION_SIZE, REGION_COUNT, _, 8>(flash, &mut workspace, &mut plan)
 }
 
 fn append_wal_record<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize>(
@@ -93,6 +87,15 @@ fn init_user_region_header<
     flash.write_region(region_index, 0, &header_bytes).unwrap();
 }
 
+fn collection_summary(state: &StartupState<8>, collection_id: CollectionId) -> StartupCollection {
+    state
+        .collections()
+        .iter()
+        .copied()
+        .find(|collection| collection.collection_id() == collection_id)
+        .unwrap()
+}
+
 fn open_formatted_store_after_corrupt_slot_without_wal_recovery() -> (usize, StartupError) {
     let mut flash = MockFlash::<128, 4, 64>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
@@ -104,16 +107,19 @@ fn open_formatted_store_after_corrupt_slot_without_wal_recovery() -> (usize, Sta
         metadata,
         0,
         wal_offset + 8,
-        WalRecord::FreeListHead { region_index: None },
+        WalRecord::FreeRegion {
+            collection_id: CollectionId(0),
+            region_index: 1,
+        },
     );
 
     (
         wal_offset,
-        open_formatted_store::<128, 4, _, 8, 4>(&mut flash).unwrap_err(),
+        open_formatted_store::<128, 4, _>(&mut flash).unwrap_err(),
     )
 }
 
-fn open_formatted_store_after_corrupt_slot_with_wal_recovery() -> (usize, StartupState<8, 4>) {
+fn open_formatted_store_after_corrupt_slot_with_wal_recovery() -> (usize, StartupState<8>) {
     let mut flash = MockFlash::<128, 4, 96>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
     let wal_offset = metadata.wal_record_area_offset().unwrap();
@@ -131,18 +137,19 @@ fn open_formatted_store_after_corrupt_slot_with_wal_recovery() -> (usize, Startu
         metadata,
         0,
         after_recovery,
-        WalRecord::FreeListHead {
-            region_index: Some(2),
+        WalRecord::FreeRegion {
+            collection_id: CollectionId(0),
+            region_index: 2,
         },
     );
 
     (
         next_offset,
-        open_formatted_store::<128, 4, _, 8, 4>(&mut flash).unwrap(),
+        open_formatted_store::<128, 4, _>(&mut flash).unwrap(),
     )
 }
 
-fn open_formatted_store_after_torn_slot_with_wal_recovery() -> (usize, StartupState<8, 4>) {
+fn open_formatted_store_after_torn_slot_with_wal_recovery() -> (usize, StartupState<8>) {
     let mut flash = MockFlash::<128, 4, 96>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
     let wal_offset = metadata.wal_record_area_offset().unwrap();
@@ -150,8 +157,9 @@ fn open_formatted_store_after_torn_slot_with_wal_recovery() -> (usize, StartupSt
     let mut physical = [0u8; 128];
     let mut logical = [0u8; 128];
     let encoded_len = encode_record_into(
-        WalRecord::FreeListHead {
-            region_index: Some(3),
+        WalRecord::FreeRegion {
+            collection_id: CollectionId(0),
+            region_index: 3,
         },
         metadata,
         &mut physical,
@@ -173,18 +181,19 @@ fn open_formatted_store_after_torn_slot_with_wal_recovery() -> (usize, StartupSt
         metadata,
         0,
         after_recovery,
-        WalRecord::FreeListHead {
-            region_index: Some(2),
+        WalRecord::FreeRegion {
+            collection_id: CollectionId(0),
+            region_index: 2,
         },
     );
 
     (
         next_offset,
-        open_formatted_store::<128, 4, _, 8, 4>(&mut flash).unwrap(),
+        open_formatted_store::<128, 4, _>(&mut flash).unwrap(),
     )
 }
 
-fn open_formatted_store_after_replayed_alloc_begin() -> (usize, StartupState<8, 4>) {
+fn open_formatted_store_after_replayed_alloc_begin() -> (usize, StartupState<8>) {
     let mut flash = MockFlash::<256, 4, 64>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
     let wal_offset = metadata.wal_record_area_offset().unwrap();
@@ -192,6 +201,7 @@ fn open_formatted_store_after_replayed_alloc_begin() -> (usize, StartupState<8, 
     let mut logical = [0u8; 256];
     let alloc_len = encoded_record_len(
         WalRecord::AllocBegin {
+            collection_id: CollectionId(0),
             region_index: 1,
             free_list_head_after: Some(2),
         },
@@ -218,6 +228,7 @@ fn open_formatted_store_after_replayed_alloc_begin() -> (usize, StartupState<8, 
         0,
         wal_offset,
         WalRecord::AllocBegin {
+            collection_id: CollectionId(0),
             region_index: 1,
             free_list_head_after: Some(2),
         },
@@ -225,40 +236,11 @@ fn open_formatted_store_after_replayed_alloc_begin() -> (usize, StartupState<8, 
 
     (
         next_offset,
-        open_formatted_store::<256, 4, _, 8, 4>(&mut flash).unwrap(),
+        open_formatted_store::<256, 4, _>(&mut flash).unwrap(),
     )
 }
 
-fn open_formatted_store_after_replayed_stage_region() -> (usize, StartupState<8, 4>) {
-    let mut flash = MockFlash::<256, 4, 64>::new(0xff);
-    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
-    let wal_offset = metadata.wal_record_area_offset().unwrap();
-
-    let after_alloc = append_wal_record(
-        &mut flash,
-        metadata,
-        0,
-        wal_offset,
-        WalRecord::AllocBegin {
-            region_index: 1,
-            free_list_head_after: Some(2),
-        },
-    );
-    let next_offset = append_wal_record(
-        &mut flash,
-        metadata,
-        0,
-        after_alloc,
-        WalRecord::StageRegion { region_index: 1 },
-    );
-
-    (
-        next_offset,
-        open_formatted_store::<256, 4, _, 8, 4>(&mut flash).unwrap(),
-    )
-}
-
-fn open_formatted_store_after_completed_wal_rotation() -> StartupState<8, 4> {
+fn open_formatted_store_after_completed_wal_rotation() -> StartupState<8> {
     let mut flash = MockFlash::<128, 4, 64>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
     let wal_offset = metadata.wal_record_area_offset().unwrap();
@@ -268,6 +250,7 @@ fn open_formatted_store_after_completed_wal_rotation() -> StartupState<8, 4> {
         0,
         wal_offset,
         WalRecord::AllocBegin {
+            collection_id: CollectionId(0),
             region_index: 1,
             free_list_head_after: Some(2),
         },
@@ -284,13 +267,13 @@ fn open_formatted_store_after_completed_wal_rotation() -> StartupState<8, 4> {
     );
     init_wal_region(&mut flash, 1, 1, 0, metadata.region_count);
 
-    open_formatted_store::<128, 4, _, 8, 4>(&mut flash).unwrap()
+    open_formatted_store::<128, 4, _>(&mut flash).unwrap()
 }
 
-fn open_formatted_store_from_fresh_format() -> (StorageMetadata, StartupState<8, 4>) {
+fn open_formatted_store_from_fresh_format() -> (StorageMetadata, StartupState<8>) {
     let mut flash = MockFlash::<64, 4, 32>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
-    let state = open_formatted_store::<64, 4, _, 8, 4>(&mut flash).unwrap();
+    let state = open_formatted_store::<64, 4, _>(&mut flash).unwrap();
     (metadata, state)
 }
 
@@ -302,7 +285,7 @@ fn open_formatted_store_from_fresh_format() -> (StorageMetadata, StartupState<8,
 #[test]
 fn requirement_open_formatted_store_requires_metadata() {
     let mut flash = MockFlash::<64, 4, 32>::new(0xff);
-    let error = open_formatted_store::<64, 4, _, 8, 4>(&mut flash).unwrap_err();
+    let error = open_formatted_store::<64, 4, _>(&mut flash).unwrap_err();
     assert_eq!(error, StartupError::MissingMetadata);
 }
 
@@ -325,7 +308,7 @@ fn requirement_open_formatted_store_rejects_duplicate_max_sequence_wal_candidate
     header.encode_into(&mut header_bytes).unwrap();
     flash.write_region(1, 0, &header_bytes).unwrap();
 
-    let error = open_formatted_store::<64, 4, _, 8, 4>(&mut flash).unwrap_err();
+    let error = open_formatted_store::<64, 4, _>(&mut flash).unwrap_err();
     assert_eq!(error, StartupError::DuplicateWalTailSequence(0));
 }
 
@@ -340,7 +323,7 @@ fn requirement_open_formatted_store_ignores_nonzero_collection_with_wal_format_w
     flash.format_empty_store(1, 8, 0xa5).unwrap();
     init_user_region_header(&mut flash, 1, 9, CollectionId(7), WAL_V1_FORMAT);
 
-    let state = open_formatted_store::<128, 4, _, 8, 4>(&mut flash).unwrap();
+    let state = open_formatted_store::<128, 4, _>(&mut flash).unwrap();
     assert_eq!(state.wal_tail(), 0);
     assert_eq!(state.max_seen_sequence(), 9);
 }
@@ -396,7 +379,7 @@ fn requirement_open_formatted_store_rejects_invalid_free_list_chain() {
         .write_region(1, 64 - FreePointerFooter::ENCODED_LEN, &footer_bytes)
         .unwrap();
 
-    let error = open_formatted_store::<64, 4, _, 8, 4>(&mut flash).unwrap_err();
+    let error = open_formatted_store::<64, 4, _>(&mut flash).unwrap_err();
     assert_eq!(
         error,
         StartupError::InvalidFreeListChain { region_index: 1 }
@@ -405,12 +388,12 @@ fn requirement_open_formatted_store_rejects_invalid_free_list_chain() {
 
 //= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
-//# RING-STARTUP-011 On `alloc_begin(collection_id, region_index, free_list_head_after)`: if `ready_region` is
-//# already set, return an error because replay found two unmatched allocation reservations. if
+//# RING-STARTUP-011 On `alloc_begin(collection_id, region_index, free_list_head_after)`: if
 //# `last_free_list_head = none`, return an error because allocation cannot consume an empty durable
 //# free list. if `last_free_list_head != region_index`, return an error because `alloc_begin` did
 //# not consume the current durable free-list head. set durable `last_free_list_head` to
-//# `free_list_head_after`. set `ready_region = (collection_id, region_index)`.
+//# `free_list_head_after`. If `collection_id = 0`, also require `ready_region` to be clear and set
+//# `ready_region = region_index` for WAL rotation recovery.
 #[test]
 fn requirement_open_formatted_store_replays_alloc_begin_into_allocator_runtime_state() {
     let (_next_offset, state) = open_formatted_store_after_replayed_alloc_begin();
@@ -430,8 +413,8 @@ fn requirement_open_formatted_store_initializes_allocator_state_after_alloc_begi
 
 //= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
-//# RING-STARTUP-025 If `ready_region` is set, hold it in memory as the next region to use before
-//# consuming another free-list entry.
+//# RING-STARTUP-025 If `ready_region` is set, hold it in memory as the WAL-rotation target
+//# before consuming another free-list entry for rotation.
 #[test]
 fn requirement_open_formatted_store_keeps_replayed_ready_region_reserved_in_memory() {
     let (_next_offset, state) = open_formatted_store_after_replayed_alloc_begin();
@@ -440,149 +423,329 @@ fn requirement_open_formatted_store_keeps_replayed_ready_region_reserved_in_memo
 }
 
 //= spec/ring/06-startup-replay.md#startup-replay-algorithm
-//= type=todo
-//# `RING-STARTUP-RESULT-007` Incomplete transaction recovery work, if the reachable WAL ends
-//# inside a collection transaction interval
+//= type=test
+//# `RING-STARTUP-018` On `transaction_finished(collection_id)`:
+//# jump back to the matching `begin_transaction(collection_id)`, apply the
+//# full transaction interval in original order, and then continue replay
+//# after `transaction_finished`.
 #[test]
-fn todo_open_formatted_store_reports_replayed_staged_regions() {
-    let (_next_offset, state) = open_formatted_store_after_replayed_stage_region();
-    assert_eq!(state.staged_regions(), &[1]);
+fn requirement_open_formatted_store_replays_finished_transaction_interval() {
+    let mut flash = MockFlash::<256, 4, 128>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    let wal_offset = metadata.wal_record_area_offset().unwrap();
+    let collection_id = CollectionId(7);
+
+    let after_new_collection = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        wal_offset,
+        WalRecord::NewCollection {
+            collection_id,
+            collection_type: CollectionType::MAP_CODE,
+        },
+    );
+    let after_begin = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        after_new_collection,
+        WalRecord::BeginTransaction { collection_id },
+    );
+    let after_update = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        after_begin,
+        WalRecord::Update {
+            collection_id,
+            payload: &[1, 2, 3],
+        },
+    );
+    let after_commit = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        after_update,
+        WalRecord::CommitTransaction { collection_id },
+    );
+    append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        after_commit,
+        WalRecord::TransactionFinished { collection_id },
+    );
+
+    let state = open_formatted_store::<256, 4, _>(&mut flash).unwrap();
+    let collection = collection_summary(&state, collection_id);
+    assert_eq!(collection.pending_update_count(), 1);
 }
 
 //= spec/ring/06-startup-replay.md#startup-replay-algorithm
-//= type=todo
+//= type=test
+//# `RING-STARTUP-019` On `rollback_transaction(collection_id)`: jump back to the matching
+//# `begin_transaction(collection_id)`, replay only commands outside that collection's transaction
+//# scope, and then continue replay after `rollback_transaction`.
+#[test]
+fn requirement_open_formatted_store_rolls_back_only_transaction_collection_records() {
+    let mut flash = MockFlash::<256, 4, 128>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    let wal_offset = metadata.wal_record_area_offset().unwrap();
+    let transaction_collection = CollectionId(7);
+    let unrelated_collection = CollectionId(8);
+
+    let mut offset = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        wal_offset,
+        WalRecord::NewCollection {
+            collection_id: transaction_collection,
+            collection_type: CollectionType::MAP_CODE,
+        },
+    );
+    offset = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        offset,
+        WalRecord::NewCollection {
+            collection_id: unrelated_collection,
+            collection_type: CollectionType::MAP_CODE,
+        },
+    );
+    offset = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        offset,
+        WalRecord::BeginTransaction {
+            collection_id: transaction_collection,
+        },
+    );
+    offset = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        offset,
+        WalRecord::Update {
+            collection_id: transaction_collection,
+            payload: &[1],
+        },
+    );
+    offset = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        offset,
+        WalRecord::Update {
+            collection_id: unrelated_collection,
+            payload: &[2],
+        },
+    );
+    append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        offset,
+        WalRecord::RollbackTransaction {
+            collection_id: transaction_collection,
+        },
+    );
+
+    let state = open_formatted_store::<256, 4, _>(&mut flash).unwrap();
+    let transaction = collection_summary(&state, transaction_collection);
+    let unrelated = collection_summary(&state, unrelated_collection);
+    assert_eq!(transaction.pending_update_count(), 0);
+    assert_eq!(unrelated.pending_update_count(), 1);
+}
+
+//= spec/ring/06-startup-replay.md#startup-replay-algorithm
+//= type=test
 //# `RING-STARTUP-011A` On transaction interval scan:
 //# if replay reaches `begin_transaction(collection_id)`, it MUST scan to
 //# `transaction_finished(collection_id)`, `rollback_transaction(collection_id)`,
 //# or WAL end before applying ordinary records for that collection in the
 //# interval.
 #[test]
-fn todo_open_formatted_store_replays_stage_region_into_staged_state() {
-    let (_next_offset, state) = open_formatted_store_after_replayed_stage_region();
-    assert_eq!(state.ready_region(), None);
-    assert_eq!(state.staged_regions(), &[1]);
+fn requirement_open_formatted_store_recovers_unfinished_transaction_before_commit() {
+    let mut flash = MockFlash::<512, 6, 256>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    let wal_offset = metadata.wal_record_area_offset().unwrap();
+    let collection_id = CollectionId(7);
+
+    let after_new_collection = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        wal_offset,
+        WalRecord::NewCollection {
+            collection_id,
+            collection_type: CollectionType::MAP_CODE,
+        },
+    );
+    let after_begin = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        after_new_collection,
+        WalRecord::BeginTransaction { collection_id },
+    );
+    let after_alloc = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        after_begin,
+        WalRecord::AllocBegin {
+            collection_id,
+            region_index: 1,
+            free_list_head_after: Some(2),
+        },
+    );
+    append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        after_alloc,
+        WalRecord::Update {
+            collection_id,
+            payload: &[1],
+        },
+    );
+
+    flash.clear_operations();
+    let state = open_formatted_store::<512, 6, _>(&mut flash).unwrap();
+    let collection = collection_summary(&state, collection_id);
+    assert_eq!(collection.pending_update_count(), 0);
     assert_eq!(state.last_free_list_head(), Some(2));
+    assert_eq!(state.free_list_tail(), Some(1));
+
+    let footer_offset = 512 - FreePointerFooter::ENCODED_LEN;
+    let region_five_footer =
+        FreePointerFooter::decode(&flash.region_bytes(5).unwrap()[footer_offset..], 0xff).unwrap();
+    let recovered_footer =
+        FreePointerFooter::decode(&flash.region_bytes(1).unwrap()[footer_offset..], 0xff);
+    assert_eq!(region_five_footer.next_tail, Some(1));
+    assert_eq!(recovered_footer.unwrap().next_tail, None);
+    let recovered_erase = flash
+        .operations()
+        .iter()
+        .position(|operation| *operation == (crate::MockOperation::EraseRegion { region_index: 1 }))
+        .unwrap();
+    let tail_link = flash
+        .operations()
+        .iter()
+        .position(|operation| {
+            matches!(
+                operation,
+                crate::MockOperation::WriteRegion {
+                    region_index: 5,
+                    offset,
+                    len,
+                } if *offset == footer_offset && *len == FreePointerFooter::ENCODED_LEN
+            )
+        })
+        .unwrap();
+    assert!(recovered_erase < tail_link);
+
+    let reopened = open_formatted_store::<512, 6, _>(&mut flash).unwrap();
+    assert_eq!(reopened.last_free_list_head(), Some(2));
+    assert_eq!(reopened.free_list_tail(), Some(1));
 }
 
-//= spec/ring/06-startup-replay.md#startup-replay-implementation-requirements
+//= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
-//# `RING-IMPL-REGRESSION-047` Startup replay MUST preserve transaction recovery state when a WAL
-//# head-control record is replayed.
+//# `RING-STARTUP-021` If WAL end is reached inside a transaction
+//# without a matching terminal marker:
+//# if `commit_transaction(collection_id)` was not seen, run idempotent data
+//# recovery for that collection and append
+//# `rollback_transaction(collection_id)`; if commit was seen, preserve the
+//# committed collection state, run idempotent cleanup recovery, and append
+//# `transaction_finished(collection_id)`.
 #[test]
-fn requirement_open_formatted_store_keeps_staged_regions_when_wal_head_control_is_replayed() {
-    let mut flash = MockFlash::<256, 4, 128>::new(0xff);
+fn requirement_open_formatted_store_finishes_post_commit_transaction_cleanup() {
+    let mut flash = MockFlash::<512, 6, 256>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
     let wal_offset = metadata.wal_record_area_offset().unwrap();
-    let after_alloc = append_wal_record(
+    let collection_id = CollectionId(7);
+
+    flash.erase_region(1).unwrap();
+    init_user_region_header(&mut flash, 1, 1, collection_id, MAP_MANIFEST_V2_FORMAT);
+    flash
+        .write_region(1, Header::ENCODED_LEN, &0u32.to_le_bytes())
+        .unwrap();
+
+    let mut offset = append_wal_record(
         &mut flash,
         metadata,
         0,
         wal_offset,
+        WalRecord::NewCollection {
+            collection_id,
+            collection_type: CollectionType::MAP_CODE,
+        },
+    );
+    offset = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        offset,
         WalRecord::AllocBegin {
+            collection_id,
             region_index: 1,
             free_list_head_after: Some(2),
         },
     );
-    let after_stage = append_wal_record(
+    offset = append_wal_record(
         &mut flash,
         metadata,
         0,
-        after_alloc,
-        WalRecord::StageRegion { region_index: 1 },
-    );
-    append_wal_record(
-        &mut flash,
-        metadata,
-        0,
-        after_stage,
+        offset,
         WalRecord::Head {
-            collection_id: CollectionId(0),
-            collection_type: CollectionType::WAL_CODE,
-            region_index: 0,
-        },
-    );
-
-    let state = open_formatted_store::<256, 4, _, 8, 4>(&mut flash).unwrap();
-    assert_eq!(state.staged_regions(), &[1]);
-}
-
-//= spec/ring/06-startup-replay.md#startup-replay-implementation-requirements
-//= type=test
-//# `RING-IMPL-REGRESSION-048` Startup replay MUST preserve transaction recovery state when
-//# non-map collection head and drop records are replayed.
-#[test]
-fn requirement_open_formatted_store_keeps_staged_regions_when_non_map_head_is_replayed() {
-    let mut flash = MockFlash::<256, 4, 128>::new(0xff);
-    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
-    let wal_offset = metadata.wal_record_area_offset().unwrap();
-    let after_alloc = append_wal_record(
-        &mut flash,
-        metadata,
-        0,
-        wal_offset,
-        WalRecord::AllocBegin {
+            collection_id,
+            collection_type: CollectionType::MAP_CODE,
             region_index: 1,
-            free_list_head_after: Some(2),
         },
     );
-    let after_stage = append_wal_record(
+    offset = append_wal_record(
         &mut flash,
         metadata,
         0,
-        after_alloc,
-        WalRecord::StageRegion { region_index: 1 },
+        offset,
+        WalRecord::BeginTransaction { collection_id },
     );
-    let after_head = append_wal_record(
+    offset = append_wal_record(
         &mut flash,
         metadata,
         0,
-        after_stage,
-        WalRecord::Head {
-            collection_id: CollectionId(7),
-            collection_type: CollectionType::CHANNEL_CODE,
-            region_index: 2,
-        },
+        offset,
+        WalRecord::DropCollection { collection_id },
     );
     append_wal_record(
         &mut flash,
         metadata,
         0,
-        after_head,
-        WalRecord::DropCollection {
-            collection_id: CollectionId(7),
-        },
+        offset,
+        WalRecord::CommitTransaction { collection_id },
     );
 
-    let state = open_formatted_store::<256, 4, _, 8, 4>(&mut flash).unwrap();
-    assert_eq!(state.staged_regions(), &[1]);
-}
+    flash.clear_operations();
+    let state = open_formatted_store::<512, 6, _>(&mut flash).unwrap();
+    let collection = collection_summary(&state, collection_id);
+    assert_eq!(collection.basis(), StartupCollectionBasis::Dropped);
+    assert_eq!(state.last_free_list_head(), Some(2));
+    assert_eq!(state.free_list_tail(), Some(1));
+    assert!(!flash.operations().iter().any(|operation| {
+        *operation == (crate::MockOperation::EraseRegion { region_index: 1 })
+    }));
 
-//= spec/ring/04-wal-records.md#wal-record-types
-//= type=test
-//# `RING-WAL-VALID-028` A transaction interval may contain ordinary commands for its
-//# `collection_id` and region allocation/free commands carrying that
-//# collection id.
-#[test]
-fn requirement_open_formatted_store_rejects_stage_region_without_matching_ready_region() {
-    let mut flash = MockFlash::<256, 4, 64>::new(0xff);
-    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
-    let wal_offset = metadata.wal_record_area_offset().unwrap();
-
-    append_wal_record(
-        &mut flash,
-        metadata,
-        0,
-        wal_offset,
-        WalRecord::StageRegion { region_index: 1 },
-    );
-
+    let reopened = open_formatted_store::<512, 6, _>(&mut flash).unwrap();
     assert_eq!(
-        open_formatted_store::<256, 4, _, 8, 4>(&mut flash).unwrap_err(),
-        StartupError::InvalidStageRegion {
-            region_index: 1,
-            ready_region: None,
-        }
+        collection_summary(&reopened, collection_id).basis(),
+        StartupCollectionBasis::Dropped
     );
+    assert_eq!(reopened.free_list_tail(), Some(1));
 }
 
 //= spec/ring/04-wal-records.md#wal-record-types
@@ -610,7 +773,7 @@ fn requirement_open_formatted_store_ignores_torn_tail_slots_after_wal_recovery()
     let (next_offset, state) = open_formatted_store_after_torn_slot_with_wal_recovery();
 
     assert_eq!(state.wal_append_offset(), next_offset);
-    assert_eq!(state.last_free_list_head(), Some(2));
+    assert_eq!(state.last_free_list_head(), Some(1));
     assert!(!state.pending_wal_recovery_boundary());
 }
 
@@ -652,7 +815,7 @@ fn requirement_open_formatted_store_tracks_live_collection_snapshot_basis() {
         },
     );
 
-    let state = open_formatted_store::<128, 4, _, 8, 4>(&mut flash).unwrap();
+    let state = open_formatted_store::<128, 4, _>(&mut flash).unwrap();
 
     assert_eq!(state.wal_append_offset(), next_offset);
     assert_eq!(state.tracked_user_collection_count(), 1);
@@ -667,7 +830,6 @@ fn requirement_open_formatted_store_tracks_live_collection_snapshot_basis() {
         StartupCollectionBasis::WalSnapshot
     );
     assert_eq!(state.collections()[0].pending_update_count(), 0);
-    assert!(state.pending_reclaims().is_empty());
 }
 
 //= spec/ring/06-startup-replay.md#startup-replay-implementation-requirements
@@ -699,7 +861,7 @@ fn requirement_open_formatted_store_counts_multiple_live_collections() {
         },
     );
 
-    let state = open_formatted_store::<128, 4, _, 8, 4>(&mut flash).unwrap();
+    let state = open_formatted_store::<128, 4, _>(&mut flash).unwrap();
     assert_eq!(state.tracked_user_collection_count(), 2);
 }
 
@@ -740,7 +902,7 @@ fn requirement_open_formatted_store_rejects_later_type_bearing_records_with_mism
         },
     );
 
-    let error = open_formatted_store::<128, 4, _, 8, 4>(&mut flash).unwrap_err();
+    let error = open_formatted_store::<128, 4, _>(&mut flash).unwrap_err();
     assert_eq!(
         error,
         StartupError::CollectionTypeMismatch {
@@ -774,7 +936,7 @@ fn requirement_open_formatted_store_accepts_committed_region_head_basis() {
         },
     );
 
-    let state = open_formatted_store::<128, 4, _, 8, 4>(&mut flash).unwrap();
+    let state = open_formatted_store::<128, 4, _>(&mut flash).unwrap();
 
     assert_eq!(state.tracked_user_collection_count(), 1);
     assert_eq!(state.collections().len(), 1);
@@ -831,29 +993,34 @@ fn requirement_open_formatted_store_accepts_reclaimed_historical_head_after_repl
             region_index: 2,
         },
     );
-    let after_reclaim_begin = append_wal_record(
+    let after_first_free = append_wal_record(
         &mut flash,
         metadata,
         0,
         after_second_head,
-        WalRecord::ReclaimBegin { region_index: 1 },
+        WalRecord::FreeRegion {
+            collection_id: CollectionId(0),
+            region_index: 1,
+        },
     );
     append_wal_record(
         &mut flash,
         metadata,
         0,
-        after_reclaim_begin,
-        WalRecord::ReclaimEnd { region_index: 1 },
+        after_first_free,
+        WalRecord::FreeRegion {
+            collection_id: CollectionId(0),
+            region_index: 1,
+        },
     );
 
-    let state = open_formatted_store::<256, 5, _, 8, 4>(&mut flash).unwrap();
+    let state = open_formatted_store::<256, 5, _>(&mut flash).unwrap();
 
     assert_eq!(state.collections().len(), 1);
     assert_eq!(
         state.collections()[0].basis(),
         StartupCollectionBasis::Region(2)
     );
-    assert!(state.pending_reclaims().is_empty());
     assert_eq!(state.free_list_tail(), Some(1));
 }
 
@@ -897,7 +1064,7 @@ fn requirement_open_formatted_store_tracks_pending_updates_on_empty_collection_b
         },
     );
 
-    let state = open_formatted_store::<128, 4, _, 8, 4>(&mut flash).unwrap();
+    let state = open_formatted_store::<128, 4, _>(&mut flash).unwrap();
 
     assert_eq!(state.tracked_user_collection_count(), 1);
     assert_eq!(state.collections().len(), 1);
@@ -938,44 +1105,8 @@ fn requirement_open_formatted_store_rejects_update_after_drop_collection() {
         },
     );
 
-    let error = open_formatted_store::<128, 4, _, 8, 4>(&mut flash).unwrap_err();
+    let error = open_formatted_store::<128, 4, _>(&mut flash).unwrap_err();
     assert_eq!(error, StartupError::DroppedCollection(CollectionId(7)));
-}
-
-//= spec/ring/04-wal-records.md#wal-record-types
-//= type=test
-//# `RING-WAL-VALID-026` `begin_transaction(collection_id)` is invalid if another transaction is
-//# already open. Nested and concurrent transactions are not supported.
-#[test]
-fn requirement_open_formatted_store_tracks_pending_reclaims_in_order() {
-    let mut flash = MockFlash::<128, 4, 96>::new(0xff);
-    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
-    let wal_offset = metadata.wal_record_area_offset().unwrap();
-    let after_begin_3 = append_wal_record(
-        &mut flash,
-        metadata,
-        0,
-        wal_offset,
-        WalRecord::ReclaimBegin { region_index: 3 },
-    );
-    let after_begin_2 = append_wal_record(
-        &mut flash,
-        metadata,
-        0,
-        after_begin_3,
-        WalRecord::ReclaimBegin { region_index: 2 },
-    );
-    append_wal_record(
-        &mut flash,
-        metadata,
-        0,
-        after_begin_2,
-        WalRecord::ReclaimEnd { region_index: 3 },
-    );
-
-    let state = open_formatted_store::<128, 4, _, 8, 4>(&mut flash).unwrap();
-
-    assert_eq!(state.pending_reclaims(), &[2]);
 }
 
 //= spec/ring/03-collection-lifecycle.md#collection-head-state-machine
@@ -999,7 +1130,7 @@ fn requirement_open_formatted_store_rejects_unsupported_live_collection_type() {
         },
     );
 
-    let error = open_formatted_store::<128, 4, _, 8, 4>(&mut flash).unwrap_err();
+    let error = open_formatted_store::<128, 4, _>(&mut flash).unwrap_err();
     assert_eq!(error, StartupError::UnsupportedLiveCollectionType(0x1234));
 }
 
@@ -1026,7 +1157,7 @@ fn requirement_open_formatted_store_fails_startup_for_unsupported_live_collectio
         },
     );
 
-    let error = open_formatted_store::<128, 4, _, 8, 4>(&mut flash).unwrap_err();
+    let error = open_formatted_store::<128, 4, _>(&mut flash).unwrap_err();
     assert_eq!(error, StartupError::UnsupportedLiveCollectionType(0x1234));
 }
 
@@ -1149,8 +1280,8 @@ fn requirement_open_formatted_store_follows_completed_link_to_the_next_wal_tail(
 
 //= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
-//# RING-STARTUP-013 On `link(next_region_index, expected_sequence)`: if `ready_region =
-//# (collection_id = 0, next_region_index)`, clear `ready_region`.
+//# RING-STARTUP-013 On `link(next_region_index, expected_sequence)`:
+//# if `ready_region = next_region_index`, clear `ready_region`.
 #[test]
 fn requirement_open_formatted_store_clears_ready_region_when_link_matches_it() {
     let state = open_formatted_store_after_completed_wal_rotation();
@@ -1173,6 +1304,7 @@ fn requirement_open_formatted_store_recovers_rotation_after_link() {
         0,
         wal_offset,
         WalRecord::AllocBegin {
+            collection_id: CollectionId(0),
             region_index: 1,
             free_list_head_after: Some(2),
         },
@@ -1188,7 +1320,7 @@ fn requirement_open_formatted_store_recovers_rotation_after_link() {
         },
     );
 
-    let state = open_formatted_store::<128, 4, _, 8, 4>(&mut flash).unwrap();
+    let state = open_formatted_store::<128, 4, _>(&mut flash).unwrap();
 
     assert_eq!(state.wal_head(), 0);
     assert_eq!(state.wal_tail(), 1);
@@ -1212,6 +1344,7 @@ fn requirement_open_formatted_store_recovers_rotation_before_link() {
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
     let wal_offset = metadata.wal_record_area_offset().unwrap();
     let alloc_record = WalRecord::AllocBegin {
+        collection_id: CollectionId(0),
         region_index: 1,
         free_list_head_after: Some(2),
     };
@@ -1250,7 +1383,7 @@ fn requirement_open_formatted_store_recovers_rotation_before_link() {
 
     append_wal_record(&mut flash, metadata, 0, offset, alloc_record);
 
-    let state = open_formatted_store::<160, 4, _, 8, 4>(&mut flash).unwrap();
+    let state = open_formatted_store::<160, 4, _>(&mut flash).unwrap();
 
     assert_eq!(state.wal_head(), 0);
     assert_eq!(state.wal_tail(), 1);
@@ -1279,6 +1412,7 @@ fn requirement_open_formatted_store_recovers_rotation_when_only_the_link_record_
     let mut physical = [0u8; REGION_SIZE];
     let mut logical = [0u8; REGION_SIZE];
     let alloc_record = WalRecord::AllocBegin {
+        collection_id: CollectionId(0),
         region_index: 1,
         free_list_head_after: Some(2),
     };
@@ -1324,7 +1458,7 @@ fn requirement_open_formatted_store_recovers_rotation_when_only_the_link_record_
     let after_alloc = append_wal_record(&mut flash, metadata, 0, after_filler, alloc_record);
     assert_eq!(REGION_SIZE - after_alloc, link_len);
 
-    let state = open_formatted_store::<REGION_SIZE, 4, _, 8, 4>(&mut flash).unwrap();
+    let state = open_formatted_store::<REGION_SIZE, 4, _>(&mut flash).unwrap();
     assert_eq!(state.wal_tail(), 1);
     assert_eq!(state.max_seen_sequence(), 1);
 }
@@ -1354,7 +1488,7 @@ fn requirement_open_formatted_store_rejects_unrecovered_boundary_in_non_tail_wal
         .write_region(0, after_link, &corrupt_tail[..128 - after_link])
         .unwrap();
 
-    let error = open_formatted_store::<128, 4, _, 8, 4>(&mut flash).unwrap_err();
+    let error = open_formatted_store::<128, 4, _>(&mut flash).unwrap_err();
     assert_eq!(error, StartupError::BrokenWalChain { region_index: 0 });
 }
 
@@ -1368,7 +1502,7 @@ fn requirement_open_formatted_store_clears_pending_recovery_boundary_when_wal_re
     let (next_offset, state) = open_formatted_store_after_corrupt_slot_with_wal_recovery();
     assert_eq!(state.wal_append_offset(), next_offset);
     assert_eq!(state.ready_region(), None);
-    assert_eq!(state.last_free_list_head(), Some(2));
+    assert_eq!(state.last_free_list_head(), Some(1));
 }
 
 //= spec/ring/06-startup-replay.md#startup-replay-algorithm
@@ -1426,7 +1560,7 @@ fn requirement_storage_open_path_rejects_invalid_retained_map_region_snapshot_an
     {
         let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
         let mut workspace = StorageWorkspace::<512>::new();
-        let mut storage = Storage::<_, 512, 5, 8, 4>::format(
+        let mut storage = Storage::<_, 512, 5>::format(
             &mut flash,
             StorageFormatConfig::new(1, 8, 0xa5),
             crate::test_storage_memory(),
@@ -1464,7 +1598,7 @@ fn requirement_storage_open_path_rejects_invalid_retained_map_region_snapshot_an
 
         drop(storage);
         let mut reopened =
-            Storage::<_, 512, 5, 8, 4>::open(&mut flash, crate::test_storage_memory()).unwrap();
+            Storage::<_, 512, 5>::open(&mut flash, crate::test_storage_memory()).unwrap();
         let mut reopen_buffer = [0u8; 512];
         let result = reopened.open_map::<i32, i32, 4, 4>(
             CollectionId(43),
@@ -1484,7 +1618,7 @@ fn requirement_storage_open_path_rejects_invalid_retained_map_region_snapshot_an
     {
         let mut flash = MockFlash::<512, 4, 1024>::new(0xff);
         let mut workspace = StorageWorkspace::<512>::new();
-        let mut storage = Storage::<_, 512, 4, 8, 4>::format(
+        let mut storage = Storage::<_, 512, 4>::format(
             &mut flash,
             StorageFormatConfig::new(1, 8, 0xa5),
             crate::test_storage_memory(),
@@ -1498,7 +1632,7 @@ fn requirement_storage_open_path_rejects_invalid_retained_map_region_snapshot_an
 
         drop(storage);
         let mut reopened =
-            Storage::<_, 512, 4, 8, 4>::open(&mut flash, crate::test_storage_memory()).unwrap();
+            Storage::<_, 512, 4>::open(&mut flash, crate::test_storage_memory()).unwrap();
         let mut reopen_buffer = [0u8; 512];
         let result = reopened.open_map::<i32, i32, 4, 4>(
             CollectionId(44),
@@ -1514,7 +1648,7 @@ fn requirement_storage_open_path_rejects_invalid_retained_map_region_snapshot_an
     {
         let mut flash = MockFlash::<512, 4, 1024>::new(0xff);
         let mut workspace = StorageWorkspace::<512>::new();
-        let mut storage = Storage::<_, 512, 4, 8, 4>::format(
+        let mut storage = Storage::<_, 512, 4>::format(
             &mut flash,
             StorageFormatConfig::new(1, 8, 0xa5),
             crate::test_storage_memory(),
@@ -1526,7 +1660,7 @@ fn requirement_storage_open_path_rejects_invalid_retained_map_region_snapshot_an
 
         drop(storage);
         let mut reopened =
-            Storage::<_, 512, 4, 8, 4>::open(&mut flash, crate::test_storage_memory()).unwrap();
+            Storage::<_, 512, 4>::open(&mut flash, crate::test_storage_memory()).unwrap();
         let mut reopen_buffer = [0u8; 512];
         let result = reopened.open_map::<i32, i32, 4, 4>(
             CollectionId(45),

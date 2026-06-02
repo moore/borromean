@@ -38,8 +38,8 @@ Startup recovery reconstructs eight things:
 1. `RING-STARTUP-RESULT-001` Durable collection states (live heads plus dropped tombstones)
 2. `RING-STARTUP-RESULT-002` In-memory working state for collections with uncommitted updates
 3. `RING-STARTUP-RESULT-003` Durable free-list head
-4. `RING-STARTUP-RESULT-004` Reserved `ready_region`, if an allocation was started but not yet
-committed by `head` or `link`
+4. `RING-STARTUP-RESULT-004` Reserved `ready_region`, if WAL rotation allocation was started but
+not yet committed by `link`
 5. `RING-STARTUP-RESULT-005` Runtime `free_list_tail`, reconstructed from the free-pointer chain
 after the durable free-list head is known
 6. `RING-STARTUP-RESULT-006` Runtime `max_seen_sequence`, initially the largest `sequence`
@@ -133,7 +133,7 @@ replayed tail record. If no such slot exists, the tail region is full.
 7. `RING-STARTUP-007` Maintain replay state:
 per collection optional live `collection_type`, explicit collection
 state, `basis_pos`, and `pending_updates`, plus global
-`last_free_list_head`, optional reserved `ready_region`, transaction
+`last_free_list_head`, optional reserved WAL-rotation `ready_region`, transaction
 scan state, and the replay-local `pending_wal_recovery_boundary`.
 Initialize `last_free_list_head` to `Some(1)` iff `region_count >= 2`,
 otherwise `None`, because format establishes that as the initial
@@ -160,14 +160,15 @@ set collection state to `WALSnapshotClean`, set `basis_pos` to this
 record's WAL position, and clear older pending updates for that
 collection at WAL positions up to and including this snapshot.
 11. `RING-STARTUP-011` On `alloc_begin(collection_id, region_index, free_list_head_after)`:
-if `ready_region` is already set, return an error because replay found
-two unmatched allocation reservations.
 if `last_free_list_head = none`, return an error because allocation
 cannot consume an empty durable free list.
 if `last_free_list_head != region_index`, return an error because
 `alloc_begin` did not consume the current durable free-list head.
 set durable `last_free_list_head` to `free_list_head_after`.
-set `ready_region = (collection_id, region_index)`.
+If `collection_id = 0`, also require `ready_region` to be clear and set
+`ready_region = region_index` for WAL rotation recovery. If
+`collection_id != 0`, do not set `ready_region`; the allocation belongs
+to the open collection transaction.
 12. `RING-STARTUP-011A` On transaction interval scan:
 if replay reaches `begin_transaction(collection_id)`, it MUST scan to
 `transaction_finished(collection_id)`, `rollback_transaction(collection_id)`,
@@ -195,15 +196,11 @@ stored `collection_format` is one it understands.
 set collection state to `RegionClean`, set `basis_pos` to this
 record's WAL position, and clear WAL updates/snapshots older than this
 basis decision.
-if `ready_region = (collection_id, region_index)`, clear
-`ready_region`;
-otherwise leave `ready_region` unchanged because this `head` either
-retargeted the collection to an already allocated existing region or
-refers to a region whose historical `alloc_begin` was already consumed
-and later reclaimed.
+if `ready_region = region_index`, clear `ready_region`;
+otherwise leave `ready_region` unchanged because this `head` retargeted
+the collection to an already allocated existing region.
 14. `RING-STARTUP-013` On `link(next_region_index, expected_sequence)`:
-if `ready_region = (collection_id = 0, next_region_index)`, clear
-`ready_region`.
+if `ready_region = next_region_index`, clear `ready_region`.
 otherwise leave `ready_region` unchanged because this `link` may refer
 to a WAL-region allocation whose historical `alloc_begin` was already
 consumed and later reclaimed.
@@ -251,7 +248,16 @@ recovery for that collection and append
 `rollback_transaction(collection_id)`; if commit was seen, preserve the
 committed collection state, run idempotent cleanup recovery, and append
 `transaction_finished(collection_id)`.
-23. `RING-STARTUP-022` After replay and transaction recovery, for each collection:
+
+    Data recovery for an uncommitted transaction may erase
+    transaction-owned allocations before returning them to the free-list
+    tail because those regions never became committed collection state.
+    Cleanup recovery after commit follows normal `free_region`
+    semantics: it requires the detached region footer to be unwritten
+    and does not erase the detached region.
+23. `RING-STARTUP-021A` Startup replay MUST NOT silently apply a transaction interval that reaches
+WAL end before a terminal marker.
+24. `RING-STARTUP-022` After replay and transaction recovery, for each collection:
 reconstruct its durable basis from the collection state. If the state
 is `EmptyClean` or `EmptyDirty`, the basis is the empty collection
 declared by `new_collection`; if that collection has post-basis
@@ -267,8 +273,8 @@ may remain dormant until the next mutation, but it must be loaded into
 RAM before accepting that mutation. If the state is `Dropped`, do not
 reconstruct mutable state for that collection and do not accept
 further mutations for that collection id.
-24. `RING-STARTUP-023` Initialize allocator state from `last_free_list_head`.
-25. `RING-STARTUP-024` Reconstruct runtime `free_list_tail` by following free-pointer
+25. `RING-STARTUP-023` Initialize allocator state from `last_free_list_head`.
+26. `RING-STARTUP-024` Reconstruct runtime `free_list_tail` by following free-pointer
 links starting at `last_free_list_head` until reaching a free region
 whose free-pointer slot is uninitialized.
 If this walk encounters a checksum-invalid or malformed free-pointer
@@ -278,13 +284,13 @@ visited regions before reaching an uninitialized tail slot, return an
 error because the
 durable free-list head does not name a valid free-list chain.
 If `last_free_list_head = none`, then `free_list_tail = none`.
-26. `RING-STARTUP-025` If `ready_region` is set, hold it in memory as the next region to
-use before consuming another free-list entry.
-27. `RING-STARTUP-026` Keep `max_seen_sequence` as the runtime source of the next region
+27. `RING-STARTUP-025` If `ready_region` is set, hold it in memory as the WAL-rotation target
+before consuming another free-list entry for rotation.
+28. `RING-STARTUP-026` Keep `max_seen_sequence` as the runtime source of the next region
 sequence. The next newly allocated region must use
 `max_seen_sequence + 1` as its header `sequence`, then update
 `max_seen_sequence` in memory to that new value.
-28. `RING-STARTUP-027` If replay encountered a torn or checksum-invalid tail record,
+29. `RING-STARTUP-027` If replay encountered a torn or checksum-invalid tail record,
 retain all state recovered from earlier complete records. The WAL head
 is unchanged. Replay may still recover and apply later valid tail
 records that begin after the torn bytes, but the first such later valid
@@ -293,14 +299,14 @@ aligned slot whose first byte is `erased_byte` after the last valid
 replayed tail record, so later WAL appends may resume there while the
 ignored corrupt span before that point remains uninterpreted until that
 region is reclaimed or erased for reuse.
-29. `RING-STARTUP-028` If replay yields a live collection whose
+30. `RING-STARTUP-028` If replay yields a live collection whose
 `collection_type` is unsupported by the implementation, startup MUST
 fail before transaction cleanup frees any region based on collection
 reachability.
-30. `RING-STARTUP-029` If replay yields a live collection with unsupported or invalid retained
+31. `RING-STARTUP-029` If replay yields a live collection with unsupported or invalid retained
     collection data under that collection's normative specification, startup MUST fail before open
     succeeds and before transaction cleanup frees any region based on collection reachability.
-31. `RING-STARTUP-030` A dropped tombstone whose old
+32. `RING-STARTUP-030` A dropped tombstone whose old
 `collection_type` is unsupported MAY remain as inert metadata and does
 not by itself require startup failure.
 
@@ -481,7 +487,7 @@ pub struct FreeListTracker {
   pub last_free_list_head: Option<RegionIndex>,
   // Region reserved by `alloc_begin` but not yet consumed by a durable
   // `head` or `link` record.
-  pub ready_region: Option<(CollectionId, RegionIndex)>,
+  pub ready_region: Option<RegionIndex>,
   // Runtime-only convenience for append-on-free operations.
   pub free_list_tail: Option<RegionIndex>,
 }

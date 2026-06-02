@@ -684,7 +684,7 @@ fn requirement_file_backing_works_with_generic_storage_api() {
         crate::test_file_backing_scratch(),
     )
     .unwrap();
-    let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT, 8, 4>::format(
+    let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT, 8>::format(
         &mut backing,
         StorageFormatConfig::new(2, 8, 0xa5),
         crate::test_storage_memory(),

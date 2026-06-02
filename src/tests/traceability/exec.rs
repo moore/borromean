@@ -104,14 +104,13 @@ fn requirement_each_fallible_storage_operation_is_drivable_as_one_future() {
     const REGION_COUNT: usize = 5;
 
     let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 2048>::new(0xff);
-    let mut storage = super::super::poll_ready(
-        Storage::<_, REGION_SIZE, REGION_COUNT, 8, 4>::format_future(
+    let mut storage =
+        super::super::poll_ready(Storage::<_, REGION_SIZE, REGION_COUNT, 8>::format_future(
             &mut flash,
             StorageFormatConfig::new(1, 8, 0xa5),
             crate::test_storage_memory(),
-        ),
-    )
-    .unwrap();
+        ))
+        .unwrap();
 
     super::super::poll_ready(storage.create_map_future(CollectionId(81))).unwrap();
 
@@ -146,7 +145,7 @@ fn requirement_each_fallible_storage_operation_is_drivable_as_one_future() {
 
     drop(storage);
     let reopened = super::super::poll_until_ready(
-        Storage::<_, REGION_SIZE, REGION_COUNT, 8, 4>::open_future(
+        Storage::<_, REGION_SIZE, REGION_COUNT, 8>::open_future(
             &mut flash,
             crate::test_storage_memory(),
         ),
@@ -172,7 +171,7 @@ fn requirement_operation_futures_advance_only_when_the_caller_polls_them() {
 
     let call_count = Rc::new(Cell::new(0usize));
     let mut flash = ObservedFlash::<REGION_SIZE, REGION_COUNT, 256>::new(0xff, call_count.clone());
-    Storage::<_, REGION_SIZE, REGION_COUNT, 8, 4>::format(
+    Storage::<_, REGION_SIZE, REGION_COUNT, 8>::format(
         &mut flash,
         StorageFormatConfig::new(1, 8, 0xa5),
         crate::test_storage_memory(),
@@ -180,7 +179,7 @@ fn requirement_operation_futures_advance_only_when_the_caller_polls_them() {
     .unwrap();
     call_count.set(0);
 
-    let future = Storage::<_, REGION_SIZE, REGION_COUNT, 8, 4>::open_future(
+    let future = Storage::<_, REGION_SIZE, REGION_COUNT, 8>::open_future(
         &mut flash,
         crate::test_storage_memory(),
     );
@@ -211,14 +210,13 @@ fn requirement_single_threaded_poll_loop_drives_operation_futures_to_completion(
     const REGION_COUNT: usize = 5;
 
     let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 2048>::new(0xff);
-    let mut storage = super::super::poll_ready(
-        Storage::<_, REGION_SIZE, REGION_COUNT, 8, 4>::format_future(
+    let mut storage =
+        super::super::poll_ready(Storage::<_, REGION_SIZE, REGION_COUNT, 8>::format_future(
             &mut flash,
             StorageFormatConfig::new(1, 8, 0xa5),
             crate::test_storage_memory(),
-        ),
-    )
-    .unwrap();
+        ))
+        .unwrap();
 
     super::super::poll_ready(storage.create_map_future(CollectionId(81))).unwrap();
 
@@ -241,7 +239,7 @@ fn requirement_single_threaded_poll_loop_drives_operation_futures_to_completion(
     drop(storage);
 
     let reopened = super::super::poll_until_ready(
-        Storage::<_, REGION_SIZE, REGION_COUNT, 8, 4>::open_future(
+        Storage::<_, REGION_SIZE, REGION_COUNT, 8>::open_future(
             &mut flash,
             crate::test_storage_memory(),
         ),
@@ -278,7 +276,7 @@ fn requirement_single_threaded_poll_loop_drives_operation_futures_to_completion(
 fn requirement_storage_can_be_reused_only_after_an_operation_future_is_finished_or_dropped() {
     let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
-    let mut storage = Storage::<_, 512, 5, 8, 4>::format(
+    let mut storage = Storage::<_, 512, 5, 8>::format(
         &mut flash,
         StorageFormatConfig::new(1, 8, 0xa5),
         crate::test_storage_memory(),

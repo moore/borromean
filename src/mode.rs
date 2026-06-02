@@ -93,7 +93,6 @@ pub enum RegionReclaimMode {
 pub enum WalHeadReclaimMode {
     Plan,
     BeginReclaim,
-    PreserveFreeListHead,
     CopyLiveState,
     CommitHead,
     CompleteReclaim,

@@ -9,7 +9,7 @@ Mechanism review:
 
 - **Purpose**: reclaim obsolete WAL and data regions while preserving
   the exact replay result and FIFO free-list ordering.
-- **State**: per-record WAL liveness, `ready_region`, transaction
+- **State**: per-record WAL liveness, WAL-rotation `ready_region`, transaction
   recovery state, free-list head/tail, and live collection/WAL
   reachability.
 - **Named operations**: `ReclaimWalHead`, `FreeRegion`,
@@ -30,8 +30,9 @@ WAL-head reclaim is the `ReclaimingWalHead(WalHeadReclaimMode)`
 operation. It operates on WAL regions, but correctness is defined per
 record. A record is reclaimable only when replay no longer needs it to
 rebuild the same collection submachine state, pending updates,
-`last_free_list_head`, reserved `ready_region`, transaction recovery
-state, and reconstructed `free_list_tail` produced by `ApplyWalRecord`.
+`last_free_list_head`, reserved WAL-rotation `ready_region`, transaction
+recovery state, and reconstructed `free_list_tail` produced by
+`ApplyWalRecord`.
 
 Per-collection cutoff:
 
@@ -80,10 +81,11 @@ live only while required to maintain a valid WAL chain from current
 WAL head to current WAL tail.
 8. `RING-WAL-RECLAIM-008` `alloc_begin(collection_id, region_index, free_list_head_after)` record:
 live if either it is the last valid free-list-head decision in replay
-order, or its reservation is still needed to recover unmatched
-`ready_region`. Its reservation role exists only until `head` or `link`
-durably consumes the allocated region; after that point, retaining the
-record is no longer required for region-consumption validity.
+order, or its WAL-rotation reservation is still needed to recover an
+unmatched `ready_region`. The reservation role exists only for
+`collection_id = 0` until `link` durably consumes the allocated WAL
+region; after that point, retaining the record is no longer required for
+region-consumption validity.
 9. `RING-WAL-RECLAIM-009` Transaction marker records are live while
 startup replay still needs them to classify a transaction interval as
 finished, rolled back, pre-commit incomplete, or post-commit
@@ -114,8 +116,8 @@ WAL-region reclaim postconditions:
 1. `RING-WAL-RECLAIM-POST-001` A collection's `H(c)`, `B(c)`, and live
 post-basis updates MUST NOT depend on bytes in the reclaimed region.
 2. `RING-WAL-RECLAIM-POST-002` The recovered free-list head MUST match pre-reclaim allocator state.
-3. `RING-WAL-RECLAIM-POST-003` The recovered `ready_region`, if any, MUST match pre-reclaim
-allocator state.
+3. `RING-WAL-RECLAIM-POST-003` The recovered WAL-rotation `ready_region`, if any, MUST match
+pre-reclaim allocator state.
 4. `RING-WAL-RECLAIM-POST-004` Transaction recovery state that replay would continue MUST match
 pre-reclaim crash-recovery state.
 5. `RING-WAL-RECLAIM-POST-005` Startup step 4 MUST recover the same effective WAL head after
@@ -134,9 +136,9 @@ Safety invariant:
 
 1. `RING-WAL-RECLAIM-SAFE-001` Reclaim MUST NOT change replay result: the recovered collection
 submachine state and pending updates for every collection, the recovered
-`last_free_list_head`, reserved `ready_region`, transaction recovery
-state, and reconstructed `free_list_tail`, after reclaim must match the
-pre-reclaim logical state.
+`last_free_list_head`, reserved WAL-rotation `ready_region`,
+transaction recovery state, and reconstructed `free_list_tail`, after
+reclaim must match the pre-reclaim logical state.
 
 ## Free Region
 
@@ -171,14 +173,23 @@ recovery to derive that `region_index` must be freed.
 
 Procedure:
 
-1. `RING-FREE-REGION-001` Establish `region_index` as a free-tail candidate without erasing it.
-Its free-pointer footer MUST represent an uninitialized successor.
-2. `RING-FREE-REGION-002` If `t_prev` exists, write and sync
+1. `RING-FREE-REGION-001` Establish `region_index` as a free-tail
+candidate without erasing it. Its free-pointer footer MUST be
+unwritten: all footer bytes equal `erased_byte`.
+2. `RING-FREE-REGION-001A` A normal `free_region` operation MUST fail
+before linking if the freed region's free-pointer footer is not
+unwritten.
+3. `RING-FREE-REGION-002` If `t_prev` exists, write and sync
 `t_prev.free_pointer.next_tail = region_index`.
-3. `RING-FREE-REGION-003` Append and sync
+4. `RING-FREE-REGION-003` Append and sync
 `free_region(collection_id, region_index)`.
-4. `RING-FREE-REGION-004` Update runtime `free_list_tail = region_index`; if the free list was
+5. `RING-FREE-REGION-004` Update runtime `free_list_tail = region_index`; if the free list was
 empty, also update runtime `last_free_list_head = Some(region_index)`.
+
+Normal cleanup MUST NOT erase `region_index`. Recovery may erase a
+transaction-owned allocation that crashed before its allocation erase
+completed, but only after proving the region is not reachable from live
+collection state.
 
 Postconditions:
 

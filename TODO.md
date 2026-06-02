@@ -17,8 +17,10 @@ Design history and exploratory ideas live in [journal.md](journal.md).
 - Resolve or retire the Duvet `todo` requirements around storage ownership, startup scratch,
   collection buffers, shared-device synchronization, named transition edges, and transaction
   recovery ordering.
-- Implement collection-scoped WAL transactions in the storage core, replacing staged-region and
-  pending-reclaim runtime state.
+- Harden collection-scoped WAL transaction recovery with broader crash-injection coverage and
+  foreground I/O-error tests.
+- Rewrite the forced WAL-rotation and WAL-head reclaim lifecycle stress tests so they exercise the
+  transaction-era allocator model without relying on old cleanup counters.
 - Refine the explicit state machine so durable transitions have named preconditions, durable
   effects, runtime effects, replay effects, and crash-cut outcomes.
 - Continue reducing low-level public map APIs that require caller-provided frontier buffers in

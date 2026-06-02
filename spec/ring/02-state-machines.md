@@ -115,7 +115,7 @@ The stable runtime state contains:
 - WAL position: current `wal_head`, `wal_tail`, and next
   `wal_append_offset` in the tail.
 - Allocator position: durable `last_free_list_head`, runtime
-  `free_list_tail`, and optional reserved `ready_region`.
+  `free_list_tail`, and optional WAL-rotation `ready_region`.
 - `max_seen_sequence`, used to assign the next initialized region
   sequence.
 - The replayed collection table, including each collection id,
@@ -186,11 +186,11 @@ stable runtime state remains the replayable state that a reset would
 recover from durable media.
 
 Some low-level APIs expose individual transition edges rather than a
-whole collection operation. For example, an allocation-start call may
-return successfully after `ReserveRegion`, leaving `ready_region` in
-stable runtime state. That is not a lingering active mode; it is
-replayable stable runtime state that later public calls may consume
-from `Idle`.
+whole collection operation. For example, a WAL rotation start may return
+successfully after `ReserveRegion`, leaving `ready_region` in stable
+runtime state. That is not a lingering active mode; it is replayable
+stable runtime state that a later rotation finish may consume from
+`Idle`.
 
 `Opening(OpenMode)` has these phases:
 
@@ -224,8 +224,8 @@ effect after a record is durable:
 | `new_collection(collection_id, collection_type)` | Create a collection entry and move its collection submachine from `NoCollection` to `EmptyClean`. |
 | `update(collection_id, payload)` | Require an existing non-dropped collection, retain the update after that collection's current durable basis, and move `EmptyClean` to `EmptyDirty`, `WALSnapshotClean` to `WALSnapshotDirty`, or `RegionClean` to `RegionDirty`; an already dirty collection remains in the matching dirty state. |
 | `snapshot(collection_id, collection_type, payload)` | If this is the first retained basis record for the collection, create replay state and set the collection type from this record; otherwise require `collection_type` to match the replay-tracked type. Move the collection submachine to `WALSnapshotClean` and discard older pending updates for that collection. |
-| `alloc_begin(collection_id, region_index, free_list_head_after)` | Advance `last_free_list_head` to `free_list_head_after` and set `ready_region = (collection_id, region_index)`. |
-| `head(collection_id, collection_type, region_index)` for a user collection | Create or validate the collection type, move the collection submachine to `RegionClean`, discard older pending updates for that collection, and consume a matching `ready_region`. |
+| `alloc_begin(collection_id, region_index, free_list_head_after)` | Advance `last_free_list_head` to `free_list_head_after`. For `collection_id = 0`, also set `ready_region = region_index` for WAL rotation recovery; user collection allocations are transaction-owned and do not occupy `ready_region`. |
+| `head(collection_id, collection_type, region_index)` for a user collection | Create or validate the collection type, move the collection submachine to `RegionClean`, and discard older pending updates for that collection. |
 | `head(collection_id = 0, collection_type = wal, region_index)` | As a WAL-chain control record, update the effective WAL head in foreground operation. During startup, the last valid tail-local control record selects the effective WAL head before main replay; during the main user-collection replay pass it has no collection-basis effect. |
 | `link(next_region_index, expected_sequence)` | Preserve WAL-chain reachability and consume matching `ready_region` for the linked WAL region. |
 | `drop_collection(collection_id)` | Move the collection submachine to `Dropped`, clear retained pending updates and volatile frontier state, and leave the collection id reserved. |
@@ -261,8 +261,8 @@ The main operation modes are transition sequences over the same table:
 - `AllocatingRegion(AllocationMode)` completes safe foreground reclaim
   if needed, preserves the minimum free-region reserve, writes and
   syncs `alloc_begin(collection_id, region_index, free_list_head_after)`,
-  then leaves the selected region in `ready_region` until a later
-  `head` or `link` consumes it.
+  then either leaves a WAL rotation target in `ready_region` or records a
+  transaction-owned user allocation.
 - `WritingCommittedRegion(CommittedRegionWriteMode)` reserves a region,
   erases and writes a committed-region header plus payload, syncs the
   region, appends and syncs the user `head` record, then applies that
@@ -318,7 +318,7 @@ inside that transition.
 | `ReplayRetainedSnapshotBasis` | `Opening(OpenMode)` or `ReclaimingWalHead(WalHeadReclaimMode)` | `NoCollection` | none during replay; `CopyRetainedWalRecord` when preserving the record into a new WAL head | `WALSnapshotClean` |
 | `ReplayRetainedRegionBasis` | `Opening(OpenMode)` or `ReclaimingWalHead(WalHeadReclaimMode)` | `NoCollection` | none during replay; `CopyRetainedWalRecord` when preserving the record into a new WAL head | `RegionClean` |
 | `ReplayRetainedDropTombstone` | `Opening(OpenMode)` or `ReclaimingWalHead(WalHeadReclaimMode)` | `NoCollection` | none during replay; `CopyRetainedWalRecord` when preserving the record into a new WAL head | `Dropped` |
-| `ReserveRegionForUse` | `AllocatingRegion(AllocationMode)` | `Idle` with free-list capacity above reserve | `ReserveRegion` | stable `ready_region` set |
+| `ReserveRegionForUse` | `AllocatingRegion(AllocationMode)` | `Idle` with free-list capacity above reserve | `ReserveRegion` | allocator advances; WAL rotation reserves `ready_region`, user allocation remains transaction-owned |
 | `RotateWalTail` | `RotatingWal(WalRotationMode)` | current WAL tail in rotation window | `StartWalRotation`, `RotateWalLink`, `InitializeRotatedWalRegion` | WAL tail moves to linked region |
 | `FreeRegion` | transaction cleanup mode | region detached from its owning collection | `LinkFreeTail`, `CommitFreeRegion` | region enters durable free-list chain |
 | `ReclaimWalHead` | `ReclaimingWalHead(WalHeadReclaimMode)` | reclaimable WAL head | transaction edges, preservation edges, `CommitWalHeadControl`, cleanup frees | WAL head moves and old head enters free-list chain |

@@ -9,20 +9,14 @@ use crate::{
 use core::mem::size_of;
 use heapless::Vec;
 
-fn format<
-    const REGION_SIZE: usize,
-    const REGION_COUNT: usize,
-    const MAX_LOG: usize,
-    const MAX_COLLECTIONS: usize,
-    const MAX_PENDING_RECLAIMS: usize,
->(
+fn format<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize>(
     flash: &mut MockFlash<REGION_SIZE, REGION_COUNT, MAX_LOG>,
     min_free_regions: u32,
     wal_write_granule: u32,
     wal_record_magic: u8,
-) -> Result<StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>, StorageRuntimeError> {
+) -> Result<StorageRuntime<8>, StorageRuntimeError> {
     let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
-    super::format::<REGION_SIZE, REGION_COUNT, _, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>(
+    super::format::<REGION_SIZE, REGION_COUNT, _, 8>(
         flash,
         &mut workspace,
         min_free_regions,
@@ -31,20 +25,11 @@ fn format<
     )
 }
 
-fn open<
-    const REGION_SIZE: usize,
-    const REGION_COUNT: usize,
-    const MAX_LOG: usize,
-    const MAX_COLLECTIONS: usize,
-    const MAX_PENDING_RECLAIMS: usize,
->(
+fn open<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize>(
     flash: &mut MockFlash<REGION_SIZE, REGION_COUNT, MAX_LOG>,
-) -> Result<StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>, StorageRuntimeError> {
+) -> Result<StorageRuntime<8>, StorageRuntimeError> {
     let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
-    super::open::<REGION_SIZE, REGION_COUNT, _, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>(
-        flash,
-        &mut workspace,
-    )
+    super::open::<REGION_SIZE, REGION_COUNT, _, 8>(flash, &mut workspace)
 }
 
 fn append_wal_record<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize>(
@@ -110,9 +95,8 @@ fn fill_until_append_reserve_requires_rotation<
     const REGION_COUNT: usize,
     const MAX_LOG: usize,
     const MAX_COLLECTIONS: usize,
-    const MAX_PENDING_RECLAIMS: usize,
 >(
-    state: &mut StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+    state: &mut StorageRuntime<MAX_COLLECTIONS>,
     flash: &mut MockFlash<REGION_SIZE, REGION_COUNT, MAX_LOG>,
     workspace: &mut StorageWorkspace<REGION_SIZE>,
     record: WalRecord<'_>,
@@ -169,7 +153,7 @@ struct CommittedRegionSequenceProgress {
 fn committed_region_sequence_progress() -> CommittedRegionSequenceProgress {
     let mut flash = MockFlash::<512, 6, 1024>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
-    let mut state = format::<512, 6, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+    let mut state = format::<512, 6, _>(&mut flash, 1, 8, 0xa5).unwrap();
 
     state
         .append_new_collection::<512, 6, _>(
@@ -264,7 +248,7 @@ fn committed_region_sequence_progress() -> CommittedRegionSequenceProgress {
 #[test]
 fn requirement_format_writes_metadata_before_reopening_the_fresh_store() {
     let mut flash = MockFlash::<128, 4, 64>::new(0xff);
-    let state = format::<128, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+    let state = format::<128, 4, _>(&mut flash, 1, 8, 0xa5).unwrap();
     let metadata = flash.metadata().copied().unwrap();
 
     assert_eq!(
@@ -287,7 +271,7 @@ fn requirement_format_writes_metadata_before_reopening_the_fresh_store() {
 #[test]
 fn requirement_format_starts_with_region_zero_as_wal_head_and_tail() {
     let mut flash = MockFlash::<128, 4, 64>::new(0xff);
-    let state = format::<128, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+    let state = format::<128, 4, _>(&mut flash, 1, 8, 0xa5).unwrap();
 
     assert_eq!(state.wal_head(), 0);
     assert_eq!(state.wal_tail(), 0);
@@ -314,7 +298,7 @@ fn requirement_reserve_next_region_consumes_the_oldest_free_regions_first() {
 fn requirement_committed_region_write_uses_a_region_previously_reserved_by_alloc_begin() {
     let mut flash = MockFlash::<512, 5, 256>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
-    let mut state = format::<512, 5, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+    let mut state = format::<512, 5, _>(&mut flash, 1, 8, 0xa5).unwrap();
 
     state
         .append_new_collection::<512, 5, _>(
@@ -339,6 +323,7 @@ fn requirement_committed_region_write_uses_a_region_previously_reserved_by_alloc
     state
         .visit_wal_records::<512, _, (), _>(&mut flash, &mut workspace, |_flash, record| {
             if let WalRecord::AllocBegin {
+                collection_id: CollectionId(0),
                 region_index: alloc_region,
                 free_list_head_after,
             } = record
@@ -376,7 +361,7 @@ fn requirement_write_committed_region_accepts_payload_that_exactly_fills_committ
 
     let mut flash = MockFlash::<REGION_SIZE, 5, 1024>::new(0xff);
     let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
-    let mut state = format::<REGION_SIZE, 5, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+    let mut state = format::<REGION_SIZE, 5, _>(&mut flash, 1, 8, 0xa5).unwrap();
     let payload = [0x5au8; PAYLOAD_CAPACITY];
 
     let region_index = state
@@ -419,7 +404,7 @@ fn requirement_write_committed_region_accepts_payload_that_exactly_fills_committ
 fn requirement_committed_region_write_waits_for_alloc_begin_sync() {
     let mut flash = MockFlash::<512, 5, 256>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
-    let mut state = format::<512, 5, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+    let mut state = format::<512, 5, _>(&mut flash, 1, 8, 0xa5).unwrap();
 
     state
         .append_new_collection::<512, 5, _>(
@@ -484,7 +469,7 @@ fn requirement_committed_region_write_waits_for_alloc_begin_sync() {
 fn requirement_reopen_after_alloc_begin_recovers_the_advanced_allocator_state() {
     let mut flash = MockFlash::<512, 5, 256>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
-    let mut state = format::<512, 5, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+    let mut state = format::<512, 5, _>(&mut flash, 1, 8, 0xa5).unwrap();
 
     let region_index = state
         .reserve_next_region::<512, 5, _>(
@@ -496,7 +481,7 @@ fn requirement_reopen_after_alloc_begin_recovers_the_advanced_allocator_state() 
             &mut crate::startup::StartupOpenPlan::empty(),
         )
         .unwrap();
-    let reopened = open::<512, 5, _, 8, 4>(&mut flash).unwrap();
+    let reopened = open::<512, 5, _>(&mut flash).unwrap();
 
     assert_eq!(reopened.ready_region(), Some(region_index));
     assert_eq!(reopened.last_free_list_head(), Some(2));
@@ -510,7 +495,7 @@ fn requirement_reopen_after_alloc_begin_recovers_the_advanced_allocator_state() 
 #[test]
 fn requirement_format_returns_fresh_runtime_state() {
     let mut flash = MockFlash::<128, 4, 64>::new(0xff);
-    let state = format::<128, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+    let state = format::<128, 4, _>(&mut flash, 1, 8, 0xa5).unwrap();
 
     assert_eq!(state.metadata().region_count, 4);
     assert_eq!(state.wal_head(), 0);
@@ -519,7 +504,6 @@ fn requirement_format_returns_fresh_runtime_state() {
     assert_eq!(state.free_list_tail(), Some(3));
     assert_eq!(state.ready_region(), None);
     assert!(state.collections().is_empty());
-    assert!(state.pending_reclaims().is_empty());
 }
 
 //= spec/ring/08-durability-formatting.md#format-storage-on-disk-initialization
@@ -529,7 +513,7 @@ fn requirement_format_returns_fresh_runtime_state() {
 #[test]
 fn requirement_format_starts_with_no_user_collection_durable_head() {
     let mut flash = MockFlash::<128, 4, 64>::new(0xff);
-    let state = format::<128, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+    let state = format::<128, 4, _>(&mut flash, 1, 8, 0xa5).unwrap();
 
     assert!(state.collections().is_empty());
     assert_eq!(state.tracked_user_collection_count(), 0);
@@ -546,7 +530,7 @@ fn requirement_user_collection_ids_are_nonzero_u64_values_and_are_not_recycled()
 
     let mut flash = MockFlash::<256, 4, 128>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
-    let mut state = format::<256, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+    let mut state = format::<256, 4, _>(&mut flash, 1, 8, 0xa5).unwrap();
 
     assert_eq!(
         state.append_new_collection::<256, 4, _>(
@@ -589,14 +573,14 @@ fn requirement_user_collection_ids_are_nonzero_u64_values_and_are_not_recycled()
 #[test]
 fn requirement_wal_collection_type_is_reserved_for_collection_id_zero() {
     assert_eq!(
-        StorageRuntime::<8, 4>::validate_supported_head_collection_type(
+        StorageRuntime::<8>::validate_supported_head_collection_type(
             CollectionId(0),
             CollectionType::WAL_CODE,
         ),
         Ok(())
     );
     assert_eq!(
-        StorageRuntime::<8, 4>::validate_supported_head_collection_type(
+        StorageRuntime::<8>::validate_supported_head_collection_type(
             CollectionId(0),
             CollectionType::MAP_CODE,
         ),
@@ -609,7 +593,7 @@ fn requirement_wal_collection_type_is_reserved_for_collection_id_zero() {
 
     let mut flash = MockFlash::<256, 4, 128>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
-    let mut state = format::<256, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+    let mut state = format::<256, 4, _>(&mut flash, 1, 8, 0xa5).unwrap();
 
     assert_eq!(
         state.append_new_collection::<256, 4, _>(
@@ -632,7 +616,7 @@ fn requirement_wal_collection_type_is_reserved_for_collection_id_zero() {
 fn requirement_visit_wal_records_reports_snapshot_and_update_records() {
     let mut flash = MockFlash::<256, 4, 512>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
-    let mut state = format::<256, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+    let mut state = format::<256, 4, _>(&mut flash, 1, 8, 0xa5).unwrap();
 
     state
         .append_new_collection::<256, 4, _>(
@@ -721,7 +705,7 @@ fn requirement_open_returns_replayed_collection_runtime_state() {
         },
     );
 
-    let state = open::<256, 4, _, 8, 4>(&mut flash).unwrap();
+    let state = open::<256, 4, _>(&mut flash).unwrap();
 
     assert_eq!(state.wal_append_offset(), next_offset);
     assert_eq!(state.max_seen_sequence(), 4);
@@ -753,6 +737,7 @@ fn requirement_open_completes_reclaims_already_on_the_free_list() {
         0,
         wal_offset,
         WalRecord::AllocBegin {
+            collection_id: CollectionId(0),
             region_index: 1,
             free_list_head_after: Some(2),
         },
@@ -762,15 +747,17 @@ fn requirement_open_completes_reclaims_already_on_the_free_list() {
         metadata,
         0,
         after_alloc,
-        WalRecord::ReclaimBegin { region_index: 3 },
+        WalRecord::FreeRegion {
+            collection_id: CollectionId(0),
+            region_index: 3,
+        },
     );
 
-    let state = open::<256, 4, _, 8, 4>(&mut flash).unwrap();
+    let state = open::<256, 4, _>(&mut flash).unwrap();
 
     assert_eq!(state.ready_region(), Some(1));
     assert_eq!(state.last_free_list_head(), Some(2));
     assert_eq!(state.free_list_tail(), Some(3));
-    assert!(state.pending_reclaims().is_empty());
 }
 
 //= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
@@ -778,7 +765,7 @@ fn requirement_open_completes_reclaims_already_on_the_free_list() {
 //# `RING-IMPL-REGRESSION-068` Opening storage MUST discard incomplete cleanup records for regions
 //# still reachable from live collection state.
 #[test]
-fn requirement_open_discards_pending_reclaims_for_still_live_regions() {
+fn requirement_open_ignores_free_region_records_for_still_live_regions() {
     let mut flash = MockFlash::<256, 4, 128>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
     init_user_region_header(&mut flash, 2, 4, CollectionId(7), 1);
@@ -800,16 +787,18 @@ fn requirement_open_discards_pending_reclaims_for_still_live_regions() {
         metadata,
         0,
         after_head,
-        WalRecord::ReclaimBegin { region_index: 2 },
+        WalRecord::FreeRegion {
+            collection_id: CollectionId(0),
+            region_index: 2,
+        },
     );
 
-    let state = open::<256, 4, _, 8, 4>(&mut flash).unwrap();
+    let state = open::<256, 4, _>(&mut flash).unwrap();
 
     assert_eq!(
         state.collections()[0].basis(),
         StartupCollectionBasis::Region(2)
     );
-    assert!(state.pending_reclaims().is_empty());
 }
 
 //= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
@@ -820,7 +809,7 @@ fn requirement_open_discards_pending_reclaims_for_still_live_regions() {
 fn requirement_append_new_collection_and_update_refresh_runtime_state() {
     let mut flash = MockFlash::<256, 4, 512>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
-    let mut state = format::<256, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+    let mut state = format::<256, 4, _>(&mut flash, 1, 8, 0xa5).unwrap();
 
     state
         .append_new_collection::<256, 4, _>(
@@ -853,7 +842,7 @@ fn requirement_append_new_collection_and_update_refresh_runtime_state() {
 fn requirement_append_update_requires_a_prior_new_collection_record() {
     let mut flash = MockFlash::<256, 4, 128>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
-    let mut state = format::<256, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+    let mut state = format::<256, 4, _>(&mut flash, 1, 8, 0xa5).unwrap();
 
     assert_eq!(
         state.append_update::<256, 4, _>(&mut flash, &mut workspace, CollectionId(7), &[1, 2]),
@@ -869,7 +858,7 @@ fn requirement_append_update_requires_a_prior_new_collection_record() {
 fn requirement_append_snapshot_resets_pending_updates() {
     let mut flash = MockFlash::<256, 4, 512>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
-    let mut state = format::<256, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+    let mut state = format::<256, 4, _>(&mut flash, 1, 8, 0xa5).unwrap();
 
     state
         .append_new_collection::<256, 4, _>(
@@ -907,7 +896,7 @@ fn requirement_append_snapshot_resets_pending_updates() {
 fn requirement_append_head_and_drop_refresh_runtime_state() {
     let mut flash = MockFlash::<256, 4, 128>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
-    let mut state = format::<256, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+    let mut state = format::<256, 4, _>(&mut flash, 1, 8, 0xa5).unwrap();
 
     state
         .append_new_collection::<256, 4, _>(
@@ -942,209 +931,32 @@ fn requirement_append_head_and_drop_refresh_runtime_state() {
     assert_eq!(state.tracked_user_collection_count(), 0);
 }
 
-//= spec/ring/01-theory.md#core-requirements
-//= type=test
-//# `RING-CORE-007` A `drop_collection(collection_id)` record that is
-//# durable MUST tombstone that collection, MUST forbid later WAL
-//# records for that `collection_id`, and MUST make older durable bytes
-//# reclaimable once they are no longer physically reachable from live
-//# state.
-#[test]
-fn requirement_drop_collection_tombstones_the_collection_forbids_later_records_and_starts_reclaim()
-{
-    let mut flash = MockFlash::<256, 4, 128>::new(0xff);
-    let mut workspace = StorageWorkspace::<256>::new();
-    let mut state = format::<256, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
-
-    state
-        .append_new_collection::<256, 4, _>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(7),
-            CollectionType::MAP_CODE,
-        )
-        .unwrap();
-    init_user_region_header(&mut flash, 2, 4, CollectionId(7), 1);
-    state
-        .append_head::<256, 4, _>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(7),
-            CollectionType::MAP_CODE,
-            2,
-        )
-        .unwrap();
-
-    let reclaim = state
-        .drop_collection_and_begin_reclaim::<256, 4, _>(&mut flash, &mut workspace, CollectionId(7))
-        .unwrap();
-
-    assert_eq!(reclaim, Some(2));
-    assert_eq!(
-        state.collections()[0].basis(),
-        StartupCollectionBasis::Dropped
-    );
-    assert_eq!(state.pending_reclaims(), &[2]);
-    assert_eq!(state.tracked_user_collection_count(), 0);
-    assert_eq!(
-        state.append_update::<256, 4, _>(&mut flash, &mut workspace, CollectionId(7), &[9]),
-        Err(StorageRuntimeError::DroppedCollection(CollectionId(7)))
-    );
-}
-
-//= spec/ring/01-theory.md#core-requirements
-//= type=test
-//# `RING-CORE-009` Any multi-step collection operation that commits a
-//# new durable basis and frees old regions MUST be tracked as a
-//# collection-scoped WAL transaction with durable begin, commit, cleanup,
-//# and terminal markers.
-#[test]
-fn requirement_append_alloc_and_reclaim_methods_refresh_runtime_state() {
-    let mut flash = MockFlash::<256, 4, 128>::new(0xff);
-    let mut workspace = StorageWorkspace::<256>::new();
-    let mut state = format::<256, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
-
-    state
-        .append_alloc_begin::<256, 4, _>(&mut flash, &mut workspace, 1, Some(2))
-        .unwrap();
-    assert_eq!(state.ready_region(), Some(1));
-    assert_eq!(state.last_free_list_head(), Some(2));
-
-    state
-        .append_reclaim_begin::<256, 4, _>(&mut flash, &mut workspace, 3)
-        .unwrap();
-    assert_eq!(state.pending_reclaims(), &[3]);
-
-    state
-        .append_reclaim_end::<256, 4, _>(&mut flash, &mut workspace, 3)
-        .unwrap();
-    assert!(state.pending_reclaims().is_empty());
-}
-
-//= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
-//= type=test
-//# `RING-IMPL-REGRESSION-072` Appending WAL recovery MUST clear pending recovery boundary and
-//# advance append offset; appending allocator cleanup records MUST refresh allocator head and tail.
-#[test]
-fn requirement_append_free_list_head_and_wal_recovery_refresh_runtime_state() {
-    let mut flash = MockFlash::<256, 4, 128>::new(0xff);
-    let mut workspace = StorageWorkspace::<256>::new();
-    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
-    let corrupt_offset = metadata.wal_record_area_offset().unwrap();
-    flash.write_region(0, corrupt_offset, &[0x10; 8]).unwrap();
-
-    let mut state = open::<256, 4, _, 8, 4>(&mut flash).unwrap();
-    assert!(state.pending_wal_recovery_boundary());
-
-    let before_append = state.wal_append_offset();
-    state
-        .append_wal_recovery::<256, 4, _>(&mut flash, &mut workspace)
-        .unwrap();
-    assert!(state.wal_append_offset() > before_append);
-    assert!(!state.pending_wal_recovery_boundary());
-
-    state
-        .append_free_list_head::<256, 4, _>(&mut flash, &mut workspace, Some(2))
-        .unwrap();
-    assert_eq!(state.last_free_list_head(), Some(2));
-    assert_eq!(state.free_list_tail(), Some(3));
-}
-
-//= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
-//= type=test
-//# `RING-IMPL-REGRESSION-133` Control-record appends MUST refresh the in-memory runtime state
-//# without reopening and replaying the WAL.
-#[test]
-fn requirement_control_record_appends_refresh_runtime_without_reopen() {
-    let mut flash = MockFlash::<512, 6, 2048>::new(0xff);
-    let mut workspace = StorageWorkspace::<512>::new();
-    let mut state = format::<512, 6, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
-
-    state
-        .append_new_collection::<512, 6, _>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(7),
-            CollectionType::MAP_CODE,
-        )
-        .unwrap();
-    init_user_region_header(
-        &mut flash,
-        4,
-        17,
-        CollectionId(7),
-        crate::MAP_REGION_V2_FORMAT,
-    );
-
-    flash.clear_operations();
-    state
-        .append_head::<512, 6, _>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(7),
-            CollectionType::MAP_CODE,
-            4,
-        )
-        .unwrap();
-    assert_eq!(
-        flash
-            .operations()
-            .iter()
-            .filter(|operation| matches!(operation, MockOperation::ReadMetadata))
-            .count(),
-        0
-    );
-    assert_eq!(
-        state.collections()[0].basis(),
-        StartupCollectionBasis::Region(4)
-    );
-    assert_eq!(state.max_seen_sequence(), 17);
-
-    flash.clear_operations();
-    state
-        .append_free_list_head::<512, 6, _>(&mut flash, &mut workspace, Some(2))
-        .unwrap();
-    assert_eq!(
-        flash
-            .operations()
-            .iter()
-            .filter(|operation| matches!(operation, MockOperation::ReadMetadata))
-            .count(),
-        0
-    );
-    let reopened = open::<512, 6, _, 8, 4>(&mut flash).unwrap();
-    assert_eq!(state.last_free_list_head(), reopened.last_free_list_head());
-    assert_eq!(state.free_list_tail(), reopened.free_list_tail());
-    assert_eq!(state.max_seen_sequence(), reopened.max_seen_sequence());
-}
-
 //= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-134` Completing transaction cleanup MUST refresh the free-list tail from
 //# footers, not by reopening the store.
 #[test]
-fn requirement_reclaim_end_refreshes_free_list_tail_without_reopen() {
+fn requirement_free_region_refreshes_free_list_tail_without_reopen() {
     let mut flash = MockFlash::<512, 6, 4096>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
-    let mut state = format::<512, 6, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+    let mut state = format::<512, 6, _>(&mut flash, 1, 8, 0xa5).unwrap();
 
-    let reclaimed = state
-        .reserve_next_region::<512, 6, _>(
+    let reclaimed = state.last_free_list_head().unwrap();
+    state
+        .append_alloc_begin::<512, 6, _>(
             &mut flash,
             &mut workspace,
-            &mut heapless::Vec::new(),
-            &mut heapless::Vec::new(),
-            &mut crate::storage::WalHeadReclaimPlan::empty(),
-            &mut crate::startup::StartupOpenPlan::empty(),
+            CollectionId(0),
+            reclaimed,
+            Some(2),
         )
         .unwrap();
-    state
-        .append_reclaim_begin::<512, 6, _>(&mut flash, &mut workspace, reclaimed)
-        .unwrap();
+    flash.erase_region(reclaimed).unwrap();
+    flash.sync().unwrap();
 
     flash.clear_operations();
     state
-        .complete_pending_reclaim::<512, 6, _>(&mut flash, &mut workspace, reclaimed)
+        .append_free_region::<512, 6, _>(&mut flash, &mut workspace, CollectionId(0), reclaimed)
         .unwrap();
     assert_eq!(
         flash
@@ -1154,13 +966,69 @@ fn requirement_reclaim_end_refreshes_free_list_tail_without_reopen() {
             .count(),
         0
     );
-    assert!(state.pending_reclaims().is_empty());
     assert_eq!(state.free_list_tail(), Some(reclaimed));
 
-    let reopened = open::<512, 6, _, 8, 4>(&mut flash).unwrap();
+    let reopened = open::<512, 6, _>(&mut flash).unwrap();
     assert_eq!(state.last_free_list_head(), reopened.last_free_list_head());
     assert_eq!(state.free_list_tail(), reopened.free_list_tail());
-    assert_eq!(state.pending_reclaims(), reopened.pending_reclaims());
+}
+
+//= spec/ring/07-reclaim.md#free-region
+//= type=test
+//# `RING-FREE-REGION-001A` A normal `free_region` operation MUST fail
+//# before linking if the freed region's free-pointer footer is not
+//# unwritten.
+#[test]
+fn requirement_free_region_rejects_written_footer_before_linking_tail() {
+    let mut flash = MockFlash::<512, 6, 4096>::new(0xff);
+    let mut workspace = StorageWorkspace::<512>::new();
+    let mut state = format::<512, 6, _>(&mut flash, 1, 8, 0xa5).unwrap();
+
+    let reclaimed = state.last_free_list_head().unwrap();
+    state
+        .append_alloc_begin::<512, 6, _>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(0),
+            reclaimed,
+            Some(2),
+        )
+        .unwrap();
+
+    let previous_tail = state.free_list_tail().unwrap();
+    let footer_offset = 512 - FreePointerFooter::ENCODED_LEN;
+    flash.clear_operations();
+    let error = state
+        .append_free_region::<512, 6, _>(&mut flash, &mut workspace, CollectionId(0), reclaimed)
+        .unwrap_err();
+
+    assert_eq!(
+        error,
+        StorageRuntimeError::FreeRegionFooterNotUnwritten {
+            region_index: reclaimed,
+        }
+    );
+    assert!(!flash.operations().iter().any(|operation| {
+        matches!(
+            operation,
+            MockOperation::WriteRegion {
+                region_index,
+                offset,
+                len,
+            } if *region_index == previous_tail
+                && *offset == footer_offset
+                && *len == FreePointerFooter::ENCODED_LEN
+        )
+    }));
+    assert!(!flash.operations().iter().any(|operation| {
+        matches!(
+            operation,
+            MockOperation::WriteRegion {
+                region_index,
+                ..
+            } if *region_index == state.wal_tail()
+        )
+    }));
 }
 
 //= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
@@ -1171,7 +1039,7 @@ fn requirement_reclaim_end_refreshes_free_list_tail_without_reopen() {
 fn requirement_append_rotation_start_and_finish_move_to_new_tail() {
     let mut flash = MockFlash::<128, 4, 128>::new(0xff);
     let mut workspace = StorageWorkspace::<128>::new();
-    let mut state = format::<128, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+    let mut state = format::<128, 4, _>(&mut flash, 1, 8, 0xa5).unwrap();
 
     let next_region = state
         .append_wal_rotation_start::<128, 4, _>(&mut flash, &mut workspace)
@@ -1190,7 +1058,7 @@ fn requirement_append_rotation_start_and_finish_move_to_new_tail() {
     assert_eq!(state.last_free_list_head(), Some(2));
     assert_eq!(state.max_seen_sequence(), 1);
 
-    let reopened = open::<128, 4, 128, 8, 4>(&mut flash).unwrap();
+    let reopened = open::<128, 4, 128>(&mut flash).unwrap();
     assert_eq!(reopened.wal_head(), state.wal_head());
     assert_eq!(reopened.wal_tail(), state.wal_tail());
     assert_eq!(reopened.wal_append_offset(), state.wal_append_offset());
@@ -1227,7 +1095,7 @@ fn requirement_committed_region_allocations_advance_sequence_from_max_seen_seque
 fn requirement_wal_rotation_initializes_the_next_wal_region_at_max_seen_sequence_plus_one() {
     let mut flash = MockFlash::<128, 4, 128>::new(0xff);
     let mut workspace = StorageWorkspace::<128>::new();
-    let mut state = format::<128, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+    let mut state = format::<128, 4, _>(&mut flash, 1, 8, 0xa5).unwrap();
 
     let next_region = state
         .append_wal_rotation_start::<128, 4, _>(&mut flash, &mut workspace)
@@ -1263,7 +1131,7 @@ fn requirement_later_region_writes_keep_sequence_numbers_strictly_monotonic() {
 fn requirement_free_region_membership_is_defined_by_the_free_list_chain() {
     let mut flash = MockFlash::<512, 5, 256>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
-    let mut state = format::<512, 5, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+    let mut state = format::<512, 5, _>(&mut flash, 1, 8, 0xa5).unwrap();
 
     let reserved_region = state
         .reserve_next_region::<512, 5, _>(
@@ -1294,7 +1162,7 @@ fn requirement_free_region_membership_is_defined_by_the_free_list_chain() {
 fn requirement_stale_footer_bytes_do_not_make_a_reserved_region_free() {
     let mut flash = MockFlash::<512, 5, 256>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
-    let mut state = format::<512, 5, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+    let mut state = format::<512, 5, _>(&mut flash, 1, 8, 0xa5).unwrap();
 
     let reserved_region = state
         .reserve_next_region::<512, 5, _>(
@@ -1318,113 +1186,6 @@ fn requirement_stale_footer_bytes_do_not_make_a_reserved_region_free() {
     assert_eq!(state.ready_region(), Some(reserved_region));
 }
 
-//= spec/ring/06-startup-replay.md#startup-replay-algorithm
-//= type=todo
-//# `RING-STARTUP-RESULT-008` Transaction terminal records written during recovery, if recovery
-//# needed to close an incomplete interval
-#[test]
-fn todo_stage_ready_region_detaches_ready_region_and_allows_next_allocation() {
-    let mut flash = MockFlash::<512, 5, 512>::new(0xff);
-    let mut workspace = StorageWorkspace::<512>::new();
-    let mut state = format::<512, 5, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
-
-    let first_region = state
-        .reserve_next_region::<512, 5, _>(
-            &mut flash,
-            &mut workspace,
-            &mut heapless::Vec::new(),
-            &mut heapless::Vec::new(),
-            &mut crate::storage::WalHeadReclaimPlan::empty(),
-            &mut crate::startup::StartupOpenPlan::empty(),
-        )
-        .unwrap();
-    state
-        .write_committed_region::<512, 5, _>(
-            &mut flash,
-            first_region,
-            CollectionId(7),
-            crate::MAP_REGION_V2_FORMAT,
-            &[1, 2, 3],
-        )
-        .unwrap();
-    state
-        .stage_ready_region::<512, 5, _>(&mut flash, &mut workspace, first_region)
-        .unwrap();
-
-    assert_eq!(state.ready_region(), None);
-    assert_eq!(state.staged_regions(), &[first_region]);
-
-    let second_region = state
-        .reserve_next_region::<512, 5, _>(
-            &mut flash,
-            &mut workspace,
-            &mut heapless::Vec::new(),
-            &mut heapless::Vec::new(),
-            &mut crate::storage::WalHeadReclaimPlan::empty(),
-            &mut crate::startup::StartupOpenPlan::empty(),
-        )
-        .unwrap();
-    assert_ne!(second_region, first_region);
-    assert_eq!(state.ready_region(), Some(second_region));
-}
-
-//= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
-//= type=test
-//# `RING-IMPL-REGRESSION-075` Reopening with incomplete transaction allocation state MUST recover
-//# allocated regions and leave no abandoned ready regions live.
-#[test]
-fn requirement_staged_regions_are_reclaimed_on_reopen_when_uncommitted() {
-    let mut flash = MockFlash::<512, 5, 512>::new(0xff);
-    let mut workspace = StorageWorkspace::<512>::new();
-    let mut state = format::<512, 5, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
-
-    let region_index = state
-        .reserve_next_region::<512, 5, _>(
-            &mut flash,
-            &mut workspace,
-            &mut heapless::Vec::new(),
-            &mut heapless::Vec::new(),
-            &mut crate::storage::WalHeadReclaimPlan::empty(),
-            &mut crate::startup::StartupOpenPlan::empty(),
-        )
-        .unwrap();
-    state
-        .write_committed_region::<512, 5, _>(
-            &mut flash,
-            region_index,
-            CollectionId(7),
-            crate::MAP_REGION_V2_FORMAT,
-            &[1, 2, 3],
-        )
-        .unwrap();
-    state
-        .stage_ready_region::<512, 5, _>(&mut flash, &mut workspace, region_index)
-        .unwrap();
-
-    let reopened = open::<512, 5, _, 8, 4>(&mut flash).unwrap();
-    assert_eq!(reopened.ready_region(), None);
-    assert!(reopened.staged_regions().is_empty());
-}
-
-//= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
-//= type=test
-//# `RING-IMPL-REGRESSION-076` Allocation cleanup MUST reject region indexes that do not match the
-//# current ready allocation state.
-#[test]
-fn requirement_stage_ready_region_rejects_non_ready_region() {
-    let mut flash = MockFlash::<512, 5, 256>::new(0xff);
-    let mut workspace = StorageWorkspace::<512>::new();
-    let mut state = format::<512, 5, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
-
-    assert_eq!(
-        state.stage_ready_region::<512, 5, _>(&mut flash, &mut workspace, 1),
-        Err(StorageRuntimeError::InvalidStageRegion {
-            region_index: 1,
-            ready_region: None,
-        })
-    );
-}
-
 //= spec/ring/05-disk-format.md#storage-requirements
 //= type=test
 //# `RING-STORAGE-007` The free-pointer footer of a region MUST NOT be
@@ -1433,7 +1194,7 @@ fn requirement_stage_ready_region_rejects_non_ready_region() {
 fn requirement_committed_region_writes_do_not_write_a_live_free_pointer_footer() {
     let mut flash = MockFlash::<512, 5, 256>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
-    let mut state = format::<512, 5, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+    let mut state = format::<512, 5, _>(&mut flash, 1, 8, 0xa5).unwrap();
 
     state
         .append_new_collection::<512, 5, _>(
@@ -1493,7 +1254,7 @@ fn requirement_committed_region_writes_do_not_write_a_live_free_pointer_footer()
 fn requirement_free_regions_are_erased_only_when_reused() {
     let mut flash = MockFlash::<512, 5, 256>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
-    let mut state = format::<512, 5, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+    let mut state = format::<512, 5, _>(&mut flash, 1, 8, 0xa5).unwrap();
 
     flash.clear_operations();
     let region_index = state
@@ -1607,7 +1368,7 @@ fn requirement_initialized_wal_region_erases_the_wal_region_before_reuse() {
 fn requirement_normal_append_rejects_when_it_would_consume_rotation_reserve() {
     let mut flash = MockFlash::<256, 4, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
-    let mut state = format::<256, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+    let mut state = format::<256, 4, _>(&mut flash, 1, 8, 0xa5).unwrap();
     state
         .append_new_collection::<256, 4, _>(
             &mut flash,
@@ -1654,7 +1415,7 @@ fn requirement_normal_append_rejects_when_it_would_consume_rotation_reserve() {
 fn requirement_internal_rotation_bridges_early_window_gap_for_large_record() {
     let mut flash = MockFlash::<256, 6, 4096>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
-    let mut state = format::<256, 6, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+    let mut state = format::<256, 6, _>(&mut flash, 1, 8, 0xa5).unwrap();
     state
         .append_new_collection::<256, 6, _>(
             &mut flash,
@@ -1670,7 +1431,7 @@ fn requirement_internal_rotation_bridges_early_window_gap_for_large_record() {
         collection_type: CollectionType::MAP_CODE,
         payload: &payload,
     };
-    fill_until_append_reserve_requires_rotation::<256, 6, _, 8, 4>(
+    fill_until_append_reserve_requires_rotation::<256, 6, _, 8>(
         &mut state,
         &mut flash,
         &mut workspace,
@@ -1703,7 +1464,7 @@ fn requirement_internal_rotation_bridges_early_window_gap_for_large_record() {
 fn requirement_append_wal_rotation_start_rejects_when_called_before_rotation_window() {
     let mut flash = MockFlash::<256, 4, 512>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
-    let mut state = format::<256, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+    let mut state = format::<256, 4, _>(&mut flash, 1, 8, 0xa5).unwrap();
 
     assert!(matches!(
         state.append_wal_rotation_start::<256, 4, _>(&mut flash, &mut workspace),
@@ -1723,7 +1484,7 @@ fn requirement_append_wal_rotation_start_rejects_when_called_before_rotation_win
 fn requirement_ensure_head_append_room_with_rotation_rotates_when_tail_lacks_head_room() {
     let mut flash = MockFlash::<256, 6, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
-    let mut state = format::<256, 6, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+    let mut state = format::<256, 6, _>(&mut flash, 1, 8, 0xa5).unwrap();
     state
         .append_new_collection::<256, 6, _>(
             &mut flash,
@@ -1760,43 +1521,13 @@ fn requirement_ensure_head_append_room_with_rotation_rotates_when_tail_lacks_hea
 
 //= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
 //= type=test
-//# `RING-IMPL-REGRESSION-080` Transaction cleanup append room checks MUST reject cleanup when
-//# allocator state no longer matches the target region.
-#[test]
-fn requirement_ensure_stage_region_append_room_with_rotation_rotates_when_tail_lacks_stage_room() {
-    let mut flash = MockFlash::<256, 6, 2048>::new(0xff);
-    let mut workspace = StorageWorkspace::<256>::new();
-    let mut state = format::<256, 6, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
-    state
-        .append_new_collection::<256, 6, _>(
-            &mut flash,
-            &mut workspace,
-            CollectionId(7),
-            CollectionType::MAP_CODE,
-        )
-        .unwrap();
-
-    let target_region = state.last_free_list_head().unwrap();
-    state.last_free_list_head = Some(99);
-
-    assert!(state
-        .ensure_stage_region_append_room_with_rotation::<256, 6, _>(
-            &mut flash,
-            &mut workspace,
-            target_region,
-        )
-        .is_err());
-}
-
-//= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
-//= type=test
 //# `RING-IMPL-REGRESSION-081` Encoded append reserve checks for alloc_begin MUST require a free
 //# region and return WalRotationRequired when none remains.
 #[test]
 fn requirement_ensure_encoded_append_reserve_rejects_alloc_begin_when_no_free_region_remains() {
     let mut flash = MockFlash::<128, 4, 128>::new(0xff);
     let mut workspace = StorageWorkspace::<128>::new();
-    let mut state = format::<128, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+    let mut state = format::<128, 4, _>(&mut flash, 1, 8, 0xa5).unwrap();
     state.last_free_list_head = None;
 
     assert_eq!(state.last_free_list_head(), None);
@@ -1815,7 +1546,7 @@ fn requirement_ensure_encoded_append_reserve_accepts_alloc_begin_at_exact_rotati
 ) {
     let mut flash = MockFlash::<256, 4, 512>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
-    let mut state = format::<256, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+    let mut state = format::<256, 4, _>(&mut flash, 1, 8, 0xa5).unwrap();
     let next_region = state.last_free_list_head().unwrap();
     let free_list_head_after =
         read_free_pointer_successor::<256, 4, _>(&mut flash, state.metadata(), next_region)
@@ -1845,7 +1576,7 @@ fn requirement_ensure_encoded_append_reserve_accepts_alloc_begin_at_exact_rotati
 fn requirement_classify_wal_head_reclaim_copies_only_the_retained_region_head() {
     let mut flash = MockFlash::<512, 5, 512>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
-    let mut state = format::<512, 5, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+    let mut state = format::<512, 5, _>(&mut flash, 1, 8, 0xa5).unwrap();
     state
         .append_new_collection::<512, 5, _>(
             &mut flash,
@@ -1923,7 +1654,7 @@ fn requirement_classify_wal_head_reclaim_copies_only_the_retained_region_head() 
 fn requirement_classify_wal_head_reclaim_copies_only_retained_drop_tombstones() {
     let mut flash = MockFlash::<256, 4, 512>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
-    let mut live_state = format::<256, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+    let mut live_state = format::<256, 4, _>(&mut flash, 1, 8, 0xa5).unwrap();
     live_state
         .append_new_collection::<256, 4, _>(
             &mut flash,
@@ -1974,7 +1705,7 @@ fn requirement_classify_wal_head_reclaim_copies_only_retained_drop_tombstones() 
 fn requirement_ensure_foreground_allocation_headroom_rejects_using_the_minimum_free_reserve() {
     let mut flash = MockFlash::<256, 5, 1024>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
-    let mut state = format::<256, 5, _, 8, 4>(&mut flash, 3, 8, 0xa5).unwrap();
+    let mut state = format::<256, 5, _>(&mut flash, 3, 8, 0xa5).unwrap();
     let _reserved = state
         .reserve_next_region::<256, 5, _>(
             &mut flash,
@@ -2011,7 +1742,7 @@ fn requirement_ensure_foreground_allocation_headroom_rejects_using_the_minimum_f
 fn requirement_copy_live_wal_head_reclaim_state_stops_when_a_record_ends_at_region_end() {
     let mut flash = MockFlash::<128, 4, 512>::new(0xff);
     let mut workspace = StorageWorkspace::<128>::new();
-    let mut state = format::<128, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+    let mut state = format::<128, 4, _>(&mut flash, 1, 8, 0xa5).unwrap();
     let metadata = state.metadata();
     append_exact_fill_update_record(&mut flash, metadata, state.wal_head(), CollectionId(77));
     let plan = WalHeadReclaimPlan::<8> {
@@ -2064,7 +1795,7 @@ fn requirement_region_reachable_from_live_state_does_not_parse_non_map_region_he
     );
 
     let mut workspace = StorageWorkspace::<128>::new();
-    let state = open::<128, 4, _, 8, 4>(&mut flash).unwrap();
+    let state = open::<128, 4, _>(&mut flash).unwrap();
     assert!(!state
         .region_reachable_from_live_state::<128, _>(&mut flash, &mut workspace, 3)
         .unwrap());
@@ -2082,7 +1813,7 @@ fn requirement_region_reachable_from_live_state_follows_map_head_references_to_r
     const MAX_RUNS: usize = 16;
 
     let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 16384>::new(0xff);
-    let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT, 8, 8>::format(
+    let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT, 8>::format(
         &mut flash,
         StorageFormatConfig::new(1, 8, 0xa5),
         crate::test_storage_memory(),
@@ -2125,28 +1856,13 @@ fn requirement_region_reachable_from_live_state_follows_map_head_references_to_r
 
 //= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
 //= type=test
-//# `RING-IMPL-REGRESSION-089` Dropping a transaction-owned region in memory MUST remove only the
-//# matching region and preserve other transaction recovery state.
-#[test]
-fn requirement_drop_staged_region_in_memory_removes_only_the_matching_region() {
-    let mut flash = MockFlash::<128, 4, 128>::new(0xff);
-    let mut state = format::<128, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
-    state.staged_regions.push(1).unwrap();
-    state.staged_regions.push(2).unwrap();
-
-    state.drop_staged_region_in_memory(1).unwrap();
-    assert_eq!(state.staged_regions(), &[2]);
-}
-
-//= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
-//= type=test
 //# `RING-IMPL-REGRESSION-090` WAL record visitation MUST process a tail record that ends exactly at
 //# the append limit and then stop.
 #[test]
 fn requirement_visit_wal_records_stops_when_a_tail_record_ends_at_the_append_limit() {
     let mut flash = MockFlash::<128, 4, 512>::new(0xff);
     let mut workspace = StorageWorkspace::<128>::new();
-    let mut state = format::<128, 4, _, 8, 4>(&mut flash, 1, 8, 0xa5).unwrap();
+    let mut state = format::<128, 4, _>(&mut flash, 1, 8, 0xa5).unwrap();
     let metadata = state.metadata();
     append_exact_fill_update_record(&mut flash, metadata, state.wal_tail(), CollectionId(77));
     state.wal_append_offset = 128;

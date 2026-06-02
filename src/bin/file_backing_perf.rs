@@ -22,7 +22,6 @@ use serde::{Deserialize, Serialize};
 
 const DEFAULT_CONFIG_PATH: &str = "perf/file_backing.toml";
 const MAX_COLLECTIONS: usize = 64;
-const MAX_PENDING_RECLAIMS: usize = 512;
 const MAX_INDEXES: usize = 128;
 const MAX_RUNS: usize = 128;
 const PERF_THREAD_STACK_BYTES: usize = 64 * 1024 * 1024;
@@ -626,7 +625,7 @@ struct SyncAuditDelta {
     wal_rotations_completed: u64,
     wal_rotation_required: u64,
     reclaim_starts: u64,
-    reclaim_ends: u64,
+    cleanup_finishes: u64,
 }
 
 #[derive(Default)]
@@ -753,10 +752,10 @@ impl SyncAuditSnapshot {
                 .metrics
                 .reclaim_starts
                 .saturating_sub(before.metrics.reclaim_starts),
-            reclaim_ends: self
+            cleanup_finishes: self
                 .metrics
-                .reclaim_ends
-                .saturating_sub(before.metrics.reclaim_ends),
+                .cleanup_finishes
+                .saturating_sub(before.metrics.cleanup_finishes),
         }
     }
 }
@@ -841,7 +840,7 @@ impl SyncAuditDelta {
             || self.wal_rotations_completed != 0
             || self.wal_rotation_required != 0
             || self.reclaim_starts != 0
-            || self.reclaim_ends != 0
+            || self.cleanup_finishes != 0
     }
 
     fn violation_reasons(self) -> Vec<String> {
@@ -1346,7 +1345,6 @@ fn capture_sync_audit_snapshot<IO, const REGION_SIZE: usize, const REGION_COUNT:
         REGION_SIZE,
         REGION_COUNT,
         MAX_COLLECTIONS,
-        MAX_PENDING_RECLAIMS,
     >,
     diagnostics_handle: &IoDiagnosticsHandle<REGION_SIZE, REGION_COUNT>,
 ) -> SyncAuditSnapshot
@@ -1918,19 +1916,17 @@ where
     .map_err(|error| format!("failed to create file backing: {error:?}"))?;
     let mut backing = InstrumentedBacking::new(backing);
     let diagnostics_handle = backing.diagnostics_handle();
-    let mut storage_memory =
-        StorageMemory::<REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>::new();
-    let mut storage =
-        Storage::<_, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>::format(
-            &mut backing,
-            StorageFormatConfig::new(
-                config.storage.min_free_regions,
-                config.storage.wal_write_granule,
-                config.storage.wal_record_magic,
-            ),
-            &mut storage_memory,
-        )
-        .map_err(|error| format!("failed to format storage: {error:?}"))?;
+    let mut storage_memory = StorageMemory::<REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>::new();
+    let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>::format(
+        &mut backing,
+        StorageFormatConfig::new(
+            config.storage.min_free_regions,
+            config.storage.wal_write_granule,
+            config.storage.wal_record_magic,
+        ),
+        &mut storage_memory,
+    )
+    .map_err(|error| format!("failed to format storage: {error:?}"))?;
     let create_format = create_format_start.elapsed();
     eprintln!(
         "[file-backing-perf] borromean create+format complete in {}",
@@ -2148,19 +2144,17 @@ where
     let backing = MemoryBacking::<REGION_SIZE, REGION_COUNT>::new(config.backing.erased_byte)?;
     let mut backing = InstrumentedBacking::new(backing);
     let diagnostics_handle = backing.diagnostics_handle();
-    let mut storage_memory =
-        StorageMemory::<REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>::new();
-    let mut storage =
-        Storage::<_, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>::format(
-            &mut backing,
-            StorageFormatConfig::new(
-                config.storage.min_free_regions,
-                config.storage.wal_write_granule,
-                config.storage.wal_record_magic,
-            ),
-            &mut storage_memory,
-        )
-        .map_err(|error| format!("failed to format memory storage: {error:?}"))?;
+    let mut storage_memory = StorageMemory::<REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>::new();
+    let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>::format(
+        &mut backing,
+        StorageFormatConfig::new(
+            config.storage.min_free_regions,
+            config.storage.wal_write_granule,
+            config.storage.wal_record_magic,
+        ),
+        &mut storage_memory,
+    )
+    .map_err(|error| format!("failed to format memory storage: {error:?}"))?;
     let create_format = create_format_start.elapsed();
     eprintln!(
         "[file-backing-perf] borromean-memory create+format complete in {}",
@@ -2828,7 +2822,6 @@ fn run_borromean_preload<
         REGION_SIZE,
         REGION_COUNT,
         MAX_COLLECTIONS,
-        MAX_PENDING_RECLAIMS,
     >,
     counters: &mut WorkloadCounters,
     timings: &mut WorkloadTimings,
@@ -3043,7 +3036,6 @@ fn execute_one_borromean_operation<
         REGION_SIZE,
         REGION_COUNT,
         MAX_COLLECTIONS,
-        MAX_PENDING_RECLAIMS,
     >,
     counters: Option<&mut WorkloadCounters>,
     timings: Option<&mut WorkloadTimings>,
@@ -3616,7 +3608,6 @@ fn maybe_compact<
         REGION_SIZE,
         REGION_COUNT,
         MAX_COLLECTIONS,
-        MAX_PENDING_RECLAIMS,
     >,
     counters: Option<&mut WorkloadCounters>,
     timings: Option<&mut WorkloadTimings>,
@@ -3705,7 +3696,6 @@ fn run_borromean_post_workload_maintenance<
         REGION_SIZE,
         REGION_COUNT,
         MAX_COLLECTIONS,
-        MAX_PENDING_RECLAIMS,
     >,
     path: Option<&Path>,
 ) -> PerfResult<MaintenanceReport>
@@ -4230,14 +4220,14 @@ fn print_borromean_core_metrics(metrics: &StoragePerfMetrics) {
         format_nanos(metrics.overflow_flush_nanos)
     );
     println!(
-        "  borromean maintenance core: compaction_checks={} compactions={} compaction_check_time={} compaction_time={} flushes={} reclaim_begin={} reclaim_end={} dirty_sync_bytes={} dirty_sync_regions={} dirty_sync_metadata_regions={} buffer_too_small={} wal_rotation_required={} append_failures={}",
+        "  borromean maintenance core: compaction_checks={} compactions={} compaction_check_time={} compaction_time={} flushes={} cleanup_start={} cleanup_end={} dirty_sync_bytes={} dirty_sync_regions={} dirty_sync_metadata_regions={} buffer_too_small={} wal_rotation_required={} append_failures={}",
         metrics.compaction_checks,
         metrics.compactions_run,
         format_nanos(metrics.compaction_check_nanos),
         format_nanos(metrics.compaction_nanos),
         metrics.flushes,
         metrics.reclaim_starts,
-        metrics.reclaim_ends,
+        metrics.cleanup_finishes,
         metrics.dirty_sync_bytes,
         metrics.dirty_sync_regions,
         metrics.dirty_sync_metadata_regions,

@@ -66,10 +66,10 @@ fn requirement_corrupt_storage_inputs_return_errors_instead_of_panicking() {
 fn requirement_public_decode_and_open_paths_expose_explicit_error_results() {
     type Flash = MockFlash<256, 5, 2048>;
     type Workspace = StorageWorkspace<256>;
-    type Store<'db, 'mem> = Storage<'db, 'mem, Flash, 256, 5, 8, 4>;
+    type Store<'db, 'mem> = Storage<'db, 'mem, Flash, 256, 5>;
     type Map<'a> = MapFrontier<'a, u16, u16, 8>;
     type Update = MapUpdate<u16, u16>;
-    type Runtime = StorageRuntime<8, 4>;
+    type Runtime = StorageRuntime<8>;
     type CreateMapFn<'db, 'mem> =
         fn(&mut Store<'db, 'mem>, CollectionId) -> Result<(), StorageRuntimeError>;
     type AppendMapUpdateFn<'db, 'mem> =
@@ -107,7 +107,7 @@ fn requirement_public_decode_and_open_paths_expose_explicit_error_results() {
     fn assert_storage_open_signature<'db, 'mem>(
         _: fn(
             &'db mut Flash,
-            &'mem mut StorageMemory<256, 5, 8, 4>,
+            &'mem mut StorageMemory<256, 5>,
         ) -> Result<Store<'db, 'mem>, StorageOpenError>,
     ) {
     }
@@ -115,11 +115,11 @@ fn requirement_public_decode_and_open_paths_expose_explicit_error_results() {
         _: fn(&mut Store<'db, 'mem>, &mut Map<'map>) -> Result<u32, MapStorageError>,
     ) {
     }
-    assert_storage_open_signature(Storage::<Flash, 256, 5, 8, 4>::open);
-    let _: CreateMapFn<'_, '_> = Storage::<Flash, 256, 5, 8, 4>::create_map;
+    assert_storage_open_signature(Storage::<Flash, 256, 5>::open);
+    let _: CreateMapFn<'_, '_> = Storage::<Flash, 256, 5>::create_map;
     let _: AppendMapUpdateFn<'_, '_> =
-        Storage::<Flash, 256, 5, 8, 4>::append_map_update::<u16, u16, 8>;
-    assert_storage_flush_signature(Storage::<Flash, 256, 5, 8, 4>::flush_map::<u16, u16, 8, 8>);
+        Storage::<Flash, 256, 5, 8>::append_map_update::<u16, u16, 8>;
+    assert_storage_flush_signature(Storage::<Flash, 256, 5, 8>::flush_map::<u16, u16, 8, 8>);
 
     // Borrow-returning map APIs need named helpers so the compiler can
     // also verify the lifetime relationship between the caller's buffer
@@ -138,12 +138,12 @@ fn requirement_public_decode_and_open_paths_expose_explicit_error_results() {
     fn assert_map_load_snapshot_signature<'a>(_: fn(&mut Map<'a>, &[u8]) -> Result<(), MapError>) {}
     fn assert_open_from_storage_signature<'a>(_: OpenFromStorageFn<'a>) {}
 
-    assert_open_map_signature(Storage::<Flash, 256, 5, 8, 4>::open_map::<u16, u16, 8, 8>);
+    assert_open_map_signature(Storage::<Flash, 256, 5, 8>::open_map::<u16, u16, 8, 8>);
     assert_map_new_signature(MapFrontier::<u16, u16, 8>::new);
     assert_map_set_signature(MapFrontier::<u16, u16, 8>::set);
     assert_map_load_snapshot_signature(MapFrontier::<u16, u16, 8>::load_snapshot);
     assert_open_from_storage_signature(
-        MapFrontier::<u16, u16, 8>::open_from_storage::<256, 5, Flash, 8, 4>,
+        MapFrontier::<u16, u16, 8>::open_from_storage::<256, 5, Flash, 8>,
     );
 }
 

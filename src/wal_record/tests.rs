@@ -344,23 +344,27 @@ fn requirement_logical_wal_records_encode_fixed_width_fields_little_endian() {
 //# when the tag is `1`, by a `u32 region_index`.
 #[test]
 fn requirement_optional_region_indexes_use_a_tag_then_little_endian_region_index() {
-    let (free_list_head_none, free_list_head_none_len) =
-        encode_logical(WalRecord::FreeListHead { region_index: None });
+    let (alloc_begin_none, alloc_begin_none_len) = encode_logical(WalRecord::AllocBegin {
+        collection_id: CollectionId(7),
+        region_index: 3,
+        free_list_head_after: None,
+    });
+    let opt_offset = 1 + size_of::<u64>() + 2 * size_of::<u32>();
     assert_eq!(
-        &free_list_head_none[1..1 + size_of::<u32>()],
-        &1u32.to_le_bytes()
+        &alloc_begin_none[1 + size_of::<u64>()..1 + size_of::<u64>() + size_of::<u32>()],
+        &(size_of::<u32>() as u32).to_le_bytes()
     );
-    assert_eq!(free_list_head_none[1 + size_of::<u32>()], 0);
+    assert_eq!(alloc_begin_none[opt_offset], 0);
     assert_eq!(
-        free_list_head_none_len,
-        1 + 2 * size_of::<u32>() + size_of::<u8>()
+        alloc_begin_none_len,
+        1 + size_of::<u64>() + 3 * size_of::<u32>() + size_of::<u8>()
     );
 
     let (alloc_begin_some, alloc_begin_some_len) = encode_logical(WalRecord::AllocBegin {
+        collection_id: CollectionId(7),
         region_index: 3,
         free_list_head_after: Some(0x1122_3344),
     });
-    let opt_offset = 1 + 2 * size_of::<u32>();
     assert_eq!(alloc_begin_some[opt_offset], 1);
     assert_eq!(
         &alloc_begin_some
@@ -369,7 +373,7 @@ fn requirement_optional_region_indexes_use_a_tag_then_little_endian_region_index
     );
     assert_eq!(
         alloc_begin_some_len,
-        1 + 4 * size_of::<u32>() + size_of::<u8>()
+        1 + size_of::<u64>() + 4 * size_of::<u32>() + size_of::<u8>()
     );
 }
 
@@ -549,8 +553,9 @@ fn requirement_consecutive_wal_record_start_offsets_stay_aligned_to_wal_write_gr
     let initial_offset = metadata.wal_record_area_offset().unwrap();
     let (_first_physical, first_len) = encode_physical(WalRecord::WalRecovery, metadata);
     let (_second_physical, second_len) = encode_physical(
-        WalRecord::FreeListHead {
-            region_index: Some(3),
+        WalRecord::FreeRegion {
+            collection_id: CollectionId(7),
+            region_index: 3,
         },
         metadata,
     );
@@ -593,6 +598,18 @@ fn requirement_empty_payload_record_types_encode_zero_payload_len() {
             collection_id: CollectionId(7),
         });
     let (wal_recovery_logical, wal_recovery_len) = encode_logical(WalRecord::WalRecovery);
+    let (begin_logical, begin_len) = encode_logical(WalRecord::BeginTransaction {
+        collection_id: CollectionId(7),
+    });
+    let (commit_logical, commit_len) = encode_logical(WalRecord::CommitTransaction {
+        collection_id: CollectionId(7),
+    });
+    let (finished_logical, finished_len) = encode_logical(WalRecord::TransactionFinished {
+        collection_id: CollectionId(7),
+    });
+    let (rollback_logical, rollback_len) = encode_logical(WalRecord::RollbackTransaction {
+        collection_id: CollectionId(7),
+    });
 
     assert_eq!(&new_collection_logical[11..15], &0u32.to_le_bytes());
     assert_eq!(new_collection_len, 19);
@@ -600,6 +617,14 @@ fn requirement_empty_payload_record_types_encode_zero_payload_len() {
     assert_eq!(drop_collection_len, 17);
     assert_eq!(&wal_recovery_logical[1..5], &0u32.to_le_bytes());
     assert_eq!(wal_recovery_len, 9);
+    assert_eq!(&begin_logical[9..13], &0u32.to_le_bytes());
+    assert_eq!(begin_len, 17);
+    assert_eq!(&commit_logical[9..13], &0u32.to_le_bytes());
+    assert_eq!(commit_len, 17);
+    assert_eq!(&finished_logical[9..13], &0u32.to_le_bytes());
+    assert_eq!(finished_len, 17);
+    assert_eq!(&rollback_logical[9..13], &0u32.to_le_bytes());
+    assert_eq!(rollback_len, 17);
 }
 
 //= spec/ring/04-wal-records.md#encoding-helper-requirements
@@ -607,13 +632,28 @@ fn requirement_empty_payload_record_types_encode_zero_payload_len() {
 //# `RING-IMPL-REGRESSION-131` Transaction marker WAL records with no payload MUST round-trip
 //# through physical encoding and decoding.
 #[test]
-fn requirement_free_list_head_none_round_trips() {
+fn requirement_transaction_markers_round_trip() {
     let metadata = metadata(4);
-    let record = WalRecord::FreeListHead { region_index: None };
-    let (physical, encoded_len) = encode_physical(record, metadata);
-    let mut decode_scratch = [0u8; 128];
-    let decoded = decode_record(&physical[..encoded_len], metadata, &mut decode_scratch).unwrap();
-    assert_eq!(decoded.record, record);
+    for record in [
+        WalRecord::BeginTransaction {
+            collection_id: CollectionId(7),
+        },
+        WalRecord::CommitTransaction {
+            collection_id: CollectionId(7),
+        },
+        WalRecord::TransactionFinished {
+            collection_id: CollectionId(7),
+        },
+        WalRecord::RollbackTransaction {
+            collection_id: CollectionId(7),
+        },
+    ] {
+        let (physical, encoded_len) = encode_physical(record, metadata);
+        let mut decode_scratch = [0u8; 128];
+        let decoded =
+            decode_record(&physical[..encoded_len], metadata, &mut decode_scratch).unwrap();
+        assert_eq!(decoded.record, record);
+    }
 }
 
 //= spec/ring/04-wal-records.md#wal-record-types
@@ -674,16 +714,24 @@ fn requirement_record_types_use_canonical_byte_codes() {
         (WalRecordType::Head, 0x05),
         (WalRecordType::DropCollection, 0x06),
         (WalRecordType::Link, 0x07),
-        (WalRecordType::FreeListHead, 0x08),
-        (WalRecordType::ReclaimBegin, 0x09),
-        (WalRecordType::ReclaimEnd, 0x0a),
         (WalRecordType::WalRecovery, 0x0b),
-        (WalRecordType::StageRegion, 0x0c),
+        (WalRecordType::FreeRegion, 0x0c),
+        (WalRecordType::BeginTransaction, 0x0d),
+        (WalRecordType::CommitTransaction, 0x0e),
+        (WalRecordType::TransactionFinished, 0x0f),
+        (WalRecordType::RollbackTransaction, 0x10),
     ];
 
     for (record_type, code) in canonical_codes {
         assert_eq!(record_type.code(), code);
         assert_eq!(WalRecordType::decode(code).unwrap(), record_type);
+    }
+
+    for removed_code in [0x08, 0x09, 0x0a] {
+        assert_eq!(
+            WalRecordType::decode(removed_code),
+            Err(WalRecordError::InvalidRecordType(removed_code))
+        );
     }
 }
 
@@ -719,12 +767,13 @@ fn requirement_logical_record_fields_follow_canonical_order() {
 #[test]
 fn requirement_payload_len_counts_only_logical_payload_bytes() {
     let (alloc_begin_logical, _alloc_begin_len) = encode_logical(WalRecord::AllocBegin {
+        collection_id: CollectionId(7),
         region_index: 3,
         free_list_head_after: Some(4),
     });
 
     assert_eq!(
-        &alloc_begin_logical[1..1 + size_of::<u32>()],
+        &alloc_begin_logical[1 + size_of::<u64>()..1 + size_of::<u64>() + size_of::<u32>()],
         &(size_of::<u32>() as u32).to_le_bytes()
     );
 }
@@ -775,6 +824,7 @@ fn requirement_record_checksum_covers_logical_prefix_bytes() {
 fn requirement_alloc_begin_round_trips_free_list_head_after() {
     let metadata = metadata(4);
     let record = WalRecord::AllocBegin {
+        collection_id: CollectionId(7),
         region_index: 3,
         free_list_head_after: Some(4),
     };
@@ -792,9 +842,12 @@ fn requirement_alloc_begin_round_trips_free_list_head_after() {
 //# `alloc_begin`, `head`, and `free_region` payloads are a single
 //# `u32 region_index`;
 #[test]
-fn requirement_stage_region_round_trips_region_index() {
+fn requirement_free_region_round_trips_region_index() {
     let metadata = metadata(4);
-    let record = WalRecord::StageRegion { region_index: 3 };
+    let record = WalRecord::FreeRegion {
+        collection_id: CollectionId(7),
+        region_index: 3,
+    };
     let (physical, encoded_len) = encode_physical(record, metadata);
     let mut decode_scratch = [0u8; 128];
     let decoded = decode_record(&physical[..encoded_len], metadata, &mut decode_scratch).unwrap();

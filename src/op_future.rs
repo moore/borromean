@@ -46,15 +46,12 @@ pub struct FormatStorageFuture<
     IO,
     const REGION_SIZE: usize,
     const REGION_COUNT: usize,
-    const MAX_COLLECTIONS: usize,
-    const MAX_PENDING_RECLAIMS: usize,
+    const MAX_COLLECTIONS: usize = 8,
 > where
     IO: FlashIo,
 {
     backing: Option<&'db mut IO>,
-    memory: Option<
-        &'mem mut StorageMemory<REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
-    >,
+    memory: Option<&'mem mut StorageMemory<REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>>,
     config: StorageFormatConfig,
 }
 
@@ -65,29 +62,14 @@ impl<
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
         const MAX_COLLECTIONS: usize,
-        const MAX_PENDING_RECLAIMS: usize,
-    >
-    FormatStorageFuture<
-        'db,
-        'mem,
-        IO,
-        REGION_SIZE,
-        REGION_COUNT,
-        MAX_COLLECTIONS,
-        MAX_PENDING_RECLAIMS,
-    >
+    > FormatStorageFuture<'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>
 where
     IO: FlashIo,
 {
     pub(crate) fn new(
         backing: &'db mut IO,
         config: StorageFormatConfig,
-        memory: &'mem mut StorageMemory<
-            REGION_SIZE,
-            REGION_COUNT,
-            MAX_COLLECTIONS,
-            MAX_PENDING_RECLAIMS,
-        >,
+        memory: &'mem mut StorageMemory<REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
     ) -> Self {
         Self {
             backing: Some(backing),
@@ -104,17 +86,7 @@ impl<
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
         const MAX_COLLECTIONS: usize,
-        const MAX_PENDING_RECLAIMS: usize,
-    > Unpin
-    for FormatStorageFuture<
-        'db,
-        'mem,
-        IO,
-        REGION_SIZE,
-        REGION_COUNT,
-        MAX_COLLECTIONS,
-        MAX_PENDING_RECLAIMS,
-    >
+    > Unpin for FormatStorageFuture<'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>
 where
     IO: FlashIo,
 {
@@ -127,22 +99,12 @@ impl<
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
         const MAX_COLLECTIONS: usize,
-        const MAX_PENDING_RECLAIMS: usize,
-    > Future
-    for FormatStorageFuture<
-        'db,
-        'mem,
-        IO,
-        REGION_SIZE,
-        REGION_COUNT,
-        MAX_COLLECTIONS,
-        MAX_PENDING_RECLAIMS,
-    >
+    > Future for FormatStorageFuture<'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>
 where
     IO: FlashIo,
 {
     type Output = Result<
-        Storage<'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+        Storage<'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
         StorageRuntimeError,
     >;
 
@@ -166,7 +128,6 @@ pub struct YieldingFlushMapFuture<
     const REGION_SIZE: usize,
     const REGION_COUNT: usize,
     const MAX_COLLECTIONS: usize,
-    const MAX_PENDING_RECLAIMS: usize,
     K,
     V,
     const MAX_INDEXES: usize,
@@ -176,15 +137,7 @@ pub struct YieldingFlushMapFuture<
     K: LsmKey,
     V: LsmValue,
 {
-    storage: &'a mut Storage<
-        'db,
-        'mem,
-        IO,
-        REGION_SIZE,
-        REGION_COUNT,
-        MAX_COLLECTIONS,
-        MAX_PENDING_RECLAIMS,
-    >,
+    storage: &'a mut Storage<'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
     map: &'a mut MapFrontier<'a, K, V, MAX_INDEXES, MAX_RUNS>,
     phase: u8,
 }
@@ -197,7 +150,6 @@ impl<
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
         const MAX_COLLECTIONS: usize,
-        const MAX_PENDING_RECLAIMS: usize,
         K,
         V,
         const MAX_INDEXES: usize,
@@ -211,7 +163,6 @@ impl<
         REGION_SIZE,
         REGION_COUNT,
         MAX_COLLECTIONS,
-        MAX_PENDING_RECLAIMS,
         K,
         V,
         MAX_INDEXES,
@@ -224,15 +175,7 @@ where
 {
     /// Creates a new yielding manifest flush future.
     pub fn new(
-        storage: &'a mut Storage<
-            'db,
-            'mem,
-            IO,
-            REGION_SIZE,
-            REGION_COUNT,
-            MAX_COLLECTIONS,
-            MAX_PENDING_RECLAIMS,
-        >,
+        storage: &'a mut Storage<'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
         map: &'a mut MapFrontier<'a, K, V, MAX_INDEXES, MAX_RUNS>,
     ) -> Self {
         Self {
@@ -251,7 +194,6 @@ impl<
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
         const MAX_COLLECTIONS: usize,
-        const MAX_PENDING_RECLAIMS: usize,
         K,
         V,
         const MAX_INDEXES: usize,
@@ -265,7 +207,6 @@ impl<
         REGION_SIZE,
         REGION_COUNT,
         MAX_COLLECTIONS,
-        MAX_PENDING_RECLAIMS,
         K,
         V,
         MAX_INDEXES,
@@ -286,7 +227,6 @@ impl<
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
         const MAX_COLLECTIONS: usize,
-        const MAX_PENDING_RECLAIMS: usize,
         K,
         V,
         const MAX_INDEXES: usize,
@@ -300,7 +240,6 @@ impl<
         REGION_SIZE,
         REGION_COUNT,
         MAX_COLLECTIONS,
-        MAX_PENDING_RECLAIMS,
         K,
         V,
         MAX_INDEXES,
@@ -320,41 +259,6 @@ where
                 if let Err(error) = this.storage.enter_mode(StorageMode::FlushingCollection(
                     CollectionFlushMode::ReserveRegion,
                 )) {
-                    this.phase = 3;
-                    return Poll::Ready(Err(error.into()));
-                }
-                if let Some(region_index) = this.storage.memory.state.last_free_list_head() {
-                    if let Err(error) = this
-                        .storage
-                        .memory
-                        .state
-                        .ensure_head_append_room_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
-                            this.storage.backing,
-                            &mut this.storage.memory.workspace,
-                            this.map.id(),
-                            CollectionType::MAP_CODE,
-                            region_index,
-                        )
-                    {
-                        this.storage.finish_mode();
-                        this.phase = 3;
-                        return Poll::Ready(Err(error.into()));
-                    }
-                }
-                if let Err(error) = this
-                    .storage
-                    .memory
-                    .state
-                    .reserve_next_region::<REGION_SIZE, REGION_COUNT, IO>(
-                        this.storage.backing,
-                        &mut this.storage.memory.workspace,
-                        &mut this.storage.memory.reclaim_source_regions,
-                        &mut this.storage.memory.active_collections,
-                        &mut this.storage.memory.reclaim_plan,
-                        &mut this.storage.memory.open_plan,
-                    )
-                {
-                    this.storage.finish_mode();
                     this.phase = 3;
                     return Poll::Ready(Err(error.into()));
                 }
@@ -390,7 +294,6 @@ impl<
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
         const MAX_COLLECTIONS: usize,
-        const MAX_PENDING_RECLAIMS: usize,
         K,
         V,
         const MAX_INDEXES: usize,
@@ -404,7 +307,6 @@ impl<
         REGION_SIZE,
         REGION_COUNT,
         MAX_COLLECTIONS,
-        MAX_PENDING_RECLAIMS,
         K,
         V,
         MAX_INDEXES,
@@ -421,30 +323,23 @@ where
 }
 
 #[derive(Debug)]
-pub(crate) enum ReclaimWalHeadPhase<const REGION_COUNT: usize, const MAX_COLLECTIONS: usize> {
+pub(crate) enum ReclaimWalHeadPhase<const REGION_COUNT: usize, const MAX_COLLECTIONS: usize = 8> {
     Plan,
     RotateToContinuation { new_head: Option<u32> },
     BeginReclaim { next_index: usize, new_head: u32 },
-    PreserveFreeListHead { new_head: u32 },
     CopyLiveState { new_head: u32 },
     CommitHead { new_head: u32 },
     CompleteReclaim { next_index: usize, new_head: u32 },
     Done,
 }
 
-pub(crate) enum OpenStoragePhase<
-    const REGION_COUNT: usize,
-    const MAX_COLLECTIONS: usize,
-    const MAX_PENDING_RECLAIMS: usize,
-> {
+pub(crate) enum OpenStoragePhase<const REGION_COUNT: usize, const MAX_COLLECTIONS: usize = 8> {
     Begin,
     RecoverRotation,
     DiscoverWalChain,
     ReplayWalChain,
     FinishStartup,
     ValidateCollections,
-    RecoverPendingReclaims,
-    RecoverStagedRegions,
     Done,
 }
 
@@ -456,20 +351,11 @@ pub struct ReclaimWalHeadFuture<
     IO,
     const REGION_SIZE: usize,
     const REGION_COUNT: usize,
-    const MAX_COLLECTIONS: usize,
-    const MAX_PENDING_RECLAIMS: usize,
+    const MAX_COLLECTIONS: usize = 8,
 > where
     IO: FlashIo,
 {
-    storage: &'a mut Storage<
-        'db,
-        'mem,
-        IO,
-        REGION_SIZE,
-        REGION_COUNT,
-        MAX_COLLECTIONS,
-        MAX_PENDING_RECLAIMS,
-    >,
+    storage: &'a mut Storage<'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
     phase: ReclaimWalHeadPhase<REGION_COUNT, MAX_COLLECTIONS>,
 }
 
@@ -480,16 +366,13 @@ pub struct OpenStorageFuture<
     IO,
     const REGION_SIZE: usize,
     const REGION_COUNT: usize,
-    const MAX_COLLECTIONS: usize,
-    const MAX_PENDING_RECLAIMS: usize,
+    const MAX_COLLECTIONS: usize = 8,
 > where
     IO: FlashIo,
 {
     backing: Option<&'db mut IO>,
-    memory: Option<
-        &'mem mut StorageMemory<REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
-    >,
-    phase: OpenStoragePhase<REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+    memory: Option<&'mem mut StorageMemory<REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>>,
+    phase: OpenStoragePhase<REGION_COUNT, MAX_COLLECTIONS>,
 }
 
 impl<
@@ -500,32 +383,13 @@ impl<
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
         const MAX_COLLECTIONS: usize,
-        const MAX_PENDING_RECLAIMS: usize,
-    >
-    ReclaimWalHeadFuture<
-        'a,
-        'db,
-        'mem,
-        IO,
-        REGION_SIZE,
-        REGION_COUNT,
-        MAX_COLLECTIONS,
-        MAX_PENDING_RECLAIMS,
-    >
+    > ReclaimWalHeadFuture<'a, 'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>
 where
     IO: FlashIo,
 {
     /// Creates a new WAL-head reclaim future.
     pub fn new(
-        storage: &'a mut Storage<
-            'db,
-            'mem,
-            IO,
-            REGION_SIZE,
-            REGION_COUNT,
-            MAX_COLLECTIONS,
-            MAX_PENDING_RECLAIMS,
-        >,
+        storage: &'a mut Storage<'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
     ) -> Self {
         Self {
             storage,
@@ -541,29 +405,14 @@ impl<
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
         const MAX_COLLECTIONS: usize,
-        const MAX_PENDING_RECLAIMS: usize,
-    >
-    OpenStorageFuture<
-        'db,
-        'mem,
-        IO,
-        REGION_SIZE,
-        REGION_COUNT,
-        MAX_COLLECTIONS,
-        MAX_PENDING_RECLAIMS,
-    >
+    > OpenStorageFuture<'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>
 where
     IO: FlashIo,
 {
     /// Creates a new open-storage future.
     pub fn new(
         backing: &'db mut IO,
-        memory: &'mem mut StorageMemory<
-            REGION_SIZE,
-            REGION_COUNT,
-            MAX_COLLECTIONS,
-            MAX_PENDING_RECLAIMS,
-        >,
+        memory: &'mem mut StorageMemory<REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
     ) -> Self {
         Self {
             backing: Some(backing),
@@ -581,18 +430,7 @@ impl<
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
         const MAX_COLLECTIONS: usize,
-        const MAX_PENDING_RECLAIMS: usize,
-    > Unpin
-    for ReclaimWalHeadFuture<
-        'a,
-        'db,
-        'mem,
-        IO,
-        REGION_SIZE,
-        REGION_COUNT,
-        MAX_COLLECTIONS,
-        MAX_PENDING_RECLAIMS,
-    >
+    > Unpin for ReclaimWalHeadFuture<'a, 'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>
 where
     IO: FlashIo,
 {
@@ -605,17 +443,7 @@ impl<
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
         const MAX_COLLECTIONS: usize,
-        const MAX_PENDING_RECLAIMS: usize,
-    > Unpin
-    for OpenStorageFuture<
-        'db,
-        'mem,
-        IO,
-        REGION_SIZE,
-        REGION_COUNT,
-        MAX_COLLECTIONS,
-        MAX_PENDING_RECLAIMS,
-    >
+    > Unpin for OpenStorageFuture<'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>
 where
     IO: FlashIo,
 {
@@ -629,18 +457,7 @@ impl<
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
         const MAX_COLLECTIONS: usize,
-        const MAX_PENDING_RECLAIMS: usize,
-    > Future
-    for ReclaimWalHeadFuture<
-        'a,
-        'db,
-        'mem,
-        IO,
-        REGION_SIZE,
-        REGION_COUNT,
-        MAX_COLLECTIONS,
-        MAX_PENDING_RECLAIMS,
-    >
+    > Future for ReclaimWalHeadFuture<'a, 'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>
 where
     IO: FlashIo,
 {
@@ -690,26 +507,16 @@ where
                     }
                 };
                 let plan = &mut this.storage.memory.reclaim_plan;
-                let new_head = if this.storage.memory.reclaim_source_regions.len()
-                    > MAX_PENDING_RECLAIMS
-                {
-                    if MAX_PENDING_RECLAIMS == 0 {
-                        this.storage.finish_mode();
-                        return Poll::Ready(Err(StorageRuntimeError::TooManyPendingReclaims));
-                    }
-                    let new_head = this.storage.memory.reclaim_source_regions[MAX_PENDING_RECLAIMS];
-                    plan.limit_to_source_tail(
-                        this.storage.memory.reclaim_source_regions[MAX_PENDING_RECLAIMS - 1],
-                        REGION_SIZE,
-                    );
-                    this.storage
-                        .memory
-                        .reclaim_source_regions
-                        .truncate(MAX_PENDING_RECLAIMS);
-                    Some(new_head)
-                } else {
-                    None
+                let Some(new_head) = this.storage.memory.reclaim_source_regions.get(1).copied()
+                else {
+                    this.storage.finish_mode();
+                    return Poll::Ready(Err(
+                        StorageRuntimeError::WalHeadReclaimRequiresMultipleWalRegions,
+                    ));
                 };
+                plan.limit_to_source_tail(plan.old_head, REGION_SIZE);
+                this.storage.memory.reclaim_source_regions.truncate(1);
+                let new_head = Some(new_head);
                 this.phase = ReclaimWalHeadPhase::RotateToContinuation { new_head };
                 Poll::Pending
             }
@@ -756,7 +563,7 @@ where
                     .get(next_index)
                     .copied()
                 else {
-                    this.phase = ReclaimWalHeadPhase::PreserveFreeListHead { new_head };
+                    this.phase = ReclaimWalHeadPhase::CopyLiveState { new_head };
                     return Poll::Pending;
                 };
                 if let Err(error) = this
@@ -776,26 +583,6 @@ where
                     next_index: next_index + 1,
                     new_head,
                 };
-                Poll::Pending
-            }
-            ReclaimWalHeadPhase::PreserveFreeListHead { new_head } => {
-                this.storage
-                    .set_mode_unchecked(StorageMode::ReclaimingWalHead(
-                        WalHeadReclaimMode::PreserveFreeListHead,
-                    ));
-                if let Err(error) = this
-                    .storage
-                    .memory
-                    .state
-                    .preserve_free_list_head_for_wal_head_reclaim::<REGION_SIZE, REGION_COUNT, IO>(
-                        this.storage.backing,
-                        &mut this.storage.memory.workspace,
-                    )
-                {
-                    this.storage.finish_mode();
-                    return Poll::Ready(Err(error));
-                }
-                this.phase = ReclaimWalHeadPhase::CopyLiveState { new_head };
                 Poll::Pending
             }
             ReclaimWalHeadPhase::CopyLiveState { new_head } => {
@@ -862,6 +649,17 @@ where
                     .get(next_index)
                     .copied()
                 else {
+                    if let Err(error) =
+                        crate::storage::open_into::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
+                            this.storage.backing,
+                            &mut this.storage.memory.workspace,
+                            &mut this.storage.memory.state,
+                            &mut this.storage.memory.open_plan,
+                        )
+                    {
+                        this.storage.finish_mode();
+                        return Poll::Ready(Err(error));
+                    }
                     this.storage.finish_mode();
                     this.phase = ReclaimWalHeadPhase::Done;
                     return Poll::Ready(Ok(new_head));
@@ -870,9 +668,10 @@ where
                     .storage
                     .memory
                     .state
-                    .complete_pending_reclaim::<REGION_SIZE, REGION_COUNT, IO>(
+                    .append_free_region_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
                         this.storage.backing,
                         &mut this.storage.memory.workspace,
+                        crate::CollectionId(0),
                         region_index,
                     )
                 {
@@ -898,18 +697,7 @@ impl<
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
         const MAX_COLLECTIONS: usize,
-        const MAX_PENDING_RECLAIMS: usize,
-    > Drop
-    for ReclaimWalHeadFuture<
-        'a,
-        'db,
-        'mem,
-        IO,
-        REGION_SIZE,
-        REGION_COUNT,
-        MAX_COLLECTIONS,
-        MAX_PENDING_RECLAIMS,
-    >
+    > Drop for ReclaimWalHeadFuture<'a, 'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>
 where
     IO: FlashIo,
 {
@@ -925,22 +713,12 @@ impl<
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
         const MAX_COLLECTIONS: usize,
-        const MAX_PENDING_RECLAIMS: usize,
-    > Future
-    for OpenStorageFuture<
-        'db,
-        'mem,
-        IO,
-        REGION_SIZE,
-        REGION_COUNT,
-        MAX_COLLECTIONS,
-        MAX_PENDING_RECLAIMS,
-    >
+    > Future for OpenStorageFuture<'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>
 where
     IO: FlashIo,
 {
     type Output = Result<
-        Storage<'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+        Storage<'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
         StorageOpenError,
     >;
 
@@ -963,7 +741,6 @@ where
                     REGION_COUNT,
                     IO,
                     MAX_COLLECTIONS,
-                    MAX_PENDING_RECLAIMS,
                 >(backing, &mut memory.workspace, &mut memory.open_plan)?;
                 this.phase = OpenStoragePhase::RecoverRotation;
                 Poll::Pending
@@ -982,7 +759,6 @@ where
                     IO,
                     REGION_COUNT,
                     MAX_COLLECTIONS,
-                    MAX_PENDING_RECLAIMS,
                 >(backing, &mut memory.workspace, &mut memory.open_plan)?;
                 this.phase = OpenStoragePhase::DiscoverWalChain;
                 Poll::Pending
@@ -1001,7 +777,6 @@ where
                     REGION_COUNT,
                     IO,
                     MAX_COLLECTIONS,
-                    MAX_PENDING_RECLAIMS,
                 >(backing, &mut memory.workspace, &mut memory.open_plan)?;
                 this.phase = OpenStoragePhase::ReplayWalChain;
                 Poll::Pending
@@ -1020,7 +795,6 @@ where
                     REGION_COUNT,
                     IO,
                     MAX_COLLECTIONS,
-                    MAX_PENDING_RECLAIMS,
                 >(backing, &mut memory.workspace, &mut memory.open_plan)?;
                 this.phase = OpenStoragePhase::FinishStartup;
                 Poll::Pending
@@ -1039,7 +813,6 @@ where
                     REGION_COUNT,
                     IO,
                     MAX_COLLECTIONS,
-                    MAX_PENDING_RECLAIMS,
                 >(backing, &mut memory.open_plan, &mut memory.state)?;
                 this.phase = OpenStoragePhase::ValidateCollections;
                 Poll::Pending
@@ -1067,40 +840,6 @@ where
                         )));
                     }
                 }
-                this.phase = OpenStoragePhase::RecoverPendingReclaims;
-                Poll::Pending
-            }
-            OpenStoragePhase::RecoverPendingReclaims => {
-                let backing = match this.backing.as_deref_mut() {
-                    Some(backing) => backing,
-                    None => return Poll::Pending,
-                };
-                let memory = match this.memory.as_deref_mut() {
-                    Some(memory) => memory,
-                    None => return Poll::Pending,
-                };
-                let runtime = &mut memory.state;
-                runtime.recover_pending_reclaims::<REGION_SIZE, REGION_COUNT, IO>(
-                    backing,
-                    &mut memory.workspace,
-                )?;
-                this.phase = OpenStoragePhase::RecoverStagedRegions;
-                Poll::Pending
-            }
-            OpenStoragePhase::RecoverStagedRegions => {
-                let backing = match this.backing.as_deref_mut() {
-                    Some(backing) => backing,
-                    None => return Poll::Pending,
-                };
-                let memory = match this.memory.as_deref_mut() {
-                    Some(memory) => memory,
-                    None => return Poll::Pending,
-                };
-                let runtime = &mut memory.state;
-                runtime.recover_abandoned_staged_regions::<REGION_SIZE, REGION_COUNT, IO>(
-                    backing,
-                    &mut memory.workspace,
-                )?;
                 let backing = this.backing.take().ok_or(StorageOpenError::Runtime(
                     StorageRuntimeError::InvalidStorageMode {
                         expected: StorageMode::Opening(OpenMode::Finish),

@@ -9,7 +9,7 @@ use super::*;
 #[test]
 fn requirement_storage_operations_use_bound_backing() {
     let mut flash = MockFlash::<256, 5, 512>::new(0xff);
-    let mut storage = Storage::<_, 256, 5, 8, 4>::format(
+    let mut storage = Storage::<_, 256, 5, 8>::format(
         &mut flash,
         StorageFormatConfig::new(1, 8, 0xa5),
         crate::test_storage_memory(),
@@ -23,7 +23,7 @@ fn requirement_storage_operations_use_bound_backing() {
     assert_eq!(storage.mode(), StorageMode::Idle);
 
     let backing = storage.into_backing();
-    let reopened = Storage::<_, 256, 5, 8, 4>::open(backing, crate::test_storage_memory()).unwrap();
+    let reopened = Storage::<_, 256, 5, 8>::open(backing, crate::test_storage_memory()).unwrap();
     assert_eq!(reopened.collections()[0].collection_id(), CollectionId(11));
 }
 
@@ -37,7 +37,7 @@ fn requirement_blocking_and_future_entry_points_produce_equivalent_storage_state
     const REGION_SIZE: usize = 256;
     const REGION_COUNT: usize = 5;
     let mut blocking_flash = MockFlash::<REGION_SIZE, REGION_COUNT, 2048>::new(0xff);
-    let mut blocking = Storage::<_, REGION_SIZE, REGION_COUNT, 8, 4>::format(
+    let mut blocking = Storage::<_, REGION_SIZE, REGION_COUNT, 8>::format(
         &mut blocking_flash,
         StorageFormatConfig::new(1, 8, 0xa5),
         crate::test_storage_memory(),
@@ -46,7 +46,7 @@ fn requirement_blocking_and_future_entry_points_produce_equivalent_storage_state
 
     let mut future_flash = MockFlash::<REGION_SIZE, REGION_COUNT, 2048>::new(0xff);
     let mut future_driven = super::super::poll_until_ready(
-        Storage::<_, REGION_SIZE, REGION_COUNT, 8, 4>::format_future(
+        Storage::<_, REGION_SIZE, REGION_COUNT, 8>::format_future(
             &mut future_flash,
             StorageFormatConfig::new(1, 8, 0xa5),
             crate::test_storage_memory(),
@@ -73,13 +73,13 @@ fn requirement_blocking_and_future_entry_points_produce_equivalent_storage_state
     drop(blocking);
     drop(future_driven);
 
-    let mut reopened_blocking = Storage::<_, REGION_SIZE, REGION_COUNT, 8, 4>::open(
+    let mut reopened_blocking = Storage::<_, REGION_SIZE, REGION_COUNT, 8>::open(
         &mut blocking_flash,
         crate::test_storage_memory(),
     )
     .unwrap();
     let reopened_future = super::super::poll_until_ready(
-        Storage::<_, REGION_SIZE, REGION_COUNT, 8, 4>::open_future(
+        Storage::<_, REGION_SIZE, REGION_COUNT, 8>::open_future(
             &mut future_flash,
             crate::test_storage_memory(),
         ),
@@ -92,10 +92,6 @@ fn requirement_blocking_and_future_entry_points_produce_equivalent_storage_state
     assert_eq!(
         reopened_blocking.collections(),
         reopened_future.collections()
-    );
-    assert_eq!(
-        reopened_blocking.pending_reclaims(),
-        reopened_future.pending_reclaims()
     );
     assert_eq!(
         reopened_blocking.last_free_list_head(),
@@ -134,7 +130,7 @@ fn requirement_blocking_and_future_entry_points_produce_equivalent_storage_state
 #[test]
 fn requirement_core_api_remains_usable_without_executor_or_framework_helpers() {
     let mut flash = MockFlash::<256, 5, 256>::new(0xff);
-    let mut storage = Storage::<_, 256, 5, 8, 4>::format(
+    let mut storage = Storage::<_, 256, 5, 8>::format(
         &mut flash,
         StorageFormatConfig::new(1, 8, 0xa5),
         crate::test_storage_memory(),
@@ -146,8 +142,7 @@ fn requirement_core_api_remains_usable_without_executor_or_framework_helpers() {
     });
 
     drop(storage);
-    let reopened =
-        Storage::<_, 256, 5, 8, 4>::open(&mut flash, crate::test_storage_memory()).unwrap();
+    let reopened = Storage::<_, 256, 5, 8>::open(&mut flash, crate::test_storage_memory()).unwrap();
     assert_eq!(reopened.metadata().region_size, 256);
     assert_eq!(reopened.collections()[0].collection_id(), CollectionId(85));
 }
@@ -160,7 +155,7 @@ fn requirement_core_api_remains_usable_without_executor_or_framework_helpers() {
 #[test]
 fn requirement_storage_context_owns_operation_scratch() {
     let mut flash = MockFlash::<256, 5, 512>::new(0xff);
-    let mut storage = Storage::<_, 256, 5, 8, 4>::format(
+    let mut storage = Storage::<_, 256, 5, 8>::format(
         &mut flash,
         StorageFormatConfig::new(1, 8, 0xa5),
         crate::test_storage_memory(),
@@ -191,7 +186,7 @@ fn requirement_storage_context_owns_operation_scratch() {
 #[test]
 fn requirement_storage_owns_backing_access() {
     let mut flash = MockFlash::<256, 5, 512>::new(0xff);
-    let storage = Storage::<_, 256, 5, 8, 4>::format(
+    let storage = Storage::<_, 256, 5, 8>::format(
         &mut flash,
         StorageFormatConfig::new(1, 8, 0xa5),
         crate::test_storage_memory(),
@@ -199,7 +194,7 @@ fn requirement_storage_owns_backing_access() {
     .unwrap();
 
     let backing = storage.into_backing();
-    let reopened = Storage::<_, 256, 5, 8, 4>::open(backing, crate::test_storage_memory()).unwrap();
+    let reopened = Storage::<_, 256, 5, 8>::open(backing, crate::test_storage_memory()).unwrap();
     assert_eq!(reopened.metadata().region_count, 5);
 }
 
@@ -210,7 +205,7 @@ fn requirement_storage_owns_backing_access() {
 #[test]
 fn requirement_operations_use_storage_backing() {
     let mut flash = MockFlash::<256, 5, 512>::new(0xff);
-    let mut storage = Storage::<_, 256, 5, 8, 4>::format(
+    let mut storage = Storage::<_, 256, 5, 8>::format(
         &mut flash,
         StorageFormatConfig::new(1, 8, 0xa5),
         crate::test_storage_memory(),
@@ -249,7 +244,7 @@ fn todo_shared_backing_synchronization_stays_behind_backing_trait() {}
 #[test]
 fn requirement_storage_runtime_exposes_single_active_mode() {
     let mut flash = MockFlash::<256, 5, 512>::new(0xff);
-    let mut storage = Storage::<_, 256, 5, 8, 4>::format(
+    let mut storage = Storage::<_, 256, 5, 8>::format(
         &mut flash,
         StorageFormatConfig::new(1, 8, 0xa5),
         crate::test_storage_memory(),
@@ -278,7 +273,7 @@ fn requirement_storage_runtime_exposes_single_active_mode() {
 #[test]
 fn requirement_runtime_state_is_separate_from_operation_progress() {
     let mut flash = MockFlash::<256, 5, 512>::new(0xff);
-    let mut storage = Storage::<_, 256, 5, 8, 4>::format(
+    let mut storage = Storage::<_, 256, 5, 8>::format(
         &mut flash,
         StorageFormatConfig::new(1, 8, 0xa5),
         crate::test_storage_memory(),
@@ -304,7 +299,7 @@ fn requirement_runtime_state_is_separate_from_operation_progress() {
 #[test]
 fn requirement_public_operations_validate_source_mode() {
     let mut flash = MockFlash::<256, 5, 512>::new(0xff);
-    let mut storage = Storage::<_, 256, 5, 8, 4>::format(
+    let mut storage = Storage::<_, 256, 5, 8>::format(
         &mut flash,
         StorageFormatConfig::new(1, 8, 0xa5),
         crate::test_storage_memory(),
@@ -340,7 +335,7 @@ fn todo_durable_writes_are_named_transition_edges() {}
 #[test]
 fn requirement_foreground_replay_and_recovery_share_wal_record_semantics() {
     let mut flash = MockFlash::<512, 6, 2048>::new(0xff);
-    let mut storage = Storage::<_, 512, 6, 8, 4>::format(
+    let mut storage = Storage::<_, 512, 6, 8>::format(
         &mut flash,
         StorageFormatConfig::new(1, 8, 0xa5),
         crate::test_storage_memory(),
@@ -355,8 +350,7 @@ fn requirement_foreground_replay_and_recovery_share_wal_record_semantics() {
     let foreground_append_offset = storage.wal_append_offset();
     drop(storage);
 
-    let reopened =
-        Storage::<_, 512, 6, 8, 4>::open(&mut flash, crate::test_storage_memory()).unwrap();
+    let reopened = Storage::<_, 512, 6, 8>::open(&mut flash, crate::test_storage_memory()).unwrap();
     assert_eq!(reopened.collections(), foreground_collections.as_slice());
     assert_eq!(reopened.wal_append_offset(), foreground_append_offset);
 }

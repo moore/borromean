@@ -4,7 +4,7 @@ use std::mem::size_of;
 
 fn flash_with_max_seen_sequence() -> MockFlash<128, 4, 256> {
     let mut flash = MockFlash::<128, 4, 256>::new(0xff);
-    Storage::<_, 128, 4, 8, 4>::format(
+    Storage::<_, 128, 4, 8>::format(
         &mut flash,
         StorageFormatConfig::new(1, 8, 0xa5),
         crate::test_storage_memory(),
@@ -66,7 +66,7 @@ fn requirement_boundary_sensitive_storage_and_map_lengths_stay_in_range() {
 #[test]
 fn requirement_arithmetic_boundary_failures_surface_explicit_error_variants() {
     let mut flash = MockFlash::<64, 4, 256>::new(0xff);
-    let storage = Storage::<_, 64, 4, 8, 4>::format(
+    let storage = Storage::<_, 64, 4, 8>::format(
         &mut flash,
         StorageFormatConfig::new(1, 8, 0xa5),
         crate::test_storage_memory(),
@@ -114,8 +114,7 @@ fn requirement_sequence_advancement_stops_at_the_maximum_value_instead_of_wrappi
     assert_eq!(CollectionId(u64::MAX).increment(), None);
 
     let mut flash = flash_with_max_seen_sequence();
-    let storage =
-        Storage::<_, 128, 4, 8, 4>::open(&mut flash, crate::test_storage_memory()).unwrap();
+    let storage = Storage::<_, 128, 4, 8>::open(&mut flash, crate::test_storage_memory()).unwrap();
     assert_eq!(storage.max_seen_sequence(), u64::MAX);
     let mut runtime = storage.into_runtime();
     assert_eq!(
@@ -129,8 +128,7 @@ fn requirement_sequence_advancement_stops_at_the_maximum_value_instead_of_wrappi
         Err(StorageRuntimeError::WalRotationRequired)
     );
 
-    let reopened =
-        Storage::<_, 128, 4, 8, 4>::open(&mut flash, crate::test_storage_memory()).unwrap();
+    let reopened = Storage::<_, 128, 4, 8>::open(&mut flash, crate::test_storage_memory()).unwrap();
     assert_eq!(reopened.max_seen_sequence(), u64::MAX);
     assert_eq!(reopened.wal_head(), 0);
 }

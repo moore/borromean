@@ -18,18 +18,18 @@ fn assert_stack_handle_size<T>(label: &str) {
 fn requirement_core_handles_and_futures_fit_small_stack_frames() {
     type Flash = MockFlash<256, 6, 1024>;
 
-    assert_stack_handle_size::<Storage<'_, '_, Flash, 256, 6, 8, 4>>("Storage");
-    assert_stack_handle_size::<FormatStorageFuture<'_, '_, Flash, 256, 6, 8, 4>>(
+    assert_stack_handle_size::<Storage<'_, '_, Flash, 256, 6, 8>>("Storage");
+    assert_stack_handle_size::<FormatStorageFuture<'_, '_, Flash, 256, 6, 8>>(
         "FormatStorageFuture",
     );
-    assert_stack_handle_size::<OpenStorageFuture<'_, '_, Flash, 256, 6, 8, 4>>("OpenStorageFuture");
-    assert_stack_handle_size::<ReclaimWalHeadFuture<'_, '_, '_, Flash, 256, 6, 8, 4>>(
+    assert_stack_handle_size::<OpenStorageFuture<'_, '_, Flash, 256, 6, 8>>("OpenStorageFuture");
+    assert_stack_handle_size::<ReclaimWalHeadFuture<'_, '_, '_, Flash, 256, 6, 8>>(
         "ReclaimWalHeadFuture",
     );
     assert_stack_handle_size::<LsmMap<'_, u16, u16, 8, 8>>("LsmMap");
     assert_stack_handle_size::<MapFrontier<'_, u16, u16, 8, 8>>("MapFrontier");
     assert_stack_handle_size::<crate::op_future::ReclaimWalHeadPhase<6, 8>>("ReclaimWalHeadPhase");
-    assert_stack_handle_size::<crate::op_future::OpenStoragePhase<6, 8, 4>>("OpenStoragePhase");
+    assert_stack_handle_size::<crate::op_future::OpenStoragePhase<6, 8>>("OpenStoragePhase");
 }
 
 //= spec/implementation.md#core-requirements
@@ -42,12 +42,12 @@ fn requirement_core_handles_and_futures_fit_small_stack_frames() {
 fn requirement_normal_operation_uses_caller_owned_buffers_without_heap_allocation() {
     let mut flash = MockFlash::<256, 5, 1024>::new(0xff);
     let mut map_buffer = [0u8; 256];
-    let mut format_memory = StorageMemory::<256, 5, 8, 4>::new();
-    let mut open_memory = StorageMemory::<256, 5, 8, 4>::new();
+    let mut format_memory = StorageMemory::<256, 5, 8>::new();
+    let mut open_memory = StorageMemory::<256, 5, 8>::new();
     let mut frontier_memory = MapFrontierMemory::<u16, 8>::new();
 
     assert_no_alloc("format/create/update/open", || {
-        let mut storage = Storage::<_, 256, 5, 8, 4>::format(
+        let mut storage = Storage::<_, 256, 5, 8>::format(
             &mut flash,
             StorageFormatConfig::new(1, 8, 0xa5),
             &mut format_memory,
@@ -62,7 +62,7 @@ fn requirement_normal_operation_uses_caller_owned_buffers_without_heap_allocatio
             .unwrap();
 
         drop(storage);
-        let mut reopened = Storage::<_, 256, 5, 8, 4>::open(&mut flash, &mut open_memory).unwrap();
+        let mut reopened = Storage::<_, 256, 5, 8>::open(&mut flash, &mut open_memory).unwrap();
         let map = reopened
             .open_map::<u16, u16, 8, 8>(CollectionId(90), &mut map_buffer, &mut frontier_memory)
             .unwrap();
@@ -78,7 +78,7 @@ fn requirement_normal_operation_uses_caller_owned_buffers_without_heap_allocatio
 #[test]
 fn requirement_explicit_collection_and_reclaim_capacities_fail_when_exhausted() {
     let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
-    let mut storage = Storage::<_, 512, 5, 1, 1>::format(
+    let mut storage = Storage::<_, 512, 5, 1>::format(
         &mut flash,
         StorageFormatConfig::new(1, 8, 0xa5),
         crate::test_storage_memory(),
@@ -113,7 +113,7 @@ fn requirement_explicit_collection_and_reclaim_capacities_fail_when_exhausted() 
 #[test]
 fn requirement_scratch_space_is_owned_by_storage_context() {
     let mut flash = MockFlash::<256, 6, 1024>::new(0xff);
-    let mut storage = Storage::<_, 256, 6, 8, 4>::format(
+    let mut storage = Storage::<_, 256, 6, 8>::format(
         &mut flash,
         StorageFormatConfig::new(1, 8, 0xa5),
         crate::test_storage_memory(),
@@ -254,7 +254,7 @@ fn requirement_map_in_memory_state_runs_inside_a_borrowed_buffer_without_allocat
 #[test]
 fn requirement_collection_api_uses_storage_owned_operation_buffers() {
     let mut flash = MockFlash::<256, 6, 1024>::new(0xff);
-    let mut storage = Storage::<_, 256, 6, 8, 4>::format(
+    let mut storage = Storage::<_, 256, 6, 8>::format(
         &mut flash,
         StorageFormatConfig::new(1, 8, 0xa5),
         crate::test_storage_memory(),

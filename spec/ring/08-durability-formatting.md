@@ -105,10 +105,12 @@ General region-allocation rule:
 `alloc_begin(collection_id, region_index, free_list_head_after)` durable.
 2. `RING-ALLOC-002` Erasing or initializing the reserved region is allowed only after
 `S(alloc_begin)`.
-3. `RING-ALLOC-003` If crash occurs after `S(alloc_begin)` but before a durable `head`
-or `link` uses `region_index`, replay must preserve `region_index` as
-`ready_region` and must not attempt to recover the old free-pointer
-contents from flash.
+3. `RING-ALLOC-003` If crash occurs after
+`S(alloc_begin(collection_id = 0, region_index, ...))` but before a
+durable `link` uses `region_index`, replay must preserve `region_index`
+as WAL-rotation `ready_region` and must not attempt to recover the old
+free-pointer contents from flash. If crash occurs after a user
+collection `alloc_begin`, transaction recovery owns the allocation.
 4. `RING-ALLOC-004` Any allocation that is not itself part of reclaim or crash recovery
 is invalid if consuming it would reduce the number of free regions
 below `min_free_regions`.
@@ -126,17 +128,18 @@ the collection is durably dropped and no later WAL record for that
 collection id may be accepted.
 5. `RING-CRASH-005` Crash before `S(region)`:
 new region is not considered durable.
-If `alloc_begin` was already durable, replay still preserves the
-reserved `ready_region`.
+If a user `alloc_begin` was already durable, replay treats the region as
+transaction-owned recovery work.
 6. `RING-CRASH-006` Crash after `S(region)` but before
 `S(head(collection_id, collection_type, region_index))`:
 region exists but is not committed as collection head.
 The allocator advance remains durable because `alloc_begin` already
-committed it, so replay keeps `region_index` reserved as `ready_region`
-unless a later durable `head` consumes it.
+committed it, so transaction recovery either reclaims the allocation or
+preserves it if the transaction later committed.
 7. `RING-CRASH-007` Crash after `S(head(collection_id, collection_type, region_index))`:
-region head transition is durable and consumes the reserved
-`ready_region`.
+region head transition is durable if the enclosing transaction reaches
+its commit phase; otherwise transaction recovery treats it as part of the
+uncommitted interval.
 8. `RING-CRASH-008` Crash after
 `S(alloc_begin(collection_id = 0, next_region_index, free_list_head_after))`
 for WAL rotation but before any durable matching `link`:

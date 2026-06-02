@@ -109,24 +109,26 @@ pub enum WalRecordType {
     Update,
     /// Appends a collection-specific snapshot payload.
     Snapshot,
-    /// Reserves a free region for future use.
+    /// Reserves a free region for use by a collection or WAL rotation.
     AllocBegin,
-    /// Detaches a ready region from the single allocation slot.
-    StageRegion,
     /// Commits a new collection or WAL head.
     Head,
     /// Drops a collection.
     DropCollection,
     /// Links one WAL region to the next.
     Link,
-    /// Updates the tracked free-list head.
-    FreeListHead,
-    /// Marks a region as pending reclaim.
-    ReclaimBegin,
-    /// Marks reclaim complete for a region.
-    ReclaimEnd,
     /// Marks a WAL recovery boundary.
     WalRecovery,
+    /// Adds a region to the free-list tail after it leaves a collection.
+    FreeRegion,
+    /// Starts a collection-scoped WAL transaction.
+    BeginTransaction,
+    /// Marks the transaction collection-state commit point.
+    CommitTransaction,
+    /// Marks transaction cleanup complete.
+    TransactionFinished,
+    /// Marks transaction pre-commit recovery complete.
+    RollbackTransaction,
 }
 
 impl WalRecordType {
@@ -140,11 +142,12 @@ impl WalRecordType {
             Self::Head => 0x05,
             Self::DropCollection => 0x06,
             Self::Link => 0x07,
-            Self::FreeListHead => 0x08,
-            Self::ReclaimBegin => 0x09,
-            Self::ReclaimEnd => 0x0a,
             Self::WalRecovery => 0x0b,
-            Self::StageRegion => 0x0c,
+            Self::FreeRegion => 0x0c,
+            Self::BeginTransaction => 0x0d,
+            Self::CommitTransaction => 0x0e,
+            Self::TransactionFinished => 0x0f,
+            Self::RollbackTransaction => 0x10,
         }
     }
 
@@ -158,11 +161,12 @@ impl WalRecordType {
             0x05 => Ok(Self::Head),
             0x06 => Ok(Self::DropCollection),
             0x07 => Ok(Self::Link),
-            0x08 => Ok(Self::FreeListHead),
-            0x09 => Ok(Self::ReclaimBegin),
-            0x0a => Ok(Self::ReclaimEnd),
             0x0b => Ok(Self::WalRecovery),
-            0x0c => Ok(Self::StageRegion),
+            0x0c => Ok(Self::FreeRegion),
+            0x0d => Ok(Self::BeginTransaction),
+            0x0e => Ok(Self::CommitTransaction),
+            0x0f => Ok(Self::TransactionFinished),
+            0x10 => Ok(Self::RollbackTransaction),
             _ => Err(WalRecordError::InvalidRecordType(code)),
         }
     }
@@ -170,7 +174,17 @@ impl WalRecordType {
     fn has_collection_id(self) -> bool {
         matches!(
             self,
-            Self::NewCollection | Self::Update | Self::Snapshot | Self::Head | Self::DropCollection
+            Self::NewCollection
+                | Self::Update
+                | Self::Snapshot
+                | Self::AllocBegin
+                | Self::Head
+                | Self::DropCollection
+                | Self::FreeRegion
+                | Self::BeginTransaction
+                | Self::CommitTransaction
+                | Self::TransactionFinished
+                | Self::RollbackTransaction
         )
     }
 
@@ -205,17 +219,14 @@ pub enum WalRecord<'a> {
         /// Collection-specific snapshot payload bytes.
         payload: &'a [u8],
     },
-    /// `alloc_begin(region_index, free_list_head_after)`.
+    /// `alloc_begin(collection_id, region_index, free_list_head_after)`.
     AllocBegin {
+        /// Collection reserving the region. WAL rotation uses collection id 0.
+        collection_id: CollectionId,
         /// Free-list region being reserved.
         region_index: u32,
         /// Successor free-list head after reserving the region.
         free_list_head_after: Option<u32>,
-    },
-    /// `stage_region(region_index)`.
-    StageRegion {
-        /// Allocated region being detached from `ready_region`.
-        region_index: u32,
     },
     /// `head(collection_id, collection_type, region_index)`.
     Head {
@@ -238,20 +249,32 @@ pub enum WalRecord<'a> {
         /// Sequence expected in the linked region header.
         expected_sequence: u64,
     },
-    /// `free_list_head(region_index)`.
-    FreeListHead {
-        /// New free-list head, or `None` for an empty free list.
-        region_index: Option<u32>,
-    },
-    /// `reclaim_begin(region_index)`.
-    ReclaimBegin {
-        /// Region entering reclaim.
+    /// `free_region(collection_id, region_index)`.
+    FreeRegion {
+        /// Collection losing the region. WAL cleanup uses collection id 0.
+        collection_id: CollectionId,
+        /// Region being appended to the free-list tail.
         region_index: u32,
     },
-    /// `reclaim_end(region_index)`.
-    ReclaimEnd {
-        /// Region whose reclaim completed.
-        region_index: u32,
+    /// `begin_transaction(collection_id)`.
+    BeginTransaction {
+        /// Collection whose transaction is starting.
+        collection_id: CollectionId,
+    },
+    /// `commit_transaction(collection_id)`.
+    CommitTransaction {
+        /// Collection whose transaction update phase is committed.
+        collection_id: CollectionId,
+    },
+    /// `transaction_finished(collection_id)`.
+    TransactionFinished {
+        /// Collection whose transaction cleanup is complete.
+        collection_id: CollectionId,
+    },
+    /// `rollback_transaction(collection_id)`.
+    RollbackTransaction {
+        /// Collection whose pre-commit transaction recovery is complete.
+        collection_id: CollectionId,
     },
     /// `wal_recovery()`.
     WalRecovery,
@@ -265,14 +288,15 @@ impl<'a> WalRecord<'a> {
             Self::Update { .. } => WalRecordType::Update,
             Self::Snapshot { .. } => WalRecordType::Snapshot,
             Self::AllocBegin { .. } => WalRecordType::AllocBegin,
-            Self::StageRegion { .. } => WalRecordType::StageRegion,
             Self::Head { .. } => WalRecordType::Head,
             Self::DropCollection { .. } => WalRecordType::DropCollection,
             Self::Link { .. } => WalRecordType::Link,
-            Self::FreeListHead { .. } => WalRecordType::FreeListHead,
-            Self::ReclaimBegin { .. } => WalRecordType::ReclaimBegin,
-            Self::ReclaimEnd { .. } => WalRecordType::ReclaimEnd,
             Self::WalRecovery => WalRecordType::WalRecovery,
+            Self::FreeRegion { .. } => WalRecordType::FreeRegion,
+            Self::BeginTransaction { .. } => WalRecordType::BeginTransaction,
+            Self::CommitTransaction { .. } => WalRecordType::CommitTransaction,
+            Self::TransactionFinished { .. } => WalRecordType::TransactionFinished,
+            Self::RollbackTransaction { .. } => WalRecordType::RollbackTransaction,
         }
     }
 }
@@ -509,16 +533,14 @@ fn encode_logical_record(
             offset = write_bytes(buffer, offset, payload)?;
         }
         WalRecord::AllocBegin {
+            collection_id,
             region_index,
             free_list_head_after,
         } => {
+            offset = write_u64(buffer, offset, collection_id.0)?;
             offset = write_u32(buffer, offset, size_of::<u32>() as u32)?;
             offset = write_u32(buffer, offset, region_index)?;
             offset = write_opt_region_index(buffer, offset, free_list_head_after)?;
-        }
-        WalRecord::StageRegion { region_index } => {
-            offset = write_u32(buffer, offset, size_of::<u32>() as u32)?;
-            offset = write_u32(buffer, offset, region_index)?;
         }
         WalRecord::Head {
             collection_id,
@@ -542,18 +564,20 @@ fn encode_logical_record(
             offset = write_u32(buffer, offset, next_region_index)?;
             offset = write_u64(buffer, offset, expected_sequence)?;
         }
-        WalRecord::FreeListHead { region_index } => {
-            offset = write_u32(
-                buffer,
-                offset,
-                u32::try_from(opt_region_index_len(region_index))
-                    .map_err(|_| WalRecordError::LengthOverflow)?,
-            )?;
-            offset = write_opt_region_index(buffer, offset, region_index)?;
-        }
-        WalRecord::ReclaimBegin { region_index } | WalRecord::ReclaimEnd { region_index } => {
+        WalRecord::FreeRegion {
+            collection_id,
+            region_index,
+        } => {
+            offset = write_u64(buffer, offset, collection_id.0)?;
             offset = write_u32(buffer, offset, size_of::<u32>() as u32)?;
             offset = write_u32(buffer, offset, region_index)?;
+        }
+        WalRecord::BeginTransaction { collection_id }
+        | WalRecord::CommitTransaction { collection_id }
+        | WalRecord::TransactionFinished { collection_id }
+        | WalRecord::RollbackTransaction { collection_id } => {
+            offset = write_u64(buffer, offset, collection_id.0)?;
+            offset = write_u32(buffer, offset, 0)?;
         }
         WalRecord::WalRecovery => {
             offset = write_u32(buffer, offset, 0)?;
@@ -604,6 +628,7 @@ fn parse_logical_record(logical: &[u8]) -> Result<WalRecord<'_>, WalRecordError>
             })
         }
         WalRecordType::AllocBegin => {
+            let collection_id = CollectionId(read_u64(logical, &mut offset)?);
             let payload_len = read_u32(logical, &mut offset)?;
             if payload_len != size_of::<u32>() as u32 {
                 return Err(WalRecordError::PayloadLengthMismatch {
@@ -614,20 +639,10 @@ fn parse_logical_record(logical: &[u8]) -> Result<WalRecord<'_>, WalRecordError>
             let region_index = read_u32(logical, &mut offset)?;
             let free_list_head_after = read_opt_region_index(logical, &mut offset)?;
             Ok(WalRecord::AllocBegin {
+                collection_id,
                 region_index,
                 free_list_head_after,
             })
-        }
-        WalRecordType::StageRegion => {
-            let payload_len = read_u32(logical, &mut offset)?;
-            if payload_len != size_of::<u32>() as u32 {
-                return Err(WalRecordError::PayloadLengthMismatch {
-                    record_type,
-                    payload_len,
-                });
-            }
-            let region_index = read_u32(logical, &mut offset)?;
-            Ok(WalRecord::StageRegion { region_index })
         }
         WalRecordType::Head => {
             let collection_id = CollectionId(read_u64(logical, &mut offset)?);
@@ -672,16 +687,8 @@ fn parse_logical_record(logical: &[u8]) -> Result<WalRecord<'_>, WalRecordError>
                 expected_sequence,
             })
         }
-        WalRecordType::FreeListHead => {
-            let payload = read_payload(logical, &mut offset)?;
-            let mut payload_offset = 0usize;
-            let region_index = read_opt_region_index(payload, &mut payload_offset)?;
-            if payload_offset != payload.len() {
-                return Err(WalRecordError::LengthOverflow);
-            }
-            Ok(WalRecord::FreeListHead { region_index })
-        }
-        WalRecordType::ReclaimBegin => {
+        WalRecordType::FreeRegion => {
+            let collection_id = CollectionId(read_u64(logical, &mut offset)?);
             let payload_len = read_u32(logical, &mut offset)?;
             if payload_len != size_of::<u32>() as u32 {
                 return Err(WalRecordError::PayloadLengthMismatch {
@@ -690,18 +697,10 @@ fn parse_logical_record(logical: &[u8]) -> Result<WalRecord<'_>, WalRecordError>
                 });
             }
             let region_index = read_u32(logical, &mut offset)?;
-            Ok(WalRecord::ReclaimBegin { region_index })
-        }
-        WalRecordType::ReclaimEnd => {
-            let payload_len = read_u32(logical, &mut offset)?;
-            if payload_len != size_of::<u32>() as u32 {
-                return Err(WalRecordError::PayloadLengthMismatch {
-                    record_type,
-                    payload_len,
-                });
-            }
-            let region_index = read_u32(logical, &mut offset)?;
-            Ok(WalRecord::ReclaimEnd { region_index })
+            Ok(WalRecord::FreeRegion {
+                collection_id,
+                region_index,
+            })
         }
         WalRecordType::WalRecovery => {
             let payload_len = read_u32(logical, &mut offset)?;
@@ -713,7 +712,39 @@ fn parse_logical_record(logical: &[u8]) -> Result<WalRecord<'_>, WalRecordError>
             }
             Ok(WalRecord::WalRecovery)
         }
+        WalRecordType::BeginTransaction => {
+            let collection_id = read_empty_transaction_marker(logical, &mut offset, record_type)?;
+            Ok(WalRecord::BeginTransaction { collection_id })
+        }
+        WalRecordType::CommitTransaction => {
+            let collection_id = read_empty_transaction_marker(logical, &mut offset, record_type)?;
+            Ok(WalRecord::CommitTransaction { collection_id })
+        }
+        WalRecordType::TransactionFinished => {
+            let collection_id = read_empty_transaction_marker(logical, &mut offset, record_type)?;
+            Ok(WalRecord::TransactionFinished { collection_id })
+        }
+        WalRecordType::RollbackTransaction => {
+            let collection_id = read_empty_transaction_marker(logical, &mut offset, record_type)?;
+            Ok(WalRecord::RollbackTransaction { collection_id })
+        }
     }
+}
+
+fn read_empty_transaction_marker(
+    logical: &[u8],
+    offset: &mut usize,
+    record_type: WalRecordType,
+) -> Result<CollectionId, WalRecordError> {
+    let collection_id = CollectionId(read_u64(logical, offset)?);
+    let payload_len = read_u32(logical, offset)?;
+    if payload_len != 0 {
+        return Err(WalRecordError::PayloadLengthMismatch {
+            record_type,
+            payload_len,
+        });
+    }
+    Ok(collection_id)
 }
 
 fn encode_logical_byte(
@@ -765,10 +796,6 @@ fn decode_logical_byte(
         code if code == escape_codes.wal_escape_code_escape => Ok(escape_codes.wal_escape_byte),
         code => Err(WalRecordError::InvalidEscapeSequence(code)),
     }
-}
-
-fn opt_region_index_len(region_index: Option<u32>) -> usize {
-    1 + usize::from(region_index.is_some()) * size_of::<u32>()
 }
 
 fn write_opt_region_index(

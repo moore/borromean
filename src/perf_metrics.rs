@@ -41,7 +41,7 @@ pub struct StoragePerfMetrics {
     pub compactions_run: u64,
     pub flushes: u64,
     pub reclaim_starts: u64,
-    pub reclaim_ends: u64,
+    pub cleanup_finishes: u64,
     pub committed_run_segments_checked: u64,
     pub committed_run_bounds_reads: u64,
     pub committed_run_snapshot_ref_reads: u64,
@@ -165,8 +165,8 @@ impl StoragePerfMetrics {
             StoragePerfCounter::ReclaimStarts => {
                 self.reclaim_starts = self.reclaim_starts.saturating_add(value);
             }
-            StoragePerfCounter::ReclaimEnds => {
-                self.reclaim_ends = self.reclaim_ends.saturating_add(value);
+            StoragePerfCounter::CleanupFinishes => {
+                self.cleanup_finishes = self.cleanup_finishes.saturating_add(value);
             }
             StoragePerfCounter::CommittedRunSegmentsChecked => {
                 self.committed_run_segments_checked =
@@ -306,6 +306,7 @@ pub(crate) enum StoragePerfCounter {
     WalBytes,
     WalRotationsAttempted,
     WalRotationsCompleted,
+    #[allow(dead_code)]
     RuntimeReopens,
     WalSyncs,
     WalReplayReads,
@@ -315,8 +316,10 @@ pub(crate) enum StoragePerfCounter {
     CompactionChecks,
     CompactionsRun,
     Flushes,
+    #[allow(dead_code)]
     ReclaimStarts,
-    ReclaimEnds,
+    #[allow(dead_code)]
+    CleanupFinishes,
     CommittedRunSegmentsChecked,
     CommittedRunBoundsReads,
     CommittedRunSnapshotRefReads,

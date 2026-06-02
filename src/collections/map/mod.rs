@@ -2103,17 +2103,16 @@ where
         const REGION_COUNT: usize,
         IO: FlashIo,
         const MAX_COLLECTIONS: usize,
-        const MAX_PENDING_RECLAIMS: usize,
     >(
         &mut self,
         collection_id: CollectionId,
-        storage: &mut StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+        storage: &mut StorageRuntime<MAX_COLLECTIONS>,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
         reclaim_source_regions: &mut Vec<u32, REGION_COUNT>,
         active_collections: &mut Vec<CollectionId, MAX_COLLECTIONS>,
         reclaim_plan: &mut WalHeadReclaimPlan<MAX_COLLECTIONS>,
-        open_plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+        open_plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS>,
         entry: Entry<K, V>,
     ) -> Result<(), MapStorageError> {
         match self.segment_entries.push(entry) {
@@ -2127,13 +2126,7 @@ where
                     .segment_entries
                     .pop()
                     .ok_or(MapError::SerializationError)?;
-                self.flush_segment::<
-                    REGION_SIZE,
-                    REGION_COUNT,
-                    IO,
-                    MAX_COLLECTIONS,
-                    MAX_PENDING_RECLAIMS,
-                >(
+                self.flush_segment::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
                     collection_id,
                     storage,
                     flash,
@@ -2153,13 +2146,7 @@ where
                 self.increment_state_count()
             }
             Err(entry) => {
-                self.flush_segment::<
-                    REGION_SIZE,
-                    REGION_COUNT,
-                    IO,
-                    MAX_COLLECTIONS,
-                    MAX_PENDING_RECLAIMS,
-                >(
+                self.flush_segment::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
                     collection_id,
                     storage,
                     flash,
@@ -2186,19 +2173,18 @@ where
         const REGION_COUNT: usize,
         IO: FlashIo,
         const MAX_COLLECTIONS: usize,
-        const MAX_PENDING_RECLAIMS: usize,
     >(
         mut self,
         collection_id: CollectionId,
-        storage: &mut StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+        storage: &mut StorageRuntime<MAX_COLLECTIONS>,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
         reclaim_source_regions: &mut Vec<u32, REGION_COUNT>,
         active_collections: &mut Vec<CollectionId, MAX_COLLECTIONS>,
         reclaim_plan: &mut WalHeadReclaimPlan<MAX_COLLECTIONS>,
-        open_plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+        open_plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS>,
     ) -> Result<Option<MapRunDescriptor<K>>, MapStorageError> {
-        self.flush_segment::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>(
+        self.flush_segment::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
             collection_id,
             storage,
             flash,
@@ -2262,35 +2248,25 @@ where
         const REGION_COUNT: usize,
         IO: FlashIo,
         const MAX_COLLECTIONS: usize,
-        const MAX_PENDING_RECLAIMS: usize,
     >(
         &mut self,
         collection_id: CollectionId,
-        storage: &mut StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+        storage: &mut StorageRuntime<MAX_COLLECTIONS>,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
         reclaim_source_regions: &mut Vec<u32, REGION_COUNT>,
         active_collections: &mut Vec<CollectionId, MAX_COLLECTIONS>,
         reclaim_plan: &mut WalHeadReclaimPlan<MAX_COLLECTIONS>,
-        open_plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+        open_plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS>,
     ) -> Result<(), MapStorageError> {
         if self.segment_entries.is_empty() {
             return Ok(());
         }
 
-        if storage.ready_region().is_none() {
-            if let Some(region_index) = storage.last_free_list_head() {
-                storage
-                    .ensure_stage_region_append_room_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
-                        flash,
-                        workspace,
-                        region_index,
-                    )?;
-            }
-        }
-        let region_index = storage.reserve_next_region::<REGION_SIZE, REGION_COUNT, IO>(
+        let region_index = storage.reserve_next_region_for::<REGION_SIZE, REGION_COUNT, IO>(
             flash,
             workspace,
+            collection_id,
             reclaim_source_regions,
             active_collections,
             reclaim_plan,
@@ -2313,12 +2289,6 @@ where
                 &payload[..used],
             )?;
         }
-        storage.stage_ready_region_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
-            flash,
-            workspace,
-            region_index,
-        )?;
-
         if self.lowest_region.is_none() {
             self.lowest_region = Some(region_index);
         }
@@ -3114,16 +3084,15 @@ where
         const REGION_COUNT: usize,
         IO: FlashIo,
         const MAX_COLLECTIONS: usize,
-        const MAX_PENDING_RECLAIMS: usize,
     >(
         &self,
-        storage: &mut StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+        storage: &mut StorageRuntime<MAX_COLLECTIONS>,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
         reclaim_source_regions: &mut Vec<u32, REGION_COUNT>,
         active_collections: &mut Vec<CollectionId, MAX_COLLECTIONS>,
         reclaim_plan: &mut WalHeadReclaimPlan<MAX_COLLECTIONS>,
-        open_plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+        open_plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS>,
         selected_runs: usize,
         cursors: &mut Vec<RunEntryCursor<K, V>, MAX_RUNS>,
         duplicate_indices: &mut Vec<usize, MAX_RUNS>,
@@ -3211,7 +3180,7 @@ where
                 cursors[index].advance::<REGION_SIZE, IO>(self.id, flash, workspace)?;
             }
             let winning_entry = winning_entry.ok_or(MapError::SerializationError)?;
-            writer.push::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>(
+            writer.push::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
                 self.id,
                 storage,
                 flash,
@@ -3224,7 +3193,7 @@ where
             )?;
         }
 
-        writer.finish::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>(
+        writer.finish::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
             self.id,
             storage,
             flash,
@@ -3275,10 +3244,9 @@ where
         const REGION_COUNT: usize,
         IO: FlashIo,
         const MAX_COLLECTIONS: usize,
-        const MAX_PENDING_RECLAIMS: usize,
     >(
         &self,
-        storage: &mut StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+        storage: &mut StorageRuntime<MAX_COLLECTIONS>,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
     ) -> Result<(), MapStorageError> {
@@ -3318,18 +3286,12 @@ where
                     view.next_region
                 };
 
-                storage.append_reclaim_begin_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
+                storage.append_free_region_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
                     flash,
                     workspace,
+                    self.id,
                     region_index,
                 )?;
-                if storage.pending_reclaims().contains(&region_index) {
-                    storage.complete_pending_reclaim::<REGION_SIZE, REGION_COUNT, IO>(
-                        flash,
-                        workspace,
-                        region_index,
-                    )?;
-                }
             }
         }
         Ok(())
@@ -4020,16 +3982,15 @@ where
         const REGION_COUNT: usize,
         IO: FlashIo,
         const MAX_COLLECTIONS: usize,
-        const MAX_PENDING_RECLAIMS: usize,
     >(
         &self,
-        storage: &mut StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+        storage: &mut StorageRuntime<MAX_COLLECTIONS>,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
         snapshot_scratch: &mut [u8],
     ) -> Result<(), MapStorageError> {
         let used = self.encode_snapshot_into(snapshot_scratch)?;
-        storage.append_snapshot::<REGION_SIZE, REGION_COUNT, IO>(
+        storage.append_snapshot_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
             flash,
             workspace,
             self.id,
@@ -4175,16 +4136,15 @@ where
         const REGION_COUNT: usize,
         IO: FlashIo,
         const MAX_COLLECTIONS: usize,
-        const MAX_PENDING_RECLAIMS: usize,
     >(
         &self,
-        storage: &mut StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+        storage: &mut StorageRuntime<MAX_COLLECTIONS>,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
         reclaim_source_regions: &mut Vec<u32, REGION_COUNT>,
         active_collections: &mut Vec<CollectionId, MAX_COLLECTIONS>,
         reclaim_plan: &mut WalHeadReclaimPlan<MAX_COLLECTIONS>,
-        open_plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+        open_plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS>,
         generation: u64,
     ) -> Result<Option<MapRunDescriptor<K>>, MapStorageError> {
         let entry_count =
@@ -4206,18 +4166,10 @@ where
                 let payload = committed_payload_buffer::<REGION_SIZE>(payload)?;
                 self.largest_frontier_segment_ending_at(payload, generation, end_index)?
             };
-            if storage.ready_region().is_none() {
-                if let Some(region_index) = storage.last_free_list_head() {
-                    storage.ensure_stage_region_append_room_with_rotation::<
-                        REGION_SIZE,
-                        REGION_COUNT,
-                        IO,
-                    >(flash, workspace, region_index)?;
-                }
-            }
-            let region_index = storage.reserve_next_region::<REGION_SIZE, REGION_COUNT, IO>(
+            let region_index = storage.reserve_next_region_for::<REGION_SIZE, REGION_COUNT, IO>(
                 flash,
                 workspace,
+                self.id,
                 reclaim_source_regions,
                 active_collections,
                 reclaim_plan,
@@ -4241,11 +4193,6 @@ where
                     &payload[..used],
                 )?;
             }
-            storage.stage_ready_region_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
-                flash,
-                workspace,
-                region_index,
-            )?;
             next_region = Some(region_index);
             first_region = Some(region_index);
             region_count = region_count
@@ -4272,16 +4219,15 @@ where
         const REGION_COUNT: usize,
         IO: FlashIo,
         const MAX_COLLECTIONS: usize,
-        const MAX_PENDING_RECLAIMS: usize,
     >(
         &self,
-        storage: &mut StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+        storage: &mut StorageRuntime<MAX_COLLECTIONS>,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
         reclaim_source_regions: &mut Vec<u32, REGION_COUNT>,
         active_collections: &mut Vec<CollectionId, MAX_COLLECTIONS>,
         reclaim_plan: &mut WalHeadReclaimPlan<MAX_COLLECTIONS>,
-        open_plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+        open_plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS>,
         source: &[u8],
         generation: u64,
     ) -> Result<Option<MapRunDescriptor<K>>, MapStorageError> {
@@ -4296,6 +4242,12 @@ where
         let mut first_region = None;
         let mut region_count = 0u32;
         let mut end_index = entry_count;
+        let owns_transaction = !storage.transaction_open_for(self.id);
+        if owns_transaction {
+            storage.begin_collection_transaction::<REGION_SIZE, REGION_COUNT, IO>(
+                flash, workspace, self.id,
+            )?;
+        }
 
         loop {
             if end_index == 0 {
@@ -4306,18 +4258,10 @@ where
                 let payload = committed_payload_buffer::<REGION_SIZE>(payload)?;
                 Self::largest_snapshot_segment_ending_at(payload, generation, source, end_index)?
             };
-            if storage.ready_region().is_none() {
-                if let Some(region_index) = storage.last_free_list_head() {
-                    storage.ensure_stage_region_append_room_with_rotation::<
-                        REGION_SIZE,
-                        REGION_COUNT,
-                        IO,
-                    >(flash, workspace, region_index)?;
-                }
-            }
-            let region_index = storage.reserve_next_region::<REGION_SIZE, REGION_COUNT, IO>(
+            let region_index = storage.reserve_next_region_for::<REGION_SIZE, REGION_COUNT, IO>(
                 flash,
                 workspace,
+                self.id,
                 reclaim_source_regions,
                 active_collections,
                 reclaim_plan,
@@ -4342,17 +4286,21 @@ where
                     &payload[..used],
                 )?;
             }
-            storage.stage_ready_region_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
-                flash,
-                workspace,
-                region_index,
-            )?;
             next_region = Some(region_index);
             first_region = Some(region_index);
             region_count = region_count
                 .checked_add(1)
                 .ok_or(MapError::SerializationError)?;
             end_index = plan.start_index;
+        }
+
+        if owns_transaction {
+            storage.commit_collection_transaction::<REGION_SIZE, REGION_COUNT, IO>(
+                flash, workspace, self.id,
+            )?;
+            storage.finish_collection_transaction::<REGION_SIZE, REGION_COUNT, IO>(
+                flash, workspace, self.id,
+            )?;
         }
 
         Ok(Some(MapRunDescriptor {
@@ -4372,18 +4320,24 @@ where
         const REGION_COUNT: usize,
         IO: FlashIo,
         const MAX_COLLECTIONS: usize,
-        const MAX_PENDING_RECLAIMS: usize,
     >(
         &mut self,
-        storage: &mut StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+        storage: &mut StorageRuntime<MAX_COLLECTIONS>,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
         reclaim_source_regions: &mut Vec<u32, REGION_COUNT>,
         active_collections: &mut Vec<CollectionId, MAX_COLLECTIONS>,
         reclaim_plan: &mut WalHeadReclaimPlan<MAX_COLLECTIONS>,
-        open_plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+        open_plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS>,
         extra_newest: Option<MapRunDescriptor<K>>,
     ) -> Result<u32, MapStorageError> {
+        let owns_transaction = !storage.transaction_open_for(self.id);
+        if owns_transaction {
+            storage.begin_collection_transaction::<REGION_SIZE, REGION_COUNT, IO>(
+                flash, workspace, self.id,
+            )?;
+        }
+
         let previous_region = storage
             .collections()
             .iter()
@@ -4400,20 +4354,10 @@ where
             .ok_or(MapStorageError::Map(MapError::SerializationError))?;
         ensure_manifest_run_capacity::<MAX_RUNS>(self.id, manifest_run_count)?;
 
-        if storage.ready_region().is_none() {
-            if let Some(region_index) = storage.last_free_list_head() {
-                storage.ensure_head_append_room_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
-                    flash,
-                    workspace,
-                    self.id,
-                    CollectionType::MAP_CODE,
-                    region_index,
-                )?;
-            }
-        }
-        let manifest_region = storage.reserve_next_region::<REGION_SIZE, REGION_COUNT, IO>(
+        let manifest_region = storage.reserve_next_region_for::<REGION_SIZE, REGION_COUNT, IO>(
             flash,
             workspace,
+            self.id,
             reclaim_source_regions,
             active_collections,
             reclaim_plan,
@@ -4438,12 +4382,21 @@ where
             CollectionType::MAP_CODE,
             manifest_region,
         )?;
+        storage.commit_collection_transaction::<REGION_SIZE, REGION_COUNT, IO>(
+            flash, workspace, self.id,
+        )?;
 
         if let Some(previous_region) = previous_region {
-            storage.append_reclaim_begin_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
+            storage.append_free_region_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
                 flash,
                 workspace,
+                self.id,
                 previous_region,
+            )?;
+        }
+        if owns_transaction {
+            storage.finish_collection_transaction::<REGION_SIZE, REGION_COUNT, IO>(
+                flash, workspace, self.id,
             )?;
         }
 
@@ -4465,16 +4418,15 @@ where
         const REGION_COUNT: usize,
         IO: FlashIo,
         const MAX_COLLECTIONS: usize,
-        const MAX_PENDING_RECLAIMS: usize,
     >(
         &mut self,
-        storage: &mut StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+        storage: &mut StorageRuntime<MAX_COLLECTIONS>,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
         reclaim_source_regions: &mut Vec<u32, REGION_COUNT>,
         active_collections: &mut Vec<CollectionId, MAX_COLLECTIONS>,
         reclaim_plan: &mut WalHeadReclaimPlan<MAX_COLLECTIONS>,
-        open_plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+        open_plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS>,
     ) -> Result<u32, MapStorageError> {
         let previous_region = storage
             .collections()
@@ -4490,11 +4442,6 @@ where
             .planned_frontier_run_region_count(workspace, frontier_generation)?
             .checked_add(1)
             .ok_or(MapError::SerializationError)?;
-        let additional_allocations = if storage.ready_region().is_some() {
-            planned_allocations.saturating_sub(1)
-        } else {
-            planned_allocations
-        };
         storage.ensure_foreground_allocation_headroom_for::<REGION_SIZE, REGION_COUNT, IO>(
             flash,
             workspace,
@@ -4502,25 +4449,23 @@ where
             active_collections,
             reclaim_plan,
             open_plan,
-            additional_allocations,
+            planned_allocations,
+        )?;
+        storage.begin_collection_transaction::<REGION_SIZE, REGION_COUNT, IO>(
+            flash, workspace, self.id,
         )?;
 
-        let frontier_run = self.write_frontier_run_to_storage::<
-            REGION_SIZE,
-            REGION_COUNT,
-            IO,
-            MAX_COLLECTIONS,
-            MAX_PENDING_RECLAIMS,
-        >(
-            storage,
-            flash,
-            workspace,
-            reclaim_source_regions,
-            active_collections,
-            reclaim_plan,
-            open_plan,
-            frontier_generation,
-        )?;
+        let frontier_run = self
+            .write_frontier_run_to_storage::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
+                storage,
+                flash,
+                workspace,
+                reclaim_source_regions,
+                active_collections,
+                reclaim_plan,
+                open_plan,
+                frontier_generation,
+            )?;
 
         let manifest_run_count = self
             .runs
@@ -4529,20 +4474,10 @@ where
             .ok_or(MapStorageError::Map(MapError::SerializationError))?;
         ensure_manifest_run_capacity::<MAX_RUNS>(self.id, manifest_run_count)?;
 
-        if storage.ready_region().is_none() {
-            if let Some(region_index) = storage.last_free_list_head() {
-                storage.ensure_head_append_room_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
-                    flash,
-                    workspace,
-                    self.id,
-                    CollectionType::MAP_CODE,
-                    region_index,
-                )?;
-            }
-        }
-        let manifest_region = storage.reserve_next_region::<REGION_SIZE, REGION_COUNT, IO>(
+        let manifest_region = storage.reserve_next_region_for::<REGION_SIZE, REGION_COUNT, IO>(
             flash,
             workspace,
+            self.id,
             reclaim_source_regions,
             active_collections,
             reclaim_plan,
@@ -4567,14 +4502,21 @@ where
             CollectionType::MAP_CODE,
             manifest_region,
         )?;
+        storage.commit_collection_transaction::<REGION_SIZE, REGION_COUNT, IO>(
+            flash, workspace, self.id,
+        )?;
 
         if let Some(previous_region) = previous_region {
-            storage.append_reclaim_begin_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
+            storage.append_free_region_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
                 flash,
                 workspace,
+                self.id,
                 previous_region,
             )?;
         }
+        storage.finish_collection_transaction::<REGION_SIZE, REGION_COUNT, IO>(
+            flash, workspace, self.id,
+        )?;
 
         if let Some(run) = frontier_run {
             self.runs
@@ -4594,9 +4536,8 @@ where
         const REGION_COUNT: usize,
         IO: FlashIo,
         const MAX_COLLECTIONS: usize,
-        const MAX_PENDING_RECLAIMS: usize,
     >(
-        storage: &StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+        storage: &StorageRuntime<MAX_COLLECTIONS>,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
         basis_scratch: &mut [u8],
@@ -4604,13 +4545,7 @@ where
         buffer: &'a mut [u8],
         memory: &'a mut MapFrontierMemory<K, MAX_RUNS>,
     ) -> Result<Self, MapStorageError> {
-        Self::open_from_storage_inner::<
-            REGION_SIZE,
-            REGION_COUNT,
-            IO,
-            MAX_COLLECTIONS,
-            MAX_PENDING_RECLAIMS,
-        >(
+        Self::open_from_storage_inner::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
             storage,
             flash,
             workspace,
@@ -4629,9 +4564,8 @@ where
         const REGION_COUNT: usize,
         IO: FlashIo,
         const MAX_COLLECTIONS: usize,
-        const MAX_PENDING_RECLAIMS: usize,
     >(
-        storage: &StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+        storage: &StorageRuntime<MAX_COLLECTIONS>,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
         basis_scratch: &mut [u8],
@@ -4640,13 +4574,7 @@ where
         memory: &'a mut MapFrontierMemory<K, MAX_RUNS>,
         metrics: &mut StoragePerfMetrics,
     ) -> Result<Self, MapStorageError> {
-        Self::open_from_storage_inner::<
-            REGION_SIZE,
-            REGION_COUNT,
-            IO,
-            MAX_COLLECTIONS,
-            MAX_PENDING_RECLAIMS,
-        >(
+        Self::open_from_storage_inner::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
             storage,
             flash,
             workspace,
@@ -4663,9 +4591,8 @@ where
         const REGION_COUNT: usize,
         IO: FlashIo,
         const MAX_COLLECTIONS: usize,
-        const MAX_PENDING_RECLAIMS: usize,
     >(
-        storage: &StorageRuntime<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>,
+        storage: &StorageRuntime<MAX_COLLECTIONS>,
         flash: &mut IO,
         workspace: &mut StorageWorkspace<REGION_SIZE>,
         basis_scratch: &mut [u8],
@@ -4941,14 +4868,31 @@ where
     Ok(())
 }
 
-pub(crate) fn map_head_region_references_region<const REGION_SIZE: usize, IO: FlashIo>(
+fn push_unique_collected_region<const CAP: usize>(
+    regions: &mut Vec<u32, CAP>,
+    collection_id: CollectionId,
+    manifest_region: u32,
+    region_index: u32,
+) -> Result<(), MapStorageError> {
+    if regions.contains(&region_index) {
+        return Ok(());
+    }
+    regions
+        .push(region_index)
+        .map_err(|_| MapStorageError::InvalidManifest {
+            collection_id,
+            region_index: manifest_region,
+        })
+}
+
+pub(crate) fn collect_map_head_regions<const REGION_SIZE: usize, IO: FlashIo, const CAP: usize>(
     flash: &mut IO,
     workspace: &mut StorageWorkspace<REGION_SIZE>,
     metadata: StorageMetadata,
     collection_id: CollectionId,
     head_region: u32,
-    target_region: u32,
-) -> Result<bool, MapStorageError> {
+    regions: &mut Vec<u32, CAP>,
+) -> Result<(), MapStorageError> {
     let (manifest_region, run_region) = workspace.scan_buffers();
     let (header, payload) =
         read_committed_region::<REGION_SIZE, IO>(flash, metadata, head_region, manifest_region)?;
@@ -4969,9 +4913,7 @@ pub(crate) fn map_head_region_references_region<const REGION_SIZE: usize, IO: Fl
             actual: header.collection_format,
         });
     }
-    if head_region == target_region {
-        return Ok(true);
-    }
+    push_unique_collected_region(regions, collection_id, head_region, head_region)?;
 
     let mut offset = 0usize;
     let run_count = usize::try_from(read_u32(payload, &mut offset)?).map_err(|_| {
@@ -5024,9 +4966,7 @@ pub(crate) fn map_head_region_references_region<const REGION_SIZE: usize, IO: Fl
                 collection_id,
                 region_index: first_region,
             })?;
-            if region_index == target_region {
-                return Ok(true);
-            }
+            push_unique_collected_region(regions, collection_id, head_region, region_index)?;
 
             let (run_header, run_payload) = read_committed_region::<REGION_SIZE, IO>(
                 flash,
@@ -5056,5 +4996,26 @@ pub(crate) fn map_head_region_references_region<const REGION_SIZE: usize, IO: Fl
         }
     }
 
-    Ok(false)
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn map_head_region_references_region<const REGION_SIZE: usize, IO: FlashIo>(
+    flash: &mut IO,
+    workspace: &mut StorageWorkspace<REGION_SIZE>,
+    metadata: StorageMetadata,
+    collection_id: CollectionId,
+    head_region: u32,
+    target_region: u32,
+) -> Result<bool, MapStorageError> {
+    let mut regions = Vec::<u32, 128>::new();
+    collect_map_head_regions::<REGION_SIZE, IO, 128>(
+        flash,
+        workspace,
+        metadata,
+        collection_id,
+        head_region,
+        &mut regions,
+    )?;
+    Ok(regions.contains(&target_region))
 }

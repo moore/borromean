@@ -222,10 +222,11 @@ observed from that head's free-pointer chain at allocation time.
 two replay-visible effects:
 
 - It advances the durable free-list head to `free_list_head_after`.
-- It reserves `region_index` as `ready_region` until a matching durable
-  `head(..., region_index)` or `link(... next_region_index = region_index ...)`
-  consumes it. This reservation exists only to preserve crash-safe
-  allocator state until consumption so the allocated region cannot leak.
+- If `collection_id = 0`, it reserves `region_index` as `ready_region`
+  until the matching WAL `link(... next_region_index = region_index ...)`
+  consumes it. This reservation exists only for WAL rotation recovery.
+  User collection allocations are transaction-owned instead; they advance
+  the allocator but do not occupy the global `ready_region` slot.
 
 5. `RING-WAL-PAYLOAD-005` `head`
 Commits a collection to a durable region head. Payload contains
@@ -233,8 +234,8 @@ the target `region_index`. The record also carries the collection type for
 that durable region basis. When `collection_id = 0`, this record
 commits a new WAL head region; there is no distinct WAL-head record
 type. If `region_index` equals the currently reserved `ready_region`,
-the `head` consumes that reservation and commits a newly allocated
-region. Otherwise, the `head` retargets the logical collection head to
+the `head` consumes that reservation. Otherwise, the `head` retargets
+the logical collection head to
 an already allocated existing region. Before appending such a
 retargeting `head`, the implementation must validate that the target
 region's header has the same `collection_id` and that the target
@@ -389,9 +390,9 @@ before this free operation.
 `link(next_region_index, ...)` record that commits a newly allocated
 region is append-valid only if it historically followed a matching
 earlier `alloc_begin` for the same region index. Replay requires a
-prior unmatched `alloc_begin` only when reconstructing a still
-unconsumed `ready_region`; after a durable `head` or `link` has
-consumed that region, the historical `alloc_begin` may be reclaimed.
+prior unmatched WAL-rotation `alloc_begin` only when reconstructing a
+still unconsumed `ready_region`; after a durable `link` consumes that
+region, the historical `alloc_begin` may be reclaimed.
 21. `RING-WAL-VALID-021` Durable allocator-head advance happens at `alloc_begin`; durable
 allocator-tail extension happens at `free_region`.
 22. `RING-WAL-VALID-022` Replay MAY recover only from checksum-invalid or torn aligned WAL
@@ -469,8 +470,8 @@ written portion of that WAL region.
 allocator advance durable with
 `alloc_begin(collection_id, region_index, free_list_head_after)`.
 5. `RING-REPLAY-ASSUME-005` If replay ends with an unmatched
-`alloc_begin(collection_id, region_index, ...)`, that region is treated
-as a reserved `ready_region` for the next allocation instead of being
+`alloc_begin(collection_id = 0, region_index, ...)`, that region is
+treated as a reserved WAL-rotation `ready_region` instead of being
 returned to the free list.
 6. `RING-REPLAY-ASSUME-006` Transaction recovery must be idempotent:
 if storage open crashes before appending `rollback_transaction` or
