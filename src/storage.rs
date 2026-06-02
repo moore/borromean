@@ -3044,9 +3044,6 @@ pub(crate) fn reopen_without_reclaim_recovery_into<
     crate::startup::recover_open_rotation::<REGION_SIZE, IO, REGION_COUNT, MAX_COLLECTIONS>(
         flash, workspace, open_plan,
     )?;
-    crate::startup::discover_open_wal_chain::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
-        flash, workspace, open_plan,
-    )?;
     crate::startup::replay_open_wal_chain::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
         flash, workspace, open_plan,
     )?;

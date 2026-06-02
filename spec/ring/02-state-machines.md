@@ -199,10 +199,10 @@ stable runtime state that a later rotation finish may consume from
 - `RecoverIncompleteRotation`: finish a tail rotation that had a
   durable rotation-start record or durable link but no initialized
   target WAL region.
-- `DiscoverWalChain`: walk `link` records from the effective WAL head
-  to the selected tail.
-- `ReplayWalRecords`: scan reachable WAL records in order and apply
-  each durable record through `ApplyWalRecord`.
+- `ReplayWalRecords`: scan reachable WAL records in order, following
+  `link` records from the effective WAL head to the selected tail, and
+  apply each durable record through `ApplyWalRecord`. Startup fails if
+  the selected tail is not reachable through a valid link chain.
 - `BuildRuntimeState`: construct the stable runtime state from the
   replay tracker and reconstructed free-list tail.
 - `ValidateLiveCollections`: let supported collection implementations

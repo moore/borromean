@@ -336,7 +336,6 @@ pub(crate) enum ReclaimWalHeadPhase<const REGION_COUNT: usize, const MAX_COLLECT
 pub(crate) enum OpenStoragePhase<const REGION_COUNT: usize, const MAX_COLLECTIONS: usize = 8> {
     Begin,
     RecoverRotation,
-    DiscoverWalChain,
     ReplayWalChain,
     FinishStartup,
     ValidateCollections,
@@ -758,24 +757,6 @@ where
                     REGION_SIZE,
                     IO,
                     REGION_COUNT,
-                    MAX_COLLECTIONS,
-                >(backing, &mut memory.workspace, &mut memory.open_plan)?;
-                this.phase = OpenStoragePhase::DiscoverWalChain;
-                Poll::Pending
-            }
-            OpenStoragePhase::DiscoverWalChain => {
-                let backing = match this.backing.as_deref_mut() {
-                    Some(backing) => backing,
-                    None => return Poll::Pending,
-                };
-                let memory = match this.memory.as_deref_mut() {
-                    Some(memory) => memory,
-                    None => return Poll::Pending,
-                };
-                crate::startup::discover_open_wal_chain::<
-                    REGION_SIZE,
-                    REGION_COUNT,
-                    IO,
                     MAX_COLLECTIONS,
                 >(backing, &mut memory.workspace, &mut memory.open_plan)?;
                 this.phase = OpenStoragePhase::ReplayWalChain;

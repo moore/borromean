@@ -477,9 +477,6 @@ pub(crate) fn open_formatted_store<
     recover_open_rotation::<REGION_SIZE, IO, REGION_COUNT, MAX_COLLECTIONS>(
         flash, workspace, plan,
     )?;
-    discover_open_wal_chain::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
-        flash, workspace, plan,
-    )?;
     replay_open_wal_chain::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
         flash, workspace, plan,
     )?;
@@ -567,7 +564,7 @@ pub(crate) fn recover_open_rotation<
     Ok(())
 }
 
-pub(crate) fn discover_open_wal_chain<
+fn build_open_wal_replay_chain<
     const REGION_SIZE: usize,
     const REGION_COUNT: usize,
     IO: FlashIo,
@@ -598,6 +595,9 @@ pub(crate) fn replay_open_wal_chain<
     workspace: &mut StorageWorkspace<REGION_SIZE>,
     plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS>,
 ) -> Result<(), StartupError> {
+    build_open_wal_replay_chain::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
+        flash, workspace, plan,
+    )?;
     loop {
         match replay_open_wal_chain_once::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
             flash, workspace, plan,
@@ -610,7 +610,7 @@ pub(crate) fn replay_open_wal_chain<
                 recover_open_rotation::<REGION_SIZE, IO, REGION_COUNT, MAX_COLLECTIONS>(
                     flash, workspace, plan,
                 )?;
-                discover_open_wal_chain::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
+                build_open_wal_replay_chain::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
                     flash, workspace, plan,
                 )?;
             }

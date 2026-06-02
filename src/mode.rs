@@ -35,7 +35,6 @@ pub enum FormatMode {
 pub enum OpenMode {
     Begin,
     RecoverRotation,
-    DiscoverWalChain,
     ReplayWalChain,
     BuildRuntimeState,
     ValidateLiveCollections,
