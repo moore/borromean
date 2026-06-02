@@ -3696,9 +3696,8 @@ fn requirement_open_from_storage_rejects_invalid_retained_region_snapshot_and_up
 
 //= spec/ring/03-collection-lifecycle.md#collection-head-state-machine
 //= type=test
-//# `RING-FORMAT-016` An implementation MUST NOT open a database
-//# successfully if replay yields a live collection whose retained
-//# committed-region basis, retained `snapshot` payload, or retained
+//# `RING-FORMAT-016A` Typed collection open or load MUST fail if retained
+//# committed-region payloads, retained `snapshot` payloads, or retained
 //# post-basis `update` payloads are unsupported or invalid under that
 //# collection's normative specification.
 #[test]

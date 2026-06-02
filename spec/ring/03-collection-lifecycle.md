@@ -261,12 +261,18 @@ region payload format.
 15. `RING-FORMAT-015` An implementation MUST NOT open a database
 successfully if replay yields a live collection whose
 `collection_type` is unsupported by that implementation.
-16. `RING-FORMAT-016` An implementation MUST NOT open a database
-successfully if replay yields a live collection whose retained
-committed-region basis, retained `snapshot` payload, or retained
+
+Storage open validates the shared ring, WAL, allocator, and storage
+ownership structure. Typed collection open or load validates
+collection-defined payloads.
+
+16. `RING-FORMAT-016` Shared storage validation MUST reject a live retained committed-region
+basis whose referenced region header does not belong to that collection.
+17. `RING-FORMAT-016A` Typed collection open or load MUST fail if retained
+committed-region payloads, retained `snapshot` payloads, or retained
 post-basis `update` payloads are unsupported or invalid under that
 collection's normative specification.
-17. `RING-FORMAT-017` A dropped tombstone for an unsupported
+18. `RING-FORMAT-017` A dropped tombstone for an unsupported
 collection type may remain as inert replay state. Support for that old
 collection type is not required unless a live basis or retained
 post-basis updates still exist for it.

@@ -1224,10 +1224,10 @@ fn requirement_has_valid_wal_target_requires_both_wal_collection_id_and_format()
     );
 }
 
-//= spec/ring/06-startup-replay.md#startup-replay-implementation-requirements
+//= spec/ring/03-collection-lifecycle.md#collection-head-state-machine
 //= type=test
-//# `RING-IMPL-REGRESSION-056` Live committed-region basis validation MUST reject a region whose
-//# header belongs to a different collection.
+//# `RING-FORMAT-016` Shared storage validation MUST reject a live retained committed-region
+//# basis whose referenced region header does not belong to that collection.
 #[test]
 fn requirement_validate_live_region_bases_rejects_committed_region_for_different_collection() {
     let mut flash = MockFlash::<128, 4, 64>::new(0xff);
