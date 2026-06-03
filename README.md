@@ -1,20 +1,30 @@
 # Borromean
 
-Borromean is a `no_std` flash-storage engine built around an append-only ring and durable collection
-heads. It is designed for durable, wear-leveling storage directly on MCU flash, with caller-provided
-device I/O and bounded operation scratch. The long-term goal is to host many collection instances
-and support multiple collection types; durable maps are implemented today, while channel, queue, and
-log-style collections remain experimental or planned.
+Borromean is `no_std` durable flash storage with bounded caller-owned memory.
 
-This repository is alpha-quality engineering code. It contains a working storage core, a durable map
-collection, a mock flash backend for tests and examples, a Linux file-backed backend for host
-testing and benchmarking, and a traceability setup that links code and tests back to local
-specifications.
+The core is log-structured. It records durable transitions in a write-ahead log, replays them after
+reset, allocates storage in erase-aligned regions, and exposes durable collections above those
+storage rules. The implemented collection today is an LSM-style durable map.
 
-The main remaining work is a deeper review of the durability state machines, continued cleanup of
-the specs for readability, and simplification of implementation code where the design has become
-clearer.
+## Why Borromean?
 
+- **Recoverable state after reset**: committed operations are replayed from WAL and region metadata.
+- **Bounded memory**: storage state and operation scratch live in caller-owned buffers; the core
+  crate does not depend on `alloc`.
+- **Flash-aware layout**: erase-region alignment, FIFO free-list allocation, and log-structured
+  updates support wear leveling to prolong flash lifespan.
+
+## Status
+
+Borromean is alpha-quality engineering code. The storage core and durable map are working, covered
+by local specs and traceability tests, and suitable for experiments and prototypes. Channel, queue,
+and log-style collections remain experimental or planned. `MockFlash` supports tests and examples,
+while the Linux file-backed backend is for host testing and benchmarking.
+
+## Quick Start
+
+This example uses `MockFlash` for the backing store. Real targets provide a flash driver by
+implementing [`FlashIo`](src/flash_io.rs).
 
 ```rust
 use borromean::{
@@ -66,12 +76,8 @@ assert_eq!(
 
 ## Performance
 
-Borromean aims to offer competitive performance for its durability model and target devices. The
-current perf matrix compares file-backed Borromean with [redb](https://github.com/cberner/redb) and
-[Fjall](https://github.com/fjall-rs/fjall), using the same deterministic workloads for each engine.
-The full generated summary lives in [BENCHMARKS.md](BENCHMARKS.md).
-
-### Relative Throughput
+Throughput is normalized to file-backed Borromean with 1 MiB regions for each scenario; higher is
+better.
 
 | scenario | borromean 1MiB | borromean 4KiB | redb | fjall |
 | --- | --- | --- | --- | --- |
@@ -81,74 +87,17 @@ The full generated summary lives in [BENCHMARKS.md](BENCHMARKS.md).
 | read_misses | 1.00x | **1.09x** | 0.33x | 0.82x |
 | mixed_update | 1.00x | 0.51x | 0.77x | **1.05x** |
 
-In the current local results, Borromean is close to Fjall on durable insert, hot-update, and mixed
-read/update throughput, and faster than redb on those write-heavy scenarios. Borromean leads the
-read-heavy scenarios in this run: 1 MiB regions are fastest on read hits, while 4 KiB regions are
-fastest on read misses. The IO tables show Borromean and Fjall write similar byte counts in the
-write workloads, so the current write-side optimization focus is durability sync cost rather than
-raw write volume.
+The current benchmark suite compares file-backed Borromean with
+[redb](https://github.com/cberner/redb) and [Fjall](https://github.com/fjall-rs/fjall), using the
+same deterministic workloads for each engine. The full generated report lives in
+[BENCHMARKS.md](BENCHMARKS.md).
 
-## Supported Today
-
-- The durable storage engine is implemented by [`Storage`](src/lib.rs).
-- The caller supplies device access through [`FlashIo`](src/flash_io.rs) and caller-owned
-  [`StorageMemory`](src/lib.rs); `Storage` is a small handle that borrows both while normal
-  operations run.
-- The only user collection type that is supported durably today is the map collection implemented by
-  [`LsmMap`](src/collections/map/mod.rs). New durable maps should be created with `LsmMap::new`;
-  low-level frontier APIs are for opening or updating existing storage collections.
-- The exported channel module is still experimental. It is documented as a public API surface, but
-  it is not yet a durably integrated storage collection.
-
-## Operating Model
-
-Borromean keeps logical storage state and bounded operation scratch in caller-owned memory structs,
-while the concrete device driver remains caller-provided through the `FlashIo` trait.
-Callers can drive the same operations in two styles:
-
-- Blocking entry points such as `Storage::format(backing, config, &mut storage_memory)`,
-  `Storage::open(backing, &mut storage_memory)`, `LsmMap::new`, and `Storage::flush_map`.
-- Future-returning entry points such as
-  `Storage::format_future(backing, config, &mut storage_memory)`,
-  `Storage::open_future(backing, &mut storage_memory)`, `Storage::create_map_future`,
-  and `Storage::flush_map_future`.
-
-In both styles the ownership model stays the same:
-
-- Borromean owns storage invariants and on-disk ordering rules.
-- The caller owns the flash driver, executor, and reusable memory; `Storage` borrows that memory
-  while it holds the backing reference.
-- Durable map handles borrow caller-owned `LsmMapMemory`, and low-level frontiers borrow
-  `MapFrontierMemory`.
-- Map values are materialized in caller-owned buffers and serialized without heap allocation inside
-  the core crate.
-
-## Documentation Map
+## Documentation
 
 - Storage format and crash semantics: [spec/ring/00-introduction.md](spec/ring/00-introduction.md)
-- Implementation architecture and API constraints: [spec/implementation.md](spec/implementation.md)
-- Durable map collection format, current validation rules, and implemented
-  whole-run LSM design: [spec/map.md](spec/map.md)
-- Experimental channel collection behavior: [spec/channel.md](spec/channel.md)
-- Mock flash backend behavior: [spec/mock.md](spec/mock.md)
-- Narrative architecture and API guide: [docs/architecture-and-api.md](docs/architecture-and-api.md)
-- Contributor tutorial for adding a durable collection:
-  [docs/implementing-a-collection.md](docs/implementing-a-collection.md)
-
-## Requirement Traceability
-
-The storage spec under [spec/ring/](spec/ring/00-introduction.md) keeps normative requirements next
-to the motivating text. Each requirement uses a stable identifier such as `RING-WAL-ENC-001` so
-Duvet annotations can point at local spec text instead of a requirements appendix.
-
-Example Rust annotation:
-
-```rust
-// = spec/ring/06-startup-replay.md#startup-replay-algorithm
-// # RING-STARTUP-003 Select WAL tail as the unique candidate WAL region with the largest valid sequence.
-```
-
-The implementation docs follow the same pattern. `spec/implementation.md` captures architecture and
-API constraints, while concrete functional behavior lives in storage, collection, or support
-specifications such as [spec/ring/](spec/ring/00-introduction.md), [spec/map.md](spec/map.md),
-[spec/channel.md](spec/channel.md), and [spec/mock.md](spec/mock.md).
+- Architecture and API guide: [docs/architecture-and-api.md](docs/architecture-and-api.md)
+- Durable map format and behavior: [spec/map.md](spec/map.md)
+- Mock flash behavior: [spec/mock.md](spec/mock.md)
+- Contributor tutorial for adding collections: [docs/implementing-a-collection.md](docs/implementing-a-collection.md)
+- Traceability and contribution notes: [CONTRIBUTING.md](CONTRIBUTING.md) and
+  [spec/implementation-policy.md](spec/implementation-policy.md)
