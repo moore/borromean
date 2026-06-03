@@ -216,7 +216,7 @@ fn requirement_disk_format_buffer_sizes_are_exposed_by_constants_or_workspace_co
 //= spec/implementation.md#collection-requirements
 //= type=test
 //# `RING-IMPL-COLL-002` Collection-specific in-memory state MUST obey
-//# the same explicit-capacity and no-allocation rules as borromean
+//# the same explicit-capacity and no-allocation rules as Borromean
 //# core.
 #[test]
 fn requirement_map_in_memory_state_runs_inside_a_borrowed_buffer_without_allocating() {

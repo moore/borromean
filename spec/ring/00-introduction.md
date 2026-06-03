@@ -30,14 +30,14 @@ high-level collection. The storage format itself is typed by collection
 identifier, collection type, and collection format so additional
 collection implementations can be added later.
 
-## Table Of Contents
+## Table of Contents
 
 This document is organized from the conceptual model toward the concrete mechanisms that make the
 model durable and recoverable.
 
 - [Requirements Format](#requirements-format)
 - [Reader Model](#reader-model)
-- [Chapter 1: Theory Of Operation](01-theory.md)
+- [Chapter 1: Theory of Operation](01-theory.md)
 - [Chapter 2: Storage Context And State Machines](02-state-machines.md)
 - [Chapter 3: Collection Lifecycle](03-collection-lifecycle.md)
 - [Chapter 4: WAL Model And Records](04-wal-records.md)
@@ -51,7 +51,7 @@ model durable and recoverable.
 
 This specification keeps normative requirements adjacent to the text
 that motivates them. Stable identifier and RFC-2119 language
-conventions for borromean specifications are defined by
+conventions for Borromean specifications are defined by
 [spec/implementation-policy.md](../implementation-policy.md).
 
 These identifiers are intended to be the primary Duvet traceability

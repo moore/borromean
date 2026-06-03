@@ -15,6 +15,55 @@ The main remaining work is a deeper review of the durability state machines, con
 the specs for readability, and simplification of implementation code where the design has become
 clearer.
 
+
+```rust
+use borromean::{
+    LsmMap, LsmMapMemory, MockFlash, Storage, StorageFormatConfig, StorageMemory,
+};
+
+const REGION_SIZE: usize = 512;
+const REGION_COUNT: usize = 8;
+const MAX_COLLECTIONS: usize = 8;
+
+let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 4096>::new(0xff);
+
+let collection_id = {
+    let mut storage_memory = StorageMemory::<REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>::new();
+    let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>::format(
+        &mut flash,
+        StorageFormatConfig::new(2, 8, 0xa5),
+        &mut storage_memory,
+    )
+    .unwrap();
+
+    let mut map_memory = LsmMapMemory::<u16, u16>::new();
+    let mut map = LsmMap::<u16, u16>::new(&mut storage, &mut map_memory).unwrap();
+
+    map.set(&mut storage, 7, 70).unwrap();
+    assert_eq!(map.get(&mut storage, &7, |_, value| *value).unwrap(), Some(70));
+
+    map.collection_id()
+};
+
+let mut reopen_memory = StorageMemory::<REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>::new();
+let mut reopened = Storage::<_, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>::open(
+    &mut flash,
+    &mut reopen_memory,
+)
+.unwrap();
+
+let mut reopened_map_memory = LsmMapMemory::<u16, u16>::new();
+let mut reopened_map =
+    LsmMap::<u16, u16>::open(collection_id, &mut reopened, &mut reopened_map_memory).unwrap();
+
+assert_eq!(
+    reopened_map
+        .get(&mut reopened, &7, |_, value| *value)
+        .unwrap(),
+    Some(70)
+);
+```
+
 ## Performance
 
 Borromean aims to offer competitive performance for its durability model and target devices. The

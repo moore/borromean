@@ -2,7 +2,7 @@ use super::*;
 
 //= spec/implementation.md#i-o-requirements
 //= type=test
-//# `RING-IMPL-IO-001` The borromean backing abstraction MUST expose only
+//# `RING-IMPL-IO-001` The Borromean backing abstraction MUST expose only
 //# the primitive operations needed to satisfy
 //# [spec/ring/00-introduction.md](ring/00-introduction.md): region or metadata reads, writes,
 //# erases, and durability barriers.
@@ -98,7 +98,7 @@ fn requirement_flash_io_trait_exposes_only_primitive_storage_operations() {
 
 //= spec/implementation.md#i-o-requirements
 //= type=test
-//# `RING-IMPL-IO-002` The borromean backing abstraction MUST be generic
+//# `RING-IMPL-IO-002` The Borromean backing abstraction MUST be generic
 //# over the caller's concrete transport, flash driver, emulator, or
 //# synchronization wrapper type.
 #[test]
@@ -119,7 +119,7 @@ fn requirement_flash_io_trait_accepts_caller_defined_driver_types() {
 
 //= spec/implementation.md#i-o-requirements
 //= type=test
-//# `RING-IMPL-IO-003` The borromean backing abstraction MUST be usable
+//# `RING-IMPL-IO-003` The Borromean backing abstraction MUST be usable
 //# without dynamic dispatch and without heap allocation.
 #[test]
 fn requirement_flash_io_trait_supports_non_allocating_concrete_driver_usage() {

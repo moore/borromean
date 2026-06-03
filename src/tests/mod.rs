@@ -872,7 +872,7 @@ fn requirement_storage_reclaim_wal_head_future_drop_after_begin_remains_recovera
 
 //= spec/implementation.md#operation-requirements
 //= type=test
-//# `RING-IMPL-OP-002` A borromean future MUST either complete with a terminal result or remain
+//# `RING-IMPL-OP-002` A Borromean future MUST either complete with a terminal result or remain
 //# safely resumable by further polling after any `Poll::Pending`.
 #[test]
 fn requirement_storage_map_operation_futures_poll_to_completion() {
@@ -923,7 +923,7 @@ fn requirement_storage_map_operation_futures_poll_to_completion() {
 
 //= spec/implementation.md#execution-requirements
 //= type=test
-//# `RING-IMPL-EXEC-005` Await boundaries inside borromean operations MUST align only with
+//# `RING-IMPL-EXEC-005` Await boundaries inside Borromean operations MUST align only with
 //# externally visible I/O steps or with pure in-memory decision points that preserve the ring
 //# ordering rules.
 #[test]

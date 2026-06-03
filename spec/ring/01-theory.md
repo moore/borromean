@@ -1,6 +1,6 @@
-# Chapter 1: Theory Of Operation
+# Chapter 1: Theory of Operation
 
-This chapter describes the design problem and the core borromean model:
+This chapter describes the design problem and the core Borromean model:
 regions provide erase granularity, bounded memory holds mutable
 frontiers, and the WAL records every durable state transition needed to
 recover after reset.
@@ -49,14 +49,14 @@ Borromean is built from a small set of mutually reinforcing choices:
 
 ## Overview
 
-To solve these challenges, borromean divides flash into equal-size
+To solve these challenges, Borromean divides flash into equal-size
 regions. Region starts and sizes must be aligned to the backing
 flash's erase-block size so every region can be erased independently.
 Collections are log-structured rather than updated in place. New
 durable collection state is written to fresh WAL records or fresh
 committed regions, and old committed regions become reclaimable only
 after a newer durable basis no longer references them. For each
-collection, borromean tracks a stable collection id and the latest
+collection, Borromean tracks a stable collection id and the latest
 durable basis selected by replay.
 
 Collection updates accumulate in bounded in-memory frontiers, but a
@@ -65,7 +65,7 @@ normal mutation is appended and synced to the global write-ahead log
 current collection state.
 Per-collection WAL entries contain a stable collection id and bytes
 whose meaning is defined by the corresponding collection-specific
-specification; those bytes are opaque to borromean core. Collection ids
+specification; those bytes are opaque to Borromean core. Collection ids
 are opaque 64-bit nonces that are assigned when
 a collection is created by `new_collection(collection_id,
 collection_type)`. Collection
@@ -164,8 +164,8 @@ recovery has already cleaned up an abandoned transaction, replay records
 that fact with `rollback_transaction(collection_id)`.
 
 The storage system also keeps a free list of regions that are
-available to satisfy new allocations. This list is FIFO (First In,
-First Out), to support wear leveling. The durable free-list head
+available to satisfy new allocations. This list is FIFO (first in,
+first out), to support wear leveling. The durable free-list head
 is tracked in WAL replay order so every durable allocator-head change
 is replayed exactly once. Allocations advance the durable free-list
 head through `alloc_begin(collection_id, region_index,
@@ -214,7 +214,7 @@ log-structured state: collection heads, allocator decisions, WAL-chain
 movement, and transaction phase markers are all represented by
 append-only facts.
 
-Oldest-first freeing is necessary for wear leveling, but borromean
+Oldest-first freeing is necessary for wear leveling, but Borromean
 cannot reclaim old bytes merely because they are old. A region remains
 live while a collection basis, collection-defined region reference,
 WAL-chain link, ready-region reservation, open transaction, or free-list

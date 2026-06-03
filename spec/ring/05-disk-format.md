@@ -38,7 +38,7 @@ time a new region is written. This lets startup identify the newest WAL
 region and order physical region writes. Logical collection heads are
 recovered from WAL `head(...)` records rather than by choosing the
 newest region for a collection. During startup region scanning,
-borromean records `max_seen_sequence`, the largest `sequence` value
+Borromean records `max_seen_sequence`, the largest `sequence` value
 found in any valid region header. Each newly allocated region, whether
 for a user collection or for a newly initialized WAL region, must use
 `sequence = max_seen_sequence + 1`, after which that new value becomes
@@ -49,7 +49,7 @@ successful later region writes must remain strictly monotonic.
 The collection format defines how user data is encoded in the user
 data section. For user collections, the meaning of non-WAL
 `collection_format` values is owned by the corresponding
-`collection_type` implementation rather than by borromean core. This
+`collection_type` implementation rather than by Borromean core. This
 spec reserves exactly one canonical core-defined format identifier,
 `wal_v1`, for WAL regions; no user collection may use that identifier.
 Storing the format in each region still allows per-collection format
@@ -252,7 +252,7 @@ and is a stable 64-bit nonce, not a small reusable counter. The
 `collection_format` defines the per-region encoding format for replay
 and read semantics. For user collections, non-WAL
 `collection_format` values are defined by the corresponding
-`collection_type` implementation rather than by borromean core, and may
+`collection_type` implementation rather than by Borromean core, and may
 evolve across regions over time without changing the collection's
 stable `collection_type`. Borromean core reserves one canonical format
 identifier, `wal_v1`, for WAL regions.

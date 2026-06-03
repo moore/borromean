@@ -163,7 +163,7 @@ fn requirement_each_fallible_storage_operation_is_drivable_as_one_future() {
 //# `RING-IMPL-EXEC-002` Borromean futures MUST make progress only when
 //# polled by the caller and when the backing object bound to the operation
 //# can make progress; they MUST NOT rely on background tasks internal to
-//# borromean.
+//# Borromean.
 #[test]
 fn requirement_operation_futures_advance_only_when_the_caller_polls_them() {
     const REGION_SIZE: usize = 256;
@@ -202,7 +202,7 @@ fn requirement_operation_futures_advance_only_when_the_caller_polls_them() {
 //= spec/implementation.md#execution-requirements
 //= type=test
 //# `RING-IMPL-EXEC-003` A simple single-threaded poll-to-completion
-//# executor MUST be sufficient to drive any borromean operation future
+//# executor MUST be sufficient to drive any Borromean operation future
 //# to completion.
 #[test]
 fn requirement_single_threaded_poll_loop_drives_operation_futures_to_completion() {

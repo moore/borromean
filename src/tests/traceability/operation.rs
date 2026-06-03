@@ -4,8 +4,8 @@ use std::task::Poll;
 
 //= spec/implementation.md#operation-requirements
 //= type=test
-//# `RING-IMPL-OP-001` A borromean future MUST NOT require spawning
-//# another borromean future in order to complete.
+//# `RING-IMPL-OP-001` A Borromean future MUST NOT require spawning
+//# another Borromean future in order to complete.
 #[test]
 fn requirement_each_public_operation_future_completes_when_polled_directly() {
     const REGION_SIZE: usize = 512;

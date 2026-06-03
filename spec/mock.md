@@ -8,7 +8,7 @@ because it is the primary backend used to verify storage semantics in this repos
 
 ## Mock Flash Requirements
 
-Mock flash exposes the same primitive operations expected by the borromean storage I/O boundary and
+Mock flash exposes the same primitive operations expected by the Borromean storage I/O boundary and
 keeps an operation log for tests.
 
 1. `RING-IMPL-REGRESSION-037` Mock flash metadata read/write operations MUST persist metadata and

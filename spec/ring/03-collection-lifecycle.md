@@ -212,7 +212,7 @@ durable tombstone`"])
 Collection format responsibility:
 
 1. `RING-FORMAT-001` Each non-WAL `collection_format` value is defined by the user
-collection type that writes it; borromean core stores that value in the
+collection type that writes it; Borromean core stores that value in the
 region header but does not assign it global meaning.
 2. `RING-FORMAT-002` Each user collection format defines how reads merge the durable basis
 with the in-memory frontier.

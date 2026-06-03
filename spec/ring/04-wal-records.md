@@ -239,7 +239,7 @@ the logical collection head to
 an already allocated existing region. Before appending such a
 retargeting `head`, the implementation must validate that the target
 region's header has the same `collection_id` and that the target
-region is not currently free. For user collections, borromean core
+region is not currently free. For user collections, Borromean core
 does not impose a global mapping from `collection_format` to
 `collection_type`; the collection implementation owns that
 interpretation. Replay does not revalidate that not-free append-time
@@ -433,7 +433,7 @@ open.
 
 Checksum trust model:
 
-1. `RING-CHECKSUM-001` During replay, borromean treats a WAL record,
+1. `RING-CHECKSUM-001` During replay, Borromean treats a WAL record,
 region header, `WalRegionPrologue`, `StorageMetadata`, or free-pointer
 footer with a valid checksum and otherwise valid local encoding as
 authoritative at the layer described by this spec.

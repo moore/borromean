@@ -30,8 +30,6 @@ Design history and exploratory ideas live in [journal.md](journal.md).
 
 ## Low Priority
 
-- Fix package metadata polish, including the `embeded` and `nostd` keyword typos in
-  `Cargo.toml`.
 - Clean up old exploratory comments in the map and channel modules once the current design is
   settled.
 - Add a short release checklist for no-std target coverage, traceability, docs, and dependency

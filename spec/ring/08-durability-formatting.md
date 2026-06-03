@@ -210,7 +210,7 @@ preserving the configured `min_free_regions` reserve, a freshly
 formatted store still has at least one non-reserved free region
 available for ordinary allocations.
 There is intentionally no normative minimum usable `region_size`
-enforced by borromean. Geometries that are formally formatable but too
+enforced by Borromean. Geometries that are formally formattable but too
 small to leave useful payload after `Header`, free-pointer footer, WAL
 prologue, and WAL-reserve overhead are treated as deployment mistakes
 rather than format errors. As deployment guidance, choose

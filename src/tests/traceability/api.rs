@@ -31,7 +31,7 @@ fn requirement_storage_operations_use_bound_backing() {
 //= type=test
 //# `RING-IMPL-API-002` The public API MUST allow a caller to drive the
 //# same storage engine from either blocking test shims or asynchronous
-//# device adapters without changing borromean correctness logic.
+//# device adapters without changing Borromean correctness logic.
 #[test]
 fn requirement_blocking_and_future_entry_points_produce_equivalent_storage_state() {
     const REGION_SIZE: usize = 256;

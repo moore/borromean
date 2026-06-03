@@ -49,7 +49,7 @@ whose size is statically bounded by type parameters or API contracts.
 
 The reason to use Rust `async` here is not to require an async runtime.
 It is to express suspendable coroutines for long-running storage
-procedures while keeping control of I/O outside borromean core.
+procedures while keeping control of I/O outside Borromean core.
 Formatting, opening, replay, WAL append, snapshot, reclaim, region
 flush, and collection operations all naturally decompose into a short
 sequence of state transitions separated by device actions such as
@@ -71,15 +71,15 @@ single future.
 2. `RING-IMPL-EXEC-002` Borromean futures MUST make progress only when
 polled by the caller and when the backing object bound to the operation
 can make progress; they MUST NOT rely on background tasks internal to
-borromean.
+Borromean.
 3. `RING-IMPL-EXEC-003` A simple single-threaded poll-to-completion
-executor MUST be sufficient to drive any borromean operation future to
+executor MUST be sufficient to drive any Borromean operation future to
 completion.
 4. `RING-IMPL-EXEC-004` Borromean operations on a given `Storage`
 instance MUST require exclusive mutable access to that instance unless
 and until a separate concurrency specification defines stronger
 sharing rules.
-5. `RING-IMPL-EXEC-005` Await boundaries inside borromean operations
+5. `RING-IMPL-EXEC-005` Await boundaries inside Borromean operations
 MUST align only with externally visible I/O steps or with pure
 in-memory decision points that preserve the ring ordering rules.
 
@@ -149,13 +149,13 @@ dispatched by default.
 
 ### I/O Requirements
 
-1. `RING-IMPL-IO-001` The borromean backing abstraction MUST expose only
+1. `RING-IMPL-IO-001` The Borromean backing abstraction MUST expose only
 the primitive operations needed to satisfy [spec/ring/00-introduction.md](ring/00-introduction.md):
 region or metadata reads, writes, erases, and durability barriers.
-2. `RING-IMPL-IO-002` The borromean backing abstraction MUST be generic
+2. `RING-IMPL-IO-002` The Borromean backing abstraction MUST be generic
 over the caller's concrete transport, flash driver, emulator, or
 synchronization wrapper type.
-3. `RING-IMPL-IO-003` The borromean backing abstraction MUST be usable
+3. `RING-IMPL-IO-003` The Borromean backing abstraction MUST be usable
 without dynamic dispatch and without heap allocation.
 4. `RING-IMPL-IO-004` If the target medium does not require an
 explicit durability barrier, the backing abstraction MAY implement sync
@@ -247,7 +247,7 @@ is out of range for the destination type.
 Embedded storage code should not treat malformed input, corrupt media,
 capacity exhaustion, or internal state conflicts as reasons to abort
 execution. Those are operational conditions that must surface as
-explicit failures. For borromean core, "panic free" means the library's
+explicit failures. For Borromean core, "panic free" means the library's
 non-test implementation must not rely on panics for correctness or for
 ordinary error handling.
 
@@ -258,7 +258,7 @@ strategy.
 
 ### Panic Requirements
 
-1. `RING-IMPL-PANIC-001` The borromean core library and its non-test
+1. `RING-IMPL-PANIC-001` The Borromean core library and its non-test
 support code MUST be panic free for all input data, including invalid
 API inputs, corrupt on-storage state, exhausted capacities, and device
 errors.
@@ -279,18 +279,18 @@ relying on a panic as a backstop.
 An operation future should be short-lived and linear: it borrows the
 `Storage` context, uses the backing and workspace held by that context,
 and finishes in a well-defined terminal result. It should not register
-itself globally, spawn helper tasks, or require that another borromean
+itself globally, spawn helper tasks, or require that another Borromean
 future be polled concurrently in order to finish.
 
 This keeps the operational model simple: the caller decides when to
 poll, the backing layer decides when device actions are ready, and the
-borromean future is just the coroutine joining those two.
+Borromean future is just the coroutine joining those two.
 
 ### Operation Requirements
 
-1. `RING-IMPL-OP-001` A borromean future MUST NOT require spawning
-another borromean future in order to complete.
-2. `RING-IMPL-OP-002` A borromean future MUST either complete with a
+1. `RING-IMPL-OP-001` A Borromean future MUST NOT require spawning
+another Borromean future in order to complete.
+2. `RING-IMPL-OP-002` A Borromean future MUST either complete with a
 terminal result or remain safely resumable by further polling after
 any `Poll::Pending`.
 3. `RING-IMPL-OP-003` If an operation future is dropped before
@@ -329,7 +329,7 @@ access, and operation scratch. Collection-specific code should operate
 through that same context.
 
 The important point is not the exact naming but the ownership
-direction: borromean owns logical invariants and operation buffers, while
+direction: Borromean owns logical invariants and operation buffers, while
 callers choose the backing implementation, executor, and any
 synchronization embedded inside that backing.
 
@@ -341,7 +341,7 @@ backing implementation and bounded operation scratch into the returned
 those dependencies through `Storage`.
 2. `RING-IMPL-API-002` The public API MUST allow a caller to drive the
 same storage engine from either blocking test shims or asynchronous
-device adapters without changing borromean correctness logic.
+device adapters without changing Borromean correctness logic.
 3. `RING-IMPL-API-003` Collection implementations MUST define their
 opaque payload semantics above the shared storage primitives rather
 than bypassing WAL and region-management invariants.
@@ -354,7 +354,7 @@ crate MUST remain usable without them.
 
 ## Startup and Recovery Strategy
 
-Startup is likely the most complex borromean operation. It must read
+Startup is likely the most complex Borromean operation. It must read
 metadata, locate the effective WAL tail and WAL head, replay the live
 collection state, rebuild bounded in-memory indexes, and detect any
 incomplete transaction cleanup or rotation that must be resumed. That is exactly
@@ -390,7 +390,7 @@ handles region addressing, sequences, and persistence ordering.
 shared storage engine for durability, ordering, and recovery rather
 than duplicating those mechanisms ad hoc.
 2. `RING-IMPL-COLL-002` Collection-specific in-memory state MUST obey
-the same explicit-capacity and no-allocation rules as borromean core.
+the same explicit-capacity and no-allocation rules as Borromean core.
 3. `RING-IMPL-COLL-003` A collection operation that needs I/O MUST be
 drivable through the same runtime-agnostic future model as core
 storage operations.

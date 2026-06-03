@@ -3,7 +3,7 @@ use crate::{MapFrontierMemory, StorageMemory, StorageOpenError, StorageRuntime};
 
 //= spec/implementation.md#panic-requirements
 //= type=test
-//# `RING-IMPL-PANIC-001` The borromean core library and its non-test
+//# `RING-IMPL-PANIC-001` The Borromean core library and its non-test
 //# support code MUST be panic free for all input data, including invalid
 //# API inputs, corrupt on-storage state, exhausted capacities, and
 //# device errors.

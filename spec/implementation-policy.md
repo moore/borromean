@@ -3,7 +3,7 @@
 ## Purpose
 
 This specification defines repository traceability policy and
-documentation-format rules for the borromean implementation
+documentation-format rules for the Borromean implementation
 specifications and their verification harnesses.
 [spec/ring/00-introduction.md](ring/00-introduction.md) and
 [spec/implementation.md](implementation.md) remain the source of truth for
