@@ -11,6 +11,8 @@
 //! Tier 1 supported APIs are [`Storage`], [`FlashIo`],
 //! [`CollectionId`], [`CollectionType`], [`LsmMap`], [`MapUpdate`],
 //! and [`MockFlash`] for tests and examples.
+//! With the `embedded-storage` feature enabled, `EmbeddedStorageFlash`
+//! is the Tier 1 adapter for `embedded-storage` NOR flash drivers.
 //! Low-level modules such as [`disk`], [`wal_record`], [`startup`], and
 //! [`storage`] are documented as advanced reference surfaces.
 //!
@@ -131,7 +133,7 @@ pub use mock::*;
 pub mod flash_io;
 pub use flash_io::*;
 
-/// `embedded-storage` NOR flash adapter.
+/// Feature-gated `embedded-storage` NOR flash adapter.
 #[cfg(feature = "embedded-storage")]
 pub mod embedded_storage;
 #[cfg(feature = "embedded-storage")]

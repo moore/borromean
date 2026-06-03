@@ -173,13 +173,17 @@ impl<
 //= type=test
 //# `RING-EMBEDDED-001` The crate MUST expose an `embedded-storage`
 //# feature that enables `EmbeddedStorageFlash`, `EmbeddedStorageOptions`,
-//# `EmbeddedStorageError`, and `EmbeddedStorageFormatError` without enabling
-//# the `std` feature.
+//# `EmbeddedStorageMetadataField`, `EmbeddedStorageError`, and
+//# `EmbeddedStorageFormatError` without enabling the `std` feature.
+//# `EmbeddedStorageFlash` MUST expose `new`, `options`, `inner`,
+//# `inner_mut`, and `into_inner` accessors for constructing the adapter,
+//# inspecting its options, and recovering the wrapped flash object.
 #[test]
 fn requirement_embedded_storage_feature_exposes_backend_api() {
     let flash = TestNorFlash::<256, 1, 8, 64, 16>::new(0x00);
-    let backing =
+    let mut backing =
         EmbeddedStorageFlash::<_, 64, 3>::new(flash, EmbeddedStorageOptions::new(0x00)).unwrap();
+    let _: Option<EmbeddedStorageMetadataField> = None;
     let _: Option<EmbeddedStorageError> = None;
     let _: Option<EmbeddedStorageFormatError> = None;
 
@@ -187,6 +191,9 @@ fn requirement_embedded_storage_feature_exposes_backend_api() {
         backing.options(),
         EmbeddedStorageOptions { erased_byte: 0x00 }
     );
+    assert_eq!(backing.inner().operations(), &[]);
+    assert_eq!(backing.inner_mut().operations(), &[]);
+    assert_eq!(backing.into_inner().operations(), &[]);
 }
 
 //= spec/embedded-storage.md#backend-behavior

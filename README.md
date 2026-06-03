@@ -19,12 +19,14 @@ storage rules. The implemented collection today is an LSM-style durable map.
 Borromean is alpha-quality engineering code. The storage core and durable map are working, covered
 by local specs and traceability tests, and suitable for experiments and prototypes. Channel, queue,
 and log-style collections remain experimental or planned. `MockFlash` supports tests and examples,
-while the Linux file-backed backend is for host testing and benchmarking.
+the optional `embedded-storage` backend adapts NOR flash drivers for embedded targets, and the
+Linux file-backed backend is for host testing and benchmarking.
 
 ## Quick Start
 
-This example uses `MockFlash` for the backing store. Real targets provide a flash driver by
-implementing [`FlashIo`](src/flash_io.rs).
+This example uses `MockFlash` for the backing store. Real targets can implement
+[`FlashIo`](src/flash_io.rs) directly, or enable the `embedded-storage` feature and wrap an
+`embedded_storage::nor_flash::NorFlash` driver with `EmbeddedStorageFlash`.
 
 ```rust
 use borromean::{
@@ -98,6 +100,7 @@ same deterministic workloads for each engine. The full generated report lives in
 - Architecture and API guide: [docs/architecture-and-api.md](docs/architecture-and-api.md)
 - Durable map format and behavior: [spec/map.md](spec/map.md)
 - Mock flash behavior: [spec/mock.md](spec/mock.md)
+- Embedded-storage backend behavior: [spec/embedded-storage.md](spec/embedded-storage.md)
 - Contributor tutorial for adding collections:
   [docs/implementing-a-collection.md](docs/implementing-a-collection.md)
 - Traceability and contribution notes: [CONTRIBUTING.md](CONTRIBUTING.md) and

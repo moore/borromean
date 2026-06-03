@@ -22,6 +22,7 @@ The Tier 1 supported API for readers and integrators is:
 - `CollectionId` and `CollectionType` for stable collection identity
 - `LsmMap` and `MapUpdate` for the durable map collection
 - `MockFlash` for tests and examples
+- feature-gated `EmbeddedStorageFlash` for `embedded-storage` NOR flash drivers
 
 Everything else is documented as advanced reference material. Those modules are useful when
 inspecting implementation details, debugging traceability, or extending the engine, but they are not
@@ -31,7 +32,9 @@ the primary onboarding path.
 
 The common storage flow is:
 
-1. Construct a flash backend that implements `FlashIo`.
+1. Construct a flash backend that implements `FlashIo`. Embedded targets can implement it directly
+   or enable the `embedded-storage` feature and wrap a `NorFlash` driver in
+   `EmbeddedStorageFlash`.
 2. Format or open the store through `Storage`, which binds exclusive mutable access to the backend.
 3. Create or open a map collection.
 4. Apply updates, snapshot the frontier, or flush it into manifest-backed
@@ -90,6 +93,7 @@ as a separate operation using the Target-Then-Greedy selection policy.
 - `src/collections/map/mod.rs`: map payload encoding, frontier logic, and map-specific storage
   helpers
 - `src/mock.rs`: in-memory flash model used by tests and examples
+- `src/embedded_storage.rs`: optional `embedded-storage` NOR flash adapter
 - `src/disk.rs` and `src/wal_record.rs`: advanced reference surfaces for exact bytes on disk and in
   WAL records
 

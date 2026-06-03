@@ -10,8 +10,11 @@ for tests that exercise hardware-like read, write, and erase granularity.
 
 1. `RING-EMBEDDED-001` The crate MUST expose an `embedded-storage`
 feature that enables `EmbeddedStorageFlash`, `EmbeddedStorageOptions`,
-`EmbeddedStorageError`, and `EmbeddedStorageFormatError` without enabling
-the `std` feature.
+`EmbeddedStorageMetadataField`, `EmbeddedStorageError`, and
+`EmbeddedStorageFormatError` without enabling the `std` feature.
+`EmbeddedStorageFlash` MUST expose `new`, `options`, `inner`,
+`inner_mut`, and `into_inner` accessors for constructing the adapter,
+inspecting its options, and recovering the wrapped flash object.
 
 ## Backend Behavior
 
