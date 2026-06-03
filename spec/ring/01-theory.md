@@ -287,6 +287,9 @@ capacity, the implementation MUST flush the collection's current
 logical frontier into collection-defined committed state, durably commit
 a new collection head, and clear the in-memory frontier before accepting
 further updates for that collection.
-17. `RING-CORE-017` After such a frontier-capacity flush, later updates
+17. `RING-CORE-016A` If a single update cannot fit in an empty mutable
+frontier buffer, the implementation MUST report explicit buffer
+exhaustion instead of flushing an empty frontier.
+18. `RING-CORE-017` After such a frontier-capacity flush, later updates
 for that collection MUST accumulate in a fresh in-memory frontier
 layered over the newly committed collection head.

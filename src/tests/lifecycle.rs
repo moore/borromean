@@ -173,11 +173,10 @@ fn assert_map_model<
     const REGION_SIZE: usize,
     const REGION_COUNT: usize,
     const MAX_COLLECTIONS: usize,
-    const MAX_INDEXES: usize,
     const MAX_RUNS: usize,
 >(
     storage: &mut Storage<'db, 'db, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
-    map: &mut LsmMap<'_, u64, u64, MAX_INDEXES, MAX_RUNS>,
+    map: &mut LsmMap<'_, u64, u64, MAX_RUNS>,
     expected: &[Option<u64>; KEY_SPACE],
 ) {
     for (key, expected_value) in expected.iter().enumerate() {
@@ -289,7 +288,6 @@ fn run_map_lifecycle_preserves_model_across_compaction_reclaim_and_rollover() {
     const REGION_COUNT: usize = 384;
     const MAX_LOG: usize = 524_288;
     const MAX_COLLECTIONS: usize = 8;
-    const MAX_INDEXES: usize = 128;
     const MAX_RUNS: usize = 128;
     const KEY_SPACE: usize = 96;
 
@@ -301,11 +299,10 @@ fn run_map_lifecycle_preserves_model_across_compaction_reclaim_and_rollover() {
         crate::test_storage_memory(),
     )
     .unwrap();
-    let mut map =
-        LsmMap::<u64, u64, MAX_INDEXES, MAX_RUNS>::new(&mut storage, crate::test_lsm_map_memory())
-            .unwrap()
-            .with_compaction_run_target(8)
-            .unwrap();
+    let mut map = LsmMap::<u64, u64, MAX_RUNS>::new(&mut storage, crate::test_lsm_map_memory())
+        .unwrap()
+        .with_compaction_run_target(8)
+        .unwrap();
     let collection_id = map.collection_id();
     let mut expected = [None; KEY_SPACE];
     let mut rng = LifecycleRng::new(0x5eed_cafe_f00d_fade);
@@ -332,30 +329,22 @@ fn run_map_lifecycle_preserves_model_across_compaction_reclaim_and_rollover() {
             service_storage_lifecycle(&mut storage, 24, &mut stats);
         }
         if operation_index % 509 == 508 {
-            assert_map_model::<
-                _,
-                KEY_SPACE,
-                REGION_SIZE,
-                REGION_COUNT,
-                MAX_COLLECTIONS,
-                MAX_INDEXES,
-                MAX_RUNS,
-            >(&mut storage, &mut map, &expected);
+            assert_map_model::<_, KEY_SPACE, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_RUNS>(
+                &mut storage,
+                &mut map,
+                &expected,
+            );
         }
     }
 
     map.compact(&mut storage).unwrap();
     stats.compactions += 1;
     service_storage_lifecycle(&mut storage, 2, &mut stats);
-    assert_map_model::<
-        _,
-        KEY_SPACE,
-        REGION_SIZE,
-        REGION_COUNT,
-        MAX_COLLECTIONS,
-        MAX_INDEXES,
-        MAX_RUNS,
-    >(&mut storage, &mut map, &expected);
+    assert_map_model::<_, KEY_SPACE, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_RUNS>(
+        &mut storage,
+        &mut map,
+        &expected,
+    );
 
     assert!(stats.compactions > 0);
     assert!(stats.wal_reclaims > 0);
@@ -368,21 +357,17 @@ fn run_map_lifecycle_preserves_model_across_compaction_reclaim_and_rollover() {
         crate::test_storage_memory(),
     )
     .unwrap();
-    let mut reopened_map = LsmMap::<u64, u64, MAX_INDEXES, MAX_RUNS>::open(
+    let mut reopened_map = LsmMap::<u64, u64, MAX_RUNS>::open(
         collection_id,
         &mut reopened,
         crate::test_lsm_map_memory(),
     )
     .unwrap();
-    assert_map_model::<
-        _,
-        KEY_SPACE,
-        REGION_SIZE,
-        REGION_COUNT,
-        MAX_COLLECTIONS,
-        MAX_INDEXES,
-        MAX_RUNS,
-    >(&mut reopened, &mut reopened_map, &expected);
+    assert_map_model::<_, KEY_SPACE, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_RUNS>(
+        &mut reopened,
+        &mut reopened_map,
+        &expected,
+    );
 }
 
 //= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements

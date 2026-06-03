@@ -29,18 +29,18 @@ fn requirement_each_public_operation_future_completes_when_polled_directly() {
         crate::test_map_frontier_memory(),
     )
     .unwrap();
-    source.set(1, 10).unwrap();
-    super::super::poll_ready(storage.snapshot_map_future::<_, _, 8>(&source)).unwrap();
+    source.set_in_memory(1, 10).unwrap();
+    super::super::poll_ready(storage.snapshot_map_future(&source)).unwrap();
 
-    super::super::poll_ready(storage.append_map_update_future::<u16, u16, 8>(
+    super::super::poll_ready(storage.append_map_update_future::<u16, u16>(
         CollectionId(82),
         &MapUpdate::Set { key: 2, value: 20 },
     ))
     .unwrap();
 
-    source.set(3, 30).unwrap();
+    source.set_in_memory(3, 30).unwrap();
     let committed_region =
-        super::super::poll_until_ready(storage.flush_map_future::<_, _, 8, 8>(&mut source), 4)
+        super::super::poll_until_ready(storage.flush_map_future::<_, _, 8>(&mut source), 4)
             .unwrap();
     assert_eq!(
         storage.collections()[0].basis(),
@@ -100,8 +100,8 @@ fn requirement_flush_future_keeps_collection_basis_on_previous_state_until_head_
                 crate::test_map_frontier_memory(),
             )
             .unwrap();
-            previous.set(1, 10).unwrap();
-            storage.flush_map::<_, _, 8, 8>(&mut previous).unwrap()
+            previous.set_in_memory(1, 10).unwrap();
+            storage.flush_map::<_, _, 8>(&mut previous).unwrap()
         };
 
         {
@@ -112,10 +112,10 @@ fn requirement_flush_future_keeps_collection_basis_on_previous_state_until_head_
                 crate::test_map_frontier_memory(),
             )
             .unwrap();
-            replacement.set(1, 11).unwrap();
-            replacement.set(2, 22).unwrap();
+            replacement.set_in_memory(1, 11).unwrap();
+            replacement.set_in_memory(2, 22).unwrap();
 
-            let future = storage.flush_map_future::<_, _, 8, 8>(&mut replacement);
+            let future = storage.flush_map_future::<_, _, 8>(&mut replacement);
             let mut future = pin!(future);
 
             for _ in 0..pending_polls {
@@ -151,8 +151,8 @@ fn requirement_flush_future_keeps_collection_basis_on_previous_state_until_head_
             crate::test_map_frontier_memory(),
         )
         .unwrap();
-        previous.set(1, 10).unwrap();
-        storage.flush_map::<_, _, 8, 8>(&mut previous).unwrap()
+        previous.set_in_memory(1, 10).unwrap();
+        storage.flush_map::<_, _, 8>(&mut previous).unwrap()
     };
 
     let replacement_region = {
@@ -163,10 +163,10 @@ fn requirement_flush_future_keeps_collection_basis_on_previous_state_until_head_
             crate::test_map_frontier_memory(),
         )
         .unwrap();
-        replacement.set(1, 11).unwrap();
-        replacement.set(2, 22).unwrap();
+        replacement.set_in_memory(1, 11).unwrap();
+        replacement.set_in_memory(2, 22).unwrap();
 
-        let future = storage.flush_map_future::<_, _, 8, 8>(&mut replacement);
+        let future = storage.flush_map_future::<_, _, 8>(&mut replacement);
         let mut future = pin!(future);
 
         assert!(matches!(
@@ -207,15 +207,15 @@ fn requirement_storage_owned_scratch_is_reusable_across_operations() {
 
     storage.create_map(CollectionId(83)).unwrap();
     storage
-        .append_map_update::<u16, u16, 8>(CollectionId(83), &MapUpdate::Set { key: 1, value: 10 })
+        .append_map_update::<u16, u16>(CollectionId(83), &MapUpdate::Set { key: 1, value: 10 })
         .unwrap();
     storage
-        .append_map_update::<u16, u16, 8>(CollectionId(83), &MapUpdate::Set { key: 2, value: 20 })
+        .append_map_update::<u16, u16>(CollectionId(83), &MapUpdate::Set { key: 2, value: 20 })
         .unwrap();
 
     let mut map_buffer = [0u8; 512];
     let map = storage
-        .open_map::<u16, u16, 8, 8>(
+        .open_map::<u16, u16, 8>(
             CollectionId(83),
             &mut map_buffer,
             crate::test_map_frontier_memory(),

@@ -179,8 +179,8 @@ distinct from map committed-region format codes such as
 
 The repository implementation also exposes lower-level storage bindings such
 as `Storage::create_map`, `Storage::open_map` with a frontier byte buffer
-and `MapFrontierMemory`,
-`update_map_frontier`, `append_map_update`, `snapshot_map`, `flush_map`,
+and `MapFrontierMemory`, storage-aware `MapFrontier::set` / `delete` /
+`apply_update`, `append_map_update`, `snapshot_map`, `flush_map`,
 `compact_map`, and `drop_map`. Those APIs are advanced plumbing around
 storage-returned `MapFrontier` values and the shared runtime; normal creation
 of a new durable map should use the object-level `LsmMap::new` API above so

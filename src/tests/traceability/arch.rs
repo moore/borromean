@@ -39,8 +39,8 @@ fn requirement_wal_storage_and_map_logic_are_exercised_through_separate_interfac
         crate::test_map_frontier_memory(),
     )
     .unwrap();
-    source.set(5, 50).unwrap();
-    let region_index = storage.flush_map::<_, _, 8, 8>(&mut source).unwrap();
+    source.set_in_memory(5, 50).unwrap();
+    let region_index = storage.flush_map::<_, _, 8>(&mut source).unwrap();
 
     drop(storage);
     let mut reopened =
@@ -52,7 +52,7 @@ fn requirement_wal_storage_and_map_logic_are_exercised_through_separate_interfac
 
     let mut reopened_buffer = [0u8; 256];
     let reopened_map = reopened
-        .open_map::<u16, u16, 8, 8>(
+        .open_map::<u16, u16, 8>(
             CollectionId(7),
             &mut reopened_buffer,
             crate::test_map_frontier_memory(),

@@ -117,21 +117,23 @@ fn requirement_public_decode_and_open_paths_expose_explicit_error_results() {
     }
     assert_storage_open_signature(Storage::<Flash, 256, 5>::open);
     let _: CreateMapFn<'_, '_> = Storage::<Flash, 256, 5>::create_map;
-    let _: AppendMapUpdateFn<'_, '_> =
-        Storage::<Flash, 256, 5, 8>::append_map_update::<u16, u16, 8>;
-    assert_storage_flush_signature(Storage::<Flash, 256, 5, 8>::flush_map::<u16, u16, 8, 8>);
+    let _: AppendMapUpdateFn<'_, '_> = Storage::<Flash, 256, 5, 8>::append_map_update::<u16, u16>;
+    assert_storage_flush_signature(Storage::<Flash, 256, 5, 8>::flush_map::<u16, u16, 8>);
 
     // Borrow-returning map APIs need named helpers so the compiler can
     // also verify the lifetime relationship between the caller's buffer
     // and the returned map value while still checking that the return
     // type is `Result<..., ...>`.
     fn assert_open_map_signature<'db, 'mem, 'a>(_: OpenMapFn<'db, 'mem, 'a>) {}
-    fn assert_map_set_signature<'a>(_: fn(&mut Map<'a>, u16, u16) -> Result<(), MapError>) {}
+    fn assert_map_set_signature<'db, 'mem, 'a>(
+        _: fn(&mut Map<'a>, &mut Store<'db, 'mem>, u16, u16) -> Result<(), MapStorageError>,
+    ) {
+    }
     fn assert_map_load_snapshot_signature<'a>(_: fn(&mut Map<'a>, &[u8]) -> Result<(), MapError>) {}
     fn assert_open_from_storage_signature<'a>(_: OpenFromStorageFn<'a>) {}
 
-    assert_open_map_signature(Storage::<Flash, 256, 5, 8>::open_map::<u16, u16, 8, 8>);
-    assert_map_set_signature(MapFrontier::<u16, u16, 8>::set);
+    assert_open_map_signature(Storage::<Flash, 256, 5, 8>::open_map::<u16, u16, 8>);
+    assert_map_set_signature(MapFrontier::<u16, u16, 8>::set::<Flash, 256, 5, 8>);
     assert_map_load_snapshot_signature(MapFrontier::<u16, u16, 8>::load_snapshot);
     assert_open_from_storage_signature(
         MapFrontier::<u16, u16, 8>::open_from_storage::<256, 5, Flash, 8>,

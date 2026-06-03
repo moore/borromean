@@ -165,7 +165,7 @@ Once the runtime and collection module exist, add the user-facing `Storage` help
 
 - `create_map` and `create_map_future`
 - `open_map`
-- `append_map_update` or `update_map_frontier`
+- `append_map_update` or storage-aware frontier mutation helpers
 - `snapshot_map`
 - `flush_map` and `flush_map_future`
 - `compact_map` if the collection has a multi-region retained basis

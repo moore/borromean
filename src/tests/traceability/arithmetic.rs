@@ -49,8 +49,8 @@ fn requirement_boundary_sensitive_storage_and_map_lengths_stay_in_range() {
         crate::test_map_frontier_memory(),
     )
     .unwrap();
-    map.set(1, 10).unwrap();
-    map.set(2, 20).unwrap();
+    map.set_in_memory(1, 10).unwrap();
+    map.set_in_memory(2, 20).unwrap();
 
     let snapshot_len = map.snapshot_len().unwrap();
     assert!(snapshot_len < 64);
@@ -157,6 +157,6 @@ fn run_large_map_entry_offsets_round_trip_with_32_bit_refs() {
     .unwrap();
     let large_value = HeaplessVec::<u8, 66_000>::from_slice(&[0u8; 66_000]).unwrap();
 
-    map.set(1, large_value).unwrap();
+    map.set_in_memory(1, large_value).unwrap();
     assert!(map.get_frontier(&1).unwrap().is_some());
 }

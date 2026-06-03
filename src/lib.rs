@@ -33,8 +33,8 @@
 //! )
 //! .unwrap();
 //!
-//! let mut map_memory = LsmMapMemory::<u16, u16, 8>::new();
-//! let mut map = LsmMap::<u16, u16, 8>::new(&mut storage, &mut map_memory).unwrap();
+//! let mut map_memory = LsmMapMemory::<u16, u16>::new();
+//! let mut map = LsmMap::<u16, u16>::new(&mut storage, &mut map_memory).unwrap();
 //! map.set(&mut storage, 7, 70).unwrap();
 //! assert_eq!(map.get(&mut storage, &7, |_, value| *value).unwrap(), Some(70));
 //! ```
@@ -74,8 +74,8 @@ pub(crate) fn test_storage_memory<
 }
 
 #[cfg(test)]
-pub(crate) fn test_lsm_map_memory<K, V, const MAX_INDEXES: usize, const MAX_RUNS: usize>(
-) -> &'static mut LsmMapMemory<K, V, MAX_INDEXES, MAX_RUNS>
+pub(crate) fn test_lsm_map_memory<K, V, const MAX_RUNS: usize>(
+) -> &'static mut LsmMapMemory<K, V, MAX_RUNS>
 where
     K: LsmKey,
     V: LsmValue,
@@ -434,14 +434,13 @@ enum AppliedMapUpdate {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn update_map_frontier_parts<
+fn apply_map_frontier_update_parts<
     K,
     V,
     IO,
     const REGION_SIZE: usize,
     const REGION_COUNT: usize,
     const MAX_COLLECTIONS: usize,
-    const MAX_INDEXES: usize,
     const MAX_RUNS: usize,
 >(
     state: &mut StorageRuntime<MAX_COLLECTIONS>,
@@ -455,7 +454,7 @@ fn update_map_frontier_parts<
     reclaim_plan: &mut storage::WalHeadReclaimPlan<MAX_COLLECTIONS>,
     open_plan: &mut startup::StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS>,
     #[cfg(feature = "perf-counters")] perf_metrics: &mut StoragePerfMetrics,
-    map: &mut MapFrontier<'_, K, V, MAX_INDEXES, MAX_RUNS>,
+    map: &mut MapFrontier<'_, K, V, MAX_RUNS>,
     update: &MapUpdate<K, V>,
 ) -> Result<(), MapStorageError>
 where
@@ -486,8 +485,7 @@ where
 
     #[cfg(feature = "perf-counters")]
     let encode_timer = StoragePerfTimerGuard::start();
-    let encoded_update =
-        MapFrontier::<K, V, MAX_INDEXES>::encode_update_into(update, payload_scratch);
+    let encoded_update = MapFrontier::<K, V>::encode_update_into(update, payload_scratch);
     #[cfg(feature = "perf-counters")]
     {
         perf_metrics.add_nanos(StoragePerfTimer::UpdateEncode, encode_timer.elapsed_nanos());
@@ -518,6 +516,9 @@ where
     let applied = match apply_result {
         Ok(undo) => AppliedMapUpdate::Undo(undo),
         Err(MapError::BufferTooSmall) => {
+            if map.frontier_is_empty() {
+                return Err(MapError::BufferTooSmall.into());
+            }
             #[cfg(feature = "perf-counters")]
             {
                 perf_metrics.increment(StoragePerfCounter::BufferTooSmallErrors);
@@ -654,7 +655,6 @@ fn compact_map_frontier_parts<
     const REGION_SIZE: usize,
     const REGION_COUNT: usize,
     const MAX_COLLECTIONS: usize,
-    const MAX_INDEXES: usize,
     const MAX_RUNS: usize,
 >(
     state: &mut StorageRuntime<MAX_COLLECTIONS>,
@@ -668,13 +668,9 @@ fn compact_map_frontier_parts<
     open_plan: &mut startup::StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS>,
     collection_id: CollectionId,
     run_target: usize,
-    mut opened: MapFrontier<'a, K, V, MAX_INDEXES, MAX_RUNS>,
+    mut opened: MapFrontier<'a, K, V, MAX_RUNS>,
     compaction_cursors: &mut heapless::Vec<crate::collections::map::RunEntryCursor<K, V>, MAX_RUNS>,
     duplicate_indices: &mut heapless::Vec<usize, MAX_RUNS>,
-    compaction_segment_entries: &mut heapless::Vec<
-        crate::collections::map::Entry<K, V>,
-        MAX_INDEXES,
-    >,
     retained_runs: &'a mut heapless::Vec<crate::collections::map::MapRunDescriptor<K>, MAX_RUNS>,
 ) -> Result<(crate::collections::map::MapFrontierState, Option<u32>), MapStorageError>
 where
@@ -731,8 +727,10 @@ where
             selected_runs,
             compaction_cursors,
             duplicate_indices,
-            compaction_segment_entries,
+            collection_scratch,
+            retained_runs,
         )?;
+    retained_runs.clear();
     let frontier_run = if opened.frontier_is_empty() {
         None
     } else {
@@ -747,7 +745,7 @@ where
             frontier_generation,
         )?
     };
-    let mut replacement = MapFrontier::<K, V, MAX_INDEXES, MAX_RUNS>::new_with_runs(
+    let mut replacement = MapFrontier::<K, V, MAX_RUNS>::new_with_runs(
         collection_id,
         collection_scratch,
         retained_runs,
@@ -956,10 +954,10 @@ impl<
         }
     }
 
-    fn ensure_map_frontier_cached<K, V, const MAX_INDEXES: usize, const MAX_RUNS: usize>(
+    fn ensure_map_frontier_cached<K, V, const MAX_RUNS: usize>(
         &mut self,
         collection_id: CollectionId,
-        memory: &mut crate::collections::map::LsmMapMemory<K, V, MAX_INDEXES, MAX_RUNS>,
+        memory: &mut crate::collections::map::LsmMapMemory<K, V, MAX_RUNS>,
     ) -> Result<(), MapStorageError>
     where
         K: LsmKey,
@@ -993,7 +991,7 @@ impl<
         memory.frontier.runs.clear();
         let generation = self.assign_map_frontier_buffer(collection_id);
         #[cfg(feature = "perf-counters")]
-        let frontier = MapFrontier::<K, V, MAX_INDEXES, MAX_RUNS>::open_from_storage_metered::<
+        let frontier = MapFrontier::<K, V, MAX_RUNS>::open_from_storage_metered::<
             REGION_SIZE,
             REGION_COUNT,
             IO,
@@ -1009,7 +1007,7 @@ impl<
             &mut self.memory.perf_metrics,
         )?;
         #[cfg(not(feature = "perf-counters"))]
-        let frontier = MapFrontier::<K, V, MAX_INDEXES, MAX_RUNS>::open_from_storage::<
+        let frontier = MapFrontier::<K, V, MAX_RUNS>::open_from_storage::<
             REGION_SIZE,
             REGION_COUNT,
             IO,
@@ -1526,9 +1524,9 @@ impl<
         run_once(move || self.create_map(collection_id))
     }
 
-    pub(crate) fn flush_map_inner<K, V, const MAX_INDEXES: usize, const MAX_RUNS: usize>(
+    pub(crate) fn flush_map_inner<K, V, const MAX_RUNS: usize>(
         &mut self,
-        map: &mut MapFrontier<'_, K, V, MAX_INDEXES, MAX_RUNS>,
+        map: &mut MapFrontier<'_, K, V, MAX_RUNS>,
     ) -> Result<u32, MapStorageError>
     where
         K: LsmKey,
@@ -1549,9 +1547,9 @@ impl<
     }
 
     /// Persists the supplied map frontier as a WAL snapshot basis.
-    pub fn snapshot_map<K, V, const MAX_INDEXES: usize>(
+    pub fn snapshot_map<K, V, const MAX_RUNS: usize>(
         &mut self,
-        map: &MapFrontier<'_, K, V, MAX_INDEXES>,
+        map: &MapFrontier<'_, K, V, MAX_RUNS>,
     ) -> Result<(), MapStorageError>
     where
         K: LsmKey,
@@ -1574,21 +1572,21 @@ impl<
     }
 
     /// Persists the supplied map frontier as a caller-driven snapshot future.
-    pub fn snapshot_map_future<'a, K, V, const MAX_INDEXES: usize>(
+    pub fn snapshot_map_future<'a, K, V, const MAX_RUNS: usize>(
         &'a mut self,
-        map: &'a MapFrontier<'a, K, V, MAX_INDEXES>,
+        map: &'a MapFrontier<'a, K, V, MAX_RUNS>,
     ) -> impl Future<Output = Result<(), MapStorageError>>
            + 'a
-           + use<'a, 'db, 'mem, K, V, MAX_INDEXES, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>
+           + use<'a, 'db, 'mem, K, V, MAX_RUNS, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>
     where
         K: LsmKey,
         V: LsmValue,
     {
-        run_once(move || self.snapshot_map::<K, V, MAX_INDEXES>(map))
+        run_once(move || self.snapshot_map::<K, V, MAX_RUNS>(map))
     }
 
     /// Encodes and appends a map update payload without mutating a caller-owned frontier.
-    pub fn append_map_update<K, V, const MAX_INDEXES: usize>(
+    pub fn append_map_update<K, V>(
         &mut self,
         collection_id: CollectionId,
         update: &MapUpdate<K, V>,
@@ -1620,7 +1618,7 @@ impl<
                     });
                 }
 
-                let used = MapFrontier::<K, V, MAX_INDEXES>::encode_update_into(
+                let used = MapFrontier::<K, V>::encode_update_into(
                     update,
                     &mut this.memory.payload_scratch,
                 )?;
@@ -1642,10 +1640,9 @@ impl<
         )
     }
 
-    /// Applies a map update to both the caller frontier and durable WAL state.
-    pub fn update_map_frontier<K, V, const MAX_INDEXES: usize, const MAX_RUNS: usize>(
+    pub(crate) fn apply_map_frontier_update<K, V, const MAX_RUNS: usize>(
         &mut self,
-        map: &mut MapFrontier<'_, K, V, MAX_INDEXES, MAX_RUNS>,
+        map: &mut MapFrontier<'_, K, V, MAX_RUNS>,
         update: &MapUpdate<K, V>,
     ) -> Result<(), MapStorageError>
     where
@@ -1657,14 +1654,13 @@ impl<
         ))
         .map_err(MapStorageError::from)?;
 
-        let result = update_map_frontier_parts::<
+        let result = apply_map_frontier_update_parts::<
             K,
             V,
             IO,
             REGION_SIZE,
             REGION_COUNT,
             MAX_COLLECTIONS,
-            MAX_INDEXES,
             MAX_RUNS,
         >(
             &mut self.memory.state,
@@ -1691,24 +1687,24 @@ impl<
     }
 
     /// Encodes and appends a map update as a caller-driven future.
-    pub fn append_map_update_future<'a, K, V, const MAX_INDEXES: usize>(
+    pub fn append_map_update_future<'a, K, V>(
         &'a mut self,
         collection_id: CollectionId,
         update: &'a MapUpdate<K, V>,
     ) -> impl Future<Output = Result<(), MapStorageError>>
            + 'a
-           + use<'a, 'db, 'mem, K, V, MAX_INDEXES, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>
+           + use<'a, 'db, 'mem, K, V, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>
     where
         K: LsmKey,
         V: LsmValue,
     {
-        run_once(move || self.append_map_update::<K, V, MAX_INDEXES>(collection_id, update))
+        run_once(move || self.append_map_update::<K, V>(collection_id, update))
     }
 
     /// Flushes the supplied map frontier into a new committed region.
-    pub fn flush_map<K, V, const MAX_INDEXES: usize, const MAX_RUNS: usize>(
+    pub fn flush_map<K, V, const MAX_RUNS: usize>(
         &mut self,
-        map: &mut MapFrontier<'_, K, V, MAX_INDEXES, MAX_RUNS>,
+        map: &mut MapFrontier<'_, K, V, MAX_RUNS>,
     ) -> Result<u32, MapStorageError>
     where
         K: LsmKey,
@@ -1716,14 +1712,14 @@ impl<
     {
         self.run_map_operation(
             StorageMode::FlushingCollection(CollectionFlushMode::CommitRegion),
-            |this| this.flush_map_inner::<K, V, MAX_INDEXES, MAX_RUNS>(map),
+            |this| this.flush_map_inner::<K, V, MAX_RUNS>(map),
         )
     }
 
     /// Flushes the supplied map frontier as a caller-driven future.
-    pub fn flush_map_future<'a, K, V, const MAX_INDEXES: usize, const MAX_RUNS: usize>(
+    pub fn flush_map_future<'a, K, V, const MAX_RUNS: usize>(
         &'a mut self,
-        map: &'a mut MapFrontier<'a, K, V, MAX_INDEXES, MAX_RUNS>,
+        map: &'a mut MapFrontier<'a, K, V, MAX_RUNS>,
     ) -> YieldingFlushMapFuture<
         'a,
         'db,
@@ -1734,7 +1730,6 @@ impl<
         MAX_COLLECTIONS,
         K,
         V,
-        MAX_INDEXES,
         MAX_RUNS,
     >
     where
@@ -1751,44 +1746,28 @@ impl<
             MAX_COLLECTIONS,
             K,
             V,
-            MAX_INDEXES,
             MAX_RUNS,
         >::new(self, map)
     }
 
     /// Compacts a map's committed run set into one replacement manifest.
-    pub fn compact_map<
-        K,
-        V,
-        const MAX_INDEXES: usize,
-        const MAX_RUNS: usize,
-        const RUN_TARGET: usize,
-    >(
+    pub fn compact_map<K, V, const MAX_RUNS: usize, const RUN_TARGET: usize>(
         &mut self,
         collection_id: CollectionId,
-        memory: &mut crate::collections::map::LsmMapMemory<K, V, MAX_INDEXES, MAX_RUNS>,
+        memory: &mut crate::collections::map::LsmMapMemory<K, V, MAX_RUNS>,
     ) -> Result<Option<u32>, MapStorageError>
     where
         K: LsmKey,
         V: LsmValue,
     {
-        self.compact_map_with_run_target::<K, V, MAX_INDEXES, MAX_RUNS>(
-            collection_id,
-            RUN_TARGET,
-            memory,
-        )
+        self.compact_map_with_run_target::<K, V, MAX_RUNS>(collection_id, RUN_TARGET, memory)
     }
 
-    pub(crate) fn compact_map_with_run_target<
-        K,
-        V,
-        const MAX_INDEXES: usize,
-        const MAX_RUNS: usize,
-    >(
+    pub(crate) fn compact_map_with_run_target<K, V, const MAX_RUNS: usize>(
         &mut self,
         collection_id: CollectionId,
         run_target: usize,
-        memory: &mut crate::collections::map::LsmMapMemory<K, V, MAX_INDEXES, MAX_RUNS>,
+        memory: &mut crate::collections::map::LsmMapMemory<K, V, MAX_RUNS>,
     ) -> Result<Option<u32>, MapStorageError>
     where
         K: LsmKey,
@@ -1797,72 +1776,68 @@ impl<
         self.invalidate_map_frontier_buffer(collection_id);
         #[cfg(feature = "perf-counters")]
         let compaction_timer = StoragePerfTimerGuard::start();
-        let result =
-            self.run_map_operation(
-                StorageMode::CompactingCollection(CollectionCompactionMode::Running),
-                |this| {
-                    #[cfg(feature = "perf-counters")]
-                    let opened =
-                        MapFrontier::<K, V, MAX_INDEXES, MAX_RUNS>::open_from_storage_metered::<
-                            REGION_SIZE,
-                            REGION_COUNT,
-                            IO,
-                            MAX_COLLECTIONS,
-                        >(
-                            &this.memory.state,
-                            this.backing,
-                            &mut this.memory.workspace,
-                            &mut this.memory.collection_scratch,
-                            collection_id,
-                            &mut this.memory.open_scratch,
-                            &mut memory.frontier,
-                            &mut this.memory.perf_metrics,
-                        )?;
-                    #[cfg(not(feature = "perf-counters"))]
-                    let opened = MapFrontier::<K, V, MAX_INDEXES, MAX_RUNS>::open_from_storage::<
-                        REGION_SIZE,
-                        REGION_COUNT,
-                        IO,
-                        MAX_COLLECTIONS,
-                    >(
-                        &this.memory.state,
-                        this.backing,
-                        &mut this.memory.workspace,
-                        &mut this.memory.collection_scratch,
-                        collection_id,
-                        &mut this.memory.open_scratch,
-                        &mut memory.frontier,
-                    )?;
-                    let (_, manifest_region) = compact_map_frontier_parts::<
-                        K,
-                        V,
-                        IO,
-                        REGION_SIZE,
-                        REGION_COUNT,
-                        MAX_COLLECTIONS,
-                        MAX_INDEXES,
-                        MAX_RUNS,
-                    >(
-                        &mut this.memory.state,
-                        this.backing,
-                        &mut this.memory.workspace,
-                        &mut this.memory.dirty_frontiers,
-                        &mut this.memory.collection_scratch,
-                        &mut this.memory.reclaim_source_regions,
-                        &mut this.memory.active_collections,
-                        &mut this.memory.reclaim_plan,
-                        &mut this.memory.open_plan,
-                        collection_id,
-                        run_target,
-                        opened,
-                        &mut memory.compaction_cursors,
-                        &mut memory.duplicate_indices,
-                        &mut memory.compaction_segment_entries,
-                        &mut memory.retained_runs,
-                    )?;
-                    Ok(manifest_region)
-                },
-            );
+        let result = self.run_map_operation(
+            StorageMode::CompactingCollection(CollectionCompactionMode::Running),
+            |this| {
+                #[cfg(feature = "perf-counters")]
+                let opened = MapFrontier::<K, V, MAX_RUNS>::open_from_storage_metered::<
+                    REGION_SIZE,
+                    REGION_COUNT,
+                    IO,
+                    MAX_COLLECTIONS,
+                >(
+                    &this.memory.state,
+                    this.backing,
+                    &mut this.memory.workspace,
+                    &mut this.memory.collection_scratch,
+                    collection_id,
+                    &mut this.memory.open_scratch,
+                    &mut memory.frontier,
+                    &mut this.memory.perf_metrics,
+                )?;
+                #[cfg(not(feature = "perf-counters"))]
+                let opened = MapFrontier::<K, V, MAX_RUNS>::open_from_storage::<
+                    REGION_SIZE,
+                    REGION_COUNT,
+                    IO,
+                    MAX_COLLECTIONS,
+                >(
+                    &this.memory.state,
+                    this.backing,
+                    &mut this.memory.workspace,
+                    &mut this.memory.collection_scratch,
+                    collection_id,
+                    &mut this.memory.open_scratch,
+                    &mut memory.frontier,
+                )?;
+                let (_, manifest_region) = compact_map_frontier_parts::<
+                    K,
+                    V,
+                    IO,
+                    REGION_SIZE,
+                    REGION_COUNT,
+                    MAX_COLLECTIONS,
+                    MAX_RUNS,
+                >(
+                    &mut this.memory.state,
+                    this.backing,
+                    &mut this.memory.workspace,
+                    &mut this.memory.dirty_frontiers,
+                    &mut this.memory.collection_scratch,
+                    &mut this.memory.reclaim_source_regions,
+                    &mut this.memory.active_collections,
+                    &mut this.memory.reclaim_plan,
+                    &mut this.memory.open_plan,
+                    collection_id,
+                    run_target,
+                    opened,
+                    &mut memory.compaction_cursors,
+                    &mut memory.duplicate_indices,
+                    &mut memory.retained_runs,
+                )?;
+                Ok(manifest_region)
+            },
+        );
         #[cfg(feature = "perf-counters")]
         {
             self.memory.perf_metrics.add_nanos(
@@ -1933,19 +1908,19 @@ impl<
     }
 
     /// Opens a live map collection into a caller-owned frontier buffer.
-    pub fn open_map<'a, K, V, const MAX_INDEXES: usize, const MAX_RUNS: usize>(
+    pub fn open_map<'a, K, V, const MAX_RUNS: usize>(
         &mut self,
         collection_id: CollectionId,
         buffer: &'a mut [u8],
         memory: &'a mut crate::collections::map::MapFrontierMemory<K, MAX_RUNS>,
-    ) -> Result<MapFrontier<'a, K, V, MAX_INDEXES, MAX_RUNS>, MapStorageError>
+    ) -> Result<MapFrontier<'a, K, V, MAX_RUNS>, MapStorageError>
     where
         K: LsmKey,
         V: LsmValue,
     {
         self.enter_mode(StorageMode::LoadingCollection(CollectionLoadMode::Running))
             .map_err(MapStorageError::from)?;
-        let result = MapFrontier::<K, V, MAX_INDEXES, MAX_RUNS>::open_from_storage::<
+        let result = MapFrontier::<K, V, MAX_RUNS>::open_from_storage::<
             REGION_SIZE,
             REGION_COUNT,
             IO,
@@ -1964,8 +1939,7 @@ impl<
     }
 }
 
-impl<'map, K, V, const MAX_INDEXES: usize, const MAX_RUNS: usize>
-    LsmMap<'map, K, V, MAX_INDEXES, MAX_RUNS>
+impl<'map, K, V, const MAX_RUNS: usize> LsmMap<'map, K, V, MAX_RUNS>
 where
     K: LsmKey,
     V: LsmValue,
@@ -1987,7 +1961,7 @@ where
         const MAX_COLLECTIONS: usize,
     >(
         storage: &mut Storage<'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
-        memory: &'map mut LsmMapMemory<K, V, MAX_INDEXES, MAX_RUNS>,
+        memory: &'map mut LsmMapMemory<K, V, MAX_RUNS>,
     ) -> Result<Self, LsmMapError> {
         let collection_id = storage.allocate_map_collection_id()?;
         storage.create_map(collection_id)?;
@@ -2009,13 +1983,13 @@ where
     >(
         collection_id: CollectionId,
         storage: &mut Storage<'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
-        memory: &'map mut LsmMapMemory<K, V, MAX_INDEXES, MAX_RUNS>,
+        memory: &'map mut LsmMapMemory<K, V, MAX_RUNS>,
     ) -> Result<Self, LsmMapError> {
         storage
             .enter_mode(StorageMode::LoadingCollection(CollectionLoadMode::Running))
             .map_err(MapStorageError::from)?;
         let result: Result<(), MapStorageError> = (|| {
-            let _frontier = MapFrontier::<K, V, MAX_INDEXES, MAX_RUNS>::open_from_storage::<
+            let _frontier = MapFrontier::<K, V, MAX_RUNS>::open_from_storage::<
                 REGION_SIZE,
                 REGION_COUNT,
                 IO,
@@ -2082,17 +2056,15 @@ where
             .perf_metrics
             .increment(StoragePerfCounter::MapReads);
         let result = (|| {
-            storage.ensure_map_frontier_cached::<K, V, MAX_INDEXES, MAX_RUNS>(
-                self.collection_id,
-                self.memory,
-            )?;
+            storage
+                .ensure_map_frontier_cached::<K, V, MAX_RUNS>(self.collection_id, self.memory)?;
             let cached_frontier = self
                 .memory
                 .cached_frontier
                 .take()
                 .ok_or(MapStorageError::UnknownCollection(self.collection_id))?;
             let buffer_generation = cached_frontier.buffer_generation;
-            let frontier = MapFrontier::<K, V, MAX_INDEXES, MAX_RUNS>::from_state(
+            let frontier = MapFrontier::<K, V, MAX_RUNS>::from_state(
                 cached_frontier.state,
                 &mut storage.memory.open_scratch,
                 &mut self.memory.frontier,
@@ -2160,30 +2132,27 @@ where
         #[cfg(feature = "perf-counters")]
         let write_timer = StoragePerfTimerGuard::start();
         let result = (|| {
-            storage.ensure_map_frontier_cached::<K, V, MAX_INDEXES, MAX_RUNS>(
-                self.collection_id,
-                self.memory,
-            )?;
+            storage
+                .ensure_map_frontier_cached::<K, V, MAX_RUNS>(self.collection_id, self.memory)?;
             let cached_frontier = self
                 .memory
                 .cached_frontier
                 .take()
                 .ok_or(MapStorageError::UnknownCollection(self.collection_id))?;
             let buffer_generation = cached_frontier.buffer_generation;
-            let mut frontier = MapFrontier::<K, V, MAX_INDEXES, MAX_RUNS>::from_state(
+            let mut frontier = MapFrontier::<K, V, MAX_RUNS>::from_state(
                 cached_frontier.state,
                 &mut storage.memory.open_scratch,
                 &mut self.memory.frontier,
             );
             let update = MapUpdate::Set { key, value };
-            let update_result = update_map_frontier_parts::<
+            let update_result = apply_map_frontier_update_parts::<
                 K,
                 V,
                 IO,
                 REGION_SIZE,
                 REGION_COUNT,
                 MAX_COLLECTIONS,
-                MAX_INDEXES,
                 MAX_RUNS,
             >(
                 &mut storage.memory.state,
@@ -2268,30 +2237,27 @@ where
         #[cfg(feature = "perf-counters")]
         let write_timer = StoragePerfTimerGuard::start();
         let result = (|| {
-            storage.ensure_map_frontier_cached::<K, V, MAX_INDEXES, MAX_RUNS>(
-                self.collection_id,
-                self.memory,
-            )?;
+            storage
+                .ensure_map_frontier_cached::<K, V, MAX_RUNS>(self.collection_id, self.memory)?;
             let cached_frontier = self
                 .memory
                 .cached_frontier
                 .take()
                 .ok_or(MapStorageError::UnknownCollection(self.collection_id))?;
             let buffer_generation = cached_frontier.buffer_generation;
-            let mut frontier = MapFrontier::<K, V, MAX_INDEXES, MAX_RUNS>::from_state(
+            let mut frontier = MapFrontier::<K, V, MAX_RUNS>::from_state(
                 cached_frontier.state,
                 &mut storage.memory.open_scratch,
                 &mut self.memory.frontier,
             );
             let update = MapUpdate::Delete { key };
-            let update_result = update_map_frontier_parts::<
+            let update_result = apply_map_frontier_update_parts::<
                 K,
                 V,
                 IO,
                 REGION_SIZE,
                 REGION_COUNT,
                 MAX_COLLECTIONS,
-                MAX_INDEXES,
                 MAX_RUNS,
             >(
                 &mut storage.memory.state,
@@ -2368,17 +2334,15 @@ where
         #[cfg(feature = "perf-counters")]
         let compaction_timer = StoragePerfTimerGuard::start();
         let result = (|| {
-            storage.ensure_map_frontier_cached::<K, V, MAX_INDEXES, MAX_RUNS>(
-                self.collection_id,
-                self.memory,
-            )?;
+            storage
+                .ensure_map_frontier_cached::<K, V, MAX_RUNS>(self.collection_id, self.memory)?;
             let cached_frontier = self
                 .memory
                 .cached_frontier
                 .take()
                 .ok_or(MapStorageError::UnknownCollection(self.collection_id))?;
             let buffer_generation = cached_frontier.buffer_generation;
-            let opened = MapFrontier::<K, V, MAX_INDEXES, MAX_RUNS>::from_state(
+            let opened = MapFrontier::<K, V, MAX_RUNS>::from_state(
                 cached_frontier.state,
                 &mut storage.memory.open_scratch,
                 &mut self.memory.frontier,
@@ -2390,7 +2354,6 @@ where
                 REGION_SIZE,
                 REGION_COUNT,
                 MAX_COLLECTIONS,
-                MAX_INDEXES,
                 MAX_RUNS,
             >(
                 &mut storage.memory.state,
@@ -2407,7 +2370,6 @@ where
                 opened,
                 &mut self.memory.compaction_cursors,
                 &mut self.memory.duplicate_indices,
-                &mut self.memory.compaction_segment_entries,
                 &mut self.memory.retained_runs,
             ) {
                 Ok((state, manifest_region)) => {

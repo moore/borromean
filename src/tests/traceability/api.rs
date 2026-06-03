@@ -18,7 +18,7 @@ fn requirement_storage_operations_use_bound_backing() {
 
     storage.create_map(CollectionId(11)).unwrap();
     storage
-        .append_map_update::<u16, u16, 8>(CollectionId(11), &MapUpdate::Set { key: 1, value: 10 })
+        .append_map_update::<u16, u16>(CollectionId(11), &MapUpdate::Set { key: 1, value: 10 })
         .unwrap();
     assert_eq!(storage.mode(), StorageMode::Idle);
 
@@ -59,10 +59,10 @@ fn requirement_blocking_and_future_entry_points_produce_equivalent_storage_state
     super::super::poll_until_ready(future_driven.create_map_future(CollectionId(61)), 16).unwrap();
 
     blocking
-        .append_map_update::<u16, u16, 8>(CollectionId(61), &MapUpdate::Set { key: 7, value: 70 })
+        .append_map_update::<u16, u16>(CollectionId(61), &MapUpdate::Set { key: 7, value: 70 })
         .unwrap();
     super::super::poll_until_ready(
-        future_driven.append_map_update_future::<u16, u16, 8>(
+        future_driven.append_map_update_future::<u16, u16>(
             CollectionId(61),
             &MapUpdate::Set { key: 7, value: 70 },
         ),
@@ -104,7 +104,7 @@ fn requirement_blocking_and_future_entry_points_produce_equivalent_storage_state
 
     let mut blocking_map_buffer = [0u8; REGION_SIZE];
     let blocking_map = reopened_blocking
-        .open_map::<u16, u16, 8, 8>(
+        .open_map::<u16, u16, 8>(
             CollectionId(61),
             &mut blocking_map_buffer,
             crate::test_map_frontier_memory(),
@@ -112,7 +112,7 @@ fn requirement_blocking_and_future_entry_points_produce_equivalent_storage_state
         .unwrap();
     let mut future_map_buffer = [0u8; REGION_SIZE];
     let future_map = reopened_future
-        .open_map::<u16, u16, 8, 8>(
+        .open_map::<u16, u16, 8>(
             CollectionId(61),
             &mut future_map_buffer,
             crate::test_map_frontier_memory(),
@@ -165,12 +165,12 @@ fn requirement_storage_context_owns_operation_scratch() {
     assert_eq!(storage.mode(), StorageMode::Idle);
     storage.create_map(CollectionId(12)).unwrap();
     storage
-        .append_map_update::<u16, u16, 8>(CollectionId(12), &MapUpdate::Set { key: 3, value: 30 })
+        .append_map_update::<u16, u16>(CollectionId(12), &MapUpdate::Set { key: 3, value: 30 })
         .unwrap();
 
     let mut map_buffer = [0u8; 256];
     let map = storage
-        .open_map::<u16, u16, 8, 8>(
+        .open_map::<u16, u16, 8>(
             CollectionId(12),
             &mut map_buffer,
             crate::test_map_frontier_memory(),
@@ -214,7 +214,7 @@ fn requirement_operations_use_storage_backing() {
 
     storage.create_map(CollectionId(13)).unwrap();
     storage
-        .append_map_update::<u16, u16, 8>(CollectionId(13), &MapUpdate::Set { key: 4, value: 40 })
+        .append_map_update::<u16, u16>(CollectionId(13), &MapUpdate::Set { key: 4, value: 40 })
         .unwrap();
     storage.drop_map(CollectionId(13)).unwrap();
 }
@@ -344,7 +344,7 @@ fn requirement_foreground_replay_and_recovery_share_wal_record_semantics() {
 
     storage.create_map(CollectionId(16)).unwrap();
     storage
-        .append_map_update::<u16, u16, 8>(CollectionId(16), &MapUpdate::Set { key: 1, value: 10 })
+        .append_map_update::<u16, u16>(CollectionId(16), &MapUpdate::Set { key: 1, value: 10 })
         .unwrap();
     let foreground_collections = [storage.collections()[0]];
     let foreground_append_offset = storage.wal_append_offset();

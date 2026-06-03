@@ -25,11 +25,11 @@ fn requirement_map_durability_and_recovery_only_change_when_the_shared_storage_e
         crate::test_map_frontier_memory(),
     )
     .unwrap();
-    source.set(1, 10).unwrap();
+    source.set_in_memory(1, 10).unwrap();
 
     let mut before_snapshot_buffer = [0u8; 512];
     let before_snapshot = storage
-        .open_map::<u16, u16, 8, 8>(
+        .open_map::<u16, u16, 8>(
             CollectionId(84),
             &mut before_snapshot_buffer,
             crate::test_map_frontier_memory(),
@@ -37,11 +37,11 @@ fn requirement_map_durability_and_recovery_only_change_when_the_shared_storage_e
         .unwrap();
     assert_eq!(before_snapshot.get_frontier(&1).unwrap(), None);
 
-    storage.snapshot_map::<_, _, 8>(&source).unwrap();
+    storage.snapshot_map(&source).unwrap();
 
     let mut after_snapshot_buffer = [0u8; 512];
     let after_snapshot = storage
-        .open_map::<u16, u16, 8, 8>(
+        .open_map::<u16, u16, 8>(
             CollectionId(84),
             &mut after_snapshot_buffer,
             crate::test_map_frontier_memory(),
@@ -49,10 +49,10 @@ fn requirement_map_durability_and_recovery_only_change_when_the_shared_storage_e
         .unwrap();
     assert_eq!(after_snapshot.get_frontier(&1).unwrap(), Some(10));
 
-    source.set(2, 20).unwrap();
+    source.set_in_memory(2, 20).unwrap();
     let mut before_update_buffer = [0u8; 512];
     let before_update = storage
-        .open_map::<u16, u16, 8, 8>(
+        .open_map::<u16, u16, 8>(
             CollectionId(84),
             &mut before_update_buffer,
             crate::test_map_frontier_memory(),
@@ -62,14 +62,14 @@ fn requirement_map_durability_and_recovery_only_change_when_the_shared_storage_e
 
     let mut payload_buffer = [0u8; 64];
     storage
-        .append_map_update::<u16, u16, 8>(CollectionId(84), &MapUpdate::Set { key: 2, value: 20 })
+        .append_map_update::<u16, u16>(CollectionId(84), &MapUpdate::Set { key: 2, value: 20 })
         .unwrap();
 
     let mut reopened_buffer = [0u8; 512];
     let mut reopened =
         Storage::<_, 512, 5, 8>::open(&mut flash, crate::test_storage_memory()).unwrap();
     let reopened_map = reopened
-        .open_map::<u16, u16, 8, 8>(
+        .open_map::<u16, u16, 8>(
             CollectionId(84),
             &mut reopened_buffer,
             crate::test_map_frontier_memory(),
@@ -104,19 +104,19 @@ fn requirement_collection_operations_with_io_are_drivable_as_runtime_agnostic_fu
         crate::test_map_frontier_memory(),
     )
     .unwrap();
-    source.set(1, 10).unwrap();
-    super::super::poll_ready(storage.snapshot_map_future::<_, _, 8>(&source)).unwrap();
+    source.set_in_memory(1, 10).unwrap();
+    super::super::poll_ready(storage.snapshot_map_future(&source)).unwrap();
 
     let mut payload_buffer = [0u8; 64];
-    super::super::poll_ready(storage.append_map_update_future::<u16, u16, 8>(
+    super::super::poll_ready(storage.append_map_update_future::<u16, u16>(
         CollectionId(84),
         &MapUpdate::Set { key: 2, value: 20 },
     ))
     .unwrap();
 
-    source.set(3, 30).unwrap();
+    source.set_in_memory(3, 30).unwrap();
     let committed_region =
-        super::super::poll_until_ready(storage.flush_map_future::<_, _, 8, 8>(&mut source), 4)
+        super::super::poll_until_ready(storage.flush_map_future::<_, _, 8>(&mut source), 4)
             .unwrap();
 
     let reclaim_region =

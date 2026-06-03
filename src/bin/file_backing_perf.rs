@@ -22,7 +22,6 @@ use serde::{Deserialize, Serialize};
 
 const DEFAULT_CONFIG_PATH: &str = "perf/file_backing.toml";
 const MAX_COLLECTIONS: usize = 64;
-const MAX_INDEXES: usize = 128;
 const MAX_RUNS: usize = 128;
 const PERF_THREAD_STACK_BYTES: usize = 64 * 1024 * 1024;
 const REDB_TABLE: TableDefinition<u64, &[u8]> = TableDefinition::new("kv");
@@ -1939,14 +1938,11 @@ where
         let map_memory = Box::leak(Box::new(LsmMapMemory::<
             u64,
             HeaplessVec<u8, VALUE_BYTES>,
-            MAX_INDEXES,
             MAX_RUNS,
         >::new()));
-        let mut map = LsmMap::<u64, HeaplessVec<u8, VALUE_BYTES>, MAX_INDEXES, MAX_RUNS>::new(
-            &mut storage,
-            map_memory,
-        )
-        .map_err(|error| format!("failed to create map: {error:?}"))?;
+        let mut map =
+            LsmMap::<u64, HeaplessVec<u8, VALUE_BYTES>, MAX_RUNS>::new(&mut storage, map_memory)
+                .map_err(|error| format!("failed to create map: {error:?}"))?;
         if let Some(target) = config.workload.compaction_run_target {
             map = map
                 .with_compaction_run_target(target)
@@ -2167,14 +2163,11 @@ where
         let map_memory = Box::leak(Box::new(LsmMapMemory::<
             u64,
             HeaplessVec<u8, VALUE_BYTES>,
-            MAX_INDEXES,
             MAX_RUNS,
         >::new()));
-        let mut map = LsmMap::<u64, HeaplessVec<u8, VALUE_BYTES>, MAX_INDEXES, MAX_RUNS>::new(
-            &mut storage,
-            map_memory,
-        )
-        .map_err(|error| format!("failed to create memory map: {error:?}"))?;
+        let mut map =
+            LsmMap::<u64, HeaplessVec<u8, VALUE_BYTES>, MAX_RUNS>::new(&mut storage, map_memory)
+                .map_err(|error| format!("failed to create memory map: {error:?}"))?;
         if let Some(target) = config.workload.compaction_run_target {
             map = map
                 .with_compaction_run_target(target)
@@ -2814,7 +2807,7 @@ fn run_borromean_preload<
 >(
     config: &PerfConfig,
     progress_label: &str,
-    maps: &mut [LsmMap<u64, HeaplessVec<u8, VALUE_BYTES>, MAX_INDEXES, MAX_RUNS>],
+    maps: &mut [LsmMap<u64, HeaplessVec<u8, VALUE_BYTES>, MAX_RUNS>],
     storage: &mut Storage<
         '_,
         '_,
@@ -3028,7 +3021,7 @@ fn execute_one_borromean_operation<
 >(
     config: &PerfConfig,
     rng: &mut XorShift64,
-    maps: &mut [LsmMap<u64, HeaplessVec<u8, VALUE_BYTES>, MAX_INDEXES, MAX_RUNS>],
+    maps: &mut [LsmMap<u64, HeaplessVec<u8, VALUE_BYTES>, MAX_RUNS>],
     storage: &mut Storage<
         '_,
         '_,
@@ -3600,7 +3593,7 @@ fn maybe_compact<
     const VALUE_BYTES: usize,
 >(
     config: &PerfConfig,
-    map: &mut LsmMap<u64, HeaplessVec<u8, VALUE_BYTES>, MAX_INDEXES, MAX_RUNS>,
+    map: &mut LsmMap<u64, HeaplessVec<u8, VALUE_BYTES>, MAX_RUNS>,
     storage: &mut Storage<
         '_,
         '_,
@@ -3688,7 +3681,7 @@ fn run_borromean_post_workload_maintenance<
     const VALUE_BYTES: usize,
 >(
     config: &PerfConfig,
-    maps: &mut [LsmMap<u64, HeaplessVec<u8, VALUE_BYTES>, MAX_INDEXES, MAX_RUNS>],
+    maps: &mut [LsmMap<u64, HeaplessVec<u8, VALUE_BYTES>, MAX_RUNS>],
     storage: &mut Storage<
         '_,
         '_,

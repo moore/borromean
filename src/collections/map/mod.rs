@@ -330,6 +330,8 @@ pub const MAP_REGION_V2_FORMAT: u16 = 4;
 pub const MAP_MANIFEST_V2_FORMAT: u16 = 5;
 /// Stable committed-region format identifier for immutable map run segments.
 pub const MAP_RUN_V2_FORMAT: u16 = 6;
+/// Default retained run descriptor capacity for public map handles.
+pub const DEFAULT_MAX_RUNS: usize = 8;
 /// Snapshot bytes representing an empty map basis.
 pub const EMPTY_MAP_SNAPSHOT: [u8; SNAPSHOT_HEADER_SIZE] = [
     SNAPSHOT_MAGIC[0],
@@ -1100,6 +1102,7 @@ fn encode_snapshot_range_from_snapshot_into(
     Ok(snapshot_len)
 }
 
+#[cfg(test)]
 fn encode_snapshot_from_entries_into<K, V>(
     entries: &[Entry<K, V>],
     snapshot: &mut [u8],
@@ -1547,6 +1550,7 @@ where
     Ok(used)
 }
 
+#[cfg(test)]
 fn encode_run_segment_from_entries_into<K, V>(
     run_payload: &mut [u8],
     generation: u64,
@@ -1703,14 +1707,14 @@ enum SearchResult {
 }
 
 /// Small durable map handle used by the public object-level API.
-pub struct LsmMap<'mem, K, V, const MAX_INDEXES: usize, const MAX_RUNS: usize = MAX_INDEXES>
+pub struct LsmMap<'mem, K, V, const MAX_RUNS: usize = DEFAULT_MAX_RUNS>
 where
     K: LsmKey,
     V: LsmValue,
 {
     pub(crate) collection_id: CollectionId,
     pub(crate) compaction_run_target: usize,
-    pub(crate) memory: &'mem mut LsmMapMemory<K, V, MAX_INDEXES, MAX_RUNS>,
+    pub(crate) memory: &'mem mut LsmMapMemory<K, V, MAX_RUNS>,
     _phantom: PhantomData<(K, V)>,
 }
 
@@ -1720,7 +1724,7 @@ pub(crate) struct CachedMapFrontier {
 }
 
 /// Caller-owned memory for the public durable map handle.
-pub struct LsmMapMemory<K, V, const MAX_INDEXES: usize, const MAX_RUNS: usize = MAX_INDEXES>
+pub struct LsmMapMemory<K, V, const MAX_RUNS: usize = DEFAULT_MAX_RUNS>
 where
     K: LsmKey,
     V: LsmValue,
@@ -1730,12 +1734,10 @@ where
     pub(crate) compaction_cursors: Vec<RunEntryCursor<K, V>, MAX_RUNS>,
     pub(crate) duplicate_indices: Vec<usize, MAX_RUNS>,
     pub(crate) retained_runs: Vec<MapRunDescriptor<K>, MAX_RUNS>,
-    pub(crate) compaction_segment_entries: Vec<Entry<K, V>, MAX_INDEXES>,
     _phantom: PhantomData<(K, V)>,
 }
 
-impl<K, V, const MAX_INDEXES: usize, const MAX_RUNS: usize>
-    LsmMapMemory<K, V, MAX_INDEXES, MAX_RUNS>
+impl<K, V, const MAX_RUNS: usize> LsmMapMemory<K, V, MAX_RUNS>
 where
     K: LsmKey,
     V: LsmValue,
@@ -1748,14 +1750,12 @@ where
             compaction_cursors: Vec::new(),
             duplicate_indices: Vec::new(),
             retained_runs: Vec::new(),
-            compaction_segment_entries: Vec::new(),
             _phantom: PhantomData,
         }
     }
 }
 
-impl<K, V, const MAX_INDEXES: usize, const MAX_RUNS: usize> Default
-    for LsmMapMemory<K, V, MAX_INDEXES, MAX_RUNS>
+impl<K, V, const MAX_RUNS: usize> Default for LsmMapMemory<K, V, MAX_RUNS>
 where
     K: LsmKey,
     V: LsmValue,
@@ -1783,8 +1783,7 @@ impl<K, const MAX_RUNS: usize> Default for MapFrontierMemory<K, MAX_RUNS> {
     }
 }
 
-impl<'mem, K, V, const MAX_INDEXES: usize, const MAX_RUNS: usize>
-    LsmMap<'mem, K, V, MAX_INDEXES, MAX_RUNS>
+impl<'mem, K, V, const MAX_RUNS: usize> LsmMap<'mem, K, V, MAX_RUNS>
 where
     K: LsmKey,
     V: LsmValue,
@@ -1792,7 +1791,7 @@ where
     pub(crate) fn from_collection_id(
         collection_id: CollectionId,
         compaction_run_target: usize,
-        memory: &'mem mut LsmMapMemory<K, V, MAX_INDEXES, MAX_RUNS>,
+        memory: &'mem mut LsmMapMemory<K, V, MAX_RUNS>,
     ) -> Self {
         memory.cached_frontier = None;
         memory.frontier.runs.clear();
@@ -1814,7 +1813,7 @@ where
 }
 
 /// Caller-owned bounded map frontier used by advanced storage helpers.
-pub struct MapFrontier<'a, K, V, const MAX_INDEXES: usize, const MAX_RUNS: usize = MAX_INDEXES> {
+pub struct MapFrontier<'a, K, V, const MAX_RUNS: usize = DEFAULT_MAX_RUNS> {
     id: CollectionId,
     record_count: EntryCount,
     next_record_offset: RecordOffset,
@@ -2066,7 +2065,7 @@ where
     }
 }
 
-struct CompactionRunWriter<'a, K, V, const MAX_INDEXES: usize>
+struct CompactionRunWriter<'a, K, V, const MAX_RUNS: usize>
 where
     K: Debug + Ord + PartialOrd + Eq + PartialEq,
     V: Debug,
@@ -2077,16 +2076,15 @@ where
     lowest_region: Option<u32>,
     region_count: u32,
     state_count: u32,
-    segment_entries: &'a mut Vec<Entry<K, V>, MAX_INDEXES>,
+    segment: MapFrontier<'a, K, V, MAX_RUNS>,
 }
 
-impl<'a, K, V, const MAX_INDEXES: usize> CompactionRunWriter<'a, K, V, MAX_INDEXES>
+impl<'a, K, V, const MAX_RUNS: usize> CompactionRunWriter<'a, K, V, MAX_RUNS>
 where
     K: LsmKey,
     V: LsmValue,
 {
-    fn new(generation: u64, segment_entries: &'a mut Vec<Entry<K, V>, MAX_INDEXES>) -> Self {
-        segment_entries.clear();
+    fn new(generation: u64, segment: MapFrontier<'a, K, V, MAX_RUNS>) -> Self {
         Self {
             generation,
             next_region: None,
@@ -2094,7 +2092,7 @@ where
             lowest_region: None,
             region_count: 0,
             state_count: 0,
-            segment_entries,
+            segment,
         }
     }
 
@@ -2115,56 +2113,80 @@ where
         open_plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS>,
         entry: Entry<K, V>,
     ) -> Result<(), MapStorageError> {
-        match self.segment_entries.push(entry) {
-            Ok(()) => {
-                if self.segment_entries_fit(workspace)? {
-                    self.increment_state_count()?;
-                    return Ok(());
+        match self.try_push_entry(workspace, &entry)? {
+            true => self.increment_state_count(),
+            false if !self.segment.frontier_is_empty() => {
+                self.flush_segment::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
+                    collection_id,
+                    storage,
+                    flash,
+                    workspace,
+                    reclaim_source_regions,
+                    active_collections,
+                    reclaim_plan,
+                    open_plan,
+                )?;
+                if !self.try_push_entry(workspace, &entry)? {
+                    return Err(MapStorageError::Map(MapError::BufferTooSmall));
                 }
+                self.increment_state_count()
+            }
+            false => Err(MapStorageError::Map(MapError::BufferTooSmall)),
+        }
+    }
 
-                let entry = self
-                    .segment_entries
-                    .pop()
-                    .ok_or(MapError::SerializationError)?;
-                self.flush_segment::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
-                    collection_id,
-                    storage,
-                    flash,
-                    workspace,
-                    reclaim_source_regions,
-                    active_collections,
-                    reclaim_plan,
-                    open_plan,
-                )?;
-                self.segment_entries
-                    .push(entry)
-                    .map_err(|_| MapError::BufferTooSmall)?;
-                match self.segment_entries_fit(workspace)? {
-                    true => {}
-                    false => return Err(MapStorageError::Map(MapError::BufferTooSmall)),
+    fn try_push_entry<const REGION_SIZE: usize>(
+        &mut self,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        entry: &Entry<K, V>,
+    ) -> Result<bool, MapError> {
+        let (payload_region, undo_scratch) = workspace.encode_buffers();
+        match self
+            .segment
+            .set_worker_with_undo(&entry.key, entry.value.as_ref(), undo_scratch)
+        {
+            Ok(undo) => {
+                if self.segment_fits_in_payload::<REGION_SIZE>(payload_region)? {
+                    Ok(true)
+                } else {
+                    self.segment
+                        .restore_from_mutation_undo(undo, undo_scratch)?;
+                    Ok(false)
                 }
-                self.increment_state_count()
             }
-            Err(entry) => {
-                self.flush_segment::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
-                    collection_id,
-                    storage,
-                    flash,
-                    workspace,
-                    reclaim_source_regions,
-                    active_collections,
-                    reclaim_plan,
-                    open_plan,
-                )?;
-                self.segment_entries
-                    .push(entry)
-                    .map_err(|_| MapError::BufferTooSmall)?;
-                match self.segment_entries_fit(workspace)? {
-                    true => {}
-                    false => return Err(MapStorageError::Map(MapError::BufferTooSmall)),
-                }
-                self.increment_state_count()
-            }
+            Err(MapError::BufferTooSmall) if !self.segment.frontier_is_empty() => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn segment_fits_in_payload<const REGION_SIZE: usize>(
+        &self,
+        payload_region: &mut [u8; REGION_SIZE],
+    ) -> Result<bool, MapError> {
+        if self.segment.frontier_is_empty() {
+            return Ok(true);
+        }
+
+        let lower: Entry<K, V> = self.segment.frontier_entry(0)?;
+        let upper_index = self
+            .segment
+            .frontier_entry_count()
+            .checked_sub(1)
+            .ok_or(MapError::SerializationError)?;
+        let upper: Entry<K, V> = self.segment.frontier_entry(upper_index)?;
+        let payload = committed_payload_buffer::<REGION_SIZE>(payload_region)?;
+        match encode_run_segment_with_snapshot_writer(
+            payload,
+            self.generation,
+            self.next_region,
+            self.segment.frontier_entry_count(),
+            &lower.key,
+            &upper.key,
+            |snapshot| self.segment.encode_snapshot_into(snapshot),
+        ) {
+            Ok(_) => Ok(true),
+            Err(MapError::BufferTooSmall) => Ok(false),
+            Err(error) => Err(error),
         }
     }
 
@@ -2225,24 +2247,6 @@ where
         }))
     }
 
-    fn segment_entries_fit<const REGION_SIZE: usize>(
-        &self,
-        workspace: &mut StorageWorkspace<REGION_SIZE>,
-    ) -> Result<bool, MapError> {
-        let (payload, _) = workspace.encode_buffers();
-        let payload = committed_payload_buffer::<REGION_SIZE>(payload)?;
-        match encode_run_segment_from_entries_into(
-            payload,
-            self.generation,
-            self.next_region,
-            self.segment_entries.as_slice(),
-        ) {
-            Ok(_) => Ok(true),
-            Err(MapError::BufferTooSmall) => Ok(false),
-            Err(error) => Err(error),
-        }
-    }
-
     fn flush_segment<
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
@@ -2259,10 +2263,17 @@ where
         reclaim_plan: &mut WalHeadReclaimPlan<MAX_COLLECTIONS>,
         open_plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS>,
     ) -> Result<(), MapStorageError> {
-        if self.segment_entries.is_empty() {
+        if self.segment.frontier_is_empty() {
             return Ok(());
         }
 
+        let lower: Entry<K, V> = self.segment.frontier_entry(0)?;
+        let upper_index = self
+            .segment
+            .frontier_entry_count()
+            .checked_sub(1)
+            .ok_or(MapError::SerializationError)?;
+        let upper: Entry<K, V> = self.segment.frontier_entry(upper_index)?;
         let region_index = storage.reserve_next_region_for::<REGION_SIZE, REGION_COUNT, IO>(
             flash,
             workspace,
@@ -2275,11 +2286,15 @@ where
         {
             let (payload, _) = workspace.encode_buffers();
             let payload = committed_payload_buffer::<REGION_SIZE>(payload)?;
-            let used = encode_run_segment_from_entries_into(
+            let entry_count = self.segment.frontier_entry_count();
+            let used = encode_run_segment_with_snapshot_writer(
                 payload,
                 self.generation,
                 self.next_region,
-                self.segment_entries.as_slice(),
+                entry_count,
+                &lower.key,
+                &upper.key,
+                |snapshot| self.segment.encode_snapshot_into(snapshot),
             )?;
             storage.write_committed_region::<REGION_SIZE, REGION_COUNT, IO>(
                 flash,
@@ -2298,7 +2313,7 @@ where
             .region_count
             .checked_add(1)
             .ok_or(MapError::SerializationError)?;
-        self.segment_entries.clear();
+        self.segment.clear_frontier();
         Ok(())
     }
 
@@ -2403,8 +2418,7 @@ fn read_run_segment_next_region<const REGION_SIZE: usize, IO: FlashIo>(
     Ok(view.next_region)
 }
 
-impl<'a, K, V, const MAX_INDEXES: usize, const MAX_RUNS: usize>
-    MapFrontier<'a, K, V, MAX_INDEXES, MAX_RUNS>
+impl<'a, K, V, const MAX_RUNS: usize> MapFrontier<'a, K, V, MAX_RUNS>
 where
     K: LsmKey,
     V: LsmValue,
@@ -2487,8 +2501,72 @@ where
         self.runs.len()
     }
 
-    /// Inserts or replaces a key with the supplied value.
-    pub fn set(&mut self, key: K, value: V) -> Result<(), MapError>
+    pub(crate) fn frontier_entry_count(&self) -> usize {
+        self.record_count.0 as usize
+    }
+
+    /// Inserts or replaces a key with the supplied value and persists the update.
+    pub fn set<
+        'db,
+        'mem,
+        IO: FlashIo,
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        const MAX_COLLECTIONS: usize,
+    >(
+        &mut self,
+        storage: &mut crate::Storage<'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
+        key: K,
+        value: V,
+    ) -> Result<(), MapStorageError>
+    where
+        K: LsmKey,
+        V: LsmValue,
+    {
+        self.apply_update(storage, &MapUpdate::Set { key, value })
+    }
+
+    /// Deletes a key from the logical map and persists the update.
+    pub fn delete<
+        'db,
+        'mem,
+        IO: FlashIo,
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        const MAX_COLLECTIONS: usize,
+    >(
+        &mut self,
+        storage: &mut crate::Storage<'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
+        key: K,
+    ) -> Result<(), MapStorageError>
+    where
+        K: LsmKey,
+        V: LsmValue,
+    {
+        self.apply_update(storage, &MapUpdate::Delete { key })
+    }
+
+    /// Applies and persists a map update, flushing this frontier if byte capacity is exhausted.
+    pub fn apply_update<
+        'db,
+        'mem,
+        IO: FlashIo,
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        const MAX_COLLECTIONS: usize,
+    >(
+        &mut self,
+        storage: &mut crate::Storage<'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
+        update: &MapUpdate<K, V>,
+    ) -> Result<(), MapStorageError>
+    where
+        K: LsmKey,
+        V: LsmValue,
+    {
+        storage.apply_map_frontier_update(self, update)
+    }
+
+    pub(crate) fn set_in_memory(&mut self, key: K, value: V) -> Result<(), MapError>
     where
         K: LsmKey,
         V: LsmValue,
@@ -2496,8 +2574,7 @@ where
         self.set_worker(key, Some(value))
     }
 
-    /// Deletes a key from the logical map.
-    pub fn delete(&mut self, key: K) -> Result<(), MapError>
+    pub(crate) fn delete_in_memory(&mut self, key: K) -> Result<(), MapError>
     where
         K: LsmKey,
         V: LsmValue,
@@ -2510,21 +2587,29 @@ where
         K: LsmKey,
         V: LsmValue,
     {
-        let search_result = self.find_index(&key)?;
+        self.set_worker_ref(&key, value.as_ref())
+    }
+
+    fn set_worker_ref(&mut self, key: &K, value: Option<&V>) -> Result<(), MapError>
+    where
+        K: LsmKey,
+        V: LsmValue,
+    {
+        let search_result = self.find_index(key)?;
 
         match search_result {
             SearchResult::Found(index) => {
                 // Updating in place is a possible space optimization, but the
                 // current format keeps append-only entry payloads until the
                 // next snapshot/flush compacts them.
-                let (start, end) = self.add_entry(&key, value.as_ref())?;
+                let (start, end) = self.add_entry(key, value)?;
 
                 EntryRef::write(self.map, index, start, end)?;
 
                 self.next_record_offset = end;
             }
             SearchResult::NotFound(index) => {
-                let (start, end) = self.add_entry(&key, value.as_ref())?;
+                let (start, end) = self.add_entry(key, value)?;
                 if index == self.next_record_index {
                     EntryRef::write(self.map, index, start, end)?;
                 } else {
@@ -2562,7 +2647,10 @@ where
         let search_result = self.find_index(key)?;
         let entry_len = encode_entry_into(key, value, scratch)?;
         let start = self.next_record_offset;
-        let index_offset = self.next_record_index.offset(self.map)?;
+        let index_offset = self
+            .next_record_index
+            .offset(self.map)
+            .map_err(|_| MapError::BufferTooSmall)?;
         if start.0 >= index_offset {
             return Err(MapError::BufferTooSmall);
         }
@@ -3096,7 +3184,8 @@ where
         selected_runs: usize,
         cursors: &mut Vec<RunEntryCursor<K, V>, MAX_RUNS>,
         duplicate_indices: &mut Vec<usize, MAX_RUNS>,
-        segment_entries: &mut Vec<Entry<K, V>, MAX_INDEXES>,
+        segment_buffer: &'a mut [u8],
+        segment_runs: &'a mut Vec<MapRunDescriptor<K>, MAX_RUNS>,
     ) -> Result<Option<MapRunDescriptor<K>>, MapStorageError> {
         if selected_runs == 0 {
             return Ok(None);
@@ -3117,10 +3206,10 @@ where
                 })?;
         }
 
-        let mut writer = CompactionRunWriter::<K, V, MAX_INDEXES>::new(
-            self.next_run_generation(),
-            segment_entries,
-        );
+        let segment =
+            MapFrontier::<K, V, MAX_RUNS>::new_with_runs(self.id, segment_buffer, segment_runs)?;
+        let mut writer =
+            CompactionRunWriter::<K, V, MAX_RUNS>::new(self.next_run_generation(), segment);
         loop {
             let mut min_index: Option<usize> = None;
             for index in 0..cursors.len() {
@@ -3307,7 +3396,10 @@ where
         V: LsmValue,
     {
         let start = self.next_record_offset;
-        let index_offset = self.next_record_index.offset(self.map)?;
+        let index_offset = self
+            .next_record_index
+            .offset(self.map)
+            .map_err(|_| MapError::BufferTooSmall)?;
         if start.0 >= index_offset {
             return Err(MapError::BufferTooSmall);
         }
@@ -3879,8 +3971,8 @@ where
     pub fn apply_update_payload(&mut self, payload: &[u8]) -> Result<(), MapError> {
         let update: MapUpdate<K, V> = from_bytes(payload)?;
         match update {
-            MapUpdate::Set { key, value } => self.set(key, value),
-            MapUpdate::Delete { key } => self.delete(key),
+            MapUpdate::Set { key, value } => self.set_in_memory(key, value),
+            MapUpdate::Delete { key } => self.delete_in_memory(key),
         }
     }
 
@@ -4685,14 +4777,7 @@ where
                                 if target_basis
                                     == crate::StartupCollectionBasis::Region(region_index)
                                 {
-                                    load_map_basis_from_flash::<
-                                        REGION_SIZE,
-                                        IO,
-                                        K,
-                                        V,
-                                        MAX_INDEXES,
-                                        MAX_RUNS,
-                                    >(
+                                    load_map_basis_from_flash::<REGION_SIZE, IO, K, V, MAX_RUNS>(
                                         flash,
                                         storage.metadata(),
                                         collection_id,
@@ -4770,14 +4855,7 @@ where
                                 if target_basis
                                     == crate::StartupCollectionBasis::Region(region_index)
                                 {
-                                    load_map_basis_from_flash::<
-                                        REGION_SIZE,
-                                        IO,
-                                        K,
-                                        V,
-                                        MAX_INDEXES,
-                                        MAX_RUNS,
-                                    >(
+                                    load_map_basis_from_flash::<REGION_SIZE, IO, K, V, MAX_RUNS>(
                                         flash,
                                         storage.metadata(),
                                         collection_id,
@@ -4815,20 +4893,13 @@ where
     }
 }
 
-fn load_map_basis_from_flash<
-    const REGION_SIZE: usize,
-    IO: FlashIo,
-    K,
-    V,
-    const MAX_INDEXES: usize,
-    const MAX_RUNS: usize,
->(
+fn load_map_basis_from_flash<const REGION_SIZE: usize, IO: FlashIo, K, V, const MAX_RUNS: usize>(
     flash: &mut IO,
     metadata: crate::StorageMetadata,
     collection_id: CollectionId,
     region_index: u32,
     basis_scratch: &mut [u8],
-    map: &mut MapFrontier<'_, K, V, MAX_INDEXES, MAX_RUNS>,
+    map: &mut MapFrontier<'_, K, V, MAX_RUNS>,
 ) -> Result<(), MapStorageError>
 where
     K: LsmKey,

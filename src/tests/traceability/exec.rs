@@ -121,18 +121,18 @@ fn requirement_each_fallible_storage_operation_is_drivable_as_one_future() {
         crate::test_map_frontier_memory(),
     )
     .unwrap();
-    source.set(1, 10).unwrap();
-    super::super::poll_ready(storage.snapshot_map_future::<_, _, 8>(&source)).unwrap();
+    source.set_in_memory(1, 10).unwrap();
+    super::super::poll_ready(storage.snapshot_map_future(&source)).unwrap();
 
-    super::super::poll_ready(storage.append_map_update_future::<u16, u16, 8>(
+    super::super::poll_ready(storage.append_map_update_future::<u16, u16>(
         CollectionId(81),
         &MapUpdate::Set { key: 2, value: 20 },
     ))
     .unwrap();
 
-    source.set(3, 30).unwrap();
+    source.set_in_memory(3, 30).unwrap();
     let committed_region =
-        super::super::poll_until_ready(storage.flush_map_future::<_, _, 8, 8>(&mut source), 4)
+        super::super::poll_until_ready(storage.flush_map_future::<_, _, 8>(&mut source), 4)
             .unwrap();
     assert_eq!(
         storage.collections()[0].basis(),
@@ -228,8 +228,8 @@ fn requirement_single_threaded_poll_loop_drives_operation_futures_to_completion(
             crate::test_map_frontier_memory(),
         )
         .unwrap();
-        map.set(7, 70).unwrap();
-        super::super::poll_until_ready(storage.flush_map_future::<_, _, 8, 8>(&mut map), 4).unwrap()
+        map.set_in_memory(7, 70).unwrap();
+        super::super::poll_until_ready(storage.flush_map_future::<_, _, 8>(&mut map), 4).unwrap()
     };
     assert_eq!(
         storage.collections()[0].basis(),
@@ -250,7 +250,7 @@ fn requirement_single_threaded_poll_loop_drives_operation_futures_to_completion(
     let mut reopened_map_buffer = [0u8; REGION_SIZE];
     let mut reopened = reopened;
     let reopened_map = reopened
-        .open_map::<u16, u16, 8, 8>(
+        .open_map::<u16, u16, 8>(
             CollectionId(81),
             &mut reopened_map_buffer,
             crate::test_map_frontier_memory(),
@@ -291,10 +291,10 @@ fn requirement_storage_can_be_reused_only_after_an_operation_future_is_finished_
         crate::test_map_frontier_memory(),
     )
     .unwrap();
-    map.set(1, 10).unwrap();
+    map.set_in_memory(1, 10).unwrap();
 
     {
-        let future = storage.flush_map_future::<_, _, 8, 8>(&mut map);
+        let future = storage.flush_map_future::<_, _, 8>(&mut map);
         let mut future = pin!(future);
         assert!(matches!(
             super::super::poll_once(future.as_mut()),
@@ -303,6 +303,6 @@ fn requirement_storage_can_be_reused_only_after_an_operation_future_is_finished_
     }
 
     storage
-        .append_map_update::<u16, u16, 8>(CollectionId(82), &MapUpdate::Set { key: 2, value: 20 })
+        .append_map_update::<u16, u16>(CollectionId(82), &MapUpdate::Set { key: 2, value: 20 })
         .unwrap();
 }

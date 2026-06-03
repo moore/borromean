@@ -22,7 +22,7 @@ fn requirement_open_future_preserves_replay_context_across_pending_polls() {
     storage.create_map(CollectionId(83)).unwrap();
     let mut payload_buffer = [0u8; 64];
     storage
-        .append_map_update::<u16, u16, 8>(CollectionId(83), &MapUpdate::Set { key: 7, value: 70 })
+        .append_map_update::<u16, u16>(CollectionId(83), &MapUpdate::Set { key: 7, value: 70 })
         .unwrap();
     drop(storage);
 
@@ -43,7 +43,7 @@ fn requirement_open_future_preserves_replay_context_across_pending_polls() {
     };
     let mut map_buffer = [0u8; 512];
     let map = reopened
-        .open_map::<u16, u16, 8, 8>(
+        .open_map::<u16, u16, 8>(
             CollectionId(83),
             &mut map_buffer,
             crate::test_map_frontier_memory(),

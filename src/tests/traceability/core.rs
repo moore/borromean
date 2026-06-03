@@ -74,14 +74,14 @@ fn requirement_storage_facade_preserves_ring_behavior_through_delegating_entry_p
 
     let mut payload_buffer = [0u8; 64];
     storage
-        .append_map_update::<u16, u16, 8>(CollectionId(86), &MapUpdate::Set { key: 7, value: 70 })
+        .append_map_update::<u16, u16>(CollectionId(86), &MapUpdate::Set { key: 7, value: 70 })
         .unwrap();
 
     let mut reopened =
         Storage::<_, 512, 5, 8>::open(&mut flash, crate::test_storage_memory()).unwrap();
     let mut map_buffer = [0u8; 512];
     let map = reopened
-        .open_map::<u16, u16, 8, 8>(
+        .open_map::<u16, u16, 8>(
             CollectionId(86),
             &mut map_buffer,
             crate::test_map_frontier_memory(),

@@ -1600,7 +1600,7 @@ fn requirement_storage_open_path_rejects_invalid_retained_map_region_snapshot_an
         let mut reopened =
             Storage::<_, 512, 5>::open(&mut flash, crate::test_storage_memory()).unwrap();
         let mut reopen_buffer = [0u8; 512];
-        let result = reopened.open_map::<i32, i32, 4, 4>(
+        let result = reopened.open_map::<i32, i32, 4>(
             CollectionId(43),
             &mut reopen_buffer,
             crate::test_map_frontier_memory(),
@@ -1634,7 +1634,7 @@ fn requirement_storage_open_path_rejects_invalid_retained_map_region_snapshot_an
         let mut reopened =
             Storage::<_, 512, 4>::open(&mut flash, crate::test_storage_memory()).unwrap();
         let mut reopen_buffer = [0u8; 512];
-        let result = reopened.open_map::<i32, i32, 4, 4>(
+        let result = reopened.open_map::<i32, i32, 4>(
             CollectionId(44),
             &mut reopen_buffer,
             crate::test_map_frontier_memory(),
@@ -1662,7 +1662,7 @@ fn requirement_storage_open_path_rejects_invalid_retained_map_region_snapshot_an
         let mut reopened =
             Storage::<_, 512, 4>::open(&mut flash, crate::test_storage_memory()).unwrap();
         let mut reopen_buffer = [0u8; 512];
-        let result = reopened.open_map::<i32, i32, 4, 4>(
+        let result = reopened.open_map::<i32, i32, 4>(
             CollectionId(45),
             &mut reopen_buffer,
             crate::test_map_frontier_memory(),

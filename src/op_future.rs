@@ -130,7 +130,6 @@ pub struct YieldingFlushMapFuture<
     const MAX_COLLECTIONS: usize,
     K,
     V,
-    const MAX_INDEXES: usize,
     const MAX_RUNS: usize,
 > where
     IO: FlashIo,
@@ -138,7 +137,7 @@ pub struct YieldingFlushMapFuture<
     V: LsmValue,
 {
     storage: &'a mut Storage<'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
-    map: &'a mut MapFrontier<'a, K, V, MAX_INDEXES, MAX_RUNS>,
+    map: &'a mut MapFrontier<'a, K, V, MAX_RUNS>,
     phase: u8,
 }
 
@@ -152,7 +151,6 @@ impl<
         const MAX_COLLECTIONS: usize,
         K,
         V,
-        const MAX_INDEXES: usize,
         const MAX_RUNS: usize,
     >
     YieldingFlushMapFuture<
@@ -165,7 +163,6 @@ impl<
         MAX_COLLECTIONS,
         K,
         V,
-        MAX_INDEXES,
         MAX_RUNS,
     >
 where
@@ -176,7 +173,7 @@ where
     /// Creates a new yielding manifest flush future.
     pub fn new(
         storage: &'a mut Storage<'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
-        map: &'a mut MapFrontier<'a, K, V, MAX_INDEXES, MAX_RUNS>,
+        map: &'a mut MapFrontier<'a, K, V, MAX_RUNS>,
     ) -> Self {
         Self {
             storage,
@@ -196,7 +193,6 @@ impl<
         const MAX_COLLECTIONS: usize,
         K,
         V,
-        const MAX_INDEXES: usize,
         const MAX_RUNS: usize,
     > Unpin
     for YieldingFlushMapFuture<
@@ -209,7 +205,6 @@ impl<
         MAX_COLLECTIONS,
         K,
         V,
-        MAX_INDEXES,
         MAX_RUNS,
     >
 where
@@ -229,7 +224,6 @@ impl<
         const MAX_COLLECTIONS: usize,
         K,
         V,
-        const MAX_INDEXES: usize,
         const MAX_RUNS: usize,
     > Future
     for YieldingFlushMapFuture<
@@ -242,7 +236,6 @@ impl<
         MAX_COLLECTIONS,
         K,
         V,
-        MAX_INDEXES,
         MAX_RUNS,
     >
 where
@@ -274,9 +267,7 @@ where
                 Poll::Pending
             }
             2 => {
-                let result = this
-                    .storage
-                    .flush_map_inner::<K, V, MAX_INDEXES, MAX_RUNS>(this.map);
+                let result = this.storage.flush_map_inner::<K, V, MAX_RUNS>(this.map);
                 this.storage.finish_mode();
                 this.phase = 3;
                 Poll::Ready(result)
@@ -296,7 +287,6 @@ impl<
         const MAX_COLLECTIONS: usize,
         K,
         V,
-        const MAX_INDEXES: usize,
         const MAX_RUNS: usize,
     > Drop
     for YieldingFlushMapFuture<
@@ -309,7 +299,6 @@ impl<
         MAX_COLLECTIONS,
         K,
         V,
-        MAX_INDEXES,
         MAX_RUNS,
     >
 where

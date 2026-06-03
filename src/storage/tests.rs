@@ -1809,7 +1809,6 @@ fn requirement_region_reachable_from_live_state_does_not_parse_non_map_region_he
 fn requirement_region_reachable_from_live_state_follows_map_head_references_to_run_regions() {
     const REGION_SIZE: usize = 512;
     const REGION_COUNT: usize = 32;
-    const MAX_INDEXES: usize = 128;
     const MAX_RUNS: usize = 16;
 
     let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 16384>::new(0xff);
@@ -1823,18 +1822,16 @@ fn requirement_region_reachable_from_live_state_follows_map_head_references_to_r
     storage.create_map(collection_id).unwrap();
 
     let mut map_buffer = [0u8; 8192];
-    let mut map = MapFrontier::<i32, i32, MAX_INDEXES, MAX_RUNS>::new(
+    let mut map = MapFrontier::<i32, i32, MAX_RUNS>::new(
         collection_id,
         &mut map_buffer,
         crate::test_map_frontier_memory(),
     )
     .unwrap();
     for key in 0..100 {
-        map.set(key, key * 10).unwrap();
+        map.set_in_memory(key, key * 10).unwrap();
     }
-    storage
-        .flush_map::<i32, i32, MAX_INDEXES, MAX_RUNS>(&mut map)
-        .unwrap();
+    storage.flush_map::<i32, i32, MAX_RUNS>(&mut map).unwrap();
 
     let run_region = storage
         .with_io_workspace(|flash, _workspace| {

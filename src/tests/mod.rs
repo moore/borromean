@@ -290,7 +290,8 @@ fn smallest_map_capacity_for_repeated_updates(update_count: usize) -> usize {
                 crate::test_map_frontier_memory(),
             )
             .unwrap();
-            (0..update_count).all(|index| map.set(1, u16::try_from(index).unwrap()).is_ok())
+            (0..update_count)
+                .all(|index| map.set_in_memory(1, u16::try_from(index).unwrap()).is_ok())
         })
         .expect("expected a bounded map capacity within the search range")
 }
@@ -329,10 +330,10 @@ fn transaction_cleanup_returns_old_map_region_to_free_list_result(
         crate::test_map_frontier_memory(),
     )
     .unwrap();
-    map.set(3, 30).unwrap();
-    let first_region = storage.flush_map::<_, _, 4, 4>(&mut map).unwrap();
+    map.set_in_memory(3, 30).unwrap();
+    let first_region = storage.flush_map::<_, _, 4>(&mut map).unwrap();
 
-    map.set(4, 40).unwrap();
+    map.set_in_memory(4, 40).unwrap();
     let previous_head = storage.last_free_list_head();
     let allocated_region = previous_head.unwrap();
     let previous_chain = storage.with_io_workspace(|flash, _workspace| {
@@ -340,7 +341,7 @@ fn transaction_cleanup_returns_old_map_region_to_free_list_result(
     });
     let previous_tail = storage.free_list_tail().unwrap();
     storage.with_io_workspace(|flash, _workspace| flash.clear_operations());
-    storage.flush_map::<_, _, 4, 4>(&mut map).unwrap();
+    storage.flush_map::<_, _, 4>(&mut map).unwrap();
 
     let mut reclaim_operations = heapless::Vec::<crate::MockOperation, 64>::new();
     storage.with_io_workspace(|flash, _workspace| {
@@ -520,9 +521,9 @@ fn wal_and_map_region_formats() -> (Header, Header) {
         crate::test_map_frontier_memory(),
     )
     .unwrap();
-    map.set(3, 30).unwrap();
+    map.set_in_memory(3, 30).unwrap();
 
-    let region_index = storage.flush_map::<_, _, 4, 4>(&mut map).unwrap();
+    let region_index = storage.flush_map::<_, _, 4>(&mut map).unwrap();
     let map_header = storage
         .with_io_workspace(|flash, _workspace| {
             Header::decode(&flash.region_bytes(region_index).unwrap()[..Header::ENCODED_LEN])
@@ -660,7 +661,7 @@ fn setup_storage_with_live_empty_head_map_in_wal_head<'db>(
     storage.create_map(CollectionId(36)).unwrap();
     let mut target_payload = [0u8; 64];
     storage
-        .append_map_update::<i32, i32, 4>(CollectionId(36), &MapUpdate::Set { key: 1, value: 10 })
+        .append_map_update::<i32, i32>(CollectionId(36), &MapUpdate::Set { key: 1, value: 10 })
         .unwrap();
 
     storage.create_map(CollectionId(136)).unwrap();
@@ -893,19 +894,19 @@ fn requirement_storage_map_operation_futures_poll_to_completion() {
         crate::test_map_frontier_memory(),
     )
     .unwrap();
-    source.set(1, 10).unwrap();
-    poll_ready(storage.snapshot_map_future::<_, _, 4>(&source)).unwrap();
+    source.set_in_memory(1, 10).unwrap();
+    poll_ready(storage.snapshot_map_future(&source)).unwrap();
 
     let mut payload_buffer = [0u8; 128];
-    poll_ready(storage.append_map_update_future::<i32, i32, 4>(
+    poll_ready(storage.append_map_update_future::<i32, i32>(
         CollectionId(41),
         &MapUpdate::Set { key: 2, value: 20 },
     ))
     .unwrap();
 
-    source.set(3, 30).unwrap();
+    source.set_in_memory(3, 30).unwrap();
     let committed_region =
-        poll_until_ready(storage.flush_map_future::<_, _, 4, 4>(&mut source), 4).unwrap();
+        poll_until_ready(storage.flush_map_future::<_, _, 4>(&mut source), 4).unwrap();
     assert_eq!(
         storage.collections()[0].basis(),
         StartupCollectionBasis::Region(committed_region)
@@ -946,9 +947,9 @@ fn requirement_storage_flush_map_future_yields_between_durable_phases() {
             crate::test_map_frontier_memory(),
         )
         .unwrap();
-        map.set(5, 50).unwrap();
+        map.set_in_memory(5, 50).unwrap();
 
-        let future = storage.flush_map_future::<_, _, 4, 4>(&mut map);
+        let future = storage.flush_map_future::<_, _, 4>(&mut map);
         let mut future = pin!(future);
 
         assert!(matches!(poll_once(future.as_mut()), Poll::Pending));
@@ -993,9 +994,9 @@ fn requirement_storage_flush_map_future_drop_after_region_write_remains_recovera
             crate::test_map_frontier_memory(),
         )
         .unwrap();
-        map.set(7, 70).unwrap();
+        map.set_in_memory(7, 70).unwrap();
 
-        let future = storage.flush_map_future::<_, _, 4, 4>(&mut map);
+        let future = storage.flush_map_future::<_, _, 4>(&mut map);
         let mut future = pin!(future);
 
         assert!(matches!(poll_once(future.as_mut()), Poll::Pending));
@@ -1323,7 +1324,6 @@ fn run_long_mixed_map_workload_preserves_collection_identity_across_reclaim_and_
     const REGION_COUNT: usize = 1024;
     const MAX_LOG: usize = 1_048_576;
     const MAX_COLLECTIONS: usize = 8;
-    const MAX_INDEXES: usize = 128;
     const MAX_RUNS: usize = 128;
 
     let mut flash =
@@ -1334,11 +1334,10 @@ fn run_long_mixed_map_workload_preserves_collection_identity_across_reclaim_and_
         crate::test_storage_memory(),
     )
     .unwrap();
-    let mut map =
-        LsmMap::<u64, u64, MAX_INDEXES, MAX_RUNS>::new(&mut storage, crate::test_lsm_map_memory())
-            .unwrap()
-            .with_compaction_run_target(8)
-            .unwrap();
+    let mut map = LsmMap::<u64, u64, MAX_RUNS>::new(&mut storage, crate::test_lsm_map_memory())
+        .unwrap()
+        .with_compaction_run_target(8)
+        .unwrap();
     let mut rng = StressRng::new(0x0123_4567_89ab_cdef);
     let initial_wal_head = storage.wal_head();
     let mut compactions = 0usize;
@@ -1476,7 +1475,7 @@ fn requirement_storage_reclaim_wal_head_reopen_preserves_replay_result() {
 
     let mut reopen_buffer = [0u8; 512];
     let reopened_map = reopened
-        .open_map::<i32, i32, 4, 4>(
+        .open_map::<i32, i32, 4>(
             CollectionId(36),
             &mut reopen_buffer,
             crate::test_map_frontier_memory(),
@@ -1543,7 +1542,7 @@ fn requirement_storage_reclaim_wal_head_reopen_has_no_broken_link_path() {
         .unwrap();
 
     let reopened_map = reopened
-        .open_map::<i32, i32, 4, 4>(
+        .open_map::<i32, i32, 4>(
             CollectionId(36),
             &mut reopen_buffer,
             crate::test_map_frontier_memory(),
@@ -1608,9 +1607,9 @@ fn requirement_storage_map_api_restores_snapshot_and_updates() {
         crate::test_map_frontier_memory(),
     )
     .unwrap();
-    source.set(1, 10).unwrap();
-    source.set(2, 20).unwrap();
-    storage.snapshot_map::<_, _, 4>(&source).unwrap();
+    source.set_in_memory(1, 10).unwrap();
+    source.set_in_memory(2, 20).unwrap();
+    storage.snapshot_map(&source).unwrap();
 
     let mut update_payload = [0u8; 64];
     let update_len = MapFrontier::<i32, i32, 4>::encode_update_into(
@@ -1624,7 +1623,7 @@ fn requirement_storage_map_api_restores_snapshot_and_updates() {
 
     let mut reopen_buffer = [0u8; 512];
     let reopened = storage
-        .open_map::<i32, i32, 4, 4>(
+        .open_map::<i32, i32, 4>(
             CollectionId(11),
             &mut reopen_buffer,
             crate::test_map_frontier_memory(),
@@ -1674,18 +1673,12 @@ fn requirement_storage_map_frontiers_do_not_exceed_the_configured_dirty_collecti
     .unwrap();
     let mut payload_buffer = [0u8; 64];
 
-    storage
-        .update_map_frontier::<u16, u16, 8, 8>(
-            &mut first_map,
-            &MapUpdate::Set { key: 1, value: 10 },
-        )
+    first_map
+        .apply_update(&mut storage, &MapUpdate::Set { key: 1, value: 10 })
         .unwrap();
 
-    let error = storage
-        .update_map_frontier::<u16, u16, 8, 8>(
-            &mut second_map,
-            &MapUpdate::Set { key: 2, value: 20 },
-        )
+    let error = second_map
+        .apply_update(&mut storage, &MapUpdate::Set { key: 2, value: 20 })
         .unwrap_err();
 
     assert!(matches!(
@@ -1698,13 +1691,10 @@ fn requirement_storage_map_frontiers_do_not_exceed_the_configured_dirty_collecti
     assert_eq!(first_map.get_frontier(&1).unwrap(), Some(10));
     assert_eq!(second_map.get_frontier(&2).unwrap(), None);
 
-    storage.flush_map::<u16, u16, 8, 8>(&mut first_map).unwrap();
+    storage.flush_map::<u16, u16, 8>(&mut first_map).unwrap();
 
-    storage
-        .update_map_frontier::<u16, u16, 8, 8>(
-            &mut second_map,
-            &MapUpdate::Set { key: 2, value: 20 },
-        )
+    second_map
+        .apply_update(&mut storage, &MapUpdate::Set { key: 2, value: 20 })
         .unwrap();
     assert_eq!(second_map.get_frontier(&2).unwrap(), Some(20));
 }
@@ -1741,14 +1731,11 @@ fn requirement_storage_map_frontier_overflow_flushes_and_commits_a_new_region_he
     .unwrap();
     let mut payload_buffer = [0u8; 64];
 
-    storage
-        .update_map_frontier::<u16, u16, 8, 8>(&mut map, &MapUpdate::Set { key: 1, value: 10 })
+    map.apply_update(&mut storage, &MapUpdate::Set { key: 1, value: 10 })
         .unwrap();
-    storage
-        .update_map_frontier::<u16, u16, 8, 8>(&mut map, &MapUpdate::Set { key: 1, value: 20 })
+    map.apply_update(&mut storage, &MapUpdate::Set { key: 1, value: 20 })
         .unwrap();
-    storage
-        .update_map_frontier::<u16, u16, 8, 8>(&mut map, &MapUpdate::Set { key: 1, value: 30 })
+    map.apply_update(&mut storage, &MapUpdate::Set { key: 1, value: 30 })
         .unwrap();
 
     assert_eq!(
@@ -1756,8 +1743,7 @@ fn requirement_storage_map_frontier_overflow_flushes_and_commits_a_new_region_he
         StartupCollectionBasis::Empty
     );
 
-    storage
-        .update_map_frontier::<u16, u16, 8, 8>(&mut map, &MapUpdate::Set { key: 1, value: 40 })
+    map.apply_update(&mut storage, &MapUpdate::Set { key: 1, value: 40 })
         .unwrap();
 
     let StartupCollectionBasis::Region(region_index) = storage.collections()[0].basis() else {
@@ -1786,7 +1772,7 @@ fn requirement_storage_map_frontier_overflow_flushes_and_commits_a_new_region_he
 
     let mut reopen_buffer = [0u8; REGION_SIZE];
     let reopened = storage
-        .open_map::<u16, u16, 8, 8>(
+        .open_map::<u16, u16, 8>(
             CollectionId(46),
             &mut reopen_buffer,
             crate::test_map_frontier_memory(),
@@ -1797,6 +1783,45 @@ fn requirement_storage_map_frontier_overflow_flushes_and_commits_a_new_region_he
         StartupCollectionBasis::Region(region_index)
     );
     assert_eq!(reopened.get_frontier(&1).unwrap(), Some(40));
+}
+
+//= spec/ring/01-theory.md#core-requirements
+//= type=test
+//# `RING-CORE-016A` If a single update cannot fit in an empty mutable
+//# frontier buffer, the implementation MUST report explicit buffer
+//# exhaustion instead of flushing an empty frontier.
+#[test]
+fn requirement_storage_map_frontier_single_oversized_update_returns_buffer_too_small() {
+    const REGION_SIZE: usize = 512;
+    const REGION_COUNT: usize = 6;
+    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 4096>::new(0xff);
+    let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT>::format(
+        &mut flash,
+        StorageFormatConfig::new(2, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
+
+    storage.create_map(CollectionId(146)).unwrap();
+
+    let mut map_buffer = [0u8; core::mem::size_of::<u32>()];
+    let mut map = MapFrontier::<u16, u16, 8>::new(
+        CollectionId(146),
+        &mut map_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
+
+    let error = map.set(&mut storage, 1, 10).unwrap_err();
+    assert!(matches!(
+        error,
+        MapStorageError::Map(MapError::BufferTooSmall)
+    ));
+    assert_eq!(
+        storage.collections()[0].basis(),
+        StartupCollectionBasis::Empty
+    );
+    assert!(map.frontier_is_empty());
 }
 
 //= spec/ring/01-theory.md#core-requirements
@@ -1830,21 +1855,18 @@ fn requirement_storage_map_frontier_continues_accumulating_updates_after_an_over
     let mut payload_buffer = [0u8; 64];
 
     for value in [10u16, 20, 30] {
-        storage
-            .update_map_frontier::<u16, u16, 8, 8>(&mut map, &MapUpdate::Set { key: 1, value })
+        map.apply_update(&mut storage, &MapUpdate::Set { key: 1, value })
             .unwrap();
     }
 
-    storage
-        .update_map_frontier::<u16, u16, 8, 8>(&mut map, &MapUpdate::Set { key: 1, value: 40 })
+    map.apply_update(&mut storage, &MapUpdate::Set { key: 1, value: 40 })
         .unwrap();
 
     let StartupCollectionBasis::Region(head_after_flush) = storage.collections()[0].basis() else {
         panic!("overflow flush should leave the collection on a committed region head");
     };
 
-    storage
-        .update_map_frontier::<u16, u16, 8, 8>(&mut map, &MapUpdate::Set { key: 2, value: 50 })
+    map.apply_update(&mut storage, &MapUpdate::Set { key: 2, value: 50 })
         .unwrap();
 
     assert_eq!(
@@ -1856,7 +1878,7 @@ fn requirement_storage_map_frontier_continues_accumulating_updates_after_an_over
 
     let mut reopen_buffer = [0u8; REGION_SIZE];
     let reopened = storage
-        .open_map::<u16, u16, 8, 8>(
+        .open_map::<u16, u16, 8>(
             CollectionId(47),
             &mut reopen_buffer,
             crate::test_map_frontier_memory(),
@@ -1885,15 +1907,15 @@ fn requirement_storage_map_api_appends_typed_updates() {
 
     let mut payload_buffer = [0u8; 128];
     storage
-        .append_map_update::<i32, i32, 4>(CollectionId(17), &MapUpdate::Set { key: 4, value: 40 })
+        .append_map_update::<i32, i32>(CollectionId(17), &MapUpdate::Set { key: 4, value: 40 })
         .unwrap();
     storage
-        .append_map_update::<i32, i32, 4>(CollectionId(17), &MapUpdate::Delete { key: 4 })
+        .append_map_update::<i32, i32>(CollectionId(17), &MapUpdate::Delete { key: 4 })
         .unwrap();
 
     let mut reopen_buffer = [0u8; 512];
     let reopened = storage
-        .open_map::<i32, i32, 4, 4>(
+        .open_map::<i32, i32, 4>(
             CollectionId(17),
             &mut reopen_buffer,
             crate::test_map_frontier_memory(),
@@ -1927,10 +1949,10 @@ fn requirement_storage_map_api_flushes_committed_region_basis() {
         crate::test_map_frontier_memory(),
     )
     .unwrap();
-    map.set(5, 50).unwrap();
-    map.set(7, 70).unwrap();
+    map.set_in_memory(5, 50).unwrap();
+    map.set_in_memory(7, 70).unwrap();
 
-    let region_index = storage.flush_map::<_, _, 4, 4>(&mut map).unwrap();
+    let region_index = storage.flush_map::<_, _, 4>(&mut map).unwrap();
     assert_eq!(
         storage.collections()[0].basis(),
         StartupCollectionBasis::Region(region_index)
@@ -1939,7 +1961,7 @@ fn requirement_storage_map_api_flushes_committed_region_basis() {
 
     let mut reopen_buffer = [0u8; 512];
     let reopened = storage
-        .open_map::<i32, i32, 4, 4>(
+        .open_map::<i32, i32, 4>(
             CollectionId(12),
             &mut reopen_buffer,
             crate::test_map_frontier_memory(),
@@ -1968,7 +1990,6 @@ fn requirement_storage_map_api_flushes_committed_region_basis() {
 fn requirement_storage_compact_map_target_then_greedy_preserves_unselected_runs() {
     const REGION_SIZE: usize = 1024;
     const REGION_COUNT: usize = 18;
-    const MAX_INDEXES: usize = 16;
     const MAX_RUNS: usize = 8;
 
     let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 8192>::new(0xff);
@@ -1983,37 +2004,29 @@ fn requirement_storage_compact_map_target_then_greedy_preserves_unselected_runs(
     storage.create_map(CollectionId(70)).unwrap();
 
     let mut map_buffer = [0u8; REGION_SIZE];
-    let mut map = MapFrontier::<i32, i32, MAX_INDEXES, MAX_RUNS>::new(
+    let mut map = MapFrontier::<i32, i32, MAX_RUNS>::new(
         CollectionId(70),
         &mut map_buffer,
         crate::test_map_frontier_memory(),
     )
     .unwrap();
-    map.set(1, 10).unwrap();
-    storage
-        .flush_map::<_, _, MAX_INDEXES, MAX_RUNS>(&mut map)
-        .unwrap();
+    map.set_in_memory(1, 10).unwrap();
+    storage.flush_map::<_, _, MAX_RUNS>(&mut map).unwrap();
 
     for key in 10..15 {
-        map.set(key, key * 10).unwrap();
+        map.set_in_memory(key, key * 10).unwrap();
     }
-    storage
-        .flush_map::<_, _, MAX_INDEXES, MAX_RUNS>(&mut map)
-        .unwrap();
+    storage.flush_map::<_, _, MAX_RUNS>(&mut map).unwrap();
 
-    map.set(100, 1000).unwrap();
-    storage
-        .flush_map::<_, _, MAX_INDEXES, MAX_RUNS>(&mut map)
-        .unwrap();
+    map.set_in_memory(100, 1000).unwrap();
+    storage.flush_map::<_, _, MAX_RUNS>(&mut map).unwrap();
 
-    map.set(200, 2000).unwrap();
-    storage
-        .flush_map::<_, _, MAX_INDEXES, MAX_RUNS>(&mut map)
-        .unwrap();
+    map.set_in_memory(200, 2000).unwrap();
+    storage.flush_map::<_, _, MAX_RUNS>(&mut map).unwrap();
 
     let mut before_buffer = [0u8; REGION_SIZE];
     let before = storage
-        .open_map::<i32, i32, MAX_INDEXES, MAX_RUNS>(
+        .open_map::<i32, i32, MAX_RUNS>(
             CollectionId(70),
             &mut before_buffer,
             crate::test_map_frontier_memory(),
@@ -2023,16 +2036,13 @@ fn requirement_storage_compact_map_target_then_greedy_preserves_unselected_runs(
 
     let mut scratch_buffer = [0u8; REGION_SIZE];
     let compacted_manifest = storage
-        .compact_map::<i32, i32, MAX_INDEXES, MAX_RUNS, 3>(
-            CollectionId(70),
-            crate::test_lsm_map_memory(),
-        )
+        .compact_map::<i32, i32, MAX_RUNS, 3>(CollectionId(70), crate::test_lsm_map_memory())
         .unwrap();
     assert!(compacted_manifest.is_some());
 
     let mut after_buffer = [0u8; REGION_SIZE];
     let after = storage
-        .open_map::<i32, i32, MAX_INDEXES, MAX_RUNS>(
+        .open_map::<i32, i32, MAX_RUNS>(
             CollectionId(70),
             &mut after_buffer,
             crate::test_map_frontier_memory(),
@@ -2077,7 +2087,6 @@ fn requirement_storage_compact_map_target_then_greedy_preserves_unselected_runs(
 fn requirement_storage_compact_map_preserves_tombstone_masking() {
     const REGION_SIZE: usize = 1024;
     const REGION_COUNT: usize = 14;
-    const MAX_INDEXES: usize = 8;
     const MAX_RUNS: usize = 8;
 
     let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 8192>::new(0xff);
@@ -2092,30 +2101,24 @@ fn requirement_storage_compact_map_preserves_tombstone_masking() {
     storage.create_map(CollectionId(71)).unwrap();
 
     let mut map_buffer = [0u8; REGION_SIZE];
-    let mut map = MapFrontier::<i32, i32, MAX_INDEXES, MAX_RUNS>::new(
+    let mut map = MapFrontier::<i32, i32, MAX_RUNS>::new(
         CollectionId(71),
         &mut map_buffer,
         crate::test_map_frontier_memory(),
     )
     .unwrap();
-    map.set(1, 10).unwrap();
-    storage
-        .flush_map::<_, _, MAX_INDEXES, MAX_RUNS>(&mut map)
-        .unwrap();
+    map.set_in_memory(1, 10).unwrap();
+    storage.flush_map::<_, _, MAX_RUNS>(&mut map).unwrap();
 
-    map.delete(1).unwrap();
-    storage
-        .flush_map::<_, _, MAX_INDEXES, MAX_RUNS>(&mut map)
-        .unwrap();
+    map.delete_in_memory(1).unwrap();
+    storage.flush_map::<_, _, MAX_RUNS>(&mut map).unwrap();
 
-    map.set(2, 20).unwrap();
-    storage
-        .flush_map::<_, _, MAX_INDEXES, MAX_RUNS>(&mut map)
-        .unwrap();
+    map.set_in_memory(2, 20).unwrap();
+    storage.flush_map::<_, _, MAX_RUNS>(&mut map).unwrap();
 
     let mut before_buffer = [0u8; REGION_SIZE];
     let before = storage
-        .open_map::<i32, i32, MAX_INDEXES, MAX_RUNS>(
+        .open_map::<i32, i32, MAX_RUNS>(
             CollectionId(71),
             &mut before_buffer,
             crate::test_map_frontier_memory(),
@@ -2130,15 +2133,12 @@ fn requirement_storage_compact_map_preserves_tombstone_masking() {
 
     let mut scratch_buffer = [0u8; REGION_SIZE];
     storage
-        .compact_map::<i32, i32, MAX_INDEXES, MAX_RUNS, 1>(
-            CollectionId(71),
-            crate::test_lsm_map_memory(),
-        )
+        .compact_map::<i32, i32, MAX_RUNS, 1>(CollectionId(71), crate::test_lsm_map_memory())
         .unwrap();
 
     let mut after_buffer = [0u8; REGION_SIZE];
     let after = storage
-        .open_map::<i32, i32, MAX_INDEXES, MAX_RUNS>(
+        .open_map::<i32, i32, MAX_RUNS>(
             CollectionId(71),
             &mut after_buffer,
             crate::test_map_frontier_memory(),
@@ -2166,7 +2166,7 @@ fn requirement_storage_compact_map_preserves_tombstone_masking() {
 fn requirement_storage_compact_map_streams_replacement_larger_than_frontier_capacity() {
     const REGION_SIZE: usize = 1024;
     const REGION_COUNT: usize = 40;
-    const MAX_INDEXES: usize = 4;
+    const ENTRY_COUNT: usize = 4;
     const MAX_RUNS: usize = 8;
 
     let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 16384>::new(0xff);
@@ -2181,25 +2181,23 @@ fn requirement_storage_compact_map_streams_replacement_larger_than_frontier_capa
     storage.create_map(CollectionId(72)).unwrap();
 
     let mut map_buffer = [0u8; REGION_SIZE];
-    let mut map = MapFrontier::<i32, i32, MAX_INDEXES, MAX_RUNS>::new(
+    let mut map = MapFrontier::<i32, i32, MAX_RUNS>::new(
         CollectionId(72),
         &mut map_buffer,
         crate::test_map_frontier_memory(),
     )
     .unwrap();
     for run in 0..3 {
-        for offset in 0..MAX_INDEXES {
+        for offset in 0..ENTRY_COUNT {
             let key = run * 10 + offset as i32;
-            map.set(key, key * 10).unwrap();
+            map.set_in_memory(key, key * 10).unwrap();
         }
-        storage
-            .flush_map::<_, _, MAX_INDEXES, MAX_RUNS>(&mut map)
-            .unwrap();
+        storage.flush_map::<_, _, MAX_RUNS>(&mut map).unwrap();
     }
 
     let mut before_buffer = [0u8; REGION_SIZE];
     let before = storage
-        .open_map::<i32, i32, MAX_INDEXES, MAX_RUNS>(
+        .open_map::<i32, i32, MAX_RUNS>(
             CollectionId(72),
             &mut before_buffer,
             crate::test_map_frontier_memory(),
@@ -2209,16 +2207,13 @@ fn requirement_storage_compact_map_streams_replacement_larger_than_frontier_capa
 
     let mut scratch_buffer = [0u8; REGION_SIZE];
     let compacted_manifest = storage
-        .compact_map::<i32, i32, MAX_INDEXES, MAX_RUNS, 1>(
-            CollectionId(72),
-            crate::test_lsm_map_memory(),
-        )
+        .compact_map::<i32, i32, MAX_RUNS, 1>(CollectionId(72), crate::test_lsm_map_memory())
         .unwrap();
     assert!(compacted_manifest.is_some());
 
     let mut after_buffer = [0u8; REGION_SIZE];
     let after = storage
-        .open_map::<i32, i32, MAX_INDEXES, MAX_RUNS>(
+        .open_map::<i32, i32, MAX_RUNS>(
             CollectionId(72),
             &mut after_buffer,
             crate::test_map_frontier_memory(),
@@ -2226,7 +2221,7 @@ fn requirement_storage_compact_map_streams_replacement_larger_than_frontier_capa
         .unwrap();
     assert_eq!(after.run_count(), 1);
     for run in 0..3 {
-        for offset in 0..MAX_INDEXES {
+        for offset in 0..ENTRY_COUNT {
             let key = run * 10 + offset as i32;
             assert_eq!(
                 storage
@@ -2240,16 +2235,13 @@ fn requirement_storage_compact_map_streams_replacement_larger_than_frontier_capa
     }
 
     let second_manifest = storage
-        .compact_map::<i32, i32, MAX_INDEXES, MAX_RUNS, 1>(
-            CollectionId(72),
-            crate::test_lsm_map_memory(),
-        )
+        .compact_map::<i32, i32, MAX_RUNS, 1>(CollectionId(72), crate::test_lsm_map_memory())
         .unwrap();
     assert_eq!(second_manifest, None);
 
     let mut second_buffer = [0u8; REGION_SIZE];
     let second = storage
-        .open_map::<i32, i32, MAX_INDEXES, MAX_RUNS>(
+        .open_map::<i32, i32, MAX_RUNS>(
             CollectionId(72),
             &mut second_buffer,
             crate::test_map_frontier_memory(),
@@ -2257,7 +2249,7 @@ fn requirement_storage_compact_map_streams_replacement_larger_than_frontier_capa
         .unwrap();
     assert_eq!(second.run_count(), 1);
     for run in 0..3 {
-        for offset in 0..MAX_INDEXES {
+        for offset in 0..ENTRY_COUNT {
             let key = run * 10 + offset as i32;
             assert_eq!(
                 storage
@@ -2296,11 +2288,11 @@ fn requirement_storage_map_replacement_flush_records_reclaim_after_new_head() {
         crate::test_map_frontier_memory(),
     )
     .unwrap();
-    map.set(1, 10).unwrap();
-    let first_region = storage.flush_map::<_, _, 4, 4>(&mut map).unwrap();
+    map.set_in_memory(1, 10).unwrap();
+    let first_region = storage.flush_map::<_, _, 4>(&mut map).unwrap();
 
-    map.set(2, 20).unwrap();
-    let second_region = storage.flush_map::<_, _, 4, 4>(&mut map).unwrap();
+    map.set_in_memory(2, 20).unwrap();
+    let second_region = storage.flush_map::<_, _, 4>(&mut map).unwrap();
 
     let mut saw_free_region = false;
     let mut saw_alloc_begin = false;
@@ -2362,11 +2354,11 @@ fn requirement_storage_map_replacement_flush_is_completed_during_reopen() {
         crate::test_map_frontier_memory(),
     )
     .unwrap();
-    map.set(1, 10).unwrap();
-    let first_region = storage.flush_map::<_, _, 4, 4>(&mut map).unwrap();
+    map.set_in_memory(1, 10).unwrap();
+    let first_region = storage.flush_map::<_, _, 4>(&mut map).unwrap();
 
-    map.set(1, 20).unwrap();
-    let second_region = storage.flush_map::<_, _, 4, 4>(&mut map).unwrap();
+    map.set_in_memory(1, 20).unwrap();
+    let second_region = storage.flush_map::<_, _, 4>(&mut map).unwrap();
 
     assert_ne!(first_region, second_region);
     assert_eq!(
@@ -2381,7 +2373,7 @@ fn requirement_storage_map_replacement_flush_is_completed_during_reopen() {
 
     let mut reopen_buffer = [0u8; 512];
     let reopened_map = reopened
-        .open_map::<i32, i32, 4, 4>(
+        .open_map::<i32, i32, 4>(
             CollectionId(13),
             &mut reopen_buffer,
             crate::test_map_frontier_memory(),
@@ -2418,11 +2410,11 @@ fn replace_map_and_free_old_manifest<'db>(
         crate::test_map_frontier_memory(),
     )
     .unwrap();
-    map.set(1, 10).unwrap();
-    let first_region = storage.flush_map::<_, _, 4, 4>(&mut map).unwrap();
+    map.set_in_memory(1, 10).unwrap();
+    let first_region = storage.flush_map::<_, _, 4>(&mut map).unwrap();
 
-    map.set(2, 20).unwrap();
-    let second_region = storage.flush_map::<_, _, 4, 4>(&mut map).unwrap();
+    map.set_in_memory(2, 20).unwrap();
+    let second_region = storage.flush_map::<_, _, 4>(&mut map).unwrap();
 
     assert_ne!(first_region, second_region);
     assert_eq!(storage.free_list_tail(), Some(first_region));
@@ -2500,7 +2492,7 @@ fn requirement_storage_reopen_after_replacement_recovers_collection_and_reclaim_
 
     let mut reopen_buffer = [0u8; 512];
     let reopened_map = reopened
-        .open_map::<i32, i32, 4, 4>(
+        .open_map::<i32, i32, 4>(
             CollectionId(26),
             &mut reopen_buffer,
             crate::test_map_frontier_memory(),
@@ -2657,11 +2649,11 @@ fn requirement_storage_map_flush_rejects_consuming_min_free_region_reserve() {
         crate::test_map_frontier_memory(),
     )
     .unwrap();
-    map.set(1, 10).unwrap();
-    storage.flush_map::<_, _, 4, 4>(&mut map).unwrap();
+    map.set_in_memory(1, 10).unwrap();
+    storage.flush_map::<_, _, 4>(&mut map).unwrap();
 
-    map.set(2, 20).unwrap();
-    let error = storage.flush_map::<_, _, 4, 4>(&mut map).unwrap_err();
+    map.set_in_memory(2, 20).unwrap();
+    let error = storage.flush_map::<_, _, 4>(&mut map).unwrap_err();
 
     assert!(matches!(
         error,
@@ -2960,8 +2952,8 @@ fn requirement_storage_drop_map_starts_reclaim_for_committed_region_basis() {
         crate::test_map_frontier_memory(),
     )
     .unwrap();
-    map.set(8, 80).unwrap();
-    let region_index = storage.flush_map::<_, _, 4, 4>(&mut map).unwrap();
+    map.set_in_memory(8, 80).unwrap();
+    let region_index = storage.flush_map::<_, _, 4>(&mut map).unwrap();
 
     let reclaim_region = storage.drop_map(CollectionId(15)).unwrap();
 
@@ -2982,7 +2974,7 @@ fn requirement_storage_drop_map_starts_reclaim_for_committed_region_basis() {
     assert_eq!(reopened.free_list_tail(), Some(region_index));
 
     let mut reopen_buffer = [0u8; 512];
-    let result = reopened.open_map::<i32, i32, 4, 4>(
+    let result = reopened.open_map::<i32, i32, 4>(
         CollectionId(15),
         &mut reopen_buffer,
         crate::test_map_frontier_memory(),
@@ -3018,8 +3010,8 @@ fn requirement_storage_drop_map_records_free_region_after_drop_commit() {
         crate::test_map_frontier_memory(),
     )
     .unwrap();
-    map.set(8, 80).unwrap();
-    storage.flush_map::<_, _, 4, 4>(&mut map).unwrap();
+    map.set_in_memory(8, 80).unwrap();
+    storage.flush_map::<_, _, 4>(&mut map).unwrap();
 
     storage.drop_map(CollectionId(19)).unwrap();
 
@@ -3086,8 +3078,8 @@ fn requirement_storage_drop_map_from_snapshot_basis_has_no_region_reclaim() {
         crate::test_map_frontier_memory(),
     )
     .unwrap();
-    map.set(1, 10).unwrap();
-    storage.snapshot_map::<_, _, 4>(&map).unwrap();
+    map.set_in_memory(1, 10).unwrap();
+    storage.snapshot_map(&map).unwrap();
 
     let reclaim_region = storage.drop_map(CollectionId(16)).unwrap();
 

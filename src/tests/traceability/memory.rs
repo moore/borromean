@@ -26,8 +26,8 @@ fn requirement_core_handles_and_futures_fit_small_stack_frames() {
     assert_stack_handle_size::<ReclaimWalHeadFuture<'_, '_, '_, Flash, 256, 6, 8>>(
         "ReclaimWalHeadFuture",
     );
-    assert_stack_handle_size::<LsmMap<'_, u16, u16, 8, 8>>("LsmMap");
-    assert_stack_handle_size::<MapFrontier<'_, u16, u16, 8, 8>>("MapFrontier");
+    assert_stack_handle_size::<LsmMap<'_, u16, u16, 8>>("LsmMap");
+    assert_stack_handle_size::<MapFrontier<'_, u16, u16, 8>>("MapFrontier");
     assert_stack_handle_size::<crate::op_future::ReclaimWalHeadPhase<6, 8>>("ReclaimWalHeadPhase");
     assert_stack_handle_size::<crate::op_future::OpenStoragePhase<6, 8>>("OpenStoragePhase");
 }
@@ -55,16 +55,13 @@ fn requirement_normal_operation_uses_caller_owned_buffers_without_heap_allocatio
         .unwrap();
         storage.create_map(CollectionId(90)).unwrap();
         storage
-            .append_map_update::<u16, u16, 8>(
-                CollectionId(90),
-                &MapUpdate::Set { key: 7, value: 70 },
-            )
+            .append_map_update::<u16, u16>(CollectionId(90), &MapUpdate::Set { key: 7, value: 70 })
             .unwrap();
 
         drop(storage);
         let mut reopened = Storage::<_, 256, 5, 8>::open(&mut flash, &mut open_memory).unwrap();
         let map = reopened
-            .open_map::<u16, u16, 8, 8>(CollectionId(90), &mut map_buffer, &mut frontier_memory)
+            .open_map::<u16, u16, 8>(CollectionId(90), &mut map_buffer, &mut frontier_memory)
             .unwrap();
         assert_eq!(map.get_frontier(&7).unwrap(), Some(70));
     });
@@ -101,8 +98,11 @@ fn requirement_explicit_collection_and_reclaim_capacities_fail_when_exhausted() 
         crate::test_map_frontier_memory(),
     )
     .unwrap();
-    tiny_map.set(1, 10).unwrap();
-    assert!(matches!(tiny_map.set(2, 20), Err(MapError::BufferTooSmall)));
+    tiny_map.set_in_memory(1, 10).unwrap();
+    assert!(matches!(
+        tiny_map.set_in_memory(2, 20),
+        Err(MapError::BufferTooSmall)
+    ));
 }
 
 //= spec/implementation.md#memory-requirements
@@ -123,7 +123,7 @@ fn requirement_scratch_space_is_owned_by_storage_context() {
     storage.create_map(CollectionId(91)).unwrap();
     for key in 0..2 {
         storage
-            .append_map_update::<u16, u16, 8>(
+            .append_map_update::<u16, u16>(
                 CollectionId(91),
                 &MapUpdate::Set {
                     key,
@@ -150,10 +150,10 @@ fn requirement_map_round_trips_large_snapshots_using_only_borrowed_buffers() {
     )
     .unwrap();
     source
-        .set(1, HeaplessVec::<u8, 96>::from_slice(&[0x11; 96]).unwrap())
+        .set_in_memory(1, HeaplessVec::<u8, 96>::from_slice(&[0x11; 96]).unwrap())
         .unwrap();
     source
-        .set(2, HeaplessVec::<u8, 96>::from_slice(&[0x22; 96]).unwrap())
+        .set_in_memory(2, HeaplessVec::<u8, 96>::from_slice(&[0x22; 96]).unwrap())
         .unwrap();
 
     let mut snapshot = [0u8; 512];
@@ -229,8 +229,8 @@ fn requirement_map_in_memory_state_runs_inside_a_borrowed_buffer_without_allocat
     .unwrap();
 
     assert_no_alloc("map set/get", || {
-        map.set(1, 10).unwrap();
-        map.set(2, 20).unwrap();
+        map.set_in_memory(1, 10).unwrap();
+        map.set_in_memory(2, 20).unwrap();
         assert_eq!(map.get_frontier(&1).unwrap(), Some(10));
         assert_eq!(map.get_frontier(&2).unwrap(), Some(20));
     });
@@ -242,8 +242,11 @@ fn requirement_map_in_memory_state_runs_inside_a_borrowed_buffer_without_allocat
         crate::test_map_frontier_memory(),
     )
     .unwrap();
-    tiny_map.set(1, 10).unwrap();
-    assert!(matches!(tiny_map.set(2, 20), Err(MapError::BufferTooSmall)));
+    tiny_map.set_in_memory(1, 10).unwrap();
+    assert!(matches!(
+        tiny_map.set_in_memory(2, 20),
+        Err(MapError::BufferTooSmall)
+    ));
 }
 
 //= spec/implementation.md#api-requirements
@@ -263,7 +266,7 @@ fn requirement_collection_api_uses_storage_owned_operation_buffers() {
 
     storage.create_map(CollectionId(92)).unwrap();
     storage
-        .append_map_update::<u16, u16, 8>(CollectionId(92), &MapUpdate::Set { key: 9, value: 90 })
+        .append_map_update::<u16, u16>(CollectionId(92), &MapUpdate::Set { key: 9, value: 90 })
         .unwrap();
     let mut map_buffer = [0u8; 256];
     let mut map = MapFrontier::<u16, u16, 8>::new(
@@ -272,6 +275,6 @@ fn requirement_collection_api_uses_storage_owned_operation_buffers() {
         crate::test_map_frontier_memory(),
     )
     .unwrap();
-    map.set(9, 90).unwrap();
+    map.set_in_memory(9, 90).unwrap();
     storage.snapshot_map(&map).unwrap();
 }
