@@ -1582,9 +1582,10 @@ fn requirement_storage_open_path_rejects_invalid_retained_map_region_snapshot_an
             })
             .unwrap();
         storage
-            .with_runtime_io_workspace(|runtime, flash, _workspace| {
+            .with_runtime_io_workspace(|runtime, flash, workspace| {
                 runtime.write_committed_region::<512, 5, _>(
                     flash,
+                    workspace,
                     region_index,
                     CollectionId(43),
                     MAP_REGION_V2_FORMAT,

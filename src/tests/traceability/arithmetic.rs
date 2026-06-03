@@ -75,9 +75,11 @@ fn requirement_arithmetic_boundary_failures_surface_explicit_error_variants() {
 
     let oversized_payload = [0u8; 64];
     let mut runtime = storage.into_runtime();
+    let mut workspace = StorageWorkspace::<64>::new();
     assert!(matches!(
         runtime.write_committed_region::<64, 4, _>(
             &mut flash,
+            &mut workspace,
             1,
             CollectionId(9),
             MAP_REGION_V2_FORMAT,
@@ -117,9 +119,11 @@ fn requirement_sequence_advancement_stops_at_the_maximum_value_instead_of_wrappi
     let storage = Storage::<_, 128, 4, 8>::open(&mut flash, crate::test_storage_memory()).unwrap();
     assert_eq!(storage.max_seen_sequence(), u64::MAX);
     let mut runtime = storage.into_runtime();
+    let mut workspace = StorageWorkspace::<128>::new();
     assert_eq!(
         runtime.write_committed_region::<128, 4, _>(
             &mut flash,
+            &mut workspace,
             1,
             CollectionId(11),
             MAP_REGION_V2_FORMAT,

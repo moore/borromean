@@ -1123,6 +1123,8 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize> FlashIo
 
         self.write_metadata(metadata).map_err(|error| match error {
             StorageIoError::Mock(error) => StorageFormatError::from(MockFormatError::from(error)),
+            #[cfg(feature = "embedded-storage")]
+            StorageIoError::EmbeddedStorage(_) => unreachable_storage_format_error(),
             StorageIoError::FileBacking(_) => unreachable_storage_format_error(),
         })?;
 
@@ -1132,6 +1134,8 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize> FlashIo
                     StorageIoError::Mock(error) => {
                         StorageFormatError::from(MockFormatError::from(error))
                     }
+                    #[cfg(feature = "embedded-storage")]
+                    StorageIoError::EmbeddedStorage(_) => unreachable_storage_format_error(),
                     StorageIoError::FileBacking(_) => unreachable_storage_format_error(),
                 })?;
         }
@@ -1150,6 +1154,8 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize> FlashIo
                 StorageIoError::Mock(error) => {
                     StorageFormatError::from(MockFormatError::from(error))
                 }
+                #[cfg(feature = "embedded-storage")]
+                StorageIoError::EmbeddedStorage(_) => unreachable_storage_format_error(),
                 StorageIoError::FileBacking(_) => unreachable_storage_format_error(),
             })?;
 
@@ -1165,6 +1171,8 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize> FlashIo
                 StorageIoError::Mock(error) => {
                     StorageFormatError::from(MockFormatError::from(error))
                 }
+                #[cfg(feature = "embedded-storage")]
+                StorageIoError::EmbeddedStorage(_) => unreachable_storage_format_error(),
                 StorageIoError::FileBacking(_) => unreachable_storage_format_error(),
             })?;
 
@@ -1189,12 +1197,16 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize> FlashIo
                     StorageIoError::Mock(error) => {
                         StorageFormatError::from(MockFormatError::from(error))
                     }
+                    #[cfg(feature = "embedded-storage")]
+                    StorageIoError::EmbeddedStorage(_) => unreachable_storage_format_error(),
                     StorageIoError::FileBacking(_) => unreachable_storage_format_error(),
                 })?;
         }
 
         self.sync().map_err(|error| match error {
             StorageIoError::Mock(error) => StorageFormatError::from(MockFormatError::from(error)),
+            #[cfg(feature = "embedded-storage")]
+            StorageIoError::EmbeddedStorage(_) => unreachable_storage_format_error(),
             StorageIoError::FileBacking(_) => unreachable_storage_format_error(),
         })?;
         Ok(metadata)

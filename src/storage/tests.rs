@@ -4,7 +4,7 @@ use crate::MockFlash;
 use crate::StorageWorkspace;
 use crate::{
     CollectionId, CollectionType, Header, MapFrontier, MockOperation, StartupCollectionBasis,
-    Storage, StorageFormatConfig, WalRecord, WalRegionPrologue,
+    Storage, StorageFormatConfig, WalRecord, WalRegionPrologue, WAL_V1_FORMAT,
 };
 use core::mem::size_of;
 use heapless::Vec;
@@ -177,6 +177,7 @@ fn committed_region_sequence_progress() -> CommittedRegionSequenceProgress {
     state
         .write_committed_region::<512, 6, _>(
             &mut flash,
+            &mut workspace,
             first_region,
             CollectionId(7),
             crate::MAP_REGION_V2_FORMAT,
@@ -210,6 +211,7 @@ fn committed_region_sequence_progress() -> CommittedRegionSequenceProgress {
     state
         .write_committed_region::<512, 6, _>(
             &mut flash,
+            &mut workspace,
             second_region,
             CollectionId(7),
             crate::MAP_REGION_V2_FORMAT,
@@ -341,6 +343,7 @@ fn requirement_committed_region_write_uses_a_region_previously_reserved_by_alloc
     state
         .write_committed_region::<512, 5, _>(
             &mut flash,
+            &mut workspace,
             region_index,
             CollectionId(7),
             crate::MAP_REGION_V2_FORMAT,
@@ -378,6 +381,7 @@ fn requirement_write_committed_region_accepts_payload_that_exactly_fills_committ
     state
         .write_committed_region::<REGION_SIZE, 5, _>(
             &mut flash,
+            &mut workspace,
             region_index,
             CollectionId(7),
             crate::MAP_REGION_V2_FORMAT,
@@ -429,6 +433,7 @@ fn requirement_committed_region_write_waits_for_alloc_begin_sync() {
     state
         .write_committed_region::<512, 5, _>(
             &mut flash,
+            &mut workspace,
             region_index,
             CollectionId(7),
             crate::MAP_REGION_V2_FORMAT,
@@ -1219,6 +1224,7 @@ fn requirement_committed_region_writes_do_not_write_a_live_free_pointer_footer()
     state
         .write_committed_region::<512, 5, _>(
             &mut flash,
+            &mut workspace,
             region_index,
             CollectionId(7),
             crate::MAP_REGION_V2_FORMAT,
@@ -1233,12 +1239,7 @@ fn requirement_committed_region_writes_do_not_write_a_live_free_pointer_footer()
             MockOperation::WriteRegion {
                 region_index,
                 offset: 0,
-                len: Header::ENCODED_LEN,
-            },
-            MockOperation::WriteRegion {
-                region_index,
-                offset: Header::ENCODED_LEN,
-                len: 3,
+                len: 32,
             },
             MockOperation::Sync,
         ]
@@ -1275,6 +1276,7 @@ fn requirement_free_regions_are_erased_only_when_reused() {
     state
         .write_committed_region::<512, 5, _>(
             &mut flash,
+            &mut workspace,
             region_index,
             CollectionId(7),
             crate::MAP_REGION_V2_FORMAT,
@@ -1295,7 +1297,8 @@ fn requirement_initialized_wal_regions_use_reserved_wal_header_fields() {
     let mut flash = MockFlash::<128, 4, 32>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
 
-    initialize_wal_region::<128, 4, _>(&mut flash, metadata, 1, 7, 0).unwrap();
+    let mut workspace = StorageWorkspace::<128>::new();
+    initialize_wal_region::<128, 4, _>(&mut flash, &mut workspace, metadata, 1, 7, 0).unwrap();
 
     let header = read_header_from_flash::<128, 4, _>(&mut flash, 1).unwrap();
     assert_eq!(header.sequence, 7);
@@ -1322,7 +1325,8 @@ fn requirement_initialized_wal_region_erases_the_reclaimed_region_before_reuse()
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
 
     flash.clear_operations();
-    initialize_wal_region::<128, 4, _>(&mut flash, metadata, 1, 7, 0).unwrap();
+    let mut workspace = StorageWorkspace::<128>::new();
+    initialize_wal_region::<128, 4, _>(&mut flash, &mut workspace, metadata, 1, 7, 0).unwrap();
 
     assert_eq!(
         flash.operations(),
@@ -1331,12 +1335,7 @@ fn requirement_initialized_wal_region_erases_the_reclaimed_region_before_reuse()
             MockOperation::WriteRegion {
                 region_index: 1,
                 offset: 0,
-                len: Header::ENCODED_LEN,
-            },
-            MockOperation::WriteRegion {
-                region_index: 1,
-                offset: Header::ENCODED_LEN,
-                len: WalRegionPrologue::ENCODED_LEN,
+                len: metadata.wal_record_area_offset().unwrap(),
             },
             MockOperation::Sync,
         ]
@@ -1352,7 +1351,8 @@ fn requirement_initialized_wal_region_erases_the_wal_region_before_reuse() {
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
 
     flash.clear_operations();
-    initialize_wal_region::<128, 4, _>(&mut flash, metadata, 1, 7, 0).unwrap();
+    let mut workspace = StorageWorkspace::<128>::new();
+    initialize_wal_region::<128, 4, _>(&mut flash, &mut workspace, metadata, 1, 7, 0).unwrap();
 
     assert!(matches!(
         flash.operations().first(),
@@ -1598,6 +1598,7 @@ fn requirement_classify_wal_head_reclaim_copies_only_the_retained_region_head() 
     state
         .write_committed_region::<512, 5, _>(
             &mut flash,
+            &mut workspace,
             retained_region,
             CollectionId(7),
             crate::MAP_REGION_V2_FORMAT,
@@ -1901,7 +1902,7 @@ fn requirement_wal_chain_contains_region_follows_the_durable_link_target() {
             expected_sequence: 1,
         },
     );
-    initialize_wal_region::<128, 4, _>(&mut flash, metadata, 2, 1, 0).unwrap();
+    initialize_wal_region::<128, 4, _>(&mut flash, &mut workspace, metadata, 2, 1, 0).unwrap();
 
     assert_eq!(
         wal_chain_contains_region::<128, _>(&mut flash, &mut workspace, metadata, 0, 2, 2),

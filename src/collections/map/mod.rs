@@ -465,6 +465,10 @@ impl From<StorageIoError> for MapStorageError {
     fn from(error: StorageIoError) -> Self {
         match error {
             StorageIoError::Mock(error) => Self::Mock(error),
+            #[cfg(feature = "embedded-storage")]
+            StorageIoError::EmbeddedStorage(error) => Self::Storage(StorageRuntimeError::from(
+                crate::flash_io::StorageIoError::EmbeddedStorage(error),
+            )),
             #[cfg(all(feature = "file-backing", target_os = "linux"))]
             StorageIoError::FileBacking(error) => Self::Storage(StorageRuntimeError::from(
                 crate::flash_io::StorageIoError::FileBacking(error),
@@ -2283,11 +2287,11 @@ where
             reclaim_plan,
             open_plan,
         )?;
-        {
+        let used = {
             let (payload, _) = workspace.encode_buffers();
             let payload = committed_payload_buffer::<REGION_SIZE>(payload)?;
             let entry_count = self.segment.frontier_entry_count();
-            let used = encode_run_segment_with_snapshot_writer(
+            encode_run_segment_with_snapshot_writer(
                 payload,
                 self.generation,
                 self.next_region,
@@ -2295,15 +2299,16 @@ where
                 &lower.key,
                 &upper.key,
                 |snapshot| self.segment.encode_snapshot_into(snapshot),
-            )?;
-            storage.write_committed_region::<REGION_SIZE, REGION_COUNT, IO>(
-                flash,
-                region_index,
-                collection_id,
-                MAP_RUN_V2_FORMAT,
-                &payload[..used],
-            )?;
-        }
+            )?
+        };
+        storage.write_committed_region_from_workspace_payload::<REGION_SIZE, REGION_COUNT, IO>(
+            flash,
+            workspace,
+            region_index,
+            collection_id,
+            MAP_RUN_V2_FORMAT,
+            used,
+        )?;
         if self.lowest_region.is_none() {
             self.lowest_region = Some(region_index);
         }
@@ -4267,24 +4272,26 @@ where
                 reclaim_plan,
                 open_plan,
             )?;
-            {
+            let used = {
                 let (payload, _) = workspace.encode_buffers();
                 let payload = committed_payload_buffer::<REGION_SIZE>(payload)?;
-                let used = self.encode_run_segment_from_frontier_into(
+                self.encode_run_segment_from_frontier_into(
                     payload,
                     generation,
                     next_region,
                     plan.start_index,
                     plan.entry_count,
-                )?;
-                storage.write_committed_region::<REGION_SIZE, REGION_COUNT, IO>(
+                )?
+            };
+            storage
+                .write_committed_region_from_workspace_payload::<REGION_SIZE, REGION_COUNT, IO>(
                     flash,
+                    workspace,
                     region_index,
                     self.id,
                     MAP_RUN_V2_FORMAT,
-                    &payload[..used],
+                    used,
                 )?;
-            }
             next_region = Some(region_index);
             first_region = Some(region_index);
             region_count = region_count
@@ -4359,25 +4366,27 @@ where
                 reclaim_plan,
                 open_plan,
             )?;
-            {
+            let used = {
                 let (payload, _) = workspace.encode_buffers();
                 let payload = committed_payload_buffer::<REGION_SIZE>(payload)?;
-                let used = Self::encode_run_segment_from_snapshot_into(
+                Self::encode_run_segment_from_snapshot_into(
                     payload,
                     generation,
                     next_region,
                     source,
                     plan.start_index,
                     plan.entry_count,
-                )?;
-                storage.write_committed_region::<REGION_SIZE, REGION_COUNT, IO>(
+                )?
+            };
+            storage
+                .write_committed_region_from_workspace_payload::<REGION_SIZE, REGION_COUNT, IO>(
                     flash,
+                    workspace,
                     region_index,
                     self.id,
                     MAP_RUN_V2_FORMAT,
-                    &payload[..used],
+                    used,
                 )?;
-            }
             next_region = Some(region_index);
             first_region = Some(region_index);
             region_count = region_count
@@ -4455,18 +4464,19 @@ where
             reclaim_plan,
             open_plan,
         )?;
-        {
+        let used = {
             let (payload, _) = workspace.encode_buffers();
             let payload = committed_payload_buffer::<REGION_SIZE>(payload)?;
-            let used = self.encode_manifest_into(payload, extra_newest.as_ref(), None)?;
-            storage.write_committed_region::<REGION_SIZE, REGION_COUNT, IO>(
-                flash,
-                manifest_region,
-                self.id,
-                MAP_MANIFEST_V2_FORMAT,
-                &payload[..used],
-            )?;
-        }
+            self.encode_manifest_into(payload, extra_newest.as_ref(), None)?
+        };
+        storage.write_committed_region_from_workspace_payload::<REGION_SIZE, REGION_COUNT, IO>(
+            flash,
+            workspace,
+            manifest_region,
+            self.id,
+            MAP_MANIFEST_V2_FORMAT,
+            used,
+        )?;
         storage.append_head_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
             flash,
             workspace,
@@ -4575,18 +4585,19 @@ where
             reclaim_plan,
             open_plan,
         )?;
-        {
+        let used = {
             let (payload, _) = workspace.encode_buffers();
             let payload = committed_payload_buffer::<REGION_SIZE>(payload)?;
-            let used = self.encode_manifest_into(payload, frontier_run.as_ref(), None)?;
-            storage.write_committed_region::<REGION_SIZE, REGION_COUNT, IO>(
-                flash,
-                manifest_region,
-                self.id,
-                MAP_MANIFEST_V2_FORMAT,
-                &payload[..used],
-            )?;
-        }
+            self.encode_manifest_into(payload, frontier_run.as_ref(), None)?
+        };
+        storage.write_committed_region_from_workspace_payload::<REGION_SIZE, REGION_COUNT, IO>(
+            flash,
+            workspace,
+            manifest_region,
+            self.id,
+            MAP_MANIFEST_V2_FORMAT,
+            used,
+        )?;
         storage.append_head_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
             flash,
             workspace,

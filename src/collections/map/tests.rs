@@ -3060,9 +3060,10 @@ fn requirement_region_payload_prefix_matches_embedded_snapshot_len() {
         })
         .unwrap();
     storage
-        .with_runtime_io_workspace(|runtime, flash, _workspace| {
+        .with_runtime_io_workspace(|runtime, flash, workspace| {
             runtime.write_committed_region::<512, 5, _>(
                 flash,
+                workspace,
                 region_index,
                 CollectionId(60),
                 MAP_REGION_V2_FORMAT,
@@ -3536,9 +3537,10 @@ fn assert_open_rejects_invalid_retained_region_snapshot_and_update_payloads(
             })
             .unwrap();
         storage
-            .with_runtime_io_workspace(|runtime, flash, _workspace| {
+            .with_runtime_io_workspace(|runtime, flash, workspace| {
                 runtime.write_committed_region::<512, 5, _>(
                     flash,
+                    workspace,
                     region_index,
                     region_collection_id,
                     MAP_REGION_V2_FORMAT,

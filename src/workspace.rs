@@ -22,6 +22,16 @@ impl<const REGION_SIZE: usize> StorageWorkspace<REGION_SIZE> {
     pub(crate) fn encode_buffers(&mut self) -> (&mut [u8; REGION_SIZE], &mut [u8; REGION_SIZE]) {
         (&mut self.physical_scratch, &mut self.logical_scratch)
     }
+
+    pub(crate) fn committed_write_buffer(&mut self) -> &mut [u8; REGION_SIZE] {
+        &mut self.region_bytes
+    }
+
+    pub(crate) fn committed_write_buffers(
+        &mut self,
+    ) -> (&mut [u8; REGION_SIZE], &mut [u8; REGION_SIZE]) {
+        (&mut self.region_bytes, &mut self.physical_scratch)
+    }
 }
 
 impl<const REGION_SIZE: usize> Default for StorageWorkspace<REGION_SIZE> {

@@ -131,6 +131,12 @@ pub use mock::*;
 pub mod flash_io;
 pub use flash_io::*;
 
+/// `embedded-storage` NOR flash adapter.
+#[cfg(feature = "embedded-storage")]
+pub mod embedded_storage;
+#[cfg(feature = "embedded-storage")]
+pub use embedded_storage::*;
+
 /// Linux host-file backing implemented with a mutable mmap.
 #[cfg(all(feature = "file-backing", target_os = "linux"))]
 pub mod file_backing;
@@ -1433,6 +1439,7 @@ impl<
                     .state
                     .write_committed_region::<REGION_SIZE, REGION_COUNT, IO>(
                         this.backing,
+                        &mut this.memory.workspace,
                         region_index,
                         collection_id,
                         collection_format,

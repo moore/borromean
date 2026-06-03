@@ -6,6 +6,9 @@ use crate::{MockFlash, StorageMetadata};
 pub enum StorageIoError {
     /// The in-memory mock backend failed.
     Mock(MockError),
+    /// The `embedded-storage` NOR flash adapter failed.
+    #[cfg(feature = "embedded-storage")]
+    EmbeddedStorage(crate::embedded_storage::EmbeddedStorageError),
     /// The Linux file-backed mmap backend failed.
     #[cfg(all(feature = "file-backing", target_os = "linux"))]
     FileBacking(crate::file_backing::FileBackingError),
@@ -14,6 +17,13 @@ pub enum StorageIoError {
 impl From<MockError> for StorageIoError {
     fn from(error: MockError) -> Self {
         Self::Mock(error)
+    }
+}
+
+#[cfg(feature = "embedded-storage")]
+impl From<crate::embedded_storage::EmbeddedStorageError> for StorageIoError {
+    fn from(error: crate::embedded_storage::EmbeddedStorageError) -> Self {
+        Self::EmbeddedStorage(error)
     }
 }
 
@@ -29,6 +39,9 @@ impl From<crate::file_backing::FileBackingError> for StorageIoError {
 pub enum StorageFormatError {
     /// The in-memory mock backend failed during formatting.
     Mock(MockFormatError),
+    /// The `embedded-storage` NOR flash adapter failed during formatting.
+    #[cfg(feature = "embedded-storage")]
+    EmbeddedStorage(crate::embedded_storage::EmbeddedStorageFormatError),
     /// The Linux file-backed mmap backend failed during formatting.
     #[cfg(all(feature = "file-backing", target_os = "linux"))]
     FileBacking(crate::file_backing::FileBackingFormatError),
@@ -37,6 +50,13 @@ pub enum StorageFormatError {
 impl From<MockFormatError> for StorageFormatError {
     fn from(error: MockFormatError) -> Self {
         Self::Mock(error)
+    }
+}
+
+#[cfg(feature = "embedded-storage")]
+impl From<crate::embedded_storage::EmbeddedStorageFormatError> for StorageFormatError {
+    fn from(error: crate::embedded_storage::EmbeddedStorageFormatError) -> Self {
+        Self::EmbeddedStorage(error)
     }
 }
 

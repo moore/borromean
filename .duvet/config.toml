@@ -64,6 +64,10 @@ source = "spec/file.md"
 format = "markdown"
 
 [[specification]]
+source = "spec/embedded-storage.md"
+format = "markdown"
+
+[[specification]]
 source = "spec/implementation-policy.md"
 format = "markdown"
 

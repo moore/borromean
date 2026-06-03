@@ -1,7 +1,8 @@
 use heapless::Vec;
 
 use crate::disk::{
-    DiskError, FreePointerFooter, Header, StorageMetadata, WalRegionPrologue, WAL_V1_FORMAT,
+    encode_wal_region_prefix, DiskError, FreePointerFooter, Header, StorageMetadata,
+    WalRegionPrologue, WAL_V1_FORMAT,
 };
 use crate::flash_io::FlashIo;
 use crate::flash_io::StorageIoError;
@@ -19,6 +20,9 @@ pub enum StartupError {
     Disk(DiskError),
     /// The backing I/O adapter failed.
     Mock(crate::MockError),
+    /// The `embedded-storage` NOR flash adapter failed.
+    #[cfg(feature = "embedded-storage")]
+    EmbeddedStorage(crate::embedded_storage::EmbeddedStorageError),
     /// The Linux file-backed mmap backend failed.
     #[cfg(all(feature = "file-backing", target_os = "linux"))]
     FileBacking(crate::file_backing::FileBackingError),
@@ -154,6 +158,8 @@ impl From<StorageIoError> for StartupError {
     fn from(error: StorageIoError) -> Self {
         match error {
             StorageIoError::Mock(error) => Self::Mock(error),
+            #[cfg(feature = "embedded-storage")]
+            StorageIoError::EmbeddedStorage(error) => Self::EmbeddedStorage(error),
             #[cfg(all(feature = "file-backing", target_os = "linux"))]
             StorageIoError::FileBacking(error) => Self::FileBacking(error),
         }
@@ -1480,6 +1486,7 @@ fn append_recovery_wal_rotation_finish<
     )?;
     initialize_wal_region::<REGION_SIZE, IO>(
         flash,
+        workspace,
         plan.metadata,
         next_region_index,
         expected_sequence,
@@ -2058,6 +2065,7 @@ fn recover_incomplete_rotation<const REGION_SIZE: usize, IO: FlashIo>(
 
             initialize_wal_region::<REGION_SIZE, IO>(
                 flash,
+                workspace,
                 metadata,
                 next_region_index,
                 expected_sequence,
@@ -2127,6 +2135,7 @@ fn recover_incomplete_rotation<const REGION_SIZE: usize, IO: FlashIo>(
 
             initialize_wal_region::<REGION_SIZE, IO>(
                 flash,
+                workspace,
                 metadata,
                 region_index,
                 expected_sequence,
@@ -2141,6 +2150,7 @@ fn recover_incomplete_rotation<const REGION_SIZE: usize, IO: FlashIo>(
 
 fn initialize_wal_region<const REGION_SIZE: usize, IO: FlashIo>(
     flash: &mut IO,
+    workspace: &mut StorageWorkspace<REGION_SIZE>,
     metadata: StorageMetadata,
     region_index: u32,
     sequence: u64,
@@ -2149,22 +2159,10 @@ fn initialize_wal_region<const REGION_SIZE: usize, IO: FlashIo>(
     ensure_region_index_in_range(region_index, metadata.region_count)?;
 
     flash.erase_region(region_index)?;
-
-    let header = Header {
-        sequence,
-        collection_id: CollectionId(0),
-        collection_format: WAL_V1_FORMAT,
-    };
-    let mut header_bytes = [0u8; Header::ENCODED_LEN];
-    header.encode_into(&mut header_bytes)?;
-    flash.write_region(region_index, 0, &header_bytes)?;
-
-    let prologue = WalRegionPrologue {
-        wal_head_region_index: wal_head,
-    };
-    let mut prologue_bytes = [0u8; WalRegionPrologue::ENCODED_LEN];
-    prologue.encode_into(&mut prologue_bytes, metadata.region_count)?;
-    flash.write_region(region_index, Header::ENCODED_LEN, &prologue_bytes)?;
+    let target = workspace.committed_write_buffer();
+    let prefix_len =
+        encode_wal_region_prefix(target, metadata, sequence, wal_head, metadata.erased_byte)?;
+    flash.write_region(region_index, 0, &target[..prefix_len])?;
     flash.sync()?;
     Ok(())
 }

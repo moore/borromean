@@ -2,7 +2,7 @@
 
 use heapless::Vec;
 
-use crate::disk::{FreePointerFooter, Header, WalRegionPrologue, WAL_V1_FORMAT};
+use crate::disk::{encode_wal_region_prefix, FreePointerFooter, Header};
 use crate::flash_io::{FlashIo, StorageFormatError, StorageIoError};
 use crate::mock::{MockError, MockFormatError};
 use crate::mode::StorageMode;
@@ -31,11 +31,17 @@ pub enum StorageRuntimeError {
     },
     /// Formatting the backing store failed.
     Format(MockFormatError),
+    /// Formatting the `embedded-storage` NOR flash adapter failed.
+    #[cfg(feature = "embedded-storage")]
+    EmbeddedStorageFormat(crate::embedded_storage::EmbeddedStorageFormatError),
     /// Formatting the Linux file-backed mmap backend failed.
     #[cfg(all(feature = "file-backing", target_os = "linux"))]
     FileBackingFormat(crate::file_backing::FileBackingFormatError),
     /// The backing I/O adapter failed.
     Mock(MockError),
+    /// The `embedded-storage` NOR flash adapter failed.
+    #[cfg(feature = "embedded-storage")]
+    EmbeddedStorage(crate::embedded_storage::EmbeddedStorageError),
     /// The Linux file-backed mmap backend failed.
     #[cfg(all(feature = "file-backing", target_os = "linux"))]
     FileBacking(crate::file_backing::FileBackingError),
@@ -173,6 +179,8 @@ impl From<StorageFormatError> for StorageRuntimeError {
     fn from(error: StorageFormatError) -> Self {
         match error {
             StorageFormatError::Mock(error) => Self::Format(error),
+            #[cfg(feature = "embedded-storage")]
+            StorageFormatError::EmbeddedStorage(error) => Self::EmbeddedStorageFormat(error),
             #[cfg(all(feature = "file-backing", target_os = "linux"))]
             StorageFormatError::FileBacking(error) => Self::FileBackingFormat(error),
         }
@@ -189,6 +197,8 @@ impl From<StorageIoError> for StorageRuntimeError {
     fn from(error: StorageIoError) -> Self {
         match error {
             StorageIoError::Mock(error) => Self::Mock(error),
+            #[cfg(feature = "embedded-storage")]
+            StorageIoError::EmbeddedStorage(error) => Self::EmbeddedStorage(error),
             #[cfg(all(feature = "file-backing", target_os = "linux"))]
             StorageIoError::FileBacking(error) => Self::FileBacking(error),
         }
@@ -516,18 +526,13 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
     >(
         &mut self,
         flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
         region_index: u32,
         collection_id: CollectionId,
         collection_format: u16,
         payload: &[u8],
     ) -> Result<(), StorageRuntimeError> {
-        let payload_capacity = REGION_SIZE
-            .checked_sub(Header::ENCODED_LEN)
-            .and_then(|remaining| remaining.checked_sub(FreePointerFooter::ENCODED_LEN))
-            .ok_or(StorageRuntimeError::CommittedRegionTooLarge {
-                payload_len: payload.len(),
-                capacity: 0,
-            })?;
+        let payload_capacity = committed_payload_capacity::<REGION_SIZE>(self.metadata)?;
         if payload.len() > payload_capacity {
             return Err(StorageRuntimeError::CommittedRegionTooLarge {
                 payload_len: payload.len(),
@@ -542,17 +547,103 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
 
         flash.erase_region(region_index)?;
 
+        let write_len = committed_write_len(self.metadata, payload.len())?;
+        let target = workspace.committed_write_buffer();
+        let target =
+            target
+                .get_mut(..write_len)
+                .ok_or(StorageRuntimeError::CommittedRegionTooLarge {
+                    payload_len: payload.len(),
+                    capacity: payload_capacity,
+                })?;
+        target.fill(self.metadata.erased_byte);
         let header = Header {
             sequence,
             collection_id,
             collection_format,
         };
-        let mut header_bytes = [0u8; Header::ENCODED_LEN];
         header
-            .encode_into(&mut header_bytes)
+            .encode_into(target)
             .map_err(|error| StorageRuntimeError::Startup(error.into()))?;
-        flash.write_region(region_index, 0, &header_bytes)?;
-        flash.write_region(region_index, Header::ENCODED_LEN, payload)?;
+        let payload_end = Header::ENCODED_LEN
+            .checked_add(payload.len())
+            .ok_or(StorageRuntimeError::WalRotationRequired)?;
+        let target_payload = target.get_mut(Header::ENCODED_LEN..payload_end).ok_or(
+            StorageRuntimeError::CommittedRegionTooLarge {
+                payload_len: payload.len(),
+                capacity: payload_capacity,
+            },
+        )?;
+        target_payload.copy_from_slice(payload);
+        flash.write_region(region_index, 0, target)?;
+        flash.sync()?;
+        self.max_seen_sequence = sequence;
+        Ok(())
+    }
+
+    pub(crate) fn write_committed_region_from_workspace_payload<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        region_index: u32,
+        collection_id: CollectionId,
+        collection_format: u16,
+        payload_len: usize,
+    ) -> Result<(), StorageRuntimeError> {
+        let payload_capacity = committed_payload_capacity::<REGION_SIZE>(self.metadata)?;
+        if payload_len > payload_capacity {
+            return Err(StorageRuntimeError::CommittedRegionTooLarge {
+                payload_len,
+                capacity: payload_capacity,
+            });
+        }
+
+        let sequence = self
+            .max_seen_sequence
+            .checked_add(1)
+            .ok_or(StorageRuntimeError::WalRotationRequired)?;
+
+        flash.erase_region(region_index)?;
+
+        let write_len = committed_write_len(self.metadata, payload_len)?;
+        let (target, payload_source) = workspace.committed_write_buffers();
+        let target =
+            target
+                .get_mut(..write_len)
+                .ok_or(StorageRuntimeError::CommittedRegionTooLarge {
+                    payload_len,
+                    capacity: payload_capacity,
+                })?;
+        target.fill(self.metadata.erased_byte);
+        let header = Header {
+            sequence,
+            collection_id,
+            collection_format,
+        };
+        header
+            .encode_into(target)
+            .map_err(|error| StorageRuntimeError::Startup(error.into()))?;
+        let payload_end = Header::ENCODED_LEN
+            .checked_add(payload_len)
+            .ok_or(StorageRuntimeError::WalRotationRequired)?;
+        let target_payload = target.get_mut(Header::ENCODED_LEN..payload_end).ok_or(
+            StorageRuntimeError::CommittedRegionTooLarge {
+                payload_len,
+                capacity: payload_capacity,
+            },
+        )?;
+        let source_payload = payload_source.get(..payload_len).ok_or(
+            StorageRuntimeError::CommittedRegionTooLarge {
+                payload_len,
+                capacity: payload_capacity,
+            },
+        )?;
+        target_payload.copy_from_slice(source_payload);
+        flash.write_region(region_index, 0, target)?;
         flash.sync()?;
         self.max_seen_sequence = sequence;
         Ok(())
@@ -1452,6 +1543,7 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
         )?;
         initialize_wal_region::<REGION_SIZE, REGION_COUNT, IO>(
             flash,
+            workspace,
             self.metadata,
             next_region_index,
             expected_sequence,
@@ -3094,32 +3186,18 @@ fn read_free_pointer_successor<const REGION_SIZE: usize, const REGION_COUNT: usi
 
 fn initialize_wal_region<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
     flash: &mut IO,
+    workspace: &mut StorageWorkspace<REGION_SIZE>,
     metadata: StorageMetadata,
     region_index: u32,
     sequence: u64,
     wal_head: u32,
 ) -> Result<(), StorageRuntimeError> {
     flash.erase_region(region_index)?;
-
-    let header = Header {
-        sequence,
-        collection_id: CollectionId(0),
-        collection_format: WAL_V1_FORMAT,
-    };
-    let mut header_bytes = [0u8; Header::ENCODED_LEN];
-    header
-        .encode_into(&mut header_bytes)
-        .map_err(|error| StorageRuntimeError::Startup(error.into()))?;
-    flash.write_region(region_index, 0, &header_bytes)?;
-
-    let prologue = WalRegionPrologue {
-        wal_head_region_index: wal_head,
-    };
-    let mut prologue_bytes = [0u8; WalRegionPrologue::ENCODED_LEN];
-    prologue
-        .encode_into(&mut prologue_bytes, metadata.region_count)
-        .map_err(|error| StorageRuntimeError::Startup(error.into()))?;
-    flash.write_region(region_index, Header::ENCODED_LEN, &prologue_bytes)?;
+    let target = workspace.committed_write_buffer();
+    let prefix_len =
+        encode_wal_region_prefix(target, metadata, sequence, wal_head, metadata.erased_byte)
+            .map_err(|error| StorageRuntimeError::Startup(error.into()))?;
+    flash.write_region(region_index, 0, &target[..prefix_len])?;
     flash.sync()?;
     Ok(())
 }
@@ -3162,6 +3240,51 @@ fn ensure_free_pointer_footer_unwritten<const REGION_SIZE: usize, IO: FlashIo>(
         Ok(())
     } else {
         Err(StorageRuntimeError::FreeRegionFooterNotUnwritten { region_index })
+    }
+}
+
+fn committed_payload_capacity<const REGION_SIZE: usize>(
+    metadata: StorageMetadata,
+) -> Result<usize, StorageRuntimeError> {
+    let granule = usize::try_from(metadata.wal_write_granule)
+        .map_err(|_| StorageRuntimeError::WalRotationRequired)?;
+    if granule == 0 {
+        return Err(StorageRuntimeError::WalRotationRequired);
+    }
+    let footer_offset = REGION_SIZE
+        .checked_sub(FreePointerFooter::ENCODED_LEN)
+        .ok_or(StorageRuntimeError::CommittedRegionTooLarge {
+            payload_len: 0,
+            capacity: 0,
+        })?;
+    let aligned_footer_boundary = footer_offset - footer_offset % granule;
+    aligned_footer_boundary
+        .checked_sub(Header::ENCODED_LEN)
+        .ok_or(StorageRuntimeError::CommittedRegionTooLarge {
+            payload_len: 0,
+            capacity: 0,
+        })
+}
+
+fn committed_write_len(
+    metadata: StorageMetadata,
+    payload_len: usize,
+) -> Result<usize, StorageRuntimeError> {
+    let granule = usize::try_from(metadata.wal_write_granule)
+        .map_err(|_| StorageRuntimeError::WalRotationRequired)?;
+    if granule == 0 {
+        return Err(StorageRuntimeError::WalRotationRequired);
+    }
+    let unaligned = Header::ENCODED_LEN
+        .checked_add(payload_len)
+        .ok_or(StorageRuntimeError::WalRotationRequired)?;
+    let remainder = unaligned % granule;
+    if remainder == 0 {
+        Ok(unaligned)
+    } else {
+        unaligned
+            .checked_add(granule - remainder)
+            .ok_or(StorageRuntimeError::WalRotationRequired)
     }
 }
 

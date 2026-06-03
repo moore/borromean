@@ -98,6 +98,7 @@ same deterministic workloads for each engine. The full generated report lives in
 - Architecture and API guide: [docs/architecture-and-api.md](docs/architecture-and-api.md)
 - Durable map format and behavior: [spec/map.md](spec/map.md)
 - Mock flash behavior: [spec/mock.md](spec/mock.md)
-- Contributor tutorial for adding collections: [docs/implementing-a-collection.md](docs/implementing-a-collection.md)
+- Contributor tutorial for adding collections:
+  [docs/implementing-a-collection.md](docs/implementing-a-collection.md)
 - Traceability and contribution notes: [CONTRIBUTING.md](CONTRIBUTING.md) and
   [spec/implementation-policy.md](spec/implementation-policy.md)

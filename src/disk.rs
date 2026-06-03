@@ -177,6 +177,34 @@ impl StorageMetadata {
     }
 }
 
+pub(crate) fn encode_wal_region_prefix(
+    buffer: &mut [u8],
+    metadata: StorageMetadata,
+    sequence: u64,
+    wal_head: u32,
+    erased_byte: u8,
+) -> Result<usize, DiskError> {
+    let prefix_len = metadata.wal_record_area_offset()?;
+    ensure_len(buffer, prefix_len)?;
+    buffer[..prefix_len].fill(erased_byte);
+
+    let header = Header {
+        sequence,
+        collection_id: CollectionId(0),
+        collection_format: WAL_V1_FORMAT,
+    };
+    header.encode_into(buffer)?;
+
+    let prologue = WalRegionPrologue {
+        wal_head_region_index: wal_head,
+    };
+    prologue.encode_into(
+        &mut buffer[Header::ENCODED_LEN..Header::ENCODED_LEN + WalRegionPrologue::ENCODED_LEN],
+        metadata.region_count,
+    )?;
+    Ok(prefix_len)
+}
+
 /// Per-region header shared by WAL and committed collection regions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Header {
