@@ -226,6 +226,8 @@ pub enum CollectionType {
     Channel, // FIFO queue
     /// Durable map collection type.
     Map, // Key-value store
+    /// WAL-backed opaque object log collection type.
+    ObjectLog, // Opaque object log
 }
 
 impl CollectionType {
@@ -235,6 +237,8 @@ impl CollectionType {
     pub const CHANNEL_CODE: u16 = 1;
     /// Stable on-disk code reserved for durable map collections.
     pub const MAP_CODE: u16 = 2;
+    /// Stable on-disk code reserved for durable object-log collections.
+    pub const OBJECT_LOG_CODE: u16 = 3;
 
     /// Returns the stable on-disk code for durable collection kinds.
     pub fn stable_code(self) -> Option<u16> {
@@ -242,6 +246,7 @@ impl CollectionType {
             Self::Wal => Some(Self::WAL_CODE),
             Self::Channel => Some(Self::CHANNEL_CODE),
             Self::Map => Some(Self::MAP_CODE),
+            Self::ObjectLog => Some(Self::OBJECT_LOG_CODE),
             Self::Uninitialized | Self::Free => None,
         }
     }
@@ -1160,7 +1165,7 @@ impl<
         self.memory.state.collections()
     }
 
-    pub(crate) fn allocate_map_collection_id(&self) -> Result<CollectionId, StorageRuntimeError> {
+    pub(crate) fn allocate_collection_id(&self) -> Result<CollectionId, StorageRuntimeError> {
         let mut next = 1u64;
         for collection in self.collections() {
             let candidate = collection
@@ -1173,6 +1178,10 @@ impl<
             }
         }
         Ok(CollectionId(next))
+    }
+
+    pub(crate) fn allocate_map_collection_id(&self) -> Result<CollectionId, StorageRuntimeError> {
+        self.allocate_collection_id()
     }
 
     /// Returns whether replay left an open WAL recovery boundary.
@@ -1196,7 +1205,7 @@ impl<
             };
 
             match collection_type {
-                CollectionType::MAP_CODE => {}
+                CollectionType::MAP_CODE | CollectionType::OBJECT_LOG_CODE => {}
                 other => return Err(StorageOpenError::UnsupportedLiveCollectionType(other)),
             }
         }

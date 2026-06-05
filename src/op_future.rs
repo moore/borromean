@@ -804,7 +804,10 @@ where
                         )));
                     };
 
-                    if collection_type != CollectionType::MAP_CODE {
+                    if !matches!(
+                        collection_type,
+                        CollectionType::MAP_CODE | CollectionType::OBJECT_LOG_CODE
+                    ) {
                         return Poll::Ready(Err(StorageOpenError::UnsupportedLiveCollectionType(
                             collection_type,
                         )));

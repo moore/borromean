@@ -347,7 +347,10 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
         if collection_id == CollectionId(0) {
             return Err(StorageRuntimeError::ReservedCollectionId(collection_id));
         }
-        if collection_type != CollectionType::MAP_CODE {
+        if !matches!(
+            collection_type,
+            CollectionType::MAP_CODE | CollectionType::OBJECT_LOG_CODE
+        ) {
             return Err(StorageRuntimeError::UnsupportedCollectionType(
                 collection_type,
             ));
@@ -1262,6 +1265,27 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
         collection_id: CollectionId,
         region_index: u32,
     ) -> Result<(), StorageRuntimeError> {
+        self.append_free_region_with_rotation_prepared::<REGION_SIZE, REGION_COUNT, IO>(
+            flash,
+            workspace,
+            collection_id,
+            region_index,
+            FreeRegionPreparation::RequireUnwrittenFooter,
+        )
+    }
+
+    pub(crate) fn append_free_region_with_rotation_prepared<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        collection_id: CollectionId,
+        region_index: u32,
+        preparation: FreeRegionPreparation,
+    ) -> Result<(), StorageRuntimeError> {
         if collection_id != CollectionId(0) {
             match self.open_transaction {
                 Some(open) if open.collection_id == collection_id => {}
@@ -1282,11 +1306,7 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
                 region_index,
             },
         )?;
-        self.prepare_region_for_free::<REGION_SIZE, IO>(
-            flash,
-            region_index,
-            FreeRegionPreparation::RequireUnwrittenFooter,
-        )?;
+        self.prepare_region_for_free::<REGION_SIZE, IO>(flash, region_index, preparation)?;
         self.write_record_and_apply::<REGION_SIZE, REGION_COUNT, IO>(
             flash,
             workspace,
@@ -1441,6 +1461,35 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
             flash,
             workspace,
             WalRecord::TransactionFinished { collection_id },
+        )?;
+        self.open_transaction = None;
+        Ok(())
+    }
+
+    /// Appends the transaction rollback marker and closes the open transaction.
+    pub(crate) fn rollback_collection_transaction<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        collection_id: CollectionId,
+    ) -> Result<(), StorageRuntimeError> {
+        let Some(open) = self.open_transaction else {
+            return Err(StorageRuntimeError::TransactionNotOpen(collection_id));
+        };
+        if open.collection_id != collection_id {
+            return Err(StorageRuntimeError::TransactionMismatch {
+                expected: open.collection_id,
+                actual: collection_id,
+            });
+        }
+        self.append_record_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
+            flash,
+            workspace,
+            WalRecord::RollbackTransaction { collection_id },
         )?;
         self.open_transaction = None;
         Ok(())
@@ -2002,6 +2051,9 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
     ) -> Result<(), StorageRuntimeError> {
         let payload = match collection_type {
             crate::CollectionType::MAP_CODE => crate::EMPTY_MAP_SNAPSHOT.as_slice(),
+            crate::CollectionType::OBJECT_LOG_CODE => {
+                crate::collections::object_log::empty_snapshot()
+            }
             other => {
                 return Err(StorageRuntimeError::WalHeadReclaimUnsupportedCollectionType(other))
             }
@@ -2294,7 +2346,8 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
                 if should_rewrite {
                     activate_collection(active_collections, collection_id)?;
                     return match collection_type {
-                        crate::CollectionType::MAP_CODE => {
+                        crate::CollectionType::MAP_CODE
+                        | crate::CollectionType::OBJECT_LOG_CODE => {
                             Ok(WalHeadReclaimAction::RewriteEmptyBasisAsSnapshot {
                                 collection_id,
                                 collection_type,

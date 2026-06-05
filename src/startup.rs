@@ -2664,7 +2664,9 @@ fn validate_live_collection_types(collections: &[StartupCollection]) -> Result<(
 
         if !matches!(
             collection_type,
-            CollectionType::CHANNEL_CODE | CollectionType::MAP_CODE
+            CollectionType::CHANNEL_CODE
+                | CollectionType::MAP_CODE
+                | CollectionType::OBJECT_LOG_CODE
         ) {
             return Err(StartupError::UnsupportedLiveCollectionType(collection_type));
         }
