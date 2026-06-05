@@ -82,6 +82,33 @@ run_trace_review() {
     python3 scripts/trace_review.py init
 }
 
+run_review() {
+    local args=()
+    if [[ -n "${BORROMEAN_TRACE_REVIEW_LIMIT:-}" ]]; then
+        args+=(--limit "$BORROMEAN_TRACE_REVIEW_LIMIT")
+    fi
+    if [[ -n "${BORROMEAN_TRACE_REVIEW_MODEL:-}" ]]; then
+        args+=(--model "$BORROMEAN_TRACE_REVIEW_MODEL")
+    fi
+    if [[ -n "${BORROMEAN_TRACE_REVIEW_EFFORT:-}" ]]; then
+        args+=(--effort "$BORROMEAN_TRACE_REVIEW_EFFORT")
+    fi
+    if [[ -n "${BORROMEAN_TRACE_REVIEW_SANDBOX:-}" ]]; then
+        args+=(--reviewer-sandbox "$BORROMEAN_TRACE_REVIEW_SANDBOX")
+    fi
+    if [[ -n "${BORROMEAN_TRACE_REVIEW_CODEX_BIN:-}" ]]; then
+        args+=(--codex-bin "$BORROMEAN_TRACE_REVIEW_CODEX_BIN")
+    fi
+    if [[ "${BORROMEAN_TRACE_REVIEW_SKIP_PREFLIGHT:-0}" == "1" ]]; then
+        args+=(--skip-preflight)
+    fi
+    if [[ "${BORROMEAN_TRACE_REVIEW_DRY_RUN:-0}" == "1" ]]; then
+        args+=(--dry-run)
+    fi
+    echo "==> python3 scripts/trace_review.py review ${args[*]}"
+    python3 scripts/trace_review.py review "${args[@]}"
+}
+
 run_trace_review_summary() {
     echo "==> python3 scripts/trace_review.py summarize"
     python3 scripts/trace_review.py summarize
@@ -261,8 +288,9 @@ Tasks:
   clippy   Run cargo clippy
   md       Run markdown formatting
   duvet    Validate traceability annotations and generate the Duvet report
+  review   Run the fresh per-test semantic review loop with Codex reviewers
   trace-review
-           Generate fresh per-test semantic review packets under target/trace-review
+           Generate fresh per-test semantic review packets under target/trace-review without running reviewers
   trace-review-summary
            Validate reviewer result JSON files and summarize semantic review findings
   mutants  Manually run cargo-mutants after validating annotations
@@ -308,6 +336,9 @@ run_task() {
             ;;
         duvet)
             run_duvet
+            ;;
+        review)
+            run_review
             ;;
         trace-review)
             run_trace_review

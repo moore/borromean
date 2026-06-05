@@ -1,9 +1,10 @@
 use super::{
-    check_annotation_shape, collect_annotation_block, collect_normative_requirement_items,
-    contains_inline_test_body, contains_normative_language, extract_all_requirement_ids,
-    extract_requirement_ids, functional_untraced_test_offenders, inline_test_module_offenders,
-    is_dedicated_test_file, is_functional_test_file, multi_requirement_harness_offenders,
-    normalize_requirement_whitespace, relative_display, spec_requirement_format_offenders,
+    check_annotation_shape, collect_annotation_block, collect_requirement_format_items,
+    configured_duvet_specifications, contains_inline_test_body, contains_normative_language,
+    extract_all_requirement_ids, extract_requirement_ids, functional_untraced_test_offenders,
+    inline_test_module_offenders, is_dedicated_test_file, is_functional_test_file,
+    multi_requirement_harness_offenders, normalize_requirement_whitespace, relative_display,
+    requirement_format_failures, spec_format_policy, spec_requirement_format_offenders,
     strip_numbered_prefix, ParsedBlock, Summary,
 };
 use std::fs;
@@ -28,7 +29,7 @@ impl TempWorkspace {
         Self { root }
     }
 
-    fn write_spec(&self, path: &str, source: &str) {
+    fn write_file(&self, path: &str, source: &str) {
         let full_path = self.root.join(path);
         if let Some(parent) = full_path.parent() {
             fs::create_dir_all(parent).unwrap();
@@ -36,12 +37,12 @@ impl TempWorkspace {
         fs::write(full_path, source).unwrap();
     }
 
+    fn write_spec(&self, path: &str, source: &str) {
+        self.write_file(path, source);
+    }
+
     fn write_harness(&self, path: &str, source: &str) {
-        let full_path = self.root.join(path);
-        if let Some(parent) = full_path.parent() {
-            fs::create_dir_all(parent).unwrap();
-        }
-        fs::write(full_path, source).unwrap();
+        self.write_file(path, source);
     }
 }
 
@@ -76,7 +77,11 @@ fn requirement_ring_impl_format_001_rejects_missing_stable_ids() {
     let workspace = TempWorkspace::new("");
     workspace.write_spec(
         "spec/example.md",
-        "1. The implementation MUST do the thing.\n",
+        "1. `RING-EXAMPLE-001` The first behavior MUST keep its identifier.\n\
+         2. `RING-EXAMPLE-002` The second behavior MUST also be checked.\n\
+         3. The later behavior MUST still start with an identifier.\n\
+         4. `RING-` The prefix-only behavior MUST be rejected.\n\
+         5. `RING-FOO` The non-numeric identifier behavior MUST be rejected.\n",
     );
 
     let error = spec_requirement_format_offenders(&workspace.root, "spec/example.md", &["RING-"])
@@ -84,6 +89,32 @@ fn requirement_ring_impl_format_001_rejects_missing_stable_ids() {
         .unwrap();
 
     assert!(error.contains("stable identifier"));
+    assert!(error.contains("The later behavior MUST"));
+    assert!(error.contains("`RING-`"));
+    assert!(error.contains("`RING-FOO`"));
+    assert!(!error.contains("RING-EXAMPLE-001"));
+    assert!(!error.contains("RING-EXAMPLE-002"));
+
+    workspace.write_file(
+        ".duvet/config.toml",
+        "[[specification]]\nsource = \"spec/file.md\"\nformat = \"markdown\"\n",
+    );
+    workspace.write_spec(
+        "spec/file.md",
+        "1. `RING-FILE-001` File behavior MUST be checked.\n\
+         2. File behavior configured through Duvet MUST still have a stable id.\n",
+    );
+
+    let failures = requirement_format_failures(&workspace.root).unwrap();
+
+    assert_eq!(
+        configured_duvet_specifications(&workspace.root),
+        Ok(vec!["spec/file.md".to_owned()])
+    );
+    assert!(spec_format_policy("spec/file.md").is_some());
+    assert_eq!(failures.len(), 1, "{failures:#?}");
+    assert!(failures[0].contains("spec/file.md#requirements-format"));
+    assert!(failures[0].contains("configured through Duvet"));
 }
 
 //= spec/implementation-policy.md#requirements-format
@@ -95,14 +126,35 @@ fn requirement_ring_impl_format_002_rejects_missing_normative_language() {
     let workspace = TempWorkspace::new("");
     workspace.write_spec(
         "spec/example.md",
-        "1. `RING-EXAMPLE-001` The implementation keeps this behavior stable.\n",
+        "1. `RING-EXAMPLE-001` The implementation MUST keep the valid behavior stable.\n\
+         2. `RING-EXAMPLE-002` Repository behavior remains stable.\n",
     );
 
     let error = spec_requirement_format_offenders(&workspace.root, "spec/example.md", &["RING-"])
         .unwrap()
         .unwrap();
 
-    assert!(error.contains("no normative requirement items"));
+    assert!(error.contains("explicit normative language"));
+    assert!(error.contains("RING-EXAMPLE-002"));
+    assert!(!error.contains("no normative requirement items"));
+    assert!(!error.contains("RING-EXAMPLE-001"));
+
+    workspace.write_file(
+        ".duvet/config.toml",
+        "[[specification]]\nsource = \"spec/file.md\"\nformat = \"markdown\"\n",
+    );
+    workspace.write_spec(
+        "spec/file.md",
+        "1. `RING-FILE-001` File behavior MUST be checked.\n\
+         2. `RING-FILE-002` Repository file behavior remains stable.\n",
+    );
+
+    let failures = requirement_format_failures(&workspace.root).unwrap();
+
+    assert_eq!(failures.len(), 1, "{failures:#?}");
+    assert!(failures[0].contains("spec/file.md#requirements-format"));
+    assert!(failures[0].contains("explicit normative language"));
+    assert!(failures[0].contains("RING-FILE-002"));
 }
 
 #[test]
@@ -145,6 +197,24 @@ fn requirement_ring_impl_test_001_accepts_single_requirement_and_todo_tests() {
             todo_tests: 1
         }
     );
+
+    let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let verify = fs::read_to_string(repo_root.join("scripts/verify.sh")).unwrap();
+    let tasks = fs::read_to_string(repo_root.join("tasks.sh")).unwrap();
+    for source in [&verify, &tasks] {
+        assert!(source.contains("cargo run --quiet --bin traceability_audit -- check-requirements"));
+        assert!(
+            source.contains("duvet report --config-path .duvet/config.toml --require-tests true")
+        );
+    }
+
+    let configured_specs = configured_duvet_specifications(&repo_root).unwrap();
+    assert!(configured_specs.contains(&"spec/implementation-policy.md".to_owned()));
+    assert!(configured_specs.contains(&"spec/file.md".to_owned()));
+    assert!(configured_specs.contains(&"spec/embedded-storage.md".to_owned()));
+    assert!(configured_specs
+        .iter()
+        .all(|spec| spec_format_policy(spec).is_some()));
 }
 
 #[test]
@@ -209,18 +279,65 @@ fn requirement_ring_impl_test_002_rejects_multi_requirement_tests() {
 #[test]
 fn requirement_ring_impl_test_003_rejects_traced_helpers() {
     let source = format!(
-        "\n{eq} spec/ring/00-introduction.md#anchor\n{eq} type=test\n{quote} `RING-EXAMPLE-001` The parser MUST parse things.\nfn helper() {{}}\n",
+        "\nfn fixture_value() -> u8 {{ 1 }}\n\n\
+         macro_rules! assert_nonzero {{\n\
+             ($value:expr) => {{\n\
+                 assert!($value > 0);\n\
+             }};\n\
+         }}\n\n\
+         fn generated_values() -> [u8; 2] {{ [fixture_value(), 2] }}\n\n\
+         {eq} spec/ring/00-introduction.md#anchor\n\
+         {eq} type=test\n\
+         {quote} `RING-EXAMPLE-001` The parser MUST parse things.\n\
+         #[test]\n\
+         fn requirement_shared_helper_one() {{\n\
+             assert_nonzero!(generated_values()[0]);\n\
+         }}\n\n\
+         {eq} spec/ring/00-introduction.md#later\n\
+         {eq} type=test\n\
+         {quote} `RING-EXAMPLE-002` The parser MUST parse other things.\n\
+         #[test]\n\
+         fn requirement_shared_helper_two() {{\n\
+             assert_nonzero!(generated_values()[1]);\n\
+         }}\n\n\
+         {eq} spec/ring/00-introduction.md#helper\n\
+         {eq} type=test\n\
+         {quote} `RING-EXAMPLE-003` A helper MUST not be the final traced entry point.\n\
+         fn helper() {{}}\n",
         eq = "//=",
         quote = "//#"
     );
     let workspace = TempWorkspace::new(&source);
     let mut errors = Vec::new();
 
-    check_annotation_shape(&workspace.root, &mut errors);
+    let summary = check_annotation_shape(&workspace.root, &mut errors);
 
+    assert_eq!(
+        summary,
+        Summary {
+            requirement_tests: 2,
+            todo_tests: 0
+        }
+    );
     assert!(errors
         .iter()
         .any(|error| error.contains("must have exactly one #[test]")));
+    assert_eq!(errors.len(), 1, "{errors:#?}");
+    assert!(errors.iter().any(|error| error.contains("helper")));
+    assert!(!errors
+        .iter()
+        .any(|error| error.contains("requirement_shared_helper_one")));
+    assert!(!errors
+        .iter()
+        .any(|error| error.contains("requirement_shared_helper_two")));
+    assert!(!errors.iter().any(|error| error.contains("fixture_value")));
+    assert!(!errors
+        .iter()
+        .any(|error| error.contains("generated_values")));
+    assert!(!errors.iter().any(|error| error.contains("assert_nonzero")));
+    assert!(!errors
+        .iter()
+        .any(|error| error.contains("multiple requirement identifiers")));
 }
 
 //= spec/implementation-policy.md#verification-requirements
@@ -260,10 +377,31 @@ fn single_requirement_harness_entries_are_not_offenders() {
 #[test]
 fn requirement_ring_impl_test_005_rejects_inline_test_modules() {
     let workspace = TempWorkspace::new("fn helper() {}\n\n#[test]\nfn inline_test() {}\n");
+    workspace.write_harness(
+        "src/functional.rs",
+        "#[cfg(test)]\nmod tests {\n    #[test]\n    fn nested_inline_test() {}\n}\n",
+    );
+    workspace.write_harness(
+        "src/functional_harness.rs",
+        "//# `RING-EXAMPLE-001` Compile harness behavior MUST stay dedicated.\n",
+    );
+    workspace.write_harness(
+        "src/storage/tests.rs",
+        "#[test]\nfn dedicated_runtime_test() {}\n",
+    );
+    workspace.write_harness(
+        "tests/ui/compile_pass.rs",
+        "//# `RING-EXAMPLE-001` Compile harness behavior MUST stay dedicated.\n",
+    );
 
     let error = inline_test_module_offenders(&workspace.root).unwrap();
 
     assert!(error.contains("non-test source files"));
+    assert!(error.contains("src/lib.rs"));
+    assert!(error.contains("src/functional.rs"));
+    assert!(error.contains("src/functional_harness.rs"));
+    assert!(!error.contains("src/storage/tests.rs"));
+    assert!(!error.contains("tests/ui/compile_pass.rs"));
 }
 
 //= spec/implementation-policy.md#verification-requirements
@@ -276,16 +414,122 @@ fn requirement_ring_impl_test_005_rejects_inline_test_modules() {
 #[test]
 fn requirement_ring_impl_test_006_rejects_untraced_functional_test_entries() {
     let workspace = TempWorkspace::new("");
+    let traced_source = format!(
+        "\n{eq} spec/ring/00-introduction.md#anchor\n\
+         {eq} type=test\n\
+         {quote} `RING-EXAMPLE-001` The storage layer MUST preserve data.\n\
+         #[test]\n\
+         fn requirement_storage_regression() {{}}\n\n\
+         {eq} spec/ring/00-introduction.md#todo\n\
+         {eq} type=todo\n\
+         {quote} `RING-EXAMPLE-002` Later storage work MUST be tracked.\n\
+         #[test]\n\
+         fn todo_storage_followup() {{}}\n\n\
+         #[test]\n\
+         fn storage_regression() {{}}\n\n\
+         fn helper() {{}}\n",
+        eq = "//=",
+        quote = "//#"
+    );
+    workspace.write_harness("src/storage/tests.rs", &traced_source);
     workspace.write_harness(
-        "src/storage/tests.rs",
-        "\n#[test]\nfn storage_regression() {}\n\nfn helper() {}\n",
+        "src/bin/traceability_audit/tests.rs",
+        "\n#[test]\nfn checker_unit_test() {}\n",
+    );
+    workspace.write_harness(
+        "src/tests/functional.rs",
+        "\n#[test]\nfn cross_module_regression() {}\n",
+    );
+    workspace.write_harness(
+        "tests/functional.rs",
+        "\n#[test]\nfn top_level_functional_regression() {}\n",
+    );
+    workspace.write_harness(
+        "src/bin/non_tool/tests.rs",
+        "\n#[test]\nfn non_tooling_bin_regression() {}\n",
     );
 
     let error = functional_untraced_test_offenders(&workspace.root).unwrap();
 
-    assert!(error.contains("src/storage/tests.rs:3"));
+    assert!(error.contains("src/storage/tests.rs"));
     assert!(error.contains("storage_regression"));
+    assert!(error.contains("src/tests/functional.rs"));
+    assert!(error.contains("cross_module_regression"));
+    assert!(error.contains("tests/functional.rs"));
+    assert!(error.contains("top_level_functional_regression"));
+    assert!(error.contains("src/bin/non_tool/tests.rs"));
+    assert!(error.contains("non_tooling_bin_regression"));
+    assert!(!error.contains("requirement_storage_regression"));
+    assert!(!error.contains("todo_storage_followup"));
+    assert!(!error.contains("checker_unit_test"));
     assert!(!error.contains("helper"));
+
+    let mut errors = Vec::new();
+    let summary = check_annotation_shape(&workspace.root, &mut errors);
+    assert_eq!(errors, Vec::<String>::new());
+    assert_eq!(
+        summary,
+        Summary {
+            requirement_tests: 1,
+            todo_tests: 1
+        }
+    );
+
+    let malformed = format!(
+        "\n{eq} spec/ring/00-introduction.md#anchor\n\
+         {eq} type=test\n\
+         {eq} type=todo\n\
+         {quote} `RING-EXAMPLE-003` Duplicate trace metadata MUST be rejected.\n\
+         #[test]\n\
+         fn requirement_duplicate_type() {{}}\n\n\
+         {eq} spec/ring/00-introduction.md#later\n\
+         {quote} `RING-EXAMPLE-004` Missing trace type MUST be rejected.\n\
+         #[test]\n\
+         fn requirement_missing_type() {{}}\n\n\
+         {eq} spec/ring/00-introduction.md#todo-prefix\n\
+         {eq} type=todo\n\
+         {quote} `RING-EXAMPLE-005` Todo traces MUST use the todo prefix.\n\
+         #[test]\n\
+         fn requirement_wrong_todo_prefix() {{}}\n\n\
+         {eq} spec/ring/00-introduction.md#wrong-prefix\n\
+         {eq} type=test\n\
+         {quote} `RING-EXAMPLE-006` Requirement traces MUST use the requirement prefix.\n\
+         #[test]\n\
+         fn parses_without_requirement_prefix() {{}}\n\n\
+         {eq} spec/ring/00-introduction.md#duplicate-spec\n\
+         {eq} spec/ring/00-introduction.md#duplicate-spec-2\n\
+         {eq} type=test\n\
+         {quote} `RING-EXAMPLE-007` Duplicate spec refs MUST be rejected.\n\
+         #[test]\n\
+         fn requirement_duplicate_spec() {{}}\n\n\
+         {eq} spec/ring/00-introduction.md#missing-quote\n\
+         {eq} type=test\n\
+         #[test]\n\
+         fn requirement_missing_quote() {{}}\n",
+        eq = "//=",
+        quote = "//#"
+    );
+    let malformed_workspace = TempWorkspace::new("");
+    malformed_workspace.write_harness("src/storage/tests.rs", &malformed);
+    let mut malformed_errors = Vec::new();
+
+    check_annotation_shape(&malformed_workspace.root, &mut malformed_errors);
+
+    assert!(malformed_errors
+        .iter()
+        .any(|error| error.contains("must have exactly one #[test]")));
+    assert!(malformed_errors
+        .iter()
+        .any(|error| error.contains("todo_ prefix")));
+    assert!(malformed_errors
+        .iter()
+        .any(|error| error.contains("requirement_ prefix")));
+    assert!(malformed_errors
+        .iter()
+        .any(|error| error.contains("spec=2")));
+    assert!(malformed_errors
+        .iter()
+        .any(|error| error.contains("quote=0")));
 }
 
 #[test]
@@ -442,7 +686,8 @@ fn requirement_item_collection_ignores_code_blocks_and_joins_continuations() {
     );
 
     let items =
-        collect_normative_requirement_items(&workspace.root.join("spec/example.md")).unwrap();
+        collect_requirement_format_items(&workspace.root.join("spec/example.md"), &["RING-"])
+            .unwrap();
 
     assert_eq!(items.len(), 2);
     assert!(items[0].contains("MUST join continuation text"));
@@ -458,7 +703,8 @@ fn requirement_item_collection_stops_at_markdown_headings() {
     );
 
     let items =
-        collect_normative_requirement_items(&workspace.root.join("spec/example.md")).unwrap();
+        collect_requirement_format_items(&workspace.root.join("spec/example.md"), &["RING-"])
+            .unwrap();
 
     assert_eq!(
         items,
@@ -483,6 +729,7 @@ fn numbered_prefix_and_normative_language_helpers_cover_boundaries() {
         "The system SHOULD report errors."
     ));
     assert!(contains_normative_language("The system MAY defer work."));
+    assert!(contains_normative_language("The system MUST."));
     assert!(!contains_normative_language("The system must work."));
     assert_eq!(
         normalize_requirement_whitespace("`RING-X-001` The system\nMUST work."),
@@ -491,9 +738,35 @@ fn numbered_prefix_and_normative_language_helpers_cover_boundaries() {
 }
 
 #[test]
+fn requirement_format_identifier_boundaries_are_enforced() {
+    let workspace = TempWorkspace::new("");
+    workspace.write_spec(
+        "spec/example.md",
+        "1. `RING-EXAMPLE-001` Numeric identifiers MUST pass.\n\
+         2. `RING-EXAMPLE-001A` Letter-suffixed split identifiers MUST pass.\n\
+         3. `RING-` Prefix-only identifiers MUST fail.\n\
+         4. `RING-EXAMPLE` Non-numeric final segments MUST fail.\n\
+         5. `MAP-EXAMPLE-001` Wrong-prefix identifiers MUST fail.\n",
+    );
+
+    let error = spec_requirement_format_offenders(&workspace.root, "spec/example.md", &["RING-"])
+        .unwrap()
+        .unwrap();
+
+    assert!(error.contains("`RING-`"));
+    assert!(error.contains("`RING-EXAMPLE`"));
+    assert!(error.contains("`MAP-EXAMPLE-001`"));
+    assert!(!error.contains("RING-EXAMPLE-001` Numeric"));
+    assert!(!error.contains("RING-EXAMPLE-001A"));
+}
+
+#[test]
 fn inline_and_dedicated_test_file_helpers_classify_paths_precisely() {
     assert!(contains_inline_test_body("#[test]\nfn direct() {}\n"));
     assert!(contains_inline_test_body("mod tests {\n}\n"));
+    assert!(contains_inline_test_body(
+        "//# `RING-EXAMPLE-001` Harness behavior MUST be dedicated.\n"
+    ));
     assert!(!contains_inline_test_body(
         "#[test_case]\nfn generated() {}\n"
     ));
@@ -520,6 +793,22 @@ fn inline_and_dedicated_test_file_helpers_classify_paths_precisely() {
     assert!(!is_functional_test_file(
         &root,
         &root.join("src/bin/traceability_audit/tests.rs")
+    ));
+    assert!(!is_functional_test_file(
+        &root,
+        &root.join("src/bin/file_backing_perf/tests.rs")
+    ));
+    assert!(is_functional_test_file(
+        &root,
+        &root.join("src/bin/non_tool/tests.rs")
+    ));
+    assert!(!is_functional_test_file(
+        &root,
+        &root.join("tests/traceability_audit_cli.rs")
+    ));
+    assert!(is_functional_test_file(
+        &root,
+        &root.join("tests/functional.rs")
     ));
 }
 

@@ -24,6 +24,12 @@ struct ParsedBlock {
     quote_blocks: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SpecFormatPolicy {
+    prefixes: &'static [&'static str],
+    allow_empty: bool,
+}
+
 impl ParsedBlock {
     fn is_empty(&self) -> bool {
         self.spec_refs.is_empty() && self.type_refs.is_empty() && self.quote_blocks.is_empty()
@@ -62,47 +68,9 @@ fn main() -> ExitCode {
 fn check_requirements(repo_root: &Path) -> Result<Summary, Vec<String>> {
     let mut failures = Vec::new();
 
-    for (spec_path, prefixes, allow_empty) in [
-        ("spec/implementation.md", &["RING-IMPL-"][..], false),
-        ("spec/implementation-policy.md", &["RING-IMPL-"][..], false),
-        ("spec/ring/00-introduction.md", &["RING-"][..], true),
-        ("spec/ring/01-theory.md", &["RING-"][..], false),
-        ("spec/ring/02-state-machines.md", &["RING-"][..], false),
-        (
-            "spec/ring/03-collection-lifecycle.md",
-            &["RING-"][..],
-            false,
-        ),
-        ("spec/ring/04-wal-records.md", &["RING-"][..], false),
-        ("spec/ring/05-disk-format.md", &["RING-"][..], false),
-        ("spec/ring/06-startup-replay.md", &["RING-"][..], false),
-        ("spec/ring/07-reclaim.md", &["RING-"][..], false),
-        (
-            "spec/ring/08-durability-formatting.md",
-            &["RING-"][..],
-            false,
-        ),
-        (
-            "spec/ring/09-implementation-coverage.md",
-            &["RING-"][..],
-            false,
-        ),
-        ("spec/map.md", &["MAP-", "RING-IMPL-REGRESSION-"][..], false),
-        ("spec/channel.md", &["RING-IMPL-REGRESSION-"][..], false),
-        ("spec/mock.md", &["RING-IMPL-REGRESSION-"][..], false),
-    ] {
-        match spec_requirement_format_offenders_with_options(
-            repo_root,
-            spec_path,
-            prefixes,
-            allow_empty,
-        ) {
-            Ok(Some(message)) => {
-                failures.push(format!("{spec_path}#requirements-format: {message}"));
-            }
-            Ok(None) => {}
-            Err(error) => failures.push(error),
-        }
+    match requirement_format_failures(repo_root) {
+        Ok(messages) => failures.extend(messages),
+        Err(error) => failures.push(error),
     }
 
     let summary = check_annotation_shape(repo_root, &mut failures);
@@ -124,6 +92,152 @@ fn check_requirements(repo_root: &Path) -> Result<Summary, Vec<String>> {
     } else {
         Err(failures)
     }
+}
+
+fn requirement_format_failures(repo_root: &Path) -> Result<Vec<String>, String> {
+    let mut failures = Vec::new();
+    for spec_path in configured_duvet_specifications(repo_root)? {
+        let policy = spec_format_policy(&spec_path).ok_or_else(|| {
+            format!("no requirement identifier prefix policy for Duvet spec {spec_path}")
+        })?;
+        match spec_requirement_format_offenders_with_options(
+            repo_root,
+            &spec_path,
+            policy.prefixes,
+            policy.allow_empty,
+        ) {
+            Ok(Some(message)) => {
+                failures.push(format!("{spec_path}#requirements-format: {message}"));
+            }
+            Ok(None) => {}
+            Err(error) => failures.push(error),
+        }
+    }
+    Ok(failures)
+}
+
+fn configured_duvet_specifications(repo_root: &Path) -> Result<Vec<String>, String> {
+    let path = repo_root.join(".duvet/config.toml");
+    let source = read_text(&path)?;
+    let mut specs = Vec::new();
+    let mut in_specification = false;
+    let mut saw_source_in_entry = false;
+
+    for (index, line) in source.lines().enumerate() {
+        let line_number = index + 1;
+        let trimmed = line.trim();
+        if trimmed.starts_with("[[") {
+            if in_specification && !saw_source_in_entry {
+                return Err(format!(
+                    ".duvet/config.toml:{line_number}: specification entry missing source"
+                ));
+            }
+            in_specification = trimmed == "[[specification]]";
+            saw_source_in_entry = false;
+            continue;
+        }
+
+        if !in_specification {
+            continue;
+        }
+
+        if let Some(value) = parse_toml_string_assignment(trimmed, "source")? {
+            if saw_source_in_entry {
+                return Err(format!(
+                    ".duvet/config.toml:{line_number}: duplicate specification source"
+                ));
+            }
+            if !value.ends_with(".md") {
+                return Err(format!(
+                    ".duvet/config.toml:{line_number}: specification source must be markdown: {value}"
+                ));
+            }
+            specs.push(value);
+            saw_source_in_entry = true;
+        }
+    }
+
+    if in_specification && !saw_source_in_entry {
+        return Err(".duvet/config.toml: final specification entry missing source".to_owned());
+    }
+    if specs.is_empty() {
+        return Err(".duvet/config.toml: no specification sources found".to_owned());
+    }
+
+    Ok(specs)
+}
+
+fn parse_toml_string_assignment(line: &str, key: &str) -> Result<Option<String>, String> {
+    let Some((left, right)) = line.split_once('=') else {
+        return Ok(None);
+    };
+    if left.trim() != key {
+        return Ok(None);
+    }
+
+    let value = right.trim();
+    if !value.starts_with('"') {
+        return Err(format!("expected quoted value for {key}: {line}"));
+    }
+
+    let mut output = String::new();
+    let mut escaped = false;
+    for char in value[1..].chars() {
+        if escaped {
+            output.push(char);
+            escaped = false;
+            continue;
+        }
+        if char == '\\' {
+            escaped = true;
+            continue;
+        }
+        if char == '"' {
+            return Ok(Some(output));
+        }
+        output.push(char);
+    }
+
+    Err(format!("unterminated quoted value for {key}: {line}"))
+}
+
+fn spec_format_policy(relative_spec_path: &str) -> Option<SpecFormatPolicy> {
+    let policy = match relative_spec_path {
+        "spec/implementation.md" | "spec/implementation-policy.md" => SpecFormatPolicy {
+            prefixes: &["RING-IMPL-"],
+            allow_empty: false,
+        },
+        "spec/map.md" => SpecFormatPolicy {
+            prefixes: &["MAP-", "RING-IMPL-REGRESSION-"],
+            allow_empty: false,
+        },
+        "spec/object-log.md" => SpecFormatPolicy {
+            prefixes: &["RING-OBJECT-"],
+            allow_empty: false,
+        },
+        "spec/channel.md" | "spec/mock.md" => SpecFormatPolicy {
+            prefixes: &["RING-IMPL-REGRESSION-"],
+            allow_empty: false,
+        },
+        "spec/file.md" => SpecFormatPolicy {
+            prefixes: &["RING-FILE-"],
+            allow_empty: false,
+        },
+        "spec/embedded-storage.md" => SpecFormatPolicy {
+            prefixes: &["RING-EMBEDDED-"],
+            allow_empty: false,
+        },
+        "spec/ring/00-introduction.md" => SpecFormatPolicy {
+            prefixes: &["RING-"],
+            allow_empty: true,
+        },
+        path if path.starts_with("spec/ring/") && path.ends_with(".md") => SpecFormatPolicy {
+            prefixes: &["RING-"],
+            allow_empty: false,
+        },
+        _ => return None,
+    };
+    Some(policy)
 }
 
 fn check_annotation_shape(repo_root: &Path, errors: &mut Vec<String>) -> Summary {
@@ -235,31 +349,27 @@ fn check_annotation_shape(repo_root: &Path, errors: &mut Vec<String>) -> Summary
                 ));
                 continue;
             }
-            if !ids.is_empty() {
-                if !spec_requirements.contains_key(&spec.spec_doc) {
-                    spec_requirements.insert(
-                        spec.spec_doc.clone(),
-                        load_spec_requirement_ids(repo_root, &spec.spec_doc),
-                    );
+            if !spec_requirements.contains_key(&spec.spec_doc) {
+                spec_requirements.insert(
+                    spec.spec_doc.clone(),
+                    load_spec_requirement_ids(repo_root, &spec.spec_doc),
+                );
+            }
+            match spec_requirements.get(&spec.spec_doc) {
+                Some(Ok(Some(requirements))) if !ids.iter().all(|id| requirements.contains(id)) => {
+                    errors.push(format!(
+                        "{}:{}: {fn_name} quotes an identifier that does not exist in {}: {ids:?}",
+                        relative_display(repo_root, &path),
+                        index + 1,
+                        spec.spec_doc
+                    ));
+                    continue;
                 }
-                match spec_requirements.get(&spec.spec_doc) {
-                    Some(Ok(Some(requirements)))
-                        if !ids.iter().all(|id| requirements.contains(id)) =>
-                    {
-                        errors.push(format!(
-                            "{}:{}: {fn_name} quotes an identifier that does not exist in {}: {ids:?}",
-                            relative_display(repo_root, &path),
-                            index + 1,
-                            spec.spec_doc
-                        ));
-                        continue;
-                    }
-                    Some(Err(error)) => {
-                        errors.push(error.clone());
-                        continue;
-                    }
-                    _ => {}
+                Some(Err(error)) => {
+                    errors.push(error.clone());
+                    continue;
                 }
+                _ => {}
             }
 
             let key = (
@@ -341,7 +451,7 @@ fn spec_requirement_format_offenders_with_options(
     allow_empty: bool,
 ) -> Result<Option<String>, String> {
     let spec_path = repo_root.join(relative_spec_path);
-    let items = collect_normative_requirement_items(&spec_path)?;
+    let items = collect_requirement_format_items(&spec_path, expected_prefixes)?;
     if items.is_empty() {
         if allow_empty {
             return Ok(None);
@@ -353,10 +463,7 @@ fn spec_requirement_format_offenders_with_options(
 
     let mut offenders = Vec::new();
     for item in items {
-        if !expected_prefixes
-            .iter()
-            .any(|expected_prefix| item.starts_with(&format!("`{expected_prefix}")))
-        {
+        if !starts_with_stable_requirement_identifier(&item, expected_prefixes) {
             offenders.push(format!(
                 "requirement item does not start with a stable identifier: {item}"
             ));
@@ -382,7 +489,10 @@ fn spec_requirement_format_offenders_with_options(
     }
 }
 
-fn collect_normative_requirement_items(spec_path: &Path) -> Result<Vec<String>, String> {
+fn collect_requirement_format_items(
+    spec_path: &Path,
+    expected_prefixes: &[&str],
+) -> Result<Vec<String>, String> {
     let source = read_text(spec_path)?;
     let mut items = Vec::new();
     let mut current = String::new();
@@ -399,7 +509,7 @@ fn collect_normative_requirement_items(spec_path: &Path) -> Result<Vec<String>, 
         }
 
         if let Some(rest) = strip_numbered_prefix(trimmed) {
-            push_normative_item(&mut items, &current);
+            push_requirement_format_item(&mut items, &current, expected_prefixes);
             current.clear();
             current.push_str(rest);
             continue;
@@ -410,7 +520,7 @@ fn collect_normative_requirement_items(spec_path: &Path) -> Result<Vec<String>, 
         }
 
         if trimmed.is_empty() || trimmed.starts_with('#') {
-            push_normative_item(&mut items, &current);
+            push_requirement_format_item(&mut items, &current, expected_prefixes);
             current.clear();
             continue;
         }
@@ -419,14 +529,88 @@ fn collect_normative_requirement_items(spec_path: &Path) -> Result<Vec<String>, 
         current.push_str(trimmed);
     }
 
-    push_normative_item(&mut items, &current);
+    push_requirement_format_item(&mut items, &current, expected_prefixes);
     Ok(items)
 }
 
-fn push_normative_item(items: &mut Vec<String>, item: &str) {
-    if contains_normative_language(item) {
+fn push_requirement_format_item(items: &mut Vec<String>, item: &str, expected_prefixes: &[&str]) {
+    if is_requirement_format_item(item, expected_prefixes) {
         items.push(item.trim().to_string());
     }
+}
+
+fn is_requirement_format_item(item: &str, expected_prefixes: &[&str]) -> bool {
+    let item = item.trim();
+    if item.is_empty() {
+        return false;
+    }
+    if contains_normative_language(item) {
+        return true;
+    }
+
+    let Some((identifier, rest)) = requirement_identifier_and_rest(item) else {
+        return false;
+    };
+    if !expected_prefixes
+        .iter()
+        .any(|expected_prefix| identifier.starts_with(expected_prefix))
+    {
+        return false;
+    }
+
+    // ID-bearing schema and replay-definition lists may be descriptive. Treat
+    // no-RFC items as format-audit candidates only when they are prose
+    // implementation requirements rather than table-like definitions.
+    let rest = rest.trim_start();
+    (rest.starts_with("The implementation ") || rest.starts_with("Repository "))
+        && !rest.contains(':')
+}
+
+fn starts_with_stable_requirement_identifier(item: &str, expected_prefixes: &[&str]) -> bool {
+    let Some((identifier, _)) = requirement_identifier_and_rest(item) else {
+        return false;
+    };
+
+    expected_prefixes.iter().any(|expected_prefix| {
+        identifier.starts_with(expected_prefix)
+            && has_stable_identifier_suffix(&identifier[expected_prefix.len()..])
+    })
+}
+
+fn requirement_identifier_and_rest(item: &str) -> Option<(&str, &str)> {
+    let rest = item.strip_prefix('`')?;
+    let end = rest.find('`')?;
+    Some((&rest[..end], &rest[end + 1..]))
+}
+
+fn has_stable_identifier_suffix(suffix: &str) -> bool {
+    if suffix.is_empty() || suffix.starts_with('-') || suffix.ends_with('-') {
+        return false;
+    }
+    if !suffix
+        .chars()
+        .all(|char| char.is_ascii_uppercase() || char.is_ascii_digit() || char == '-')
+    {
+        return false;
+    }
+
+    let Some(final_segment) = suffix.rsplit('-').next() else {
+        return false;
+    };
+    let digits = final_segment
+        .chars()
+        .take_while(|char| char.is_ascii_digit())
+        .count();
+    if digits == 0 {
+        return false;
+    }
+    let suffix_len = final_segment.len() - digits;
+    suffix_len == 0
+        || (suffix_len == 1
+            && final_segment
+                .chars()
+                .last()
+                .is_some_and(|char| char.is_ascii_uppercase()))
 }
 
 fn strip_numbered_prefix(line: &str) -> Option<&str> {
@@ -444,10 +628,8 @@ fn strip_numbered_prefix(line: &str) -> Option<&str> {
 }
 
 fn contains_normative_language(text: &str) -> bool {
-    text.contains(" MUST ")
-        || text.contains(" MUST NOT ")
-        || text.contains(" SHOULD ")
-        || text.contains(" MAY ")
+    text.split(|char: char| !char.is_ascii_alphabetic())
+        .any(|word| matches!(word, "MUST" | "SHOULD" | "MAY"))
 }
 
 fn contains_test_name_placeholder_requirement(text: &str) -> bool {
@@ -482,15 +664,20 @@ fn inline_test_module_offenders(repo_root: &Path) -> Option<String> {
 fn contains_inline_test_body(source: &str) -> bool {
     source.lines().any(|line| {
         let trimmed = line.trim();
-        trimmed == "#[test]" || trimmed.starts_with("mod tests {")
+        trimmed == "#[test]" || trimmed.starts_with("mod tests {") || trimmed.starts_with("//#")
     })
 }
 
 fn functional_untraced_test_offenders(repo_root: &Path) -> Option<String> {
-    let src_root = repo_root.join("src");
     let mut offenders = Vec::new();
+    let mut paths = rust_files(&repo_root.join("src"));
+    let tests_root = repo_root.join("tests");
+    if tests_root.exists() {
+        paths.extend(rust_files(&tests_root));
+        paths.sort();
+    }
 
-    for path in rust_files(&src_root) {
+    for path in paths {
         if !is_functional_test_file(repo_root, &path) {
             continue;
         }
@@ -524,23 +711,34 @@ fn functional_untraced_test_offenders(repo_root: &Path) -> Option<String> {
 }
 
 fn is_functional_test_file(repo_root: &Path, path: &Path) -> bool {
-    if !is_dedicated_test_file(path) {
+    if is_tooling_test_file(repo_root, path) {
         return false;
     }
 
     let relative = path.strip_prefix(repo_root).unwrap_or(path);
-    let mut components = relative.components();
-    if components
+    if relative
+        .components()
         .next()
-        .is_some_and(|component| component.as_os_str() == "src")
-        && components
-            .next()
-            .is_some_and(|component| component.as_os_str() == "bin")
+        .is_some_and(|component| component.as_os_str() == "tests")
     {
+        return true;
+    }
+
+    if !is_dedicated_test_file(path) {
         return false;
     }
 
     true
+}
+
+fn is_tooling_test_file(repo_root: &Path, path: &Path) -> bool {
+    let relative = relative_display(repo_root, path).replace('\\', "/");
+    matches!(
+        relative.as_str(),
+        "src/bin/traceability_audit/tests.rs"
+            | "src/bin/file_backing_perf/tests.rs"
+            | "tests/traceability_audit_cli.rs"
+    )
 }
 
 fn multi_requirement_harness_offenders(repo_root: &Path) -> Option<String> {

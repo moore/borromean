@@ -6,7 +6,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
 from dataclasses import asdict, dataclass
@@ -15,6 +17,16 @@ from typing import Any
 
 
 VALID_VERDICTS = {"pass", "weak", "fail", "needs_context"}
+REVIEW_CACHE_VERSION = 1
+DEFAULT_REVIEWER_EFFORT = "xhigh"
+VALID_REVIEWER_EFFORTS = {"minimal", "low", "medium", "high", "xhigh"}
+DEFAULT_REVIEWER_SANDBOX = "auto"
+VALID_REVIEWER_SANDBOXES = {
+    "auto",
+    "read-only",
+    "workspace-write",
+    "danger-full-access",
+}
 REQUIRED_RESULT_FIELDS = {
     "test_id",
     "verdict",
@@ -24,6 +36,19 @@ REQUIRED_RESULT_FIELDS = {
     "missing_clauses",
     "suggested_improvement",
 }
+REVIEW_PROMPT = """You are performing one fresh semantic traceability review.
+
+Read the packet at:
+{packet_path}
+
+Rules:
+- Treat this as a new review with no prior findings, summaries, or assumptions.
+- Inspect the full repository as needed to understand the implementation under test.
+- Do not inspect target/trace-review/results/ or aggregate summaries.
+- Do not edit files. You may run read-only inspection commands and non-source-mutating checks.
+- Return only one JSON object matching the requested result schema.
+- The JSON object must use test_id {test_id!r}.
+"""
 
 
 @dataclass(frozen=True)
@@ -480,6 +505,408 @@ def run_preflight(repo_root: Path) -> tuple[int, int]:
     return int(match.group(1)), int(match.group(2))
 
 
+def git_tracked_file_hashes(repo_root: Path) -> dict[str, str]:
+    files = subprocess.run(
+        ["git", "ls-files", "-z"],
+        cwd=repo_root,
+        check=True,
+        stdout=subprocess.PIPE,
+    ).stdout.split(b"\0")
+    hashes: dict[str, str] = {}
+    for raw_path in files:
+        if not raw_path:
+            continue
+        rel = raw_path.decode("utf-8")
+        path = repo_root / rel
+        if path.exists():
+            hashes[rel] = hashlib.sha256(path.read_bytes()).hexdigest()
+        else:
+            hashes[rel] = "<missing>"
+    return hashes
+
+
+def changed_tracked_files(before: dict[str, str], after: dict[str, str]) -> list[str]:
+    changed: list[str] = []
+    for path in sorted(set(before) | set(after)):
+        if before.get(path) != after.get(path):
+            changed.append(path)
+    return changed
+
+
+def git_status_lines(repo_root: Path) -> set[str]:
+    status = subprocess.run(
+        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
+        cwd=repo_root,
+        check=True,
+        text=True,
+        stdout=subprocess.PIPE,
+    ).stdout
+    return {line for line in status.splitlines() if line.strip()}
+
+
+def new_status_lines(
+    before: set[str], after: set[str], repo_root: Path, output_dir: Path
+) -> list[str]:
+    output_prefix = display_path(repo_root, output_dir).rstrip("/") + "/"
+    allowed_prefixes = {output_prefix}
+    added: list[str] = []
+    for line in sorted(after - before):
+        path = line[3:]
+        if any(path.startswith(prefix) for prefix in allowed_prefixes):
+            continue
+        added.append(line)
+    return added
+
+
+def write_result_schema(output_dir: Path) -> Path:
+    schema = {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "type": "object",
+        "additionalProperties": False,
+        "required": sorted(REQUIRED_RESULT_FIELDS),
+        "properties": {
+            "test_id": {"type": "string"},
+            "verdict": {"enum": sorted(VALID_VERDICTS)},
+            "rationale": {"type": "string", "minLength": 1},
+            "inspected_paths": {"type": "array", "items": {"type": "string"}},
+            "key_assertions": {"type": "array", "items": {"type": "string"}},
+            "missing_clauses": {"type": "array", "items": {"type": "string"}},
+            "suggested_improvement": {"type": ["string", "null"]},
+        },
+    }
+    schema_path = output_dir / "result_schema.json"
+    schema_path.write_text(json.dumps(schema, indent=2) + "\n", encoding="utf-8")
+    return schema_path
+
+
+def parse_json_response(text: str) -> Any:
+    stripped = text.strip()
+    if stripped.startswith("```"):
+        lines = stripped.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        stripped = "\n".join(lines).strip()
+
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError:
+        start = stripped.find("{")
+        end = stripped.rfind("}")
+        if start == -1 or end == -1 or end <= start:
+            raise
+        return json.loads(stripped[start : end + 1])
+
+
+def packet_path(output_dir: Path, test_id: str) -> Path:
+    return output_dir / "packets" / f"{test_id}.md"
+
+
+def result_path(output_dir: Path, test_id: str) -> Path:
+    return output_dir / "results" / f"{test_id}.json"
+
+
+def hash_json(value: Any) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def packet_hash(packet: TracePacket) -> str:
+    return hash_json(
+        {
+            "entry": asdict(packet.entry),
+            "annotation_block": packet.annotation_block,
+            "test_source": packet.test_source,
+            "spec_section": packet.spec_section,
+        }
+    )
+
+
+def normalize_review_path(repo_root: Path, path: str) -> str:
+    cleaned = path.strip().strip("`")
+    cleaned = re.sub(r":\d+(?::\d+)?$", "", cleaned)
+    if cleaned.startswith("./"):
+        cleaned = cleaned[2:]
+
+    candidate = Path(cleaned)
+    if candidate.is_absolute():
+        try:
+            return candidate.resolve().relative_to(repo_root.resolve()).as_posix()
+        except ValueError:
+            return candidate.as_posix()
+
+    return candidate.as_posix()
+
+
+def review_dependency_paths(
+    repo_root: Path, packet: TracePacket, result: dict[str, Any]
+) -> list[str]:
+    paths = [
+        packet.entry.path,
+        packet.entry.spec_doc,
+        *packet.entry.likely_entry_points,
+        *result.get("inspected_paths", []),
+    ]
+    normalized: list[str] = []
+    for path in paths:
+        if not isinstance(path, str) or not path.strip():
+            continue
+        normalized_path = normalize_review_path(repo_root, path)
+        if normalized_path not in normalized:
+            normalized.append(normalized_path)
+    return normalized
+
+
+def file_or_directory_hash(repo_root: Path, relative: str) -> str:
+    path = Path(relative)
+    if path.is_absolute():
+        try:
+            path = path.resolve().relative_to(repo_root.resolve())
+        except ValueError:
+            return "outside-repo"
+
+    absolute = repo_root / path
+    if not absolute.exists():
+        return "missing"
+    if absolute.is_file():
+        return "file:" + hashlib.sha256(absolute.read_bytes()).hexdigest()
+    if absolute.is_dir():
+        entries: list[tuple[str, str]] = []
+        for child in sorted(absolute.rglob("*")):
+            if not child.is_file():
+                continue
+            rel = child.resolve().relative_to(repo_root.resolve()).as_posix()
+            if rel.startswith(".git/") or rel.startswith("target/trace-review/"):
+                continue
+            entries.append((rel, hashlib.sha256(child.read_bytes()).hexdigest()))
+        return "dir:" + hash_json(entries)
+    return "unsupported"
+
+
+def dependency_hashes(repo_root: Path, paths: list[str]) -> dict[str, str]:
+    return {path: file_or_directory_hash(repo_root, path) for path in paths}
+
+
+def attach_review_cache(
+    repo_root: Path, packet: TracePacket, result: dict[str, Any]
+) -> dict[str, Any]:
+    result = dict(result)
+    dependencies = dependency_hashes(
+        repo_root, review_dependency_paths(repo_root, packet, result)
+    )
+    result["review_cache"] = {
+        "version": REVIEW_CACHE_VERSION,
+        "packet_hash": packet_hash(packet),
+        "dependencies": dependencies,
+    }
+    return result
+
+
+def cached_result_status(
+    repo_root: Path, packet: TracePacket, result: dict[str, Any]
+) -> tuple[bool, str]:
+    errors = validate_result(packet.entry.test_id, result)
+    if errors:
+        return False, "invalid result"
+    if result.get("verdict") == "needs_context":
+        return False, "needs_context result"
+
+    cache = result.get("review_cache")
+    if not isinstance(cache, dict):
+        return False, "missing cache metadata"
+    if cache.get("version") != REVIEW_CACHE_VERSION:
+        return False, "cache version changed"
+    if cache.get("packet_hash") != packet_hash(packet):
+        return False, "packet changed"
+
+    expected_dependencies = dependency_hashes(
+        repo_root, review_dependency_paths(repo_root, packet, result)
+    )
+    if cache.get("dependencies") != expected_dependencies:
+        return False, "review dependency changed"
+
+    return True, "unchanged"
+
+
+def load_result_file(path: Path) -> dict[str, Any] | None:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError):
+        return None
+    if isinstance(value, dict):
+        return value
+    return None
+
+
+def prepare_codex_home(output_dir: Path) -> Path:
+    codex_home = output_dir / "codex-home"
+    codex_home.mkdir(parents=True, exist_ok=True)
+    source_home = Path.home() / ".codex"
+    for name in ("auth.json", "config.toml", "installation_id"):
+        source = source_home / name
+        target = codex_home / name
+        if target.exists() or target.is_symlink() or not source.exists():
+            continue
+        try:
+            os.symlink(source, target)
+        except OSError:
+            shutil.copy2(source, target)
+    return codex_home
+
+
+def codex_environment(codex_home: Path) -> dict[str, str]:
+    env = os.environ.copy()
+    env["CODEX_HOME"] = str(codex_home)
+    return env
+
+
+def codex_sandbox_available(
+    codex_bin: str, repo_root: Path, codex_home: Path
+) -> tuple[bool, str]:
+    try:
+        process = subprocess.run(
+            [
+                codex_bin,
+                "sandbox",
+                "--permissions-profile",
+                ":workspace",
+                "--cd",
+                str(repo_root),
+                "true",
+            ],
+            cwd=repo_root,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=codex_environment(codex_home),
+            timeout=20,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return False, str(error)
+
+    if process.returncode == 0:
+        return True, ""
+
+    detail = (process.stderr or process.stdout).strip()
+    return False, detail or f"codex sandbox exited with {process.returncode}"
+
+
+def resolve_reviewer_sandbox(
+    codex_bin: str, repo_root: Path, requested: str, codex_home: Path
+) -> tuple[str, str | None]:
+    if requested != "auto":
+        return requested, None
+
+    available, detail = codex_sandbox_available(codex_bin, repo_root, codex_home)
+    if available:
+        return "workspace-write", None
+
+    return (
+        "danger-full-access",
+        "Codex bubblewrap sandbox is unavailable for nested reviewer runs; "
+        f"falling back to danger-full-access. Sandbox check: {detail}",
+    )
+
+
+def run_reviewer(
+    repo_root: Path,
+    output_dir: Path,
+    packet_entry: TracePacket,
+    *,
+    codex_bin: str,
+    schema_path: Path,
+    model: str | None,
+    effort: str,
+    sandbox: str,
+    codex_home: Path,
+) -> None:
+    entry = packet_entry.entry
+    test_id = entry.test_id
+    review_packet_path = packet_path(output_dir, test_id)
+    if not review_packet_path.exists():
+        raise SystemExit(f"{review_packet_path} does not exist; run init first")
+
+    logs_dir = output_dir / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    last_message_path = logs_dir / f"{test_id}.last-message.json"
+    stdout_path = logs_dir / f"{test_id}.stdout.log"
+    stderr_path = logs_dir / f"{test_id}.stderr.log"
+
+    prompt = REVIEW_PROMPT.format(
+        packet_path=display_path(repo_root, review_packet_path),
+        test_id=test_id,
+    )
+    command = [
+        codex_bin,
+        "exec",
+        "-c",
+        'approval_policy="never"',
+        "-c",
+        f'model_reasoning_effort="{effort}"',
+        "--cd",
+        str(repo_root),
+        "--sandbox",
+        sandbox,
+        "--ephemeral",
+        "--output-schema",
+        str(schema_path),
+        "--output-last-message",
+        str(last_message_path),
+        "-",
+    ]
+    if model:
+        command[2:2] = ["--model", model]
+
+    before = git_tracked_file_hashes(repo_root)
+    status_before = git_status_lines(repo_root)
+    process = subprocess.run(
+        command,
+        cwd=repo_root,
+        input=prompt,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        env=codex_environment(codex_home),
+    )
+    stdout_path.write_text(process.stdout, encoding="utf-8")
+    stderr_path.write_text(process.stderr, encoding="utf-8")
+
+    after = git_tracked_file_hashes(repo_root)
+    status_after = git_status_lines(repo_root)
+    changed = changed_tracked_files(before, after)
+    if changed:
+        raise SystemExit(
+            "reviewer changed tracked files; inspect and revert intentionally before continuing: "
+            + ", ".join(changed)
+        )
+    new_status = new_status_lines(status_before, status_after, repo_root, output_dir)
+    if new_status:
+        raise SystemExit(
+            "reviewer left new non-review worktree changes; inspect them before continuing: "
+            + ", ".join(new_status)
+        )
+
+    if process.returncode != 0:
+        raise SystemExit(
+            f"reviewer failed for {test_id}; see {display_path(repo_root, stderr_path)}"
+        )
+    if not last_message_path.exists():
+        raise SystemExit(f"reviewer did not write {display_path(repo_root, last_message_path)}")
+
+    result = parse_json_response(last_message_path.read_text(encoding="utf-8"))
+    errors = validate_result(test_id, result)
+    if errors:
+        raise SystemExit(
+            "reviewer returned invalid result:\n" + "\n".join(f"- {error}" for error in errors)
+        )
+
+    result = attach_review_cache(repo_root, packet_entry, result)
+    path = result_path(output_dir, test_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
+
+
 def write_inventory(
     output_dir: Path, packets: list[TracePacket], *, packet_limit: int | None = None
 ) -> None:
@@ -587,7 +1014,8 @@ def render_packet(repo_root: Path, output_dir: Path, packet: TracePacket) -> str
 {likely_paths if likely_paths else "- No path hints found; search the repository."}
 
 ## Required Result
-Write this JSON result to `{result_rel}`:
+Return this JSON object as the final response. In manual mode, write the
+same JSON result to `{result_rel}`:
 
 ```json
 {json.dumps(result_template, indent=2)}
@@ -680,6 +1108,12 @@ def render_summary(output_dir: Path) -> str:
     entries = inventory["entries"]
     by_id = {entry["test_id"]: entry for entry in entries}
     results, errors = load_results(output_dir)
+    stale_result_ids = sorted(set(results) - set(by_id))
+    results = {
+        test_id: result
+        for test_id, result in results.items()
+        if test_id in by_id
+    }
 
     verdict_counts = {verdict: 0 for verdict in sorted(VALID_VERDICTS)}
     for result in results.values():
@@ -696,6 +1130,7 @@ def render_summary(output_dir: Path) -> str:
         f"- Todo traces inventoried: {len(inventory['todos'])}",
         f"- Result files reviewed: {reviewed}",
         f"- Pending reviews: {total - reviewed}",
+        f"- Stale result files ignored: {len(stale_result_ids)}",
         "",
         "## Verdict Counts",
         "",
@@ -706,6 +1141,10 @@ def render_summary(output_dir: Path) -> str:
     if errors:
         lines.extend(["", "## Result Validation Errors", ""])
         lines.extend(f"- {error}" for error in errors)
+
+    if stale_result_ids:
+        lines.extend(["", "## Stale Results Ignored", ""])
+        lines.extend(f"- `{test_id}`" for test_id in stale_result_ids)
 
     findings = [
         (test_id, result)
@@ -803,6 +1242,114 @@ def command_summarize(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_review(args: argparse.Namespace) -> int:
+    repo_root = repo_root_from_args(args.repo_root)
+    output_dir = (repo_root / args.output_dir).resolve()
+    codex_bin = args.codex_bin or shutil.which("codex")
+    if codex_bin is None:
+        print("codex executable was not found on PATH", file=sys.stderr)
+        return 127
+    codex_home = prepare_codex_home(output_dir)
+
+    init_args = argparse.Namespace(
+        repo_root=args.repo_root,
+        output_dir=args.output_dir,
+        skip_preflight=args.skip_preflight,
+        packet_limit=None,
+    )
+    init_status = command_init(init_args)
+    if init_status != 0:
+        return init_status
+
+    inventory = load_inventory(output_dir)
+    packets, errors = collect_trace_packets(repo_root)
+    if errors:
+        for error in errors:
+            print(error, file=sys.stderr)
+        return 1
+    packets_by_id = {
+        packet.entry.test_id: packet for packet in packets if packet.entry.trace_type == "test"
+    }
+    entries: list[TracePacket] = [
+        packets_by_id[entry["test_id"]]
+        for entry in inventory["entries"]
+        if entry["test_id"] in packets_by_id
+    ]
+    if args.only:
+        requested = set(args.only)
+        entries = [entry for entry in entries if entry.entry.test_id in requested]
+        missing = sorted(requested - {entry.entry.test_id for entry in entries})
+        if missing:
+            print(f"unknown test ids: {missing}", file=sys.stderr)
+            return 2
+
+    skipped_current = 0
+    stale_reasons: dict[str, int] = {}
+    if args.resume:
+        selected_entries: list[TracePacket] = []
+        for entry in entries:
+            existing = load_result_file(result_path(output_dir, entry.entry.test_id))
+            if existing is None:
+                selected_entries.append(entry)
+                continue
+
+            current, reason = cached_result_status(repo_root, entry, existing)
+            if current:
+                skipped_current += 1
+                continue
+
+            stale_reasons[reason] = stale_reasons.get(reason, 0) + 1
+            selected_entries.append(entry)
+        entries = selected_entries
+
+    if args.limit is not None:
+        entries = entries[: args.limit]
+
+    reviewer_sandbox, sandbox_warning = resolve_reviewer_sandbox(
+        codex_bin, repo_root, args.reviewer_sandbox, codex_home
+    )
+    if sandbox_warning:
+        print(f"warning: {sandbox_warning}", file=sys.stderr)
+
+    schema_path = write_result_schema(output_dir)
+    if args.resume:
+        print(f"skipped {skipped_current} unchanged review(s)")
+        for reason, count in sorted(stale_reasons.items()):
+            print(f"rerunning {count} stale review(s): {reason}")
+    print(
+        f"running {len(entries)} fresh review(s) with {codex_bin} "
+        f"(sandbox={reviewer_sandbox}, effort={args.effort}, "
+        f"codex_home={display_path(repo_root, codex_home)})"
+    )
+
+    for index, entry in enumerate(entries, start=1):
+        test_id = entry.entry.test_id
+        print(
+            f"[{index}/{len(entries)}] reviewing "
+            f"{entry.entry.path}:{entry.entry.line} {entry.entry.function}"
+        )
+        if args.dry_run:
+            continue
+        run_reviewer(
+            repo_root,
+            output_dir,
+            entry,
+            codex_bin=codex_bin,
+            schema_path=schema_path,
+            model=args.model,
+            effort=args.effort,
+            sandbox=reviewer_sandbox,
+            codex_home=codex_home,
+        )
+
+    if not args.dry_run:
+        summary = render_summary(output_dir)
+        summary_path = output_dir / "summary.md"
+        summary_path.write_text(summary, encoding="utf-8")
+        print(f"wrote {display_path(repo_root, summary_path)}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Prepare and summarize fresh per-test traceability reviews."
@@ -838,6 +1385,60 @@ def build_parser() -> argparse.ArgumentParser:
         "summarize", help="validate result JSON files and write summary.md"
     )
     summarize.set_defaults(func=command_summarize)
+
+    review = subparsers.add_parser(
+        "review", help="run the fresh per-test review loop with Codex"
+    )
+    review.add_argument(
+        "--skip-preflight",
+        action="store_true",
+        help="skip traceability_audit and Duvet preflight before reviewing",
+    )
+    review.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help="review only the first N pending tests",
+    )
+    review.add_argument(
+        "--only",
+        action="append",
+        default=[],
+        help="review only this test id; may be repeated",
+    )
+    review.add_argument(
+        "--no-resume",
+        dest="resume",
+        action="store_false",
+        help="rerun reviews even when the cached result is still current",
+    )
+    review.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="print selected reviews without invoking Codex",
+    )
+    review.add_argument("--codex-bin", default=None, help="path to the codex executable")
+    review.add_argument("--model", default=None, help="optional Codex model override")
+    review.add_argument(
+        "--effort",
+        default=DEFAULT_REVIEWER_EFFORT,
+        choices=sorted(VALID_REVIEWER_EFFORTS),
+        help=(
+            "Codex model_reasoning_effort for each reviewer "
+            f"(default: {DEFAULT_REVIEWER_EFFORT})"
+        ),
+    )
+    review.add_argument(
+        "--reviewer-sandbox",
+        default=DEFAULT_REVIEWER_SANDBOX,
+        choices=sorted(VALID_REVIEWER_SANDBOXES),
+        help=(
+            "sandbox for each fresh reviewer; auto uses workspace-write when "
+            "Codex sandbox works and danger-full-access when nested bubblewrap fails "
+            f"(default: {DEFAULT_REVIEWER_SANDBOX})"
+        ),
+    )
+    review.set_defaults(func=command_review, resume=True)
 
     return parser
 

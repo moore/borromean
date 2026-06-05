@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import importlib.util
+import contextlib
+import io
 import json
 import sys
 import tempfile
@@ -147,12 +149,31 @@ class TraceReviewTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            (output / "results" / "stale_result.json").write_text(
+                json.dumps(
+                    {
+                        "test_id": "stale_result",
+                        "verdict": "fail",
+                        "rationale": "This stale result should not affect the summary.",
+                        "inspected_paths": ["src/stale.rs"],
+                        "key_assertions": ["assert!(false)"],
+                        "missing_clauses": ["all current clauses"],
+                        "suggested_improvement": "Regenerate stale packets.",
+                    }
+                ),
+                encoding="utf-8",
+            )
 
             summary = MODULE.render_summary(output)
 
         self.assertIn("Requirement tests inventoried: 2", summary)
+        self.assertIn("Stale result files ignored: 1", summary)
+        self.assertIn("Result files reviewed: 1", summary)
+        self.assertIn("fail: 0", summary)
         self.assertIn("weak: 1", summary)
         self.assertIn("Suggested improvement: Add a boundary case.", summary)
+        self.assertIn("`stale_result`", summary)
+        self.assertNotIn("This stale result should not affect the summary.", summary)
 
     def test_result_validation_requires_paths_and_suggestions(self) -> None:
         errors = MODULE.validate_result(
@@ -170,6 +191,218 @@ class TraceReviewTests(unittest.TestCase):
 
         self.assertIn("abc: inspected_paths must not be empty for fail", errors)
         self.assertIn("abc: suggested_improvement is required for fail", errors)
+
+    def test_parse_json_response_accepts_fenced_json(self) -> None:
+        parsed = MODULE.parse_json_response(
+            """```json
+{"test_id": "abc", "verdict": "pass"}
+```"""
+        )
+
+        self.assertEqual(parsed["test_id"], "abc")
+        self.assertEqual(parsed["verdict"], "pass")
+
+    def test_new_status_lines_allows_review_output_only(self) -> None:
+        before: set[str] = set()
+        after = {
+            "?? target/trace-review/results/abc.json",
+            "?? src/new_file.rs",
+        }
+
+        added = MODULE.new_status_lines(
+            before,
+            after,
+            Path("/repo"),
+            Path("/repo/target/trace-review"),
+        )
+
+        self.assertEqual(added, ["?? src/new_file.rs"])
+
+    def test_default_reviewer_effort_is_xhigh(self) -> None:
+        parser = MODULE.build_parser()
+        args = parser.parse_args(["review", "--dry-run"])
+
+        self.assertEqual(args.effort, "xhigh")
+
+    def test_review_cache_tracks_packet_and_dependency_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            write_repo(root)
+            packets, errors = MODULE.collect_trace_packets(root)
+            self.assertEqual(errors, [])
+            packet = packets[0]
+            result = {
+                "test_id": packet.entry.test_id,
+                "verdict": "pass",
+                "rationale": "The assertion checks the implementation value.",
+                "inspected_paths": ["src/foo.rs", "src/foo/tests.rs"],
+                "key_assertions": ["assert_eq!(crate::foo::value(), 1)"],
+                "missing_clauses": [],
+                "suggested_improvement": None,
+            }
+            cached = MODULE.attach_review_cache(root, packet, result)
+
+            current, reason = MODULE.cached_result_status(root, packet, cached)
+            self.assertTrue(current, reason)
+
+            (root / "src" / "unrelated.rs").write_text("pub fn unrelated() {}\n")
+            current, reason = MODULE.cached_result_status(root, packet, cached)
+            self.assertTrue(current, reason)
+
+            (root / "src" / "foo.rs").write_text(
+                "pub fn value() -> u8 { 2 }\n", encoding="utf-8"
+            )
+            current, reason = MODULE.cached_result_status(root, packet, cached)
+            self.assertFalse(current)
+            self.assertEqual(reason, "review dependency changed")
+
+            (root / "src" / "foo.rs").write_text(
+                "pub fn value() -> u8 { 1 }\n", encoding="utf-8"
+            )
+            spec_text = (root / "spec" / "foo.md").read_text(encoding="utf-8")
+            (root / "spec" / "foo.md").write_text(
+                spec_text.replace("expected value", "expected runtime value"),
+                encoding="utf-8",
+            )
+            new_packets, errors = MODULE.collect_trace_packets(root)
+            self.assertEqual(errors, [])
+            current, reason = MODULE.cached_result_status(root, new_packets[0], cached)
+            self.assertFalse(current)
+            self.assertEqual(reason, "packet changed")
+
+    def test_needs_context_result_is_not_a_cache_hit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            write_repo(root)
+            packets, errors = MODULE.collect_trace_packets(root)
+            self.assertEqual(errors, [])
+            packet = packets[0]
+            result = MODULE.attach_review_cache(
+                root,
+                packet,
+                {
+                    "test_id": packet.entry.test_id,
+                    "verdict": "needs_context",
+                    "rationale": "Could not inspect files.",
+                    "inspected_paths": [],
+                    "key_assertions": [],
+                    "missing_clauses": ["source unavailable"],
+                    "suggested_improvement": "Rerun with working file access.",
+                },
+            )
+
+            current, reason = MODULE.cached_result_status(root, packet, result)
+
+        self.assertFalse(current)
+        self.assertEqual(reason, "needs_context result")
+
+    def test_auto_sandbox_falls_back_when_codex_sandbox_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            script = root / "codex"
+            script.write_text(
+                "#!/usr/bin/env sh\n"
+                "if [ \"$1\" = sandbox ]; then\n"
+                "  echo 'bwrap: loopback: Failed RTM_NEWADDR' >&2\n"
+                "  exit 1\n"
+                "fi\n"
+                "exit 0\n",
+                encoding="utf-8",
+            )
+            script.chmod(0o755)
+
+            sandbox, warning = MODULE.resolve_reviewer_sandbox(
+                str(script), root, "auto", root / "codex-home"
+            )
+
+        self.assertEqual(sandbox, "danger-full-access")
+        self.assertIsNotNone(warning)
+        self.assertIn("bubblewrap sandbox is unavailable", warning)
+
+    def test_review_dry_run_skips_current_cached_result(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            write_repo(root)
+            packets, errors = MODULE.collect_trace_packets(root)
+            self.assertEqual(errors, [])
+            output = root / "target" / "trace-review"
+            MODULE.write_inventory(output, packets)
+            MODULE.write_packets(root, output, packets)
+
+            packet = packets[0]
+            result = MODULE.attach_review_cache(
+                root,
+                packet,
+                {
+                    "test_id": packet.entry.test_id,
+                    "verdict": "pass",
+                    "rationale": "The assertion checks the implementation value.",
+                    "inspected_paths": ["src/foo.rs", "src/foo/tests.rs"],
+                    "key_assertions": ["assert_eq!(crate::foo::value(), 1)"],
+                    "missing_clauses": [],
+                    "suggested_improvement": None,
+                },
+            )
+            (output / "results" / f"{packet.entry.test_id}.json").write_text(
+                json.dumps(result), encoding="utf-8"
+            )
+            args = type(
+                "Args",
+                (),
+                {
+                    "repo_root": str(root),
+                    "output_dir": "target/trace-review",
+                    "codex_bin": sys.executable,
+                    "skip_preflight": True,
+                    "only": [packet.entry.test_id],
+                    "resume": True,
+                    "limit": None,
+                    "dry_run": True,
+                    "model": None,
+                    "effort": "xhigh",
+                    "reviewer_sandbox": "workspace-write",
+                },
+            )()
+            output_text = io.StringIO()
+
+            with contextlib.redirect_stdout(output_text):
+                status = MODULE.command_review(args)
+
+        self.assertEqual(status, 0)
+        self.assertIn("skipped 1 unchanged review(s)", output_text.getvalue())
+        self.assertIn("running 0 fresh review(s)", output_text.getvalue())
+
+    def test_review_dry_run_selects_reviews_without_results(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            write_repo(root)
+            args = type(
+                "Args",
+                (),
+                {
+                    "repo_root": str(root),
+                    "output_dir": "target/trace-review",
+                    "codex_bin": sys.executable,
+                    "skip_preflight": True,
+                    "only": [],
+                    "resume": True,
+                    "limit": 1,
+                    "dry_run": True,
+                    "model": None,
+                    "effort": "xhigh",
+                    "reviewer_sandbox": "workspace-write",
+                },
+            )()
+
+            status = MODULE.command_review(args)
+
+            output = root / "target" / "trace-review"
+            inventory = json.loads((output / "inventory.json").read_text(encoding="utf-8"))
+            result_files = list((output / "results").glob("*.json"))
+
+        self.assertEqual(status, 0)
+        self.assertEqual(inventory["requirement_tests"], 2)
+        self.assertEqual(result_files, [])
 
 
 if __name__ == "__main__":
