@@ -3,7 +3,7 @@
 ## Purpose
 
 `ObjectLog` is a durable opaque object collection intended to support
-higher-level linear log storage. It is meant for callers that need stable
+external storage systems built on top of it. It is meant for callers that need stable
 object addresses, durable append semantics, prefix truncation, and efficient
 packing on flash-like media.
 
@@ -43,16 +43,18 @@ snapshot payload represents an empty object log during WAL reclaim.
 `ObjectLogHandle` that names the reserved final data-region frame, and
 reopening the collection MUST
 reconstruct unflushed frontier objects from retained WAL updates.
-2. `RING-OBJECT-005` `ObjectLogHandle` MUST NOT expose public field
-access or an unchecked public field constructor, and object-log reads MUST
-reject handles that do not name a live reserved frame.
-3. `RING-OBJECT-006` Opening an object-log collection by id MUST fail
+2. `RING-OBJECT-002` `ObjectLogHandle` MUST remain opaque to external
+callers: it MUST NOT expose public field access, an unchecked public field
+constructor, or debug formatting that reveals internal handle components.
+3. `RING-OBJECT-003` Opening an object-log collection by id MUST fail
 if the live collection exists with a non-object-log collection type.
-4. `RING-OBJECT-011` The durable object-log handle encoding MUST be
-exactly 12 bytes with no padding: bytes 0 through 3 contain
-`region_index` as a little-endian `u32`, bytes 4 through 7 contain
-`sequence` as a little-endian `u32`, and bytes 8 through 11 contain
+4. `RING-OBJECT-004` The durable object-log handle encoding MUST be
+exactly 16 bytes with no padding: bytes 0 through 3 contain
+`region_index` as a little-endian `u32`, bytes 4 through 11 contain
+`sequence` as a little-endian `u64`, and bytes 12 through 15 contain
 `offset` as a little-endian `u32`.
+5. `RING-OBJECT-005` Object-log reads MUST reject handles that do not
+name a live reserved frame.
 
 ## Durability
 
@@ -66,22 +68,55 @@ rebuilds the same frontier from retained WAL updates.
 
 Flush is the point where the reserved physical region is written. The data
 region begins with an object-log prologue containing the sequence assigned to
-that logical frontier region, followed by packed object frames. A flushed read
-checks both the region header and the object-log prologue before returning
-bytes, so a stale handle cannot silently read from an unrelated later use of
-the same physical region. After flush, the collection persists metadata that
-describes the flushed regions and any still-live frontier state.
+that logical frontier region and the log metadata for the collection, followed
+by packed object frames. A flushed read checks the region header and the full
+object-log prologue before returning bytes, so a stale handle cannot silently
+read from an unrelated later use of the same physical region or from a region
+formatted for a different object-log record format. After flush, the collection
+persists metadata that describes the flushed regions and any still-live
+frontier state.
 
-Root metadata is intentionally small and opaque. Higher-level storage can use
-it to record its own current root, checkpoint, or log metadata without forcing
-Borromean core to understand that higher-level structure.
+Log metadata is a non-empty immutable opaque byte sequence supplied when the
+object log is created. The object log stores and validates it but never
+interprets it. It is part of the durable identity and format of the log, not an
+object, handle, checkpoint, head, tail, or traversal position. Opening a log
+restores and exposes the stored metadata so callers can decide how to interpret
+object bytes without knowing the metadata before open. Appends, reads,
+traversal, truncation, and append transactions do not modify it.
 
-1. `RING-OBJECT-002` Flushing an object-log frontier MUST write the
+The object-log data-region prologue is encoded before object frames. Integer
+fields are little-endian, and object frames begin immediately after the
+metadata bytes. Its fields are:
+
+- `magic: [u8; 4]`: the literal bytes `OLOG`, used to identify the region as
+  an object-log data region before interpreting the rest of the prologue.
+- `version: u16`: the object-log data prologue format version, currently `1`,
+  used to reject data regions whose prologue or frame layout is not understood.
+- `sequence: u64`: the object-log region serial named by handles for frames in
+  this region, used with the physical region index to reject stale handles
+  after storage reuses a region for a later object-log frontier.
+- `log_metadata_len: u32`: the byte length of the immutable log metadata copy
+  that follows, used to validate bounds and locate the first object frame.
+- `log_metadata: [u8; log_metadata_len]`: a verbatim copy of the collection's
+  immutable log metadata, used to reject flushed regions whose durable format
+  identity differs from the collection being opened or read.
+
+1. `RING-OBJECT-006` Flushing an object-log frontier MUST write the
 frontier bytes into the previously reserved physical data region, persist
 metadata sufficient to read flushed handles after reopen, and assign a
 new sequence to a later reserved frontier region.
-2. `RING-OBJECT-004` Object-log root metadata MUST be persisted through
-WAL state and restored when the collection is reopened.
+2. `RING-OBJECT-007` Object-log metadata MUST be a non-empty immutable
+opaque byte sequence supplied at collection creation, persisted with
+collection state, restored on open, and exposed to callers without requiring
+the caller to know it before opening the collection.
+3. `RING-OBJECT-008` Every object-log data region MUST contain the full
+immutable log metadata in its object-log prologue, and opening or reading a
+flushed region MUST reject a prologue whose metadata differs from the
+collection metadata.
+4. `RING-OBJECT-014` Object-log region sequences MUST be monotonic `u64`
+values that never wrap. If replay, snapshot decode, or open observes state
+that would require advancing past `u64::MAX`, the collection MUST be treated
+as corrupt.
 
 ## Committed Visibility
 
@@ -98,12 +133,12 @@ transaction commit record is durable. Public operations validate against the
 committed end, not the planned end, so a planned handle cannot be read,
 traversed, or used as a truncation boundary before commit.
 
-1. `RING-OBJECT-008` Object-log reads, traversal, and truncation MUST
+1. `RING-OBJECT-009` Object-log reads, traversal, and truncation MUST
 observe only committed object bounds.
 
 ## Truncation
 
-Linear storage normally discards prefixes rather than arbitrary individual
+Linear storage discards prefixes rather than arbitrary individual
 objects. The object log therefore tracks live bounds as a head and tail over
 the same internal region, sequence, and offset facts used by handles.
 Truncation advances the head to an object boundary by taking a live handle as
@@ -118,7 +153,7 @@ the storage engine's wear-leveling behavior. If the same physical region is
 allocated again later, the object log assigns a new sequence, so stale handles
 do not alias new data.
 
-1. `RING-OBJECT-003` Truncating an object log MUST accept a live
+1. `RING-OBJECT-010` Truncating an object log MUST accept a live
 `ObjectLogHandle` as an exclusive boundary, invalidate handles before that
 boundary while retaining the boundary handle, and return fully obsolete data
 regions to Borromean storage.
@@ -138,7 +173,7 @@ handle, and the tail object has no next handle. A stale, truncated, forged, or
 corrupt handle is rejected with an object-log error instead of being treated
 as end-of-log.
 
-1. `RING-OBJECT-007` Object-log traversal MUST provide a way to obtain
+1. `RING-OBJECT-011` Object-log traversal MUST provide a way to obtain
 the first live `ObjectLogHandle` and a way to obtain the next live
 `ObjectLogHandle` after a provided live handle. Empty logs and tail handles
 MUST return no handle, while handles outside the current live log MUST be
@@ -174,8 +209,8 @@ cleanup, startup recovery skips the uncommitted object-log updates, returns
 any remaining transaction allocations to storage, and records rollback
 completion.
 
-1. `RING-OBJECT-009` Scoped append transactions MUST keep appended
+1. `RING-OBJECT-012` Scoped append transactions MUST keep appended
 objects invisible until the durable commit record.
-2. `RING-OBJECT-010` Failed or uncommitted append transactions MUST roll
+2. `RING-OBJECT-013` Failed or uncommitted append transactions MUST roll
 back cleanly by discarding staged object-log state and returning
 transaction-reserved regions to storage without making planned handles live.

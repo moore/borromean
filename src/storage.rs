@@ -3024,6 +3024,10 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
                 .wal_record_area_offset()
                 .map_err(|error| StorageRuntimeError::Startup(error.into()))?;
             let mut next_region = None;
+            let mut pending_boundary_open = false;
+            let granule = usize::try_from(metadata.wal_write_granule).map_err(|_| {
+                StorageVisitError::Storage(StorageRuntimeError::WalRotationRequired)
+            })?;
 
             loop {
                 match limit.checked_sub(offset) {
@@ -3037,14 +3041,63 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
                 }
 
                 if region_bytes[offset] == metadata.erased_byte {
+                    if !is_tail && pending_boundary_open {
+                        return Err(StorageVisitError::Storage(StorageRuntimeError::Startup(
+                            StartupError::BrokenWalChain {
+                                region_index: current_region,
+                            },
+                        )));
+                    }
                     break;
                 }
 
+                if region_bytes[offset] != metadata.wal_record_magic {
+                    pending_boundary_open = true;
+                    offset = offset
+                        .checked_add(granule)
+                        .ok_or(StorageRuntimeError::WalRotationRequired)
+                        .map_err(StorageVisitError::Storage)?;
+                    continue;
+                }
+
                 let decoded =
-                    decode_record(&region_bytes[offset..limit], metadata, logical_scratch)
-                        .map_err(StorageRuntimeError::from)?;
+                    match decode_record(&region_bytes[offset..limit], metadata, logical_scratch) {
+                        Ok(decoded) => decoded,
+                        Err(_) => {
+                            pending_boundary_open = true;
+                            offset = offset
+                                .checked_add(granule)
+                                .ok_or(StorageRuntimeError::WalRotationRequired)
+                                .map_err(StorageVisitError::Storage)?;
+                            continue;
+                        }
+                    };
                 let record = decoded.record;
                 let encoded_len = decoded.encoded_len;
+                if pending_boundary_open && record.record_type() != WalRecordType::WalRecovery {
+                    return Err(StorageVisitError::Storage(StorageRuntimeError::Startup(
+                        StartupError::UnexpectedRecordAfterCorruption {
+                            region_index: current_region,
+                            offset,
+                        },
+                    )));
+                }
+                if !pending_boundary_open && record.record_type() == WalRecordType::WalRecovery {
+                    return Err(StorageVisitError::Storage(StorageRuntimeError::Startup(
+                        StartupError::UnexpectedWalRecovery {
+                            region_index: current_region,
+                            offset,
+                        },
+                    )));
+                }
+                if record.record_type() == WalRecordType::WalRecovery {
+                    pending_boundary_open = false;
+                    offset = offset
+                        .checked_add(encoded_len)
+                        .ok_or(StorageRuntimeError::WalRotationRequired)
+                        .map_err(StorageVisitError::Storage)?;
+                    continue;
+                }
                 if let WalRecord::Link {
                     next_region_index, ..
                 } = record

@@ -24,23 +24,23 @@ pub const OBJECT_LOG_MANIFEST_V1_FORMAT: u16 = 8;
 
 const DATA_MAGIC: [u8; 4] = *b"OLOG";
 const DATA_VERSION: u16 = 1;
-const DATA_PROLOGUE_LEN: usize =
-    size_of::<u32>() + size_of::<u16>() + size_of::<u16>() + size_of::<u32>();
+const DATA_PROLOGUE_FIXED_LEN: usize =
+    size_of::<u32>() + size_of::<u16>() + size_of::<u64>() + size_of::<u32>();
 const FRAME_HEADER_LEN: usize = size_of::<u32>() + size_of::<u32>();
 
 const SNAPSHOT_MAGIC: [u8; 4] = *b"OLGS";
-const SNAPSHOT_VERSION: u16 = 2;
-const HANDLE_ENCODED_LEN: usize = 3 * size_of::<u32>();
+const SNAPSHOT_VERSION: u16 = 3;
+const HANDLE_ENCODED_LEN: usize = 2 * size_of::<u32>() + size_of::<u64>();
 
 const UPDATE_APPEND: u8 = 1;
 const UPDATE_TRUNCATE_HEAD: u8 = 2;
-const UPDATE_SET_ROOT: u8 = 3;
+const UPDATE_SET_LOG_METADATA: u8 = 3;
 
 /// Stable object address returned by [`ObjectLog::append`].
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct ObjectLogHandle {
     region_index: u32,
-    sequence: u32,
+    sequence: u64,
     offset: u32,
 }
 
@@ -52,7 +52,7 @@ impl fmt::Debug for ObjectLogHandle {
 
 impl ObjectLogHandle {
     /// Creates a handle from its checked fields.
-    pub(crate) const fn new(region_index: u32, sequence: u32, offset: u32) -> Self {
+    pub(crate) const fn new(region_index: u32, sequence: u64, offset: u32) -> Self {
         Self {
             region_index,
             sequence,
@@ -64,7 +64,7 @@ impl ObjectLogHandle {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ObjectLogRegion {
     region_index: u32,
-    sequence: u32,
+    sequence: u64,
     start_offset: u32,
     end_offset: u32,
     committed_end_offset: u32,
@@ -94,20 +94,19 @@ struct ObjectLogReplayTransaction {
 pub struct ObjectLogMemory<
     const REGION_SIZE: usize,
     const MAX_REGIONS: usize = 16,
-    const ROOT_MAX: usize = 64,
+    const LOG_METADATA_MAX: usize = 64,
 > {
     regions: Vec<ObjectLogRegion, MAX_REGIONS>,
     frontier_payload: [u8; REGION_SIZE],
     rollback_regions: Vec<ObjectLogRegion, MAX_REGIONS>,
     rollback_frontier_payload: [u8; REGION_SIZE],
-    root: [u8; ROOT_MAX],
-    root_len: usize,
-    root_present: bool,
-    next_sequence: u32,
+    log_metadata: [u8; LOG_METADATA_MAX],
+    log_metadata_len: usize,
+    next_sequence: u64,
 }
 
-impl<const REGION_SIZE: usize, const MAX_REGIONS: usize, const ROOT_MAX: usize>
-    ObjectLogMemory<REGION_SIZE, MAX_REGIONS, ROOT_MAX>
+impl<const REGION_SIZE: usize, const MAX_REGIONS: usize, const LOG_METADATA_MAX: usize>
+    ObjectLogMemory<REGION_SIZE, MAX_REGIONS, LOG_METADATA_MAX>
 {
     /// Allocates empty object-log memory.
     pub fn new() -> Self {
@@ -116,9 +115,8 @@ impl<const REGION_SIZE: usize, const MAX_REGIONS: usize, const ROOT_MAX: usize>
             frontier_payload: [0; REGION_SIZE],
             rollback_regions: Vec::new(),
             rollback_frontier_payload: [0; REGION_SIZE],
-            root: [0; ROOT_MAX],
-            root_len: 0,
-            root_present: false,
+            log_metadata: [0; LOG_METADATA_MAX],
+            log_metadata_len: 0,
             next_sequence: 0,
         }
     }
@@ -128,15 +126,14 @@ impl<const REGION_SIZE: usize, const MAX_REGIONS: usize, const ROOT_MAX: usize>
         self.frontier_payload.fill(0);
         self.rollback_regions.clear();
         self.rollback_frontier_payload.fill(0);
-        self.root.fill(0);
-        self.root_len = 0;
-        self.root_present = false;
+        self.log_metadata.fill(0);
+        self.log_metadata_len = 0;
         self.next_sequence = 0;
     }
 }
 
-impl<const REGION_SIZE: usize, const MAX_REGIONS: usize, const ROOT_MAX: usize> Default
-    for ObjectLogMemory<REGION_SIZE, MAX_REGIONS, ROOT_MAX>
+impl<const REGION_SIZE: usize, const MAX_REGIONS: usize, const LOG_METADATA_MAX: usize> Default
+    for ObjectLogMemory<REGION_SIZE, MAX_REGIONS, LOG_METADATA_MAX>
 {
     fn default() -> Self {
         Self::new()
@@ -148,10 +145,10 @@ pub struct ObjectLog<
     'mem,
     const REGION_SIZE: usize,
     const MAX_REGIONS: usize = 16,
-    const ROOT_MAX: usize = 64,
+    const LOG_METADATA_MAX: usize = 64,
 > {
     collection_id: CollectionId,
-    memory: &'mem mut ObjectLogMemory<REGION_SIZE, MAX_REGIONS, ROOT_MAX>,
+    memory: &'mem mut ObjectLogMemory<REGION_SIZE, MAX_REGIONS, LOG_METADATA_MAX>,
 }
 
 /// Scoped append-only object-log transaction.
@@ -165,9 +162,9 @@ pub struct ObjectLogTransaction<
     const REGION_COUNT: usize,
     const MAX_COLLECTIONS: usize,
     const MAX_REGIONS: usize = 16,
-    const ROOT_MAX: usize = 64,
+    const LOG_METADATA_MAX: usize = 64,
 > {
-    log: &'tx mut ObjectLog<'mem, REGION_SIZE, MAX_REGIONS, ROOT_MAX>,
+    log: &'tx mut ObjectLog<'mem, REGION_SIZE, MAX_REGIONS, LOG_METADATA_MAX>,
     storage: &'tx mut Storage<'db, 'storage_mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
     allocated_regions: Vec<u32, REGION_COUNT>,
 }
@@ -182,7 +179,7 @@ impl<
         const REGION_COUNT: usize,
         const MAX_COLLECTIONS: usize,
         const MAX_REGIONS: usize,
-        const ROOT_MAX: usize,
+        const LOG_METADATA_MAX: usize,
     >
     ObjectLogTransaction<
         'tx,
@@ -194,7 +191,7 @@ impl<
         REGION_COUNT,
         MAX_COLLECTIONS,
         MAX_REGIONS,
-        ROOT_MAX,
+        LOG_METADATA_MAX,
     >
 {
     /// Appends an object to this transaction and returns its planned stable handle.
@@ -204,8 +201,8 @@ impl<
     }
 }
 
-impl<const REGION_SIZE: usize, const MAX_REGIONS: usize, const ROOT_MAX: usize> Collection
-    for ObjectLog<'_, REGION_SIZE, MAX_REGIONS, ROOT_MAX>
+impl<const REGION_SIZE: usize, const MAX_REGIONS: usize, const LOG_METADATA_MAX: usize> Collection
+    for ObjectLog<'_, REGION_SIZE, MAX_REGIONS, LOG_METADATA_MAX>
 {
     fn id(&self) -> CollectionId {
         self.collection_id
@@ -216,8 +213,8 @@ impl<const REGION_SIZE: usize, const MAX_REGIONS: usize, const ROOT_MAX: usize> 
     }
 }
 
-impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const ROOT_MAX: usize>
-    ObjectLog<'mem, REGION_SIZE, MAX_REGIONS, ROOT_MAX>
+impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const LOG_METADATA_MAX: usize>
+    ObjectLog<'mem, REGION_SIZE, MAX_REGIONS, LOG_METADATA_MAX>
 {
     /// Creates a new object-log collection.
     pub fn new<
@@ -228,15 +225,24 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const ROOT_MAX: u
         const MAX_COLLECTIONS: usize,
     >(
         storage: &mut Storage<'db, 'storage_mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
-        memory: &'mem mut ObjectLogMemory<REGION_SIZE, MAX_REGIONS, ROOT_MAX>,
+        memory: &'mem mut ObjectLogMemory<REGION_SIZE, MAX_REGIONS, LOG_METADATA_MAX>,
+        log_metadata: &[u8],
     ) -> Result<Self, ObjectLogError> {
+        validate_log_metadata_len::<LOG_METADATA_MAX>(log_metadata.len())?;
         let collection_id = storage.allocate_collection_id()?;
-        storage.append_new_collection(collection_id, CollectionType::OBJECT_LOG_CODE)?;
         memory.clear();
-        Ok(Self {
+
+        storage.append_new_collection(collection_id, CollectionType::OBJECT_LOG_CODE)?;
+        let mut update = [0u8; REGION_SIZE];
+        let used = encode_set_log_metadata_update(log_metadata, &mut update)?;
+        storage.append_update(collection_id, &update[..used])?;
+        let mut log = Self {
             collection_id,
             memory,
-        })
+        };
+        log.apply_log_metadata(log_metadata)?;
+        log.validate_open_state(storage)?;
+        Ok(log)
     }
 
     /// Opens an existing object-log collection.
@@ -249,22 +255,27 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const ROOT_MAX: u
     >(
         collection_id: CollectionId,
         storage: &mut Storage<'db, 'storage_mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
-        memory: &'mem mut ObjectLogMemory<REGION_SIZE, MAX_REGIONS, ROOT_MAX>,
+        memory: &'mem mut ObjectLogMemory<REGION_SIZE, MAX_REGIONS, LOG_METADATA_MAX>,
     ) -> Result<Self, ObjectLogError> {
         validate_collection::<IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>(
             storage,
             collection_id,
         )?;
         memory.clear();
-        replay_object_log::<IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS, MAX_REGIONS, ROOT_MAX>(
-            storage,
+        replay_object_log::<
+            IO,
+            REGION_SIZE,
+            REGION_COUNT,
+            MAX_COLLECTIONS,
+            MAX_REGIONS,
+            LOG_METADATA_MAX,
+        >(storage, collection_id, memory)?;
+        let log = Self {
             collection_id,
             memory,
-        )?;
-        Ok(Self {
-            collection_id,
-            memory,
-        })
+        };
+        log.validate_open_state(storage)?;
+        Ok(log)
     }
 
     /// Returns the stable collection id.
@@ -382,7 +393,7 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const ROOT_MAX: u
                 REGION_COUNT,
                 MAX_COLLECTIONS,
                 MAX_REGIONS,
-                ROOT_MAX,
+                LOG_METADATA_MAX,
             >,
         ) -> Result<T, ObjectLogError>,
     {
@@ -394,54 +405,12 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const ROOT_MAX: u
         result
     }
 
-    /// Persists opaque root metadata for this log.
-    pub fn set_root<
-        'db,
-        'storage_mem,
-        IO: FlashIo,
-        const REGION_COUNT: usize,
-        const MAX_COLLECTIONS: usize,
-    >(
-        &mut self,
-        storage: &mut Storage<'db, 'storage_mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
-        root: &[u8],
-    ) -> Result<(), ObjectLogError> {
-        if root.len() > ROOT_MAX {
-            return Err(ObjectLogError::RootTooLarge {
-                len: root.len(),
-                capacity: ROOT_MAX,
-            });
-        }
-        storage.enter_mode(StorageMode::UpdatingCollection(
-            CollectionUpdateMode::Running,
-        ))?;
-        let result = (|| {
-            let used = encode_set_root_update(root, &mut storage.memory.payload_scratch)?;
-            storage
-                .memory
-                .state
-                .append_update_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
-                    storage.backing,
-                    &mut storage.memory.workspace,
-                    self.collection_id,
-                    &storage.memory.payload_scratch[..used],
-                )?;
-            self.apply_set_root(root)
-        })();
-        storage.finish_mode();
-        result
-    }
-
-    /// Reads opaque root metadata, when present.
-    pub fn get_root<R, F>(&self, read: F) -> Option<R>
+    /// Reads immutable opaque log metadata.
+    pub fn get_log_metadata<R, F>(&self, read: F) -> R
     where
         F: FnOnce(&[u8]) -> R,
     {
-        if self.memory.root_present {
-            Some(read(&self.memory.root[..self.memory.root_len]))
-        } else {
-            None
-        }
+        read(&self.memory.log_metadata[..self.memory.log_metadata_len])
     }
 
     /// Returns the first committed live object handle, if the log is non-empty.
@@ -487,11 +456,11 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const ROOT_MAX: u
     ) -> Result<ObjectLogHandle, ObjectLogError> {
         let frame_len = frame_len(bytes.len())?;
         let payload_capacity = committed_payload_capacity::<REGION_SIZE>(storage.metadata())?;
-        let object_start = object_payload_start()?;
-        if frame_len > payload_capacity.saturating_sub(DATA_PROLOGUE_LEN) {
+        let object_start = self.object_payload_start()?;
+        if frame_len > payload_capacity.saturating_sub(object_start) {
             return Err(ObjectLogError::ObjectTooLarge {
                 len: bytes.len(),
-                capacity: payload_capacity.saturating_sub(DATA_PROLOGUE_LEN + FRAME_HEADER_LEN),
+                capacity: object_payload_capacity(payload_capacity, self.memory.log_metadata_len)?,
             });
         }
 
@@ -609,7 +578,7 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const ROOT_MAX: u
                 REGION_COUNT,
                 MAX_COLLECTIONS,
                 MAX_REGIONS,
-                ROOT_MAX,
+                LOG_METADATA_MAX,
             >,
         ) -> Result<T, ObjectLogError>,
     {
@@ -684,10 +653,11 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const ROOT_MAX: u
     ) -> Result<ObjectLogHandle, ObjectLogError> {
         let frame_len = frame_len(bytes.len())?;
         let payload_capacity = committed_payload_capacity::<REGION_SIZE>(storage.metadata())?;
-        if frame_len > payload_capacity.saturating_sub(DATA_PROLOGUE_LEN) {
+        let object_start = self.object_payload_start()?;
+        if frame_len > payload_capacity.saturating_sub(object_start) {
             return Err(ObjectLogError::ObjectTooLarge {
                 len: bytes.len(),
-                capacity: payload_capacity.saturating_sub(DATA_PROLOGUE_LEN + FRAME_HEADER_LEN),
+                capacity: object_payload_capacity(payload_capacity, self.memory.log_metadata_len)?,
             });
         }
 
@@ -729,6 +699,8 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const ROOT_MAX: u
         bytes: &[u8],
         allocated_regions: &mut Vec<u32, REGION_COUNT>,
     ) -> Result<ObjectLogHandle, ObjectLogError> {
+        let sequence = self.memory.next_sequence;
+        let _ = next_sequence_after(sequence)?;
         let region_index = storage
             .memory
             .state
@@ -744,8 +716,7 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const ROOT_MAX: u
         allocated_regions
             .push(region_index)
             .map_err(|_| ObjectLogError::TooManyRegions)?;
-        let sequence = self.memory.next_sequence;
-        let offset = u32::try_from(Header::ENCODED_LEN + object_payload_start()?)
+        let offset = u32::try_from(Header::ENCODED_LEN + self.object_payload_start()?)
             .map_err(|_| ObjectLogError::LengthOverflow)?;
         let handle = ObjectLogHandle::new(region_index, sequence, offset);
         let used = encode_append_update(handle, bytes, &mut storage.memory.payload_scratch)?;
@@ -822,6 +793,7 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const ROOT_MAX: u
         bytes: &[u8],
         visibility: AppendVisibility,
     ) -> Result<(), ObjectLogError> {
+        let next_sequence = next_sequence_after(handle.sequence)?;
         let frame_len = frame_len(bytes.len())?;
         let payload_offset = payload_offset(handle.offset)?;
         let payload_end = payload_offset
@@ -837,7 +809,7 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const ROOT_MAX: u
         let region_index = match self.find_region(handle.region_index, handle.sequence) {
             Some(index) => index,
             None => {
-                let start = u32::try_from(Header::ENCODED_LEN + object_payload_start()?)
+                let start = u32::try_from(Header::ENCODED_LEN + self.object_payload_start()?)
                     .map_err(|_| ObjectLogError::LengthOverflow)?;
                 let region = ObjectLogRegion {
                     region_index: handle.region_index,
@@ -881,23 +853,20 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const ROOT_MAX: u
         if matches!(visibility, AppendVisibility::Committed) {
             region.committed_end_offset = region.end_offset;
         }
-        self.memory.next_sequence = self
-            .memory
-            .next_sequence
-            .max(handle.sequence.saturating_add(1));
+        self.memory.next_sequence = self.memory.next_sequence.max(next_sequence);
         Ok(())
     }
 
-    fn apply_set_root(&mut self, root: &[u8]) -> Result<(), ObjectLogError> {
-        if root.len() > ROOT_MAX {
-            return Err(ObjectLogError::RootTooLarge {
-                len: root.len(),
-                capacity: ROOT_MAX,
-            });
+    fn apply_log_metadata(&mut self, log_metadata: &[u8]) -> Result<(), ObjectLogError> {
+        validate_log_metadata_len::<LOG_METADATA_MAX>(log_metadata.len())?;
+        if self.memory.log_metadata_len != 0 {
+            if &self.memory.log_metadata[..self.memory.log_metadata_len] == log_metadata {
+                return Ok(());
+            }
+            return Err(ObjectLogError::InvalidEncoding);
         }
-        self.memory.root[..root.len()].copy_from_slice(root);
-        self.memory.root_len = root.len();
-        self.memory.root_present = true;
+        self.memory.log_metadata[..log_metadata.len()].copy_from_slice(log_metadata);
+        self.memory.log_metadata_len = log_metadata.len();
         Ok(())
     }
 
@@ -1077,10 +1046,9 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const ROOT_MAX: u
             .get_mut(index)
             .ok_or(ObjectLogError::InvalidHandle)?
             .flushed = true;
-        let snapshot_len = encode_snapshot::<MAX_REGIONS, ROOT_MAX>(
+        let snapshot_len = encode_snapshot::<MAX_REGIONS, LOG_METADATA_MAX>(
             &self.memory.regions,
-            &self.memory.root[..self.memory.root_len],
-            self.memory.root_present,
+            &self.memory.log_metadata[..self.memory.log_metadata_len],
             &mut storage.memory.payload_scratch,
         )?;
         storage
@@ -1309,18 +1277,37 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const ROOT_MAX: u
             return Err(ObjectLogError::InvalidFrame);
         }
 
-        let mut prologue = [0u8; DATA_PROLOGUE_LEN];
+        let mut prologue = [0u8; DATA_PROLOGUE_FIXED_LEN];
         storage
             .backing
             .read_region(
                 region.region_index,
                 Header::ENCODED_LEN,
-                DATA_PROLOGUE_LEN,
+                DATA_PROLOGUE_FIXED_LEN,
                 |bytes| prologue.copy_from_slice(bytes),
             )
             .map_err(StorageRuntimeError::from)?;
-        if decode_data_prologue_sequence(&prologue)? != region.sequence {
+        let (sequence, log_metadata_len) = decode_data_prologue_header(&prologue)?;
+        if sequence != region.sequence {
             return Err(ObjectLogError::InvalidHandle);
+        }
+        if log_metadata_len == 0
+            || log_metadata_len > LOG_METADATA_MAX
+            || log_metadata_len != self.memory.log_metadata_len
+        {
+            return Err(ObjectLogError::InvalidFrame);
+        }
+        let metadata_matches = storage
+            .backing
+            .read_region(
+                region.region_index,
+                Header::ENCODED_LEN + DATA_PROLOGUE_FIXED_LEN,
+                log_metadata_len,
+                |bytes| bytes == &self.memory.log_metadata[..self.memory.log_metadata_len],
+            )
+            .map_err(StorageRuntimeError::from)?;
+        if !metadata_matches {
+            return Err(ObjectLogError::InvalidFrame);
         }
         Ok(())
     }
@@ -1370,15 +1357,46 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const ROOT_MAX: u
         Ok(read(&scratch[..payload_len]))
     }
 
-    fn initialize_frontier_payload(&mut self, sequence: u32) -> Result<(), ObjectLogError> {
+    fn initialize_frontier_payload(&mut self, sequence: u64) -> Result<(), ObjectLogError> {
         self.memory.frontier_payload.fill(0);
+        let prologue_len = self.object_payload_start()?;
         encode_data_prologue(
             sequence,
-            &mut self.memory.frontier_payload[..DATA_PROLOGUE_LEN],
+            &self.memory.log_metadata[..self.memory.log_metadata_len],
+            &mut self.memory.frontier_payload[..prologue_len],
         )
     }
 
-    fn find_region(&self, region_index: u32, sequence: u32) -> Option<usize> {
+    fn object_payload_start(&self) -> Result<usize, ObjectLogError> {
+        data_prologue_len(self.memory.log_metadata_len)
+    }
+
+    fn validate_open_state<
+        'db,
+        'storage_mem,
+        IO: FlashIo,
+        const REGION_COUNT: usize,
+        const MAX_COLLECTIONS: usize,
+    >(
+        &self,
+        storage: &mut Storage<'db, 'storage_mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
+    ) -> Result<(), ObjectLogError> {
+        validate_log_metadata_len::<LOG_METADATA_MAX>(self.memory.log_metadata_len)?;
+        let object_start = u32::try_from(Header::ENCODED_LEN + self.object_payload_start()?)
+            .map_err(|_| ObjectLogError::LengthOverflow)?;
+        for region in self.memory.regions.iter().copied() {
+            let _ = next_sequence_after(region.sequence)?;
+            if region.start_offset < object_start {
+                return Err(ObjectLogError::InvalidEncoding);
+            }
+            if region.flushed {
+                self.validate_flushed_region_prologue(storage, region)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn find_region(&self, region_index: u32, sequence: u64) -> Option<usize> {
         self.memory
             .regions
             .iter()
@@ -1523,8 +1541,10 @@ pub enum ObjectLogError {
     MissingFrontier,
     /// Object payload exceeded the region object capacity.
     ObjectTooLarge { len: usize, capacity: usize },
-    /// Root metadata exceeded configured memory.
-    RootTooLarge { len: usize, capacity: usize },
+    /// Log metadata must be non-empty.
+    LogMetadataEmpty,
+    /// Log metadata exceeded configured memory.
+    LogMetadataTooLarge { len: usize, capacity: usize },
     /// Read scratch was too small.
     BufferTooSmall { needed: usize, available: usize },
     /// A stored object frame was invalid.
@@ -1577,11 +1597,11 @@ fn replay_object_log<
     const REGION_COUNT: usize,
     const MAX_COLLECTIONS: usize,
     const MAX_REGIONS: usize,
-    const ROOT_MAX: usize,
+    const LOG_METADATA_MAX: usize,
 >(
     storage: &mut Storage<'_, '_, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
     collection_id: CollectionId,
-    memory: &mut ObjectLogMemory<REGION_SIZE, MAX_REGIONS, ROOT_MAX>,
+    memory: &mut ObjectLogMemory<REGION_SIZE, MAX_REGIONS, LOG_METADATA_MAX>,
 ) -> Result<(), ObjectLogError> {
     let mut transaction = None::<ObjectLogReplayTransaction>;
     let result = storage
@@ -1682,10 +1702,10 @@ fn replay_object_log<
 fn apply_update_payload<
     const REGION_SIZE: usize,
     const MAX_REGIONS: usize,
-    const ROOT_MAX: usize,
+    const LOG_METADATA_MAX: usize,
 >(
     payload: &[u8],
-    memory: &mut ObjectLogMemory<REGION_SIZE, MAX_REGIONS, ROOT_MAX>,
+    memory: &mut ObjectLogMemory<REGION_SIZE, MAX_REGIONS, LOG_METADATA_MAX>,
     append_visibility: AppendVisibility,
 ) -> Result<(), ObjectLogError> {
     let mut offset = 0usize;
@@ -1717,13 +1737,13 @@ fn apply_update_payload<
             };
             log.apply_truncate_before(handle, &mut freed)?;
         }
-        UPDATE_SET_ROOT => {
+        UPDATE_SET_LOG_METADATA => {
             let len = usize::try_from(read_u32(payload, &mut offset)?)
                 .map_err(|_| ObjectLogError::LengthOverflow)?;
             let end = offset
                 .checked_add(len)
                 .ok_or(ObjectLogError::LengthOverflow)?;
-            let root = payload
+            let log_metadata = payload
                 .get(offset..end)
                 .ok_or(ObjectLogError::InvalidEncoding)?;
             offset = end;
@@ -1731,7 +1751,7 @@ fn apply_update_payload<
                 collection_id: CollectionId::new(0),
                 memory,
             };
-            log.apply_set_root(root)?;
+            log.apply_log_metadata(log_metadata)?;
         }
         _ => return Err(ObjectLogError::InvalidEncoding),
     }
@@ -1745,7 +1765,7 @@ pub(crate) fn empty_snapshot() -> &'static [u8] {
     &EMPTY_SNAPSHOT
 }
 
-const EMPTY_SNAPSHOT: [u8; 16] = [b'O', b'L', b'G', b'S', 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+const EMPTY_SNAPSHOT: [u8; 16] = [b'O', b'L', b'G', b'S', 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
 
 fn encode_append_update(
     handle: ObjectLogHandle,
@@ -1772,23 +1792,26 @@ fn encode_truncate_update(
     write_handle(output, offset, handle)
 }
 
-fn encode_set_root_update(root: &[u8], output: &mut [u8]) -> Result<usize, ObjectLogError> {
+fn encode_set_log_metadata_update(
+    log_metadata: &[u8],
+    output: &mut [u8],
+) -> Result<usize, ObjectLogError> {
     let mut offset = 0usize;
-    offset = write_u8(output, offset, UPDATE_SET_ROOT)?;
+    offset = write_u8(output, offset, UPDATE_SET_LOG_METADATA)?;
     offset = write_u32(
         output,
         offset,
-        u32::try_from(root.len()).map_err(|_| ObjectLogError::LengthOverflow)?,
+        u32::try_from(log_metadata.len()).map_err(|_| ObjectLogError::LengthOverflow)?,
     )?;
-    write_bytes(output, offset, root)
+    write_bytes(output, offset, log_metadata)
 }
 
-fn encode_snapshot<const MAX_REGIONS: usize, const ROOT_MAX: usize>(
+fn encode_snapshot<const MAX_REGIONS: usize, const LOG_METADATA_MAX: usize>(
     regions: &Vec<ObjectLogRegion, MAX_REGIONS>,
-    root: &[u8],
-    root_present: bool,
+    log_metadata: &[u8],
     output: &mut [u8],
 ) -> Result<usize, ObjectLogError> {
+    validate_log_metadata_len::<LOG_METADATA_MAX>(log_metadata.len())?;
     let mut offset = 0usize;
     offset = write_bytes(output, offset, &SNAPSHOT_MAGIC)?;
     offset = write_u16(output, offset, SNAPSHOT_VERSION)?;
@@ -1801,53 +1824,50 @@ fn encode_snapshot<const MAX_REGIONS: usize, const ROOT_MAX: usize>(
     offset = write_u32(
         output,
         offset,
-        if root_present {
-            u32::try_from(root.len()).map_err(|_| ObjectLogError::LengthOverflow)?
-        } else {
-            0
-        },
+        u32::try_from(log_metadata.len()).map_err(|_| ObjectLogError::LengthOverflow)?,
     )?;
     for region in regions.iter().copied() {
+        let _ = next_sequence_after(region.sequence)?;
         offset = write_u32(output, offset, region.region_index)?;
-        offset = write_u32(output, offset, region.sequence)?;
+        offset = write_u64(output, offset, region.sequence)?;
         offset = write_u32(output, offset, region.start_offset)?;
         offset = write_u32(output, offset, region.end_offset)?;
         offset = write_u32(output, offset, region.committed_end_offset)?;
         offset = write_u8(output, offset, if region.flushed { 1 } else { 0 })?;
     }
-    if root_present {
-        if root.len() > ROOT_MAX {
-            return Err(ObjectLogError::RootTooLarge {
-                len: root.len(),
-                capacity: ROOT_MAX,
-            });
-        }
-        offset = write_bytes(output, offset, root)?;
-    }
+    offset = write_bytes(output, offset, log_metadata)?;
     Ok(offset)
 }
 
-fn decode_snapshot<const REGION_SIZE: usize, const MAX_REGIONS: usize, const ROOT_MAX: usize>(
+fn decode_snapshot<
+    const REGION_SIZE: usize,
+    const MAX_REGIONS: usize,
+    const LOG_METADATA_MAX: usize,
+>(
     input: &[u8],
-    memory: &mut ObjectLogMemory<REGION_SIZE, MAX_REGIONS, ROOT_MAX>,
+    memory: &mut ObjectLogMemory<REGION_SIZE, MAX_REGIONS, LOG_METADATA_MAX>,
 ) -> Result<(), ObjectLogError> {
     let mut offset = 0usize;
     if read_bytes(input, &mut offset, SNAPSHOT_MAGIC.len())? != SNAPSHOT_MAGIC.as_slice() {
         return Err(ObjectLogError::InvalidEncoding);
     }
     let version = read_u16(input, &mut offset)?;
-    if !(1..=SNAPSHOT_VERSION).contains(&version) {
+    if version != SNAPSHOT_VERSION {
         return Err(ObjectLogError::InvalidEncoding);
     }
     let _reserved = read_u16(input, &mut offset)?;
     let region_count = usize::try_from(read_u32(input, &mut offset)?)
         .map_err(|_| ObjectLogError::LengthOverflow)?;
-    let root_len = usize::try_from(read_u32(input, &mut offset)?)
+    let log_metadata_len = usize::try_from(read_u32(input, &mut offset)?)
         .map_err(|_| ObjectLogError::LengthOverflow)?;
+    validate_log_metadata_len::<LOG_METADATA_MAX>(log_metadata_len)?;
     memory.clear();
+    let object_start = u32::try_from(Header::ENCODED_LEN + data_prologue_len(log_metadata_len)?)
+        .map_err(|_| ObjectLogError::LengthOverflow)?;
     for _ in 0..region_count {
         let region_index = read_u32(input, &mut offset)?;
-        let sequence = read_u32(input, &mut offset)?;
+        let sequence = read_u64(input, &mut offset)?;
+        let next_sequence = next_sequence_after(sequence)?;
         let start_offset = read_u32(input, &mut offset)?;
         let end_offset = read_u32(input, &mut offset)?;
         let committed_end_offset = if version >= 2 {
@@ -1869,6 +1889,7 @@ fn decode_snapshot<const REGION_SIZE: usize, const MAX_REGIONS: usize, const ROO
         };
         if region.committed_end_offset > region.end_offset
             || region.committed_end_offset < region.start_offset
+            || region.start_offset < object_start
         {
             return Err(ObjectLogError::InvalidEncoding);
         }
@@ -1876,36 +1897,42 @@ fn decode_snapshot<const REGION_SIZE: usize, const MAX_REGIONS: usize, const ROO
             .regions
             .push(region)
             .map_err(|_| ObjectLogError::TooManyRegions)?;
-        memory.next_sequence = memory.next_sequence.max(region.sequence.saturating_add(1));
+        memory.next_sequence = memory.next_sequence.max(next_sequence);
     }
-    if root_len > 0 {
-        if root_len > ROOT_MAX {
-            return Err(ObjectLogError::RootTooLarge {
-                len: root_len,
-                capacity: ROOT_MAX,
-            });
-        }
-        let root = read_bytes(input, &mut offset, root_len)?;
-        memory.root[..root_len].copy_from_slice(root);
-        memory.root_len = root_len;
-        memory.root_present = true;
-    }
+    let log_metadata = read_bytes(input, &mut offset, log_metadata_len)?;
+    memory.log_metadata[..log_metadata_len].copy_from_slice(log_metadata);
+    memory.log_metadata_len = log_metadata_len;
     if offset != input.len() {
         return Err(ObjectLogError::InvalidEncoding);
     }
     Ok(())
 }
 
-fn encode_data_prologue(sequence: u32, output: &mut [u8]) -> Result<(), ObjectLogError> {
+fn encode_data_prologue(
+    sequence: u64,
+    log_metadata: &[u8],
+    output: &mut [u8],
+) -> Result<(), ObjectLogError> {
+    if output.len() < data_prologue_len(log_metadata.len())? {
+        return Err(ObjectLogError::BufferTooSmall {
+            needed: data_prologue_len(log_metadata.len())?,
+            available: output.len(),
+        });
+    }
     let mut offset = 0usize;
     offset = write_bytes(output, offset, &DATA_MAGIC)?;
     offset = write_u16(output, offset, DATA_VERSION)?;
-    offset = write_u16(output, offset, 0)?;
-    let _ = write_u32(output, offset, sequence)?;
+    offset = write_u64(output, offset, sequence)?;
+    offset = write_u32(
+        output,
+        offset,
+        u32::try_from(log_metadata.len()).map_err(|_| ObjectLogError::LengthOverflow)?,
+    )?;
+    let _ = write_bytes(output, offset, log_metadata)?;
     Ok(())
 }
 
-fn decode_data_prologue_sequence(input: &[u8]) -> Result<u32, ObjectLogError> {
+fn decode_data_prologue_header(input: &[u8]) -> Result<(u64, usize), ObjectLogError> {
     let mut offset = 0usize;
     if read_bytes(input, &mut offset, DATA_MAGIC.len())? != DATA_MAGIC.as_slice() {
         return Err(ObjectLogError::InvalidFrame);
@@ -1913,8 +1940,10 @@ fn decode_data_prologue_sequence(input: &[u8]) -> Result<u32, ObjectLogError> {
     if read_u16(input, &mut offset)? != DATA_VERSION {
         return Err(ObjectLogError::InvalidFrame);
     }
-    let _reserved = read_u16(input, &mut offset)?;
-    read_u32(input, &mut offset)
+    let sequence = read_u64(input, &mut offset)?;
+    let log_metadata_len = usize::try_from(read_u32(input, &mut offset)?)
+        .map_err(|_| ObjectLogError::LengthOverflow)?;
+    Ok((sequence, log_metadata_len))
 }
 
 fn encode_frame_into(bytes: &[u8], output: &mut [u8]) -> Result<(), ObjectLogError> {
@@ -1963,10 +1992,40 @@ fn frame_len(payload_len: usize) -> Result<usize, ObjectLogError> {
         .ok_or(ObjectLogError::LengthOverflow)
 }
 
-fn object_payload_start() -> Result<usize, ObjectLogError> {
-    DATA_PROLOGUE_LEN
-        .checked_add(0)
+fn validate_log_metadata_len<const LOG_METADATA_MAX: usize>(
+    len: usize,
+) -> Result<(), ObjectLogError> {
+    if len == 0 {
+        return Err(ObjectLogError::LogMetadataEmpty);
+    }
+    if len > LOG_METADATA_MAX {
+        return Err(ObjectLogError::LogMetadataTooLarge {
+            len,
+            capacity: LOG_METADATA_MAX,
+        });
+    }
+    Ok(())
+}
+
+fn data_prologue_len(log_metadata_len: usize) -> Result<usize, ObjectLogError> {
+    DATA_PROLOGUE_FIXED_LEN
+        .checked_add(log_metadata_len)
         .ok_or(ObjectLogError::LengthOverflow)
+}
+
+fn object_payload_capacity(
+    payload_capacity: usize,
+    log_metadata_len: usize,
+) -> Result<usize, ObjectLogError> {
+    Ok(payload_capacity
+        .saturating_sub(data_prologue_len(log_metadata_len)?)
+        .saturating_sub(FRAME_HEADER_LEN))
+}
+
+fn next_sequence_after(sequence: u64) -> Result<u64, ObjectLogError> {
+    sequence
+        .checked_add(1)
+        .ok_or(ObjectLogError::InvalidEncoding)
 }
 
 fn payload_offset(region_offset: u32) -> Result<usize, ObjectLogError> {
@@ -2013,14 +2072,14 @@ fn write_handle(
             available: output.len(),
         })?;
     offset = write_u32(output, offset, handle.region_index)?;
-    offset = write_u32(output, offset, handle.sequence)?;
+    offset = write_u64(output, offset, handle.sequence)?;
     write_u32(output, offset, handle.offset)
 }
 
 fn read_handle(input: &[u8], offset: &mut usize) -> Result<ObjectLogHandle, ObjectLogError> {
     Ok(ObjectLogHandle {
         region_index: read_u32(input, offset)?,
-        sequence: read_u32(input, offset)?,
+        sequence: read_u64(input, offset)?,
         offset: read_u32(input, offset)?,
     })
 }
@@ -2045,6 +2104,10 @@ fn write_u16(output: &mut [u8], offset: usize, value: u16) -> Result<usize, Obje
 }
 
 fn write_u32(output: &mut [u8], offset: usize, value: u32) -> Result<usize, ObjectLogError> {
+    write_bytes(output, offset, &value.to_le_bytes())
+}
+
+fn write_u64(output: &mut [u8], offset: usize, value: u64) -> Result<usize, ObjectLogError> {
     write_bytes(output, offset, &value.to_le_bytes())
 }
 
@@ -2080,6 +2143,13 @@ fn read_u32(input: &[u8], offset: &mut usize) -> Result<u32, ObjectLogError> {
     let mut value = [0u8; size_of::<u32>()];
     value.copy_from_slice(bytes);
     Ok(u32::from_le_bytes(value))
+}
+
+fn read_u64(input: &[u8], offset: &mut usize) -> Result<u64, ObjectLogError> {
+    let bytes = read_bytes(input, offset, size_of::<u64>())?;
+    let mut value = [0u8; size_of::<u64>()];
+    value.copy_from_slice(bytes);
+    Ok(u64::from_le_bytes(value))
 }
 
 fn read_bytes<'a>(
