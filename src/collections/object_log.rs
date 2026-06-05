@@ -81,6 +81,13 @@ impl ObjectLogRegion {
 }
 
 #[derive(Clone, Copy)]
+struct ObjectLogFrameInfo {
+    header: [u8; FRAME_HEADER_LEN],
+    payload_start: usize,
+    payload_len: usize,
+}
+
+#[derive(Clone, Copy)]
 enum AppendVisibility {
     Planned,
     Committed,
@@ -343,6 +350,51 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const LOG_METADAT
     {
         storage.enter_mode(StorageMode::ReadingStorage(ReadMode::Running))?;
         let result = self.get_inner(storage, handle, scratch, read);
+        storage.finish_mode();
+        result
+    }
+
+    /// Returns the stored object length without returning object bytes.
+    pub fn get_object_len<
+        'db,
+        'storage_mem,
+        IO: FlashIo,
+        const REGION_COUNT: usize,
+        const MAX_COLLECTIONS: usize,
+    >(
+        &self,
+        storage: &mut Storage<'db, 'storage_mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
+        handle: ObjectLogHandle,
+    ) -> Result<u64, ObjectLogError> {
+        storage.enter_mode(StorageMode::ReadingStorage(ReadMode::Running))?;
+        let result = self.get_object_len_inner(storage, handle);
+        storage.finish_mode();
+        result
+    }
+
+    /// Fetches a byte range from an object and passes those bytes to `read`.
+    pub fn get_range<
+        'db,
+        'storage_mem,
+        IO: FlashIo,
+        R,
+        F,
+        const REGION_COUNT: usize,
+        const MAX_COLLECTIONS: usize,
+    >(
+        &self,
+        storage: &mut Storage<'db, 'storage_mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
+        handle: ObjectLogHandle,
+        offset: u64,
+        len: u64,
+        scratch: &mut [u8],
+        read: F,
+    ) -> Result<R, ObjectLogError>
+    where
+        F: FnOnce(&[u8]) -> R,
+    {
+        storage.enter_mode(StorageMode::ReadingStorage(ReadMode::Running))?;
+        let result = self.get_range_inner(storage, handle, offset, len, scratch, read);
         storage.finish_mode();
         result
     }
@@ -1096,6 +1148,70 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const LOG_METADAT
         }
     }
 
+    fn get_object_len_inner<
+        'db,
+        'storage_mem,
+        IO: FlashIo,
+        const REGION_COUNT: usize,
+        const MAX_COLLECTIONS: usize,
+    >(
+        &self,
+        storage: &mut Storage<'db, 'storage_mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
+        handle: ObjectLogHandle,
+    ) -> Result<u64, ObjectLogError> {
+        let region = self
+            .find_region(handle.region_index, handle.sequence)
+            .and_then(|index| self.memory.regions.get(index).copied())
+            .ok_or(ObjectLogError::InvalidHandle)?;
+        if !region.contains_committed(handle) {
+            return Err(ObjectLogError::InvalidHandle);
+        }
+        if region.flushed {
+            u64::try_from(
+                self.read_flushed_frame_info(storage, region, handle)?
+                    .payload_len,
+            )
+            .map_err(|_| ObjectLogError::LengthOverflow)
+        } else {
+            u64::try_from(self.frontier_payload_len(region, handle)?)
+                .map_err(|_| ObjectLogError::LengthOverflow)
+        }
+    }
+
+    fn get_range_inner<
+        'db,
+        'storage_mem,
+        IO: FlashIo,
+        R,
+        F,
+        const REGION_COUNT: usize,
+        const MAX_COLLECTIONS: usize,
+    >(
+        &self,
+        storage: &mut Storage<'db, 'storage_mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
+        handle: ObjectLogHandle,
+        object_offset: u64,
+        len: u64,
+        scratch: &mut [u8],
+        read: F,
+    ) -> Result<R, ObjectLogError>
+    where
+        F: FnOnce(&[u8]) -> R,
+    {
+        let region = self
+            .find_region(handle.region_index, handle.sequence)
+            .and_then(|index| self.memory.regions.get(index).copied())
+            .ok_or(ObjectLogError::InvalidHandle)?;
+        if !region.contains_committed(handle) {
+            return Err(ObjectLogError::InvalidHandle);
+        }
+        if region.flushed {
+            self.get_range_flushed(storage, region, handle, object_offset, len, scratch, read)
+        } else {
+            self.get_range_frontier(region, handle, object_offset, len, scratch, read)
+        }
+    }
+
     fn next_handle_inner<
         'db,
         'storage_mem,
@@ -1210,6 +1326,88 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const LOG_METADAT
     where
         F: FnOnce(&[u8]) -> R,
     {
+        let frame = self.read_flushed_frame_info(storage, region, handle)?;
+        let payload_len = frame.payload_len;
+        if scratch.len() < payload_len {
+            return Err(ObjectLogError::BufferTooSmall {
+                needed: payload_len,
+                available: scratch.len(),
+            });
+        }
+        if storage.memory.payload_scratch.len() < payload_len {
+            return Err(ObjectLogError::InvalidFrame);
+        }
+        storage
+            .backing
+            .read_region(
+                handle.region_index,
+                frame.payload_start,
+                payload_len,
+                |bytes| storage.memory.payload_scratch[..payload_len].copy_from_slice(bytes),
+            )
+            .map_err(StorageRuntimeError::from)?;
+        validate_frame_checksum(
+            &frame.header,
+            &storage.memory.payload_scratch[..payload_len],
+        )?;
+        scratch[..payload_len].copy_from_slice(&storage.memory.payload_scratch[..payload_len]);
+        Ok(read(&scratch[..payload_len]))
+    }
+
+    fn get_range_flushed<
+        'db,
+        'storage_mem,
+        IO: FlashIo,
+        R,
+        F,
+        const REGION_COUNT: usize,
+        const MAX_COLLECTIONS: usize,
+    >(
+        &self,
+        storage: &mut Storage<'db, 'storage_mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
+        region: ObjectLogRegion,
+        handle: ObjectLogHandle,
+        object_offset: u64,
+        len: u64,
+        scratch: &mut [u8],
+        read: F,
+    ) -> Result<R, ObjectLogError>
+    where
+        F: FnOnce(&[u8]) -> R,
+    {
+        let frame = self.read_flushed_frame_info(storage, region, handle)?;
+        let payload_len = frame.payload_len;
+        let range = checked_object_read_range(payload_len, object_offset, len, scratch.len())?;
+        let read_len = range.end - range.start;
+        if read_len != 0 {
+            storage
+                .backing
+                .read_region(
+                    handle.region_index,
+                    frame
+                        .payload_start
+                        .checked_add(range.start)
+                        .ok_or(ObjectLogError::LengthOverflow)?,
+                    read_len,
+                    |bytes| scratch[..read_len].copy_from_slice(bytes),
+                )
+                .map_err(StorageRuntimeError::from)?;
+        }
+        Ok(read(&scratch[..read_len]))
+    }
+
+    fn read_flushed_frame_info<
+        'db,
+        'storage_mem,
+        IO: FlashIo,
+        const REGION_COUNT: usize,
+        const MAX_COLLECTIONS: usize,
+    >(
+        &self,
+        storage: &mut Storage<'db, 'storage_mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
+        region: ObjectLogRegion,
+        handle: ObjectLogHandle,
+    ) -> Result<ObjectLogFrameInfo, ObjectLogError> {
         self.validate_flushed_region_prologue(storage, region)?;
         let mut header = [0u8; FRAME_HEADER_LEN];
         storage
@@ -1222,10 +1420,12 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const LOG_METADAT
             )
             .map_err(StorageRuntimeError::from)?;
         let payload_len = decode_frame_payload_len(&header)?;
-        let frame_end = usize::try_from(handle.offset)
+        let payload_start = usize::try_from(handle.offset)
             .map_err(|_| ObjectLogError::LengthOverflow)?
             .checked_add(FRAME_HEADER_LEN)
-            .and_then(|value| value.checked_add(payload_len))
+            .ok_or(ObjectLogError::LengthOverflow)?;
+        let frame_end = payload_start
+            .checked_add(payload_len)
             .ok_or(ObjectLogError::LengthOverflow)?;
         if frame_end
             > usize::try_from(region.committed_end_offset)
@@ -1233,26 +1433,11 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const LOG_METADAT
         {
             return Err(ObjectLogError::InvalidFrame);
         }
-        if scratch.len() < payload_len {
-            return Err(ObjectLogError::BufferTooSmall {
-                needed: payload_len,
-                available: scratch.len(),
-            });
-        }
-        storage
-            .backing
-            .read_region(
-                handle.region_index,
-                usize::try_from(handle.offset)
-                    .map_err(|_| ObjectLogError::LengthOverflow)?
-                    .checked_add(FRAME_HEADER_LEN)
-                    .ok_or(ObjectLogError::LengthOverflow)?,
-                payload_len,
-                |bytes| scratch[..payload_len].copy_from_slice(bytes),
-            )
-            .map_err(StorageRuntimeError::from)?;
-        validate_frame_checksum(&header, &scratch[..payload_len])?;
-        Ok(read(&scratch[..payload_len]))
+        Ok(ObjectLogFrameInfo {
+            header,
+            payload_start,
+            payload_len,
+        })
     }
 
     fn validate_flushed_region_prologue<
@@ -1355,6 +1540,65 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const LOG_METADAT
         validate_frame_checksum(frame_header, payload)?;
         scratch[..payload_len].copy_from_slice(payload);
         Ok(read(&scratch[..payload_len]))
+    }
+
+    fn frontier_payload_len(
+        &self,
+        region: ObjectLogRegion,
+        handle: ObjectLogHandle,
+    ) -> Result<usize, ObjectLogError> {
+        let frame_offset = payload_offset(handle.offset)?;
+        let bytes = self
+            .memory
+            .frontier_payload
+            .get(frame_offset..)
+            .ok_or(ObjectLogError::InvalidHandle)?;
+        let payload_len = decode_frame_payload_len(bytes)?;
+        let frame_end = frame_offset
+            .checked_add(FRAME_HEADER_LEN)
+            .and_then(|value| value.checked_add(payload_len))
+            .ok_or(ObjectLogError::LengthOverflow)?;
+        if frame_end > payload_offset(region.committed_end_offset)? {
+            return Err(ObjectLogError::InvalidFrame);
+        }
+        Ok(payload_len)
+    }
+
+    fn get_range_frontier<R, F>(
+        &self,
+        region: ObjectLogRegion,
+        handle: ObjectLogHandle,
+        object_offset: u64,
+        len: u64,
+        scratch: &mut [u8],
+        read: F,
+    ) -> Result<R, ObjectLogError>
+    where
+        F: FnOnce(&[u8]) -> R,
+    {
+        let frame_offset = payload_offset(handle.offset)?;
+        let bytes = self
+            .memory
+            .frontier_payload
+            .get(frame_offset..)
+            .ok_or(ObjectLogError::InvalidHandle)?;
+        let payload_len = decode_frame_payload_len(bytes)?;
+        let frame_end = frame_offset
+            .checked_add(FRAME_HEADER_LEN)
+            .and_then(|value| value.checked_add(payload_len))
+            .ok_or(ObjectLogError::LengthOverflow)?;
+        if frame_end > payload_offset(region.committed_end_offset)? {
+            return Err(ObjectLogError::InvalidFrame);
+        }
+        let payload = self
+            .memory
+            .frontier_payload
+            .get(frame_offset + FRAME_HEADER_LEN..frame_end)
+            .ok_or(ObjectLogError::InvalidFrame)?;
+        let range = checked_object_read_range(payload_len, object_offset, len, scratch.len())?;
+        let read_len = range.end - range.start;
+        scratch[..read_len].copy_from_slice(&payload[range]);
+        Ok(read(&scratch[..read_len]))
     }
 
     fn initialize_frontier_payload(&mut self, sequence: u64) -> Result<(), ObjectLogError> {
@@ -1541,6 +1785,12 @@ pub enum ObjectLogError {
     MissingFrontier,
     /// Object payload exceeded the region object capacity.
     ObjectTooLarge { len: usize, capacity: usize },
+    /// Requested object byte range was outside the stored object.
+    ObjectRangeOutOfBounds {
+        offset: u64,
+        len: u64,
+        object_len: u64,
+    },
     /// Log metadata must be non-empty.
     LogMetadataEmpty,
     /// Log metadata exceeded configured memory.
@@ -2020,6 +2270,35 @@ fn object_payload_capacity(
     Ok(payload_capacity
         .saturating_sub(data_prologue_len(log_metadata_len)?)
         .saturating_sub(FRAME_HEADER_LEN))
+}
+
+fn checked_object_read_range(
+    payload_len: usize,
+    offset: u64,
+    len: u64,
+    scratch_len: usize,
+) -> Result<core::ops::Range<usize>, ObjectLogError> {
+    let payload_len_u64 = u64::try_from(payload_len).map_err(|_| ObjectLogError::LengthOverflow)?;
+    let end = offset
+        .checked_add(len)
+        .ok_or(ObjectLogError::LengthOverflow)?;
+    if offset > payload_len_u64 || end > payload_len_u64 {
+        return Err(ObjectLogError::ObjectRangeOutOfBounds {
+            offset,
+            len,
+            object_len: payload_len_u64,
+        });
+    }
+    let len_usize = usize::try_from(len).map_err(|_| ObjectLogError::LengthOverflow)?;
+    let offset_usize = usize::try_from(offset).map_err(|_| ObjectLogError::LengthOverflow)?;
+    let end_usize = usize::try_from(end).map_err(|_| ObjectLogError::LengthOverflow)?;
+    if scratch_len < len_usize {
+        return Err(ObjectLogError::BufferTooSmall {
+            needed: len_usize,
+            available: scratch_len,
+        });
+    }
+    Ok(offset_usize..end_usize)
 }
 
 fn next_sequence_after(sequence: u64) -> Result<u64, ObjectLogError> {

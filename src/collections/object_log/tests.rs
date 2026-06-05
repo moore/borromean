@@ -28,6 +28,37 @@ fn assert_get<
     assert_eq!(len, expected.len());
 }
 
+fn assert_get_range<
+    IO: FlashIo,
+    const REGION_SIZE: usize,
+    const REGION_COUNT: usize,
+    const MAX_COLLECTIONS: usize,
+    const MAX_REGIONS: usize,
+    const LOG_METADATA_MAX: usize,
+>(
+    log: &ObjectLog<'_, REGION_SIZE, MAX_REGIONS, LOG_METADATA_MAX>,
+    storage: &mut Storage<'_, '_, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
+    handle: ObjectLogHandle,
+    offset: u64,
+    expected: &[u8],
+) {
+    let mut scratch = [0u8; 64];
+    let len = log
+        .get_range(
+            storage,
+            handle,
+            offset,
+            expected.len() as u64,
+            &mut scratch,
+            |bytes| {
+                assert_eq!(bytes, expected);
+                bytes.len()
+            },
+        )
+        .unwrap();
+    assert_eq!(len, expected.len());
+}
+
 fn read_u16_at(bytes: &[u8], offset: usize) -> u16 {
     u16::from_le_bytes(bytes[offset..offset + 2].try_into().unwrap())
 }
@@ -69,9 +100,9 @@ fn assert_region_log_metadata<
 //= spec/object-log.md#api-and-handles
 //= type=test
 //# `RING-OBJECT-001` Appending an object MUST return an
-//# opaque `ObjectLogHandle` that names the reserved final data-region frame,
-//# and reopening the collection MUST
-//# reconstruct unflushed frontier objects from retained WAL updates.
+//# opaque `ObjectLogHandle` that names a committed object record, and reopening
+//# the collection MUST reconstruct unflushed frontier objects from retained WAL
+//# updates.
 #[test]
 fn requirement_object_log_replays_unflushed_frontier_from_wal_updates() {
     const REGION_SIZE: usize = 512;
@@ -99,6 +130,125 @@ fn requirement_object_log_replays_unflushed_frontier_from_wal_updates() {
     let mut reopened_memory = ObjectLogMemory::<REGION_SIZE, 4, 16>::new();
     let reopened_log = ObjectLog::open(collection_id, &mut reopened, &mut reopened_memory).unwrap();
     assert_get(&reopened_log, &mut reopened, handle, b"alpha");
+}
+
+//= spec/object-log.md#api-and-handles
+//= type=test
+//# `RING-OBJECT-015` Object-log range reads MUST accept `u64`
+//# object-relative offset and length values, return only that committed byte
+//# range, reject ranges outside the object, and require only enough caller
+//# scratch for the requested range.
+#[test]
+fn requirement_object_log_range_reads_return_requested_subrange() {
+    const REGION_SIZE: usize = 512;
+    const REGION_COUNT: usize = 8;
+    const OBJECT: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
+
+    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 4096>::new(0xff);
+    let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT>::format(
+        &mut flash,
+        StorageFormatConfig::new(2, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
+    let mut memory = ObjectLogMemory::<REGION_SIZE, 4, 16>::new();
+    let mut log = ObjectLog::new(&mut storage, &mut memory, b"log-meta").unwrap();
+    let handle = log.append(&mut storage, OBJECT).unwrap();
+
+    assert_get_range(&log, &mut storage, handle, 2, b"cdefg");
+    let mut empty_scratch = [];
+    assert_eq!(
+        log.get_range(
+            &mut storage,
+            handle,
+            OBJECT.len() as u64,
+            0,
+            &mut empty_scratch,
+            |bytes| bytes.len(),
+        )
+        .unwrap(),
+        0
+    );
+
+    let mut short_scratch = [0u8; 2];
+    assert!(matches!(
+        log.get_range(&mut storage, handle, 2, 3, &mut short_scratch, |_| ()),
+        Err(ObjectLogError::BufferTooSmall {
+            needed: 3,
+            available: 2
+        })
+    ));
+    let mut scratch = [0u8; 8];
+    assert!(matches!(
+        log.get_range(
+            &mut storage,
+            handle,
+            (OBJECT.len() - 1) as u64,
+            2,
+            &mut scratch,
+            |_| ()
+        ),
+        Err(ObjectLogError::ObjectRangeOutOfBounds {
+            offset,
+            len: 2,
+            object_len
+        }) if offset == (OBJECT.len() - 1) as u64 && object_len == OBJECT.len() as u64
+    ));
+
+    log.flush(&mut storage).unwrap();
+    assert_get_range(&log, &mut storage, handle, 10, b"klmn");
+}
+
+//= spec/object-log.md#api-and-handles
+//= type=test
+//# `RING-OBJECT-016` Object-log whole-object reads MUST fail with a
+//# buffer-too-small error that reports the stored object length when caller
+//# scratch cannot hold the full object, and object-log length queries MUST return
+//# the stored `u64` object length without returning object bytes.
+#[test]
+fn requirement_object_log_reports_object_len_and_full_read_buffer_size() {
+    const REGION_SIZE: usize = 512;
+    const REGION_COUNT: usize = 8;
+    const OBJECT: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
+
+    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 4096>::new(0xff);
+    let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT>::format(
+        &mut flash,
+        StorageFormatConfig::new(2, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
+    let mut memory = ObjectLogMemory::<REGION_SIZE, 4, 16>::new();
+    let mut log = ObjectLog::new(&mut storage, &mut memory, b"log-meta").unwrap();
+    let handle = log.append(&mut storage, OBJECT).unwrap();
+
+    assert_eq!(
+        log.get_object_len(&mut storage, handle).unwrap(),
+        OBJECT.len() as u64
+    );
+
+    let mut short_scratch = [0u8; 8];
+    assert!(matches!(
+        log.get(&mut storage, handle, &mut short_scratch, |_| ()),
+        Err(ObjectLogError::BufferTooSmall {
+            needed,
+            available: 8
+        }) if needed == OBJECT.len()
+    ));
+
+    log.flush(&mut storage).unwrap();
+
+    assert_eq!(
+        log.get_object_len(&mut storage, handle).unwrap(),
+        OBJECT.len() as u64
+    );
+    assert!(matches!(
+        log.get(&mut storage, handle, &mut short_scratch, |_| ()),
+        Err(ObjectLogError::BufferTooSmall {
+            needed,
+            available: 8
+        }) if needed == OBJECT.len()
+    ));
 }
 
 //= spec/object-log.md#durability
@@ -326,7 +476,7 @@ fn requirement_object_log_handle_public_representation_is_opaque() {
 //= spec/object-log.md#api-and-handles
 //= type=test
 //# `RING-OBJECT-005` Object-log reads MUST reject handles that do not
-//# name a live reserved frame.
+//# name a live reserved object record.
 #[test]
 fn requirement_object_log_rejects_forged_handles() {
     const REGION_SIZE: usize = 512;
@@ -357,8 +507,8 @@ fn requirement_object_log_rejects_forged_handles() {
 
 //= spec/object-log.md#api-and-handles
 //= type=test
-//# `RING-OBJECT-004` The durable object-log handle encoding MUST be
-//# exactly 16 bytes with no padding: bytes 0 through 3 contain
+//# `RING-OBJECT-004` The durable object-log handle and `ObjectLogPointer`
+//# encoding MUST be exactly 16 bytes with no padding: bytes 0 through 3 contain
 //# `region_index` as a little-endian `u32`, bytes 4 through 11 contain
 //# `sequence` as a little-endian `u64`, and bytes 12 through 15 contain
 //# `offset` as a little-endian `u32`.
@@ -701,3 +851,63 @@ fn requirement_object_log_failed_transaction_rolls_back_allocations() {
     ));
     assert_eq!(reopened.free_list_tail(), Some(planned.region_index));
 }
+
+//= spec/object-log.md#durability
+//= type=todo
+//# `RING-OBJECT-017` Object-log V1 data regions MUST encode object records
+//# with the common typed-record header
+//# `[record_type:u8][body_len:u32 little-endian][body_crc32c:u32
+//# little-endian][body]`, MUST compute `body_crc32c` as CRC32C over `body`, and
+//# MUST reject unknown record types.
+#[test]
+fn todo_object_log_v1_data_regions_use_typed_record_headers() {}
+
+//= spec/object-log.md#durability
+//= type=todo
+//# `RING-OBJECT-018` Inline objects MUST be encoded as record type `0x01`
+//# `InlineObject` whose body is the raw object bytes and whose public handle
+//# names that record.
+#[test]
+fn todo_object_log_inline_objects_use_inline_object_records() {}
+
+//= spec/object-log.md#durability
+//= type=todo
+//# `RING-OBJECT-019` Large-object handles MUST point to record type `0x03`
+//# `ObjectEnd` records encoded as `[total_object_len:u64
+//# little-endian][first:ObjectLogPointer][last:ObjectLogPointer]`.
+#[test]
+fn todo_object_log_large_object_handles_point_to_end_records() {}
+
+//= spec/object-log.md#durability
+//= type=todo
+//# `RING-OBJECT-020` Object chunks MUST be encoded as record type `0x02`
+//# `ObjectChunk` bodies `[flags:u8][logical_start:u64
+//# little-endian][chunk_len:u32
+//# little-endian][prev:ObjectLogPointer][next:ObjectLogPointer][chunk_bytes]`, MUST reject nonzero
+//# reserved flags, and MUST validate each chunk through its record CRC32C.
+#[test]
+fn todo_object_log_chunks_encode_links_and_validate_crc() {}
+
+//= spec/object-log.md#large-objects
+//= type=todo
+//# `RING-OBJECT-021` Large-object runs MUST use linked `ObjectChunk`
+//# records with previous and next links or start and end markers rather than a
+//# map-style manifest.
+#[test]
+fn todo_object_log_large_object_runs_use_linked_chunks() {}
+
+//= spec/object-log.md#large-objects
+//= type=todo
+//# `RING-OBJECT-022` Large-object append placement MUST fill the current
+//# frontier first, directly materialize full frontier images, and keep the
+//# trailing partial chunk plus `ObjectEnd` record WAL-backed.
+#[test]
+fn todo_object_log_large_object_append_placement_uses_frontier_first() {}
+
+//= spec/object-log.md#large-objects
+//= type=todo
+//# `RING-OBJECT-023` Every physical region written for a large-object run
+//# MUST be transaction-reserved before write and recoverable if the transaction
+//# does not commit.
+#[test]
+fn todo_object_log_large_object_regions_are_transaction_reserved() {}

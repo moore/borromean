@@ -3,6 +3,143 @@
 This journal captures design ideas, motivation, and decision history before they
 are ready to become normative specification text.
 
+## 2026-06-05: Large ObjectLog Objects And Direct Region Materialization
+
+The current object-log design reserves a stable handle for a packed frame in one
+object-log data region, persists the object bytes through a WAL update, and later
+flushes the in-memory frontier into that reserved region. That is a good fit for
+small objects because the handle is stable before and after flush, and the WAL
+contains enough information to rebuild an unflushed frontier after reset.
+
+Objects larger than one region push against that model in two places. First, an
+object frame no longer fits in the object-log frontier buffer or in a single
+committed-region payload. Second, writing the full object bytes into the WAL is a
+poor fit for large payloads because it double-writes the data and makes WAL
+rotation and reclaim carry bulk object bytes that are already destined for data
+regions.
+
+A better direction is to keep WAL records small without abandoning partially
+used object-log regions. A large append should be staged through the same
+in-memory frontier used by ordinary appends. The first chunk consumes whatever
+payload space is left in the current frontier. If the object continues after the
+frontier becomes full, that full frontier image can be written and synced as a
+committed object-log data region without also writing those object bytes to the
+WAL. Subsequent full-region chunks follow the same rule: fill an empty frontier
+image, commit it directly to a new data region, and skip the WAL bytes for that
+full image. The final partial chunk and object-end record stay in the live
+frontier and are persisted through the normal WAL path, so later appends can
+still use the remaining space in that region.
+
+The object-log handle should continue to be opaque and stable, but for a large
+object it should name an object-end record rather than the first chunk. The end
+record should hold the total logical object length and point into the run so the
+reader can find both the end and the start of the object. The object run itself
+should be a linked list of chunk records instead of a map-style manifest: the
+number of regions in one object can be unbounded, and a manifest would either
+need its own growth strategy or impose an artificial limit. Chunk records can
+carry both forward and backward links. The writer can reserve or otherwise know
+the next span before it finishes and commits the current full frontier image,
+so the current chunk can point forward and the next chunk can point back to the
+previous chunk. Backward links remain useful for future streaming writes because
+each new chunk can be connected to the previous chunk before the final object
+length is known. Forward links make normal start-to-end reads and validation
+cheaper once the completed object is published. Later, the same linked structure
+can grow skip-list-style links so reads can seek toward a byte offset without
+walking every frame.
+
+Continuation frames remain internal implementation details. Public reads,
+traversal, and truncation should continue to operate on logical object
+boundaries, with the handle identifying the completed object through its end
+record.
+
+The large-object path should still be transaction-backed. Every physical region
+that becomes part of the object run must be reserved by the transaction before
+it is written, so recovery can return those regions to free storage if the
+transaction never commits. The transaction does not need to reserve the whole run
+up front or pre-pad every region in the span:
+
+1. Append `begin_transaction(collection_id)`.
+2. Write the leading partial chunk, if any, into the current in-memory frontier
+   and persist that frontier mutation through the ordinary WAL path.
+3. Whenever a frontier image becomes full before the object-end record can be
+   written, transaction-reserve storage for the next span before sealing the
+   current image, fill the current chunk's forward link and the next chunk's
+   backward link, write and sync the full object-log region image, and record
+   only the small allocation/run metadata needed for recovery.
+4. Repeat the full-frontier direct materialization step for any middle chunks.
+5. Write the trailing partial chunk, if any, and the object-end record into the
+   live in-memory frontier and persist them through the ordinary WAL path. If the
+   final data byte exactly fills a frontier image, directly materialize that full
+   image first and write the object-end record at the start of the next frontier.
+6. Append a small object-log publish update that records the end-record handle
+   and any run metadata needed for replay and validation.
+7. Append `commit_transaction(collection_id)` so recovery keeps the published
+   object state.
+8. Append `transaction_finished(collection_id)` after any cleanup is complete.
+
+If reset happens before commit, startup recovery should treat the append as
+uncommitted and return the transaction-reserved regions to storage after erasing
+or otherwise preparing them as required by the free-region rules. If reset
+happens after commit but before `transaction_finished`, recovery is simpler than
+stable-head replacement because object writing does not free old regions. In
+that case recovery should keep the published object run and append
+`transaction_finished` once allocator state and object-log state agree.
+
+This means the large-object format should not require padding merely because an
+object crosses a region boundary. The split is a normal span boundary between
+declared chunks, not a reason to close out the region with artificial object-log
+padding. Direct materialization happens only for full frontier images, and the
+tail remains in the ordinary frontier/WAL flow. Any physical write-alignment
+padding that the committed-region writer needs remains an implementation detail
+of the storage write path rather than logical object padding.
+
+The object-log frame format should distinguish chunk boundaries from object
+boundaries. Every object span chunk records its chunk length and local span
+metadata, including previous and next links or markers that the chunk is the
+start or end of the run. Each chunk should also carry its own checksum. That
+lets partial reads validate only the chunks they touch instead of needing a
+whole-object checksum, and it keeps corruption localized to a specific run
+segment. The object-end record declares the logical object length and completes
+the run. Readers validate the declared chunk bounds, validate touched chunk
+checksums, and follow run metadata, but bytes outside the declared chunks are
+simply unused frontier capacity available to later appends.
+
+The near-term API should stay slice-based. Callers that append an object provide
+the whole object buffer to the existing append/write path, and the object log can
+derive the total length from that slice while deciding how much lands in the
+current frontier, how many full frontier images can be directly materialized,
+and how much remains as the trailing frontier/WAL-backed chunk. This keeps the
+first implementation smaller and avoids introducing a no-std streaming trait
+before the storage format is settled.
+
+Reads still benefit from a smaller-range API. A range read can take an opaque
+handle, an object-relative offset, and a length, then return only that requested
+committed byte range through caller scratch. For the first implementation, range
+reads can validate the handle, data-region prologue, frame header, and requested
+bounds without validating a whole-object checksum. Once the multi-region chunk
+format exists, range reads should validate the per-chunk checksums for the
+chunks they read. Full-object `get` can keep validating every chunk it returns.
+A separate whole-span checksum can be revisited later if there is a concrete
+need for it.
+
+A streaming API can be explored later. If Borromean eventually needs append or
+read APIs that do not require a whole object buffer, we should look at the
+existing embedded Rust APIs to see if this problem has already been solved.
+
+Open questions before this becomes normative specification text:
+
+- What exact chunk and end-record fields are required for bidirectional
+  traversal, startup validation, and future skip-list-style offset traversal.
+- Whether directly materialized full frontier images need any storage write
+  granule metadata beyond the committed-region writer's existing alignment
+  rules.
+- Whether a whole-span checksum adds enough value beyond per-chunk checksums to
+  justify extra object-end metadata.
+- How much run metadata belongs in the publish update, the object-end record,
+  and committed data region prologues.
+- How to bound the number of regions consumed by one append relative to
+  `min_free_regions` and recovery's need to append terminal transaction records.
+
 ## 2026-06-01: WAL Transactions For Multi-Record Recovery
 
 Staged regions are currently the explicit mechanism for making multi-region

@@ -16,11 +16,12 @@ Reusing the same log region in place would reduce allocation churn, but it
 would work against wear leveling and make stale handles harder to detect.
 
 The design resolves those tensions by separating address reservation from
-physical materialization. An append first reserves the physical data region and
-the exact frame offset that will eventually contain the object. The bytes are
-then persisted through a WAL update and packed into an in-memory frontier for
-that reserved region. Later, flush materializes the frontier into the same
-reserved region, so the handle remains valid before and after flush.
+physical materialization. An append first reserves object-log record addresses
+inside a frontier. Small objects can be represented by one inline object record;
+large objects can be represented by linked chunk records plus a final
+object-end record. The bytes needed to recover unflushed frontier state are
+persisted through WAL updates. Later, flush materializes the frontier into the
+same reserved region, so handles remain valid before and after flush.
 
 ## API And Handles
 
@@ -32,6 +33,16 @@ accepted by later object-log operations. That keeps the public API from
 promising a particular bit layout and prevents callers from constructing
 plausible-looking handles that never came from the collection.
 
+Reads may fetch either a whole object or an object-relative byte range. Public
+object-relative offsets and lengths are `u64` values. Whole object reads require
+caller scratch large enough for the stored object. If the scratch buffer is too
+small, the read fails with an error that reports the stored object length so the
+caller can retry with a larger buffer or switch to a range read. A length-only
+query returns the stored `u64` object length without returning object bytes. A
+range read uses an opaque live handle plus `offset` and `len` values inside that
+object's payload bytes. It returns only the requested byte range, so callers need
+scratch capacity for the requested range rather than for the full object.
+
 This collection also has its own durable `collection_type`. That lets generic
 Borromean open and replay paths recognize object-log collections without
 hard-coding application-specific behavior into core storage. The collection-specific
@@ -40,21 +51,29 @@ only needs to know that the collection type is supported and which empty
 snapshot payload represents an empty object log during WAL reclaim.
 
 1. `RING-OBJECT-001` Appending an object MUST return an opaque
-`ObjectLogHandle` that names the reserved final data-region frame, and
-reopening the collection MUST
-reconstruct unflushed frontier objects from retained WAL updates.
+`ObjectLogHandle` that names a committed object record, and reopening the
+collection MUST reconstruct unflushed frontier objects from retained WAL
+updates.
 2. `RING-OBJECT-002` `ObjectLogHandle` MUST remain opaque to external
 callers: it MUST NOT expose public field access, an unchecked public field
 constructor, or debug formatting that reveals internal handle components.
 3. `RING-OBJECT-003` Opening an object-log collection by id MUST fail
 if the live collection exists with a non-object-log collection type.
-4. `RING-OBJECT-004` The durable object-log handle encoding MUST be
-exactly 16 bytes with no padding: bytes 0 through 3 contain
-`region_index` as a little-endian `u32`, bytes 4 through 11 contain
-`sequence` as a little-endian `u64`, and bytes 12 through 15 contain
-`offset` as a little-endian `u32`.
+4. `RING-OBJECT-004` The durable object-log handle and `ObjectLogPointer`
+encoding MUST be exactly 16 bytes with no padding: bytes 0 through 3 contain
+`region_index` as a little-endian `u32`, bytes 4 through 11 contain `sequence`
+as a little-endian `u64`, and bytes 12 through 15 contain `offset` as a
+little-endian `u32`.
 5. `RING-OBJECT-005` Object-log reads MUST reject handles that do not
-name a live reserved frame.
+name a live reserved object record.
+6. `RING-OBJECT-015` Object-log range reads MUST accept `u64`
+object-relative offset and length values, return only that committed byte range,
+reject ranges outside the object, and require only enough caller scratch for the
+requested range.
+7. `RING-OBJECT-016` Object-log whole-object reads MUST fail with a
+buffer-too-small error that reports the stored object length when caller
+scratch cannot hold the full object, and object-log length queries MUST return
+the stored `u64` object length without returning object bytes.
 
 ## Durability
 
@@ -69,12 +88,12 @@ rebuilds the same frontier from retained WAL updates.
 Flush is the point where the reserved physical region is written. The data
 region begins with an object-log prologue containing the sequence assigned to
 that logical frontier region and the log metadata for the collection, followed
-by packed object frames. A flushed read checks the region header and the full
+by typed object records. A flushed read checks the region header and the full
 object-log prologue before returning bytes, so a stale handle cannot silently
 read from an unrelated later use of the same physical region or from a region
 formatted for a different object-log record format. After flush, the collection
-persists metadata that describes the flushed regions and any still-live
-frontier state.
+persists metadata that describes the flushed regions and any still-live frontier
+state.
 
 Log metadata is a non-empty immutable opaque byte sequence supplied when the
 object log is created. The object log stores and validates it but never
@@ -84,22 +103,53 @@ restores and exposes the stored metadata so callers can decide how to interpret
 object bytes without knowing the metadata before open. Appends, reads,
 traversal, truncation, and append transactions do not modify it.
 
-The object-log data-region prologue is encoded before object frames. Integer
-fields are little-endian, and object frames begin immediately after the
+The object-log data-region prologue is encoded before object records. Integer
+fields are little-endian, and object records begin immediately after the
 metadata bytes. Its fields are:
 
 - `magic: [u8; 4]`: the literal bytes `OLOG`, used to identify the region as
   an object-log data region before interpreting the rest of the prologue.
 - `version: u16`: the object-log data prologue format version, currently `1`,
-  used to reject data regions whose prologue or frame layout is not understood.
-- `sequence: u64`: the object-log region serial named by handles for frames in
+  used to reject data regions whose prologue or record layout is not understood.
+- `sequence: u64`: the object-log region serial named by handles for records in
   this region, used with the physical region index to reject stale handles
   after storage reuses a region for a later object-log frontier.
 - `log_metadata_len: u32`: the byte length of the immutable log metadata copy
-  that follows, used to validate bounds and locate the first object frame.
+  that follows, used to validate bounds and locate the first object record.
 - `log_metadata: [u8; log_metadata_len]`: a verbatim copy of the collection's
   immutable log metadata, used to reject flushed regions whose durable format
   identity differs from the collection being opened or read.
+
+`ObjectLogPointer` is the persisted pointer type used inside object records. It
+is encoded exactly like `ObjectLogHandle`: `[region_index:u32
+little-endian][sequence:u64 little-endian][offset:u32 little-endian]`.
+`region_index` names the physical region, `sequence` is the object-log region
+serial that prevents stale-region aliasing, and `offset` is the region-local
+record offset. Region-local persisted offsets are `u32`; object-relative offsets
+and object lengths exposed by the read API are `u64`.
+
+Object-log V1 data regions contain typed object records. Each record has the
+common header `[record_type:u8][body_len:u32 little-endian][body_crc32c:u32
+little-endian][body]`. `body_len` is the exact byte length of `body`, and
+`body_crc32c` is CRC32C over `body` using the same CRC-32C/ISCSI polynomial used
+elsewhere in Borromean disk structures.
+
+Record type `0x01` is `InlineObject`. Its body is the raw object bytes, and the
+public object handle points directly at the `InlineObject` record.
+
+Record type `0x02` is `ObjectChunk`. Its body is
+`[flags:u8][logical_start:u64 little-endian][chunk_len:u32
+little-endian][prev:ObjectLogPointer][next:ObjectLogPointer][chunk_bytes]`.
+`logical_start` is the object-relative offset of the first byte in
+`chunk_bytes`. `chunk_len` is the exact byte length of `chunk_bytes`. Flag bit 0
+means `prev` is valid; when clear, the chunk is the first chunk in the object
+run. Flag bit 1 means `next` is valid; when clear, the chunk is the last chunk
+in the object run. All other flag bits are reserved and must be zero.
+
+Record type `0x03` is `ObjectEnd`. Its body is `[total_object_len:u64
+little-endian][first:ObjectLogPointer][last:ObjectLogPointer]`. Large-object
+public handles point at an `ObjectEnd` record. `first` and `last` name the first
+and last `ObjectChunk` records in the linked object run.
 
 1. `RING-OBJECT-006` Flushing an object-log frontier MUST write the
 frontier bytes into the previously reserved physical data region, persist
@@ -117,6 +167,63 @@ collection metadata.
 values that never wrap. If replay, snapshot decode, or open observes state
 that would require advancing past `u64::MAX`, the collection MUST be treated
 as corrupt.
+5. `RING-OBJECT-017` Object-log V1 data regions MUST encode object records
+with the common typed-record header
+`[record_type:u8][body_len:u32 little-endian][body_crc32c:u32
+little-endian][body]`, MUST compute `body_crc32c` as CRC32C over `body`, and
+MUST reject unknown record types.
+6. `RING-OBJECT-018` Inline objects MUST be encoded as record type `0x01`
+`InlineObject` whose body is the raw object bytes and whose public handle names
+that record.
+7. `RING-OBJECT-019` Large-object handles MUST point to record type `0x03`
+`ObjectEnd` records encoded as `[total_object_len:u64
+little-endian][first:ObjectLogPointer][last:ObjectLogPointer]`.
+8. `RING-OBJECT-020` Object chunks MUST be encoded as record type `0x02`
+`ObjectChunk` bodies `[flags:u8][logical_start:u64
+little-endian][chunk_len:u32 little-endian][prev:ObjectLogPointer][next:ObjectLogPointer][chunk_bytes]`,
+MUST reject nonzero reserved flags, and MUST validate each chunk through its
+record CRC32C.
+
+## Large Objects
+
+Large objects are represented as linked runs of `ObjectChunk` records completed
+by one `ObjectEnd` record. The object log does not use a map-style manifest for
+these runs because a single logical object may consume an unbounded number of
+regions. The chunk links are the object-run structure: `prev` supports backward
+discovery from the end record and future streaming writes, while `next` supports
+normal start-to-end reads and validation. Skip-list-style links may be added in
+a later format if offset traversal needs to avoid walking every chunk.
+
+A large append first consumes available space in the current frontier. When a
+frontier image becomes full before the object-end record can be written, the
+object log may directly materialize that full image into a transaction-reserved
+data region without writing the full object bytes to the WAL. The final partial
+chunk and `ObjectEnd` record remain in the live frontier and are persisted
+through the ordinary WAL path. If the final object byte exactly fills a frontier
+image, that image is directly materialized and the `ObjectEnd` record is written
+at the start of the next frontier.
+
+Crossing a chunk, span, or region boundary does not create logical object
+padding. Bytes outside declared object records are unused frontier capacity for
+later appends. Any physical write-alignment padding required by the committed
+region writer is part of the storage write path rather than the object-log
+object format.
+
+Every physical region that becomes part of a large-object run is reserved by the
+transaction before it is written. If reset happens before commit, recovery
+returns the transaction-reserved regions to free storage. If reset happens after
+commit but before `transaction_finished`, recovery keeps the published object
+run and finishes the transaction.
+
+1. `RING-OBJECT-021` Large-object runs MUST use linked `ObjectChunk`
+records with previous and next links or start and end markers rather than a
+map-style manifest.
+2. `RING-OBJECT-022` Large-object append placement MUST fill the current
+frontier first, directly materialize full frontier images, and keep the trailing
+partial chunk plus `ObjectEnd` record WAL-backed.
+3. `RING-OBJECT-023` Every physical region written for a large-object run
+MUST be transaction-reserved before write and recoverable if the transaction
+does not commit.
 
 ## Committed Visibility
 
@@ -144,7 +251,7 @@ the same internal region, sequence, and offset facts used by handles.
 Truncation advances the head to an object boundary by taking a live handle as
 the exclusive boundary: objects before that handle are discarded, and the
 provided handle remains live. Requiring a handle boundary keeps truncation
-aligned with object frames without exposing raw offsets to callers.
+aligned with object records without exposing raw offsets to callers.
 
 Whole regions that fall before the new head are returned to Borromean storage.
 They are not reused in place by the object log. A later append will allocate
