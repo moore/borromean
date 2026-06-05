@@ -130,7 +130,6 @@ fn requirement_encoding_and_decoding_round_trip_from_plain_byte_buffers() {
 //# each durable transition is inspectable in code review and testable in
 //# isolation.
 #[test]
-#[ignore = "transaction recovery stepwise future coverage is still pending"]
 fn requirement_startup_and_reclaim_expose_stepwise_intermediate_states_between_polls() {
     let mut flash = MockFlash::<256, 4, 512>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
@@ -187,6 +186,6 @@ fn requirement_startup_and_reclaim_expose_stepwise_intermediate_states_between_p
     let (mut storage, next_region) = super::super::setup_storage_with_stale_wal_head(&mut flash);
     let reclaimed_head =
         super::super::poll_until_ready(storage.reclaim_wal_head_future(), 16).unwrap();
-    assert_ne!(reclaimed_head, next_region);
+    assert_eq!(reclaimed_head, next_region);
     assert_eq!(storage.wal_head(), reclaimed_head);
 }

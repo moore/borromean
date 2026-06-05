@@ -1908,4 +1908,34 @@ fn requirement_wal_chain_contains_region_follows_the_durable_link_target() {
         wal_chain_contains_region::<128, _>(&mut flash, &mut workspace, metadata, 0, 2, 2),
         Ok(true)
     );
+
+    let mut flash = MockFlash::<128, 4, 512>::new(0xff);
+    let mut workspace = StorageWorkspace::<128>::new();
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    let wal_offset = metadata.wal_record_area_offset().unwrap();
+    let granule = usize::try_from(metadata.wal_write_granule).unwrap();
+    flash.write_region(0, wal_offset, &[0; 8]).unwrap();
+    let after_recovery = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        wal_offset + granule,
+        WalRecord::WalRecovery,
+    );
+    append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        after_recovery,
+        WalRecord::Link {
+            next_region_index: 2,
+            expected_sequence: 1,
+        },
+    );
+    initialize_wal_region::<128, 4, _>(&mut flash, &mut workspace, metadata, 2, 1, 0).unwrap();
+
+    assert_eq!(
+        wal_chain_contains_region::<128, _>(&mut flash, &mut workspace, metadata, 0, 2, 2),
+        Ok(true)
+    );
 }

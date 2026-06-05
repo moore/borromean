@@ -2688,6 +2688,8 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
         let metadata = self.metadata;
         let region_size = usize::try_from(metadata.region_size)
             .map_err(|_| StorageRuntimeError::WalRotationRequired)?;
+        let granule = usize::try_from(metadata.wal_write_granule)
+            .map_err(|_| StorageRuntimeError::WalRotationRequired)?;
         let limit = if source_region == plan.source_tail {
             plan.source_tail_append_offset
         } else {
@@ -2696,6 +2698,7 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
         let mut offset = metadata
             .wal_record_area_offset()
             .map_err(|error| StorageRuntimeError::Startup(error.into()))?;
+        let mut pending_recovery_boundary = false;
         loop {
             let remaining = match limit.checked_sub(offset) {
                 Some(0) => break,
@@ -2708,11 +2711,46 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
                 flash.read_region(source_region, offset, remaining, |bytes| {
                     region_bytes[..remaining].copy_from_slice(bytes);
                 })?;
-                if region_bytes[0] == metadata.erased_byte {
+                let start_byte = region_bytes[0];
+                if start_byte == metadata.erased_byte {
                     None
+                } else if start_byte != metadata.wal_record_magic {
+                    pending_recovery_boundary = true;
+                    let next_offset = offset
+                        .checked_add(granule)
+                        .ok_or(StorageRuntimeError::WalRotationRequired)?;
+                    if next_offset > limit {
+                        return Err(StorageRuntimeError::Startup(StartupError::BrokenWalChain {
+                            region_index: source_region,
+                        }));
+                    }
+                    Some((next_offset, WalHeadReclaimAction::Skip, None, 0usize))
                 } else {
                     let decoded =
                         decode_record(&region_bytes[..remaining], metadata, logical_scratch)?;
+                    let record_type = decoded.record.record_type();
+                    if record_type == crate::WalRecordType::WalRecovery
+                        && !pending_recovery_boundary
+                    {
+                        return Err(StorageRuntimeError::Startup(
+                            StartupError::UnexpectedWalRecovery {
+                                region_index: source_region,
+                                offset,
+                            },
+                        ));
+                    }
+                    if pending_recovery_boundary && record_type != crate::WalRecordType::WalRecovery
+                    {
+                        return Err(StorageRuntimeError::Startup(
+                            StartupError::UnexpectedRecordAfterCorruption {
+                                region_index: source_region,
+                                offset,
+                            },
+                        ));
+                    }
+                    if record_type == crate::WalRecordType::WalRecovery {
+                        pending_recovery_boundary = false;
+                    }
                     let encoded_len = decoded.encoded_len;
                     let reclaim_action = self.classify_wal_head_record_for_reclaim(
                         &plan.original_collections,
@@ -2725,11 +2763,14 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
                         } => Some(next_region_index),
                         _ => None,
                     };
-                    Some((encoded_len, reclaim_action, link_target))
+                    let next_offset = offset
+                        .checked_add(encoded_len)
+                        .ok_or(StorageRuntimeError::WalRotationRequired)?;
+                    Some((next_offset, reclaim_action, link_target, encoded_len))
                 }
             };
 
-            let Some((encoded_len, reclaim_action, link_target)) = action else {
+            let Some((next_offset, reclaim_action, link_target, encoded_len)) = action else {
                 break;
             };
             match reclaim_action {
@@ -2763,14 +2804,17 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
                 }
             }
 
-            offset = offset
-                .checked_add(encoded_len)
-                .ok_or(StorageRuntimeError::WalRotationRequired)?;
+            offset = next_offset;
             if link_target.is_some() {
                 return Ok(link_target);
             }
         }
 
+        if pending_recovery_boundary {
+            return Err(StorageRuntimeError::Startup(StartupError::BrokenWalChain {
+                region_index: source_region,
+            }));
+        }
         Ok(None)
     }
 
@@ -3437,6 +3481,8 @@ fn find_link_target_in_wal_region<const REGION_SIZE: usize, IO: FlashIo>(
 ) -> Result<Option<u32>, StorageRuntimeError> {
     let region_size = usize::try_from(metadata.region_size)
         .map_err(|_| StorageRuntimeError::WalRotationRequired)?;
+    let granule = usize::try_from(metadata.wal_write_granule)
+        .map_err(|_| StorageRuntimeError::WalRotationRequired)?;
     let (region_bytes, logical_scratch) = workspace.scan_buffers();
     flash.read_region(region_index, 0, region_bytes.len(), |bytes| {
         region_bytes.copy_from_slice(bytes);
@@ -3445,6 +3491,7 @@ fn find_link_target_in_wal_region<const REGION_SIZE: usize, IO: FlashIo>(
     let mut offset = metadata
         .wal_record_area_offset()
         .map_err(|error| StorageRuntimeError::Startup(error.into()))?;
+    let mut pending_recovery_boundary = false;
     loop {
         match region_size.checked_sub(offset) {
             Some(0) => break,
@@ -3452,8 +3499,26 @@ fn find_link_target_in_wal_region<const REGION_SIZE: usize, IO: FlashIo>(
             None => return Err(StorageRuntimeError::WalRotationRequired),
         }
 
-        if region_bytes[offset] == metadata.erased_byte {
+        let start_byte = region_bytes[offset];
+        if start_byte == metadata.erased_byte {
+            if pending_recovery_boundary {
+                return Err(StorageRuntimeError::Startup(StartupError::BrokenWalChain {
+                    region_index,
+                }));
+            }
             return Ok(None);
+        }
+        if start_byte != metadata.wal_record_magic {
+            pending_recovery_boundary = true;
+            offset = offset
+                .checked_add(granule)
+                .ok_or(StorageRuntimeError::WalRotationRequired)?;
+            if offset > region_size {
+                return Err(StorageRuntimeError::Startup(StartupError::BrokenWalChain {
+                    region_index,
+                }));
+            }
+            continue;
         }
 
         let decoded = decode_record(
@@ -3462,6 +3527,26 @@ fn find_link_target_in_wal_region<const REGION_SIZE: usize, IO: FlashIo>(
             logical_scratch,
         )
         .map_err(StorageRuntimeError::from)?;
+        let record_type = decoded.record.record_type();
+        if record_type == crate::WalRecordType::WalRecovery && !pending_recovery_boundary {
+            return Err(StorageRuntimeError::Startup(
+                StartupError::UnexpectedWalRecovery {
+                    region_index,
+                    offset,
+                },
+            ));
+        }
+        if pending_recovery_boundary && record_type != crate::WalRecordType::WalRecovery {
+            return Err(StorageRuntimeError::Startup(
+                StartupError::UnexpectedRecordAfterCorruption {
+                    region_index,
+                    offset,
+                },
+            ));
+        }
+        if record_type == crate::WalRecordType::WalRecovery {
+            pending_recovery_boundary = false;
+        }
         if let WalRecord::Link {
             next_region_index, ..
         } = decoded.record
@@ -3473,6 +3558,11 @@ fn find_link_target_in_wal_region<const REGION_SIZE: usize, IO: FlashIo>(
             .ok_or(StorageRuntimeError::WalRotationRequired)?;
     }
 
+    if pending_recovery_boundary {
+        return Err(StorageRuntimeError::Startup(StartupError::BrokenWalChain {
+            region_index,
+        }));
+    }
     Ok(None)
 }
 

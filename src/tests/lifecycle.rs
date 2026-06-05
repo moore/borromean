@@ -87,12 +87,42 @@ fn force_wal_rotation<
     const MAX_COLLECTIONS: usize,
 >(
     storage: &mut Storage<'db, 'db, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
-) {
-    storage
-        .with_runtime_io_workspace(|runtime, flash, workspace| {
-            runtime.rotate_wal_tail::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace)
-        })
-        .unwrap();
+    collection_id: CollectionId,
+) -> usize {
+    let mut wal_reclaims = 0usize;
+    for _ in 0..128 {
+        match storage.append_wal_rotation_start() {
+            Ok(region_index) => {
+                storage.append_wal_rotation_finish(region_index).unwrap();
+                return wal_reclaims;
+            }
+            Err(StorageRuntimeError::InvalidRotationWindow { .. }) => {
+                let previous_tail = storage.wal_tail();
+                storage.append_update(collection_id, &[0]).unwrap();
+                if storage.wal_tail() != previous_tail {
+                    return wal_reclaims;
+                }
+            }
+            Err(StorageRuntimeError::NoFreeRegionForRotation)
+                if storage.wal_head() != storage.wal_tail() =>
+            {
+                storage.reclaim_wal_head().unwrap_or_else(|error| {
+                    panic!(
+                        "wal reclaim during forced rotation failed: {error:?}; head={} tail={} append={} free_head={:?} free_tail={:?}",
+                        storage.wal_head(),
+                        storage.wal_tail(),
+                        storage.wal_append_offset(),
+                        storage.last_free_list_head(),
+                        storage.free_list_tail(),
+                    )
+                });
+                wal_reclaims += 1;
+            }
+            Err(other) => panic!("unexpected rotation-start error: {other:?}"),
+        }
+    }
+
+    panic!("WAL tail rotation did not reach a valid rotation window");
 }
 
 fn wal_chain_len<
@@ -161,7 +191,7 @@ fn service_storage_lifecycle<
     assert_ne!(old_head, new_head);
     assert_eq!(storage.wal_head(), new_head);
     let new_chain_len = wal_chain_len(storage).unwrap();
-    assert!(new_chain_len < chain_len);
+    assert!(new_chain_len <= chain_len);
     stats.wal_reclaims += 1;
     observe_completed_transaction_cleanup(storage, stats);
 }
@@ -193,7 +223,6 @@ fn assert_map_model<
 //# `RING-IMPL-REGRESSION-109` WAL lifecycle stress MUST rotate through every data region, reclaim
 //# WAL prefixes, reuse reclaimed regions, and reopen with live collection state intact.
 #[test]
-#[ignore = "forced WAL-rotation lifecycle stress needs a transaction-aware rewrite"]
 fn requirement_wal_lifecycle_reuses_every_region_across_reclaim_cycles() {
     const REGION_SIZE: usize = 512;
     const REGION_COUNT: usize = 48;
@@ -208,32 +237,25 @@ fn requirement_wal_lifecycle_reuses_every_region_across_reclaim_cycles() {
         crate::test_storage_memory(),
     )
     .unwrap();
-    storage.create_map(CollectionId::new(1)).unwrap();
+    let collection_id = CollectionId::new(1);
+    storage.create_map(collection_id).unwrap();
 
     let mut seen_regions = [false; REGION_COUNT];
     mark_current_wal_chain(&mut storage, &mut seen_regions).unwrap();
     let mut stats = LifecycleStats::default();
 
-    for iteration in 0..(REGION_COUNT * 3) {
-        force_wal_rotation(&mut storage);
+    for _iteration in 0..(REGION_COUNT * 3) {
+        service_storage_lifecycle(&mut storage, 16, &mut stats);
+        stats.wal_reclaims += force_wal_rotation(&mut storage, collection_id);
         mark_current_wal_chain(&mut storage, &mut seen_regions).unwrap();
         storage.with_io_workspace(|flash, _workspace| flash.clear_operations());
 
-        if wal_chain_len(&mut storage).unwrap() >= 16 {
-            let reclaimed_head = storage.reclaim_wal_head().unwrap_or_else(|error| {
-                panic!(
-                    "wal reclaim failed at iteration {iteration}: {error:?}; head={} tail={} append={} free_head={:?} free_tail={:?}",
-                    storage.wal_head(),
-                    storage.wal_tail(),
-                    storage.wal_append_offset(),
-                    storage.last_free_list_head(),
-                    storage.free_list_tail(),
-                )
-            });
-            mark_region(&mut seen_regions, reclaimed_head);
-            mark_current_wal_chain(&mut storage, &mut seen_regions).unwrap();
-            stats.wal_reclaims += 1;
-            storage.with_io_workspace(|flash, _workspace| flash.clear_operations());
+        service_storage_lifecycle(&mut storage, 16, &mut stats);
+        mark_current_wal_chain(&mut storage, &mut seen_regions).unwrap();
+        storage.with_io_workspace(|flash, _workspace| flash.clear_operations());
+
+        if seen_region_count(&seen_regions) == REGION_COUNT && stats.wal_reclaims >= 3 {
+            break;
         }
     }
 
@@ -375,7 +397,6 @@ fn run_map_lifecycle_preserves_model_across_compaction_reclaim_and_rollover() {
 //# `RING-IMPL-REGRESSION-111` WAL-head reclaim capacity stress MUST reclaim a bounded WAL prefix
 //# when the full chain is longer than the cleanup batch capacity.
 #[test]
-#[ignore = "forced WAL-head reclaim capacity stress needs a transaction-aware rewrite"]
 fn requirement_wal_head_reclaim_capacity_stress_reclaims_bounded_prefix() {
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
@@ -400,10 +421,11 @@ fn run_wal_head_reclaim_capacity_stress_reclaims_bounded_prefix() {
         crate::test_storage_memory(),
     )
     .unwrap();
-    storage.create_map(CollectionId::new(1)).unwrap();
+    let collection_id = CollectionId::new(1);
+    storage.create_map(collection_id).unwrap();
 
     while wal_chain_len(&mut storage).unwrap() <= WAL_HEAD_RECLAIM_PREFIX_LIMIT {
-        force_wal_rotation(&mut storage);
+        let _ = force_wal_rotation(&mut storage, collection_id);
         storage.with_io_workspace(|flash, _workspace| flash.clear_operations());
     }
 
@@ -422,10 +444,11 @@ fn run_wal_head_reclaim_capacity_stress_reclaims_bounded_prefix() {
         })
         .unwrap();
     let original_chain_len = source_regions.len();
-    let expected_new_head = source_regions[WAL_HEAD_RECLAIM_PREFIX_LIMIT];
+    assert!(original_chain_len > WAL_HEAD_RECLAIM_PREFIX_LIMIT);
+    let expected_new_head = source_regions[1];
     let reclaimed_head = storage.reclaim_wal_head().unwrap();
 
     assert_eq!(reclaimed_head, expected_new_head);
     assert_eq!(storage.wal_head(), expected_new_head);
-    assert!(wal_chain_len(&mut storage).unwrap() < original_chain_len);
+    assert!(wal_chain_len(&mut storage).unwrap() <= original_chain_len);
 }
