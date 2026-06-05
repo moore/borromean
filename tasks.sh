@@ -77,6 +77,16 @@ run_duvet() {
     duvet report --config-path .duvet/config.toml --require-tests true
 }
 
+run_trace_review() {
+    echo "==> python3 scripts/trace_review.py init"
+    python3 scripts/trace_review.py init
+}
+
+run_trace_review_summary() {
+    echo "==> python3 scripts/trace_review.py summarize"
+    python3 scripts/trace_review.py summarize
+}
+
 run_mutants() {
     echo "==> cargo run --quiet --bin traceability_audit -- check-requirements"
     cargo run --quiet --bin traceability_audit -- check-requirements
@@ -251,6 +261,10 @@ Tasks:
   clippy   Run cargo clippy
   md       Run markdown formatting
   duvet    Validate traceability annotations and generate the Duvet report
+  trace-review
+           Generate fresh per-test semantic review packets under target/trace-review
+  trace-review-summary
+           Validate reviewer result JSON files and summarize semantic review findings
   mutants  Manually run cargo-mutants after validating annotations
   perf     Run the FileBacking perf runner (override config with BORROMEAN_PERF_CONFIG)
   perf-test
@@ -294,6 +308,12 @@ run_task() {
             ;;
         duvet)
             run_duvet
+            ;;
+        trace-review)
+            run_trace_review
+            ;;
+        trace-review-summary)
+            run_trace_review_summary
             ;;
         mutants)
             run_mutants
