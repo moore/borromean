@@ -8,6 +8,13 @@ use crate::{
     MAP_MANIFEST_V2_FORMAT, MAP_REGION_V2_FORMAT,
 };
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct RecoveryRecordCounts {
+    free_region: usize,
+    rollback_transaction: usize,
+    transaction_finished: usize,
+}
+
 fn open_formatted_store<
     const REGION_SIZE: usize,
     const REGION_COUNT: usize,
@@ -94,6 +101,344 @@ fn collection_summary(state: &StartupState<8>, collection_id: CollectionId) -> S
         .copied()
         .find(|collection| collection.collection_id() == collection_id)
         .unwrap()
+}
+
+fn count_recovery_records_in_storage<
+    IO: FlashIo,
+    const REGION_SIZE: usize,
+    const REGION_COUNT: usize,
+    const MAX_COLLECTIONS: usize,
+>(
+    storage: &mut Storage<'_, '_, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
+    collection_id: CollectionId,
+    region_index: u32,
+) -> RecoveryRecordCounts {
+    let mut counts = RecoveryRecordCounts::default();
+    storage
+        .with_runtime_io_workspace(|runtime, flash, workspace| {
+            runtime.visit_wal_records::<REGION_SIZE, _, (), _>(
+                flash,
+                workspace,
+                |_flash, record| {
+                    match record {
+                        WalRecord::FreeRegion {
+                            collection_id: seen,
+                            region_index: seen_region,
+                        } if seen == collection_id && seen_region == region_index => {
+                            counts.free_region += 1;
+                        }
+                        WalRecord::RollbackTransaction {
+                            collection_id: seen,
+                        } if seen == collection_id => {
+                            counts.rollback_transaction += 1;
+                        }
+                        WalRecord::TransactionFinished {
+                            collection_id: seen,
+                        } if seen == collection_id => {
+                            counts.transaction_finished += 1;
+                        }
+                        _ => {}
+                    }
+                    Ok(())
+                },
+            )
+        })
+        .unwrap();
+    counts
+}
+
+fn storage_collection_summary<
+    IO: FlashIo,
+    const REGION_SIZE: usize,
+    const REGION_COUNT: usize,
+    const MAX_COLLECTIONS: usize,
+>(
+    storage: &Storage<'_, '_, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
+    collection_id: CollectionId,
+) -> StartupCollection {
+    storage
+        .collections()
+        .iter()
+        .copied()
+        .find(|collection| collection.collection_id() == collection_id)
+        .unwrap()
+}
+
+fn setup_precommit_transaction_recovery(
+    append_free_region: bool,
+    append_rollback: bool,
+) -> MockFlash<512, 6, 256> {
+    let mut flash = MockFlash::<512, 6, 256>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    let wal_offset = metadata.wal_record_area_offset().unwrap();
+    let collection_id = CollectionId(7);
+
+    let mut offset = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        wal_offset,
+        WalRecord::NewCollection {
+            collection_id,
+            collection_type: CollectionType::MAP_CODE,
+        },
+    );
+    offset = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        offset,
+        WalRecord::BeginTransaction { collection_id },
+    );
+    offset = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        offset,
+        WalRecord::AllocBegin {
+            collection_id,
+            region_index: 1,
+            free_list_head_after: Some(2),
+        },
+    );
+    offset = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        offset,
+        WalRecord::Update {
+            collection_id,
+            payload: &[1],
+        },
+    );
+    if append_free_region {
+        offset = append_wal_record(
+            &mut flash,
+            metadata,
+            0,
+            offset,
+            WalRecord::FreeRegion {
+                collection_id,
+                region_index: 1,
+            },
+        );
+    }
+    if append_rollback {
+        append_wal_record(
+            &mut flash,
+            metadata,
+            0,
+            offset,
+            WalRecord::RollbackTransaction { collection_id },
+        );
+    }
+    flash
+}
+
+fn setup_precommit_unfinished_transaction() -> MockFlash<512, 6, 256> {
+    setup_precommit_transaction_recovery(false, false)
+}
+
+fn setup_precommit_recovery_after_allocation_free_before_rollback() -> MockFlash<512, 6, 256> {
+    setup_precommit_transaction_recovery(true, false)
+}
+
+fn setup_precommit_recovered_with_rollback_transaction() -> MockFlash<512, 6, 256> {
+    setup_precommit_transaction_recovery(true, true)
+}
+
+fn setup_precommit_transaction_requiring_recovery_rotation() -> MockFlash<256, 6, 512> {
+    const REGION_SIZE: usize = 256;
+
+    let mut flash = MockFlash::<REGION_SIZE, 6, 512>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    let wal_offset = metadata.wal_record_area_offset().unwrap();
+    let collection_id = CollectionId(7);
+    let filler_collection_id = CollectionId(8);
+    let begin_record = WalRecord::BeginTransaction { collection_id };
+    let update_record = WalRecord::Update {
+        collection_id,
+        payload: &[1],
+    };
+    let rollback_record = WalRecord::RollbackTransaction { collection_id };
+    let rotation_alloc_begin_record = WalRecord::AllocBegin {
+        collection_id: CollectionId(0),
+        region_index: 1,
+        free_list_head_after: Some(2),
+    };
+    let rotation_link_record = WalRecord::Link {
+        next_region_index: 1,
+        expected_sequence: 1,
+    };
+
+    let mut physical = [0u8; REGION_SIZE];
+    let mut logical = [0u8; REGION_SIZE];
+    let begin_len =
+        encoded_record_len(begin_record, metadata, &mut physical, &mut logical).unwrap();
+    let update_len =
+        encoded_record_len(update_record, metadata, &mut physical, &mut logical).unwrap();
+    let rollback_len =
+        encoded_record_len(rollback_record, metadata, &mut physical, &mut logical).unwrap();
+    let rotation_alloc_begin_len = encoded_record_len(
+        rotation_alloc_begin_record,
+        metadata,
+        &mut physical,
+        &mut logical,
+    )
+    .unwrap();
+    let rotation_link_len =
+        encoded_record_len(rotation_link_record, metadata, &mut physical, &mut logical).unwrap();
+    let rotation_reserve = rotation_alloc_begin_len + rotation_link_len;
+
+    let mut offset = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        wal_offset,
+        WalRecord::NewCollection {
+            collection_id,
+            collection_type: CollectionType::MAP_CODE,
+        },
+    );
+    let filler_payload = [0u8; REGION_SIZE];
+    let filler_payload_len = (0..=filler_payload.len())
+        .find(|payload_len| {
+            encoded_record_len(
+                WalRecord::Snapshot {
+                    collection_id: filler_collection_id,
+                    collection_type: CollectionType::MAP_CODE,
+                    payload: &filler_payload[..*payload_len],
+                },
+                metadata,
+                &mut physical,
+                &mut logical,
+            )
+            .is_ok_and(|filler_len| {
+                let transaction_end = offset + filler_len + begin_len + update_len;
+                let Some(terminal_end) = transaction_end.checked_add(rollback_len) else {
+                    return false;
+                };
+                let Some(rotation_alloc_end) =
+                    transaction_end.checked_add(rotation_alloc_begin_len)
+                else {
+                    return false;
+                };
+                if terminal_end > REGION_SIZE || rotation_alloc_end > REGION_SIZE {
+                    return false;
+                }
+                let remaining_after_terminal = REGION_SIZE - terminal_end;
+                let remaining_after_rotation_alloc = REGION_SIZE - rotation_alloc_end;
+                remaining_after_terminal < rotation_reserve
+                    && remaining_after_rotation_alloc >= rotation_link_len
+                    && remaining_after_rotation_alloc < rotation_reserve
+            })
+        })
+        .expect("snapshot filler should place rollback past the tail boundary");
+    offset = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        offset,
+        WalRecord::Snapshot {
+            collection_id: filler_collection_id,
+            collection_type: CollectionType::MAP_CODE,
+            payload: &filler_payload[..filler_payload_len],
+        },
+    );
+
+    offset = append_wal_record(&mut flash, metadata, 0, offset, begin_record);
+    let end = append_wal_record(&mut flash, metadata, 0, offset, update_record);
+    assert!(end + rollback_len <= REGION_SIZE);
+    assert!(REGION_SIZE - (end + rollback_len) < rotation_reserve);
+    flash
+}
+
+fn setup_postcommit_transaction_recovery(append_free_region: bool) -> MockFlash<512, 6, 256> {
+    let mut flash = MockFlash::<512, 6, 256>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    let wal_offset = metadata.wal_record_area_offset().unwrap();
+    let collection_id = CollectionId(7);
+
+    flash.erase_region(1).unwrap();
+    init_user_region_header(&mut flash, 1, 1, collection_id, MAP_MANIFEST_V2_FORMAT);
+    flash
+        .write_region(1, Header::ENCODED_LEN, &0u32.to_le_bytes())
+        .unwrap();
+
+    let mut offset = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        wal_offset,
+        WalRecord::NewCollection {
+            collection_id,
+            collection_type: CollectionType::MAP_CODE,
+        },
+    );
+    offset = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        offset,
+        WalRecord::AllocBegin {
+            collection_id,
+            region_index: 1,
+            free_list_head_after: Some(2),
+        },
+    );
+    offset = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        offset,
+        WalRecord::Head {
+            collection_id,
+            collection_type: CollectionType::MAP_CODE,
+            region_index: 1,
+        },
+    );
+    offset = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        offset,
+        WalRecord::BeginTransaction { collection_id },
+    );
+    offset = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        offset,
+        WalRecord::DropCollection { collection_id },
+    );
+    offset = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        offset,
+        WalRecord::CommitTransaction { collection_id },
+    );
+    if append_free_region {
+        append_wal_record(
+            &mut flash,
+            metadata,
+            0,
+            offset,
+            WalRecord::FreeRegion {
+                collection_id,
+                region_index: 1,
+            },
+        );
+    }
+    flash
+}
+
+fn setup_postcommit_unfinished_transaction() -> MockFlash<512, 6, 256> {
+    setup_postcommit_transaction_recovery(false)
+}
+
+fn setup_postcommit_recovery_after_cleanup_free_before_finished() -> MockFlash<512, 6, 256> {
+    setup_postcommit_transaction_recovery(true)
 }
 
 fn open_formatted_store_after_corrupt_slot_without_wal_recovery() -> (usize, StartupError) {
@@ -746,6 +1091,343 @@ fn requirement_open_formatted_store_finishes_post_commit_transaction_cleanup() {
         StartupCollectionBasis::Dropped
     );
     assert_eq!(reopened.free_list_tail(), Some(1));
+}
+
+//= spec/ring/07-reclaim.md#transaction-cleanup-recovery
+//= type=test
+//# `RING-TX-RECOVERY-001` If startup reaches WAL end before
+//# `commit_transaction(collection_id)`, it MUST run data recovery for that
+//# transaction and append `rollback_transaction(collection_id)`.
+#[test]
+fn requirement_startup_recovers_uncommitted_transaction_with_rollback_marker() {
+    let mut flash = setup_precommit_unfinished_transaction();
+    let collection_id = CollectionId(7);
+
+    let mut storage =
+        Storage::<_, 512, 6, 8>::open(&mut flash, crate::test_storage_memory()).unwrap();
+
+    let collection = storage_collection_summary(&storage, collection_id);
+    assert_eq!(collection.pending_update_count(), 0);
+    assert_eq!(storage.last_free_list_head(), Some(2));
+    assert_eq!(storage.free_list_tail(), Some(1));
+
+    let counts = count_recovery_records_in_storage(&mut storage, collection_id, 1);
+    assert_eq!(
+        counts,
+        RecoveryRecordCounts {
+            free_region: 1,
+            rollback_transaction: 1,
+            transaction_finished: 0,
+        }
+    );
+}
+
+//= spec/ring/07-reclaim.md#transaction-cleanup-recovery
+//= type=test
+//# `RING-TX-RECOVERY-002` If startup reaches WAL end after
+//# `commit_transaction(collection_id)` but before
+//# `transaction_finished(collection_id)`, it MUST preserve the committed
+//# collection state, finish cleanup frees derived from durable
+//# collection-specific state, and append
+//# `transaction_finished(collection_id)`.
+#[test]
+fn requirement_startup_finishes_post_commit_transaction_cleanup_with_finished_marker() {
+    let mut flash = setup_postcommit_unfinished_transaction();
+    let collection_id = CollectionId(7);
+
+    flash.clear_operations();
+    let mut storage =
+        Storage::<_, 512, 6, 8>::open(&mut flash, crate::test_storage_memory()).unwrap();
+
+    let collection = storage_collection_summary(&storage, collection_id);
+    assert_eq!(collection.basis(), StartupCollectionBasis::Dropped);
+    assert_eq!(storage.last_free_list_head(), Some(2));
+    assert_eq!(storage.free_list_tail(), Some(1));
+
+    let counts = count_recovery_records_in_storage(&mut storage, collection_id, 1);
+    assert_eq!(
+        counts,
+        RecoveryRecordCounts {
+            free_region: 1,
+            rollback_transaction: 0,
+            transaction_finished: 1,
+        }
+    );
+    drop(storage);
+
+    assert!(!flash.operations().iter().any(|operation| {
+        *operation == (crate::MockOperation::EraseRegion { region_index: 1 })
+    }));
+}
+
+//= spec/ring/07-reclaim.md#transaction-cleanup-recovery
+//= type=test
+//# `RING-TX-RECOVERY-003` Both data recovery and cleanup recovery MUST
+//# be idempotent if startup crashes before the terminal marker is durable.
+#[test]
+fn requirement_transaction_recovery_is_idempotent() {
+    let collection_id = CollectionId(7);
+    let mut precommit_flash = setup_precommit_recovery_after_allocation_free_before_rollback();
+
+    let mut precommit_storage =
+        Storage::<_, 512, 6, 8>::open(&mut precommit_flash, crate::test_storage_memory()).unwrap();
+    let precommit_counts =
+        count_recovery_records_in_storage(&mut precommit_storage, collection_id, 1);
+    assert_eq!(
+        precommit_counts,
+        RecoveryRecordCounts {
+            free_region: 1,
+            rollback_transaction: 1,
+            transaction_finished: 0,
+        }
+    );
+    drop(precommit_storage);
+
+    let mut reopened_precommit =
+        Storage::<_, 512, 6, 8>::open(&mut precommit_flash, crate::test_storage_memory()).unwrap();
+    assert_eq!(
+        count_recovery_records_in_storage(&mut reopened_precommit, collection_id, 1),
+        precommit_counts
+    );
+    assert_eq!(
+        storage_collection_summary(&reopened_precommit, collection_id).pending_update_count(),
+        0
+    );
+
+    let mut postcommit_flash = setup_postcommit_recovery_after_cleanup_free_before_finished();
+
+    let mut postcommit_storage =
+        Storage::<_, 512, 6, 8>::open(&mut postcommit_flash, crate::test_storage_memory()).unwrap();
+    let postcommit_counts =
+        count_recovery_records_in_storage(&mut postcommit_storage, collection_id, 1);
+    assert_eq!(
+        postcommit_counts,
+        RecoveryRecordCounts {
+            free_region: 1,
+            rollback_transaction: 0,
+            transaction_finished: 1,
+        }
+    );
+    drop(postcommit_storage);
+
+    let mut reopened_postcommit =
+        Storage::<_, 512, 6, 8>::open(&mut postcommit_flash, crate::test_storage_memory()).unwrap();
+    assert_eq!(
+        count_recovery_records_in_storage(&mut reopened_postcommit, collection_id, 1),
+        postcommit_counts
+    );
+    assert_eq!(
+        storage_collection_summary(&reopened_postcommit, collection_id).basis(),
+        StartupCollectionBasis::Dropped
+    );
+}
+
+//= spec/ring/07-reclaim.md#transaction-cleanup-recovery
+//= type=test
+//# `RING-TX-RECOVERY-004` The configured minimum free-region reserve MUST leave enough WAL
+//# capacity for startup recovery to append a required terminal transaction
+//# record.
+#[test]
+fn requirement_min_free_region_reserve_covers_transaction_terminal_records() {
+    let mut flash = setup_precommit_transaction_requiring_recovery_rotation();
+    let collection_id = CollectionId(7);
+
+    let mut storage =
+        Storage::<_, 256, 6, 8>::open(&mut flash, crate::test_storage_memory()).unwrap();
+
+    assert_eq!(storage.wal_tail(), 1);
+    assert_eq!(storage.last_free_list_head(), Some(2));
+    assert!(storage.free_list_tail().is_some());
+    assert_eq!(
+        storage_collection_summary(&storage, collection_id).pending_update_count(),
+        0
+    );
+
+    let counts = count_recovery_records_in_storage(&mut storage, collection_id, 1);
+    assert_eq!(
+        counts,
+        RecoveryRecordCounts {
+            free_region: 0,
+            rollback_transaction: 1,
+            transaction_finished: 0,
+        }
+    );
+}
+
+//= spec/ring/04-wal-records.md#wal-record-types
+//= type=test
+//# `RING-WAL-PAYLOAD-010` `begin_transaction`
+//# Starts a WAL transaction interval for `collection_id`. Until the
+//# matching terminal marker is found or WAL end is reached, replay scans
+//# ordinary records for that collection without applying them on the first
+//# pass.
+#[test]
+fn requirement_wal_begin_transaction_record_starts_collection_interval() {
+    let mut flash = setup_precommit_unfinished_transaction();
+    let collection_id = CollectionId(7);
+
+    let mut storage =
+        Storage::<_, 512, 6, 8>::open(&mut flash, crate::test_storage_memory()).unwrap();
+
+    assert_eq!(
+        storage_collection_summary(&storage, collection_id).pending_update_count(),
+        0
+    );
+    assert_eq!(
+        count_recovery_records_in_storage(&mut storage, collection_id, 1).rollback_transaction,
+        1
+    );
+}
+
+//= spec/ring/04-wal-records.md#wal-record-types
+//= type=test
+//# `RING-WAL-PAYLOAD-011` `commit_transaction`
+//# Ends the transaction update phase for `collection_id`. Before this
+//# marker, recovery abandons the collection-state update. After this
+//# marker, recovery preserves the collection-state update and finishes
+//# allocator cleanup.
+#[test]
+fn requirement_wal_commit_transaction_record_marks_update_phase() {
+    let mut flash = setup_postcommit_unfinished_transaction();
+    let collection_id = CollectionId(7);
+
+    let mut storage =
+        Storage::<_, 512, 6, 8>::open(&mut flash, crate::test_storage_memory()).unwrap();
+
+    assert_eq!(
+        storage_collection_summary(&storage, collection_id).basis(),
+        StartupCollectionBasis::Dropped
+    );
+    let counts = count_recovery_records_in_storage(&mut storage, collection_id, 1);
+    assert_eq!(counts.free_region, 1);
+    assert_eq!(counts.transaction_finished, 1);
+    assert_eq!(counts.rollback_transaction, 0);
+}
+
+//= spec/ring/04-wal-records.md#wal-record-types
+//= type=test
+//# `RING-WAL-PAYLOAD-012` `transaction_finished`
+//# Ends the cleanup phase for `collection_id`. Both the collection-state
+//# update and allocator cleanup are complete, so replay can apply the full
+//# transaction interval in original order.
+#[test]
+fn requirement_wal_transaction_finished_record_closes_cleanup_phase() {
+    let mut flash = MockFlash::<256, 4, 128>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    let wal_offset = metadata.wal_record_area_offset().unwrap();
+    let collection_id = CollectionId(7);
+
+    let mut offset = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        wal_offset,
+        WalRecord::NewCollection {
+            collection_id,
+            collection_type: CollectionType::MAP_CODE,
+        },
+    );
+    offset = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        offset,
+        WalRecord::BeginTransaction { collection_id },
+    );
+    offset = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        offset,
+        WalRecord::Update {
+            collection_id,
+            payload: &[1, 2, 3],
+        },
+    );
+    offset = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        offset,
+        WalRecord::CommitTransaction { collection_id },
+    );
+    append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        offset,
+        WalRecord::TransactionFinished { collection_id },
+    );
+
+    let mut storage =
+        Storage::<_, 256, 4, 8>::open(&mut flash, crate::test_storage_memory()).unwrap();
+    assert_eq!(
+        storage_collection_summary(&storage, collection_id).pending_update_count(),
+        1
+    );
+
+    let counts = count_recovery_records_in_storage(&mut storage, collection_id, 1);
+    assert_eq!(counts.transaction_finished, 1);
+    assert_eq!(counts.rollback_transaction, 0);
+}
+
+//= spec/ring/04-wal-records.md#wal-record-types
+//= type=test
+//# `RING-WAL-PAYLOAD-013` `rollback_transaction`
+//# Records that pre-commit recovery for `collection_id` has completed.
+//# Replay skips transaction-scoped records in the interval and does not
+//# repeat recovery.
+#[test]
+fn requirement_wal_rollback_transaction_record_closes_data_recovery() {
+    let mut flash = setup_precommit_recovered_with_rollback_transaction();
+    let collection_id = CollectionId(7);
+
+    let mut storage =
+        Storage::<_, 512, 6, 8>::open(&mut flash, crate::test_storage_memory()).unwrap();
+
+    assert_eq!(
+        storage_collection_summary(&storage, collection_id).pending_update_count(),
+        0
+    );
+    let counts = count_recovery_records_in_storage(&mut storage, collection_id, 1);
+    assert_eq!(
+        counts,
+        RecoveryRecordCounts {
+            free_region: 1,
+            rollback_transaction: 1,
+            transaction_finished: 0,
+        }
+    );
+    drop(storage);
+
+    let mut reopened =
+        Storage::<_, 512, 6, 8>::open(&mut flash, crate::test_storage_memory()).unwrap();
+    assert_eq!(
+        count_recovery_records_in_storage(&mut reopened, collection_id, 1),
+        counts
+    );
+}
+
+//= spec/ring/07-reclaim.md#free-region
+//= type=test
+//# `RING-FREE-REGION-PRE-003` The owning collection's committed
+//# transaction state MUST contain enough durable information for cleanup
+//# recovery to derive that `region_index` must be freed.
+#[test]
+fn requirement_collection_state_contains_cleanup_free_plan() {
+    let mut flash = setup_postcommit_unfinished_transaction();
+    let collection_id = CollectionId(7);
+
+    let mut storage =
+        Storage::<_, 512, 6, 8>::open(&mut flash, crate::test_storage_memory()).unwrap();
+
+    assert_eq!(
+        storage_collection_summary(&storage, collection_id).basis(),
+        StartupCollectionBasis::Dropped
+    );
+    let counts = count_recovery_records_in_storage(&mut storage, collection_id, 1);
+    assert_eq!(counts.free_region, 1);
+    assert_eq!(counts.transaction_finished, 1);
 }
 
 //= spec/ring/04-wal-records.md#wal-record-types
