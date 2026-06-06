@@ -180,9 +180,10 @@ that record.
 little-endian][first:ObjectLogPointer][last:ObjectLogPointer]`.
 8. `RING-OBJECT-020` Object chunks MUST be encoded as record type `0x02`
 `ObjectChunk` bodies `[flags:u8][logical_start:u64
-little-endian][chunk_len:u32 little-endian][prev:ObjectLogPointer][next:ObjectLogPointer][chunk_bytes]`,
-MUST reject nonzero reserved flags, and MUST validate each chunk through its
-record CRC32C.
+little-endian][chunk_len:u32
+little-endian][prev:ObjectLogPointer][next:ObjectLogPointer][chunk_bytes]`, MUST
+reject nonzero reserved flags, and MUST validate each chunk through its record
+CRC32C.
 
 ## Large Objects
 
