@@ -229,6 +229,12 @@ fn requirement_format_empty_store_accepts_exact_minimum_region_count() {
 
     assert_eq!(metadata.region_count, 3);
     assert_eq!(flash.metadata(), Some(&metadata));
+
+    let mut exact_size = MockFlash::<32, 3, 16>::new(0xff);
+    let exact_size_metadata = exact_size.format_empty_store(1, 8, 0xa5).unwrap();
+
+    assert_eq!(exact_size_metadata.region_size, 32);
+    assert_eq!(exact_size.metadata(), Some(&exact_size_metadata));
 }
 
 //= spec/ring/08-durability-formatting.md#format-storage-on-disk-initialization

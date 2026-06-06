@@ -358,9 +358,10 @@ fn requirement_committed_region_write_uses_a_region_previously_reserved_by_alloc
 //# committed payload capacity and persist the full payload bytes.
 #[test]
 fn requirement_write_committed_region_accepts_payload_that_exactly_fills_committed_capacity() {
-    const REGION_SIZE: usize = 256;
-    const PAYLOAD_CAPACITY: usize =
-        REGION_SIZE - Header::ENCODED_LEN - FreePointerFooter::ENCODED_LEN;
+    const REGION_SIZE: usize = 258;
+    const FOOTER_OFFSET: usize = REGION_SIZE - FreePointerFooter::ENCODED_LEN;
+    const ALIGNED_FOOTER_BOUNDARY: usize = FOOTER_OFFSET - FOOTER_OFFSET % 8;
+    const PAYLOAD_CAPACITY: usize = ALIGNED_FOOTER_BOUNDARY - Header::ENCODED_LEN;
 
     let mut flash = MockFlash::<REGION_SIZE, 5, 1024>::new(0xff);
     let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
@@ -396,6 +397,22 @@ fn requirement_write_committed_region_accepts_payload_that_exactly_fills_committ
         })
         .unwrap();
     assert_eq!(stored, payload);
+
+    let too_large = [0x6bu8; PAYLOAD_CAPACITY + 1];
+    assert!(matches!(
+        state.write_committed_region::<REGION_SIZE, 5, _>(
+            &mut flash,
+            &mut workspace,
+            region_index,
+            CollectionId(7),
+            crate::MAP_REGION_V2_FORMAT,
+            &too_large,
+        ),
+        Err(StorageRuntimeError::CommittedRegionTooLarge {
+            payload_len,
+            capacity,
+        }) if payload_len == too_large.len() && capacity == PAYLOAD_CAPACITY
+    ));
 }
 
 //= spec/ring/08-durability-formatting.md#durability-and-crash-semantics
@@ -1150,12 +1167,75 @@ fn requirement_free_region_membership_is_defined_by_the_free_list_chain() {
         .unwrap();
 
     assert_eq!(reserved_region, 1);
+    assert_eq!(
+        read_free_pointer_successor::<512, 5, _>(&mut flash, state.metadata(), 2).unwrap(),
+        Some(3)
+    );
+    assert_eq!(
+        read_free_pointer_successor::<512, 5, _>(&mut flash, state.metadata(), 4).unwrap(),
+        None
+    );
     assert!(!state
         .region_is_on_free_list::<512, 5, _>(&mut flash, reserved_region)
         .unwrap());
     assert!(state
         .region_is_on_free_list::<512, 5, _>(&mut flash, 2)
         .unwrap());
+
+    assert_eq!(
+        state.append_alloc_begin::<512, 5, _>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(0),
+            2,
+            Some(2),
+        ),
+        Err(StorageRuntimeError::Startup(
+            StartupError::InvalidFreeListChain { region_index: 2 }
+        ))
+    );
+    assert_eq!(
+        state.append_alloc_begin::<512, 5, _>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(0),
+            2,
+            Some(state.wal_tail()),
+        ),
+        Err(StorageRuntimeError::Startup(
+            StartupError::InvalidFreeListChain {
+                region_index: state.wal_tail(),
+            }
+        ))
+    );
+
+    state.wal_tail = 3;
+    assert_eq!(
+        state.append_alloc_begin::<512, 5, _>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(0),
+            2,
+            Some(3),
+        ),
+        Err(StorageRuntimeError::Startup(
+            StartupError::InvalidFreeListChain { region_index: 3 }
+        ))
+    );
+    state.wal_tail = 0;
+    state.ready_region = Some(3);
+    assert_eq!(
+        state.append_alloc_begin::<512, 5, _>(
+            &mut flash,
+            &mut workspace,
+            CollectionId(0),
+            2,
+            Some(3),
+        ),
+        Err(StorageRuntimeError::Startup(
+            StartupError::InvalidFreeListChain { region_index: 3 }
+        ))
+    );
 }
 
 //= spec/ring/05-disk-format.md#free-pointer-footer
@@ -1362,8 +1442,9 @@ fn requirement_initialized_wal_region_erases_the_wal_region_before_reuse() {
 
 //= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
 //= type=test
-//# `RING-IMPL-REGRESSION-077` Normal WAL appends MUST reject writes that would consume rotation
-//# reserve until WAL rotation completes, after which appends may continue.
+//# `RING-IMPL-REGRESSION-077` Normal WAL append capacity MUST exclude a logical reserve large
+//# enough for the rotation-link record, even though the link record does not occupy a fixed byte
+//# position before rotation starts.
 #[test]
 fn requirement_normal_append_rejects_when_it_would_consume_rotation_reserve() {
     let mut flash = MockFlash::<256, 4, 2048>::new(0xff);
@@ -1458,10 +1539,10 @@ fn requirement_internal_rotation_bridges_early_window_gap_for_large_record() {
 
 //= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
 //= type=test
-//# `RING-IMPL-REGRESSION-078` WAL rotation start MUST reject calls made before the WAL tail has
-//# entered the rotation window.
+//# `RING-IMPL-REGRESSION-078` WAL rotation start MUST be accepted only after normal append capacity
+//# is exhausted and while the rotation-link reserve remains available.
 #[test]
-fn requirement_append_wal_rotation_start_rejects_when_called_before_rotation_window() {
+fn requirement_wal_rotation_rejects_calls_outside_the_rotation_window() {
     let mut flash = MockFlash::<256, 4, 512>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
     let mut state = format::<256, 4, _>(&mut flash, 1, 8, 0xa5).unwrap();
@@ -1474,6 +1555,26 @@ fn requirement_append_wal_rotation_start_rejects_when_called_before_rotation_win
             ..
         }) if remaining_after >= rotation_reserve
     ));
+
+    let next_region = state.last_free_list_head().unwrap();
+    let free_list_head_after =
+        read_free_pointer_successor::<256, 4, _>(&mut flash, state.metadata(), next_region)
+            .unwrap();
+    let reserves = state
+        .rotation_reserves::<256, 4>(&mut workspace, next_region, free_list_head_after)
+        .unwrap();
+    state.wal_append_offset = 256 - reserves.alloc_begin_len - (reserves.link_reserve - 1);
+
+    assert!(matches!(
+        state.rotate_wal_tail::<256, 4, _>(&mut flash, &mut workspace),
+        Err(StorageRuntimeError::InvalidRotationWindow {
+            remaining_after,
+            link_reserve,
+            ..
+        }) if remaining_after < link_reserve
+    ));
+    assert_eq!(state.wal_tail(), 0);
+    assert_eq!(state.ready_region(), None);
 }
 
 //= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements

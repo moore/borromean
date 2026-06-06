@@ -283,10 +283,8 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize>
             self.erased_byte,
             wal_record_magic,
         )?;
-        let wal_header_len = Header::ENCODED_LEN + WalRegionPrologue::ENCODED_LEN;
         let wal_record_area_offset = metadata.wal_record_area_offset()?;
         let min_region_size_usize = StorageMetadata::ENCODED_LEN
-            .max(wal_header_len)
             .max(wal_record_area_offset)
             .max(FreePointerFooter::ENCODED_LEN);
         if REGION_SIZE < min_region_size_usize {

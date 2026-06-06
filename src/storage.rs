@@ -495,7 +495,8 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
             open_plan,
         )?;
 
-        let region_index = loop {
+        let mut allocated_region = None;
+        for _attempt in 0..self.metadata.region_count {
             let region_index = self
                 .last_free_list_head
                 .ok_or(StorageRuntimeError::NoFreeRegionForRotation)?;
@@ -511,14 +512,19 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
                 region_index,
                 free_list_head_after,
             ) {
-                Ok(()) => break region_index,
+                Ok(()) => {
+                    allocated_region = Some(region_index);
+                    break;
+                }
                 Err(StorageRuntimeError::WalRotationRequired) => {
-                    self.rotate_wal_tail::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace)?;
+                    self.rotate_wal_tail_with_progress::<REGION_SIZE, REGION_COUNT, IO>(
+                        flash, workspace,
+                    )?;
                 }
                 Err(error) => return Err(error),
             }
-        };
-        Ok(region_index)
+        }
+        allocated_region.ok_or(StorageRuntimeError::WalRotationRequired)
     }
 
     /// Writes a committed collection region and syncs it durably.
@@ -1046,7 +1052,7 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
         region_index: u32,
     ) -> Result<(), StorageRuntimeError> {
         let mut allocation_region = region_index;
-        loop {
+        for _attempt in 0..self.metadata.region_count {
             if self.last_free_list_head != Some(allocation_region) {
                 let Some(current_head) = self.last_free_list_head else {
                     return Ok(());
@@ -1065,11 +1071,14 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
             ) {
                 Ok(()) => return Ok(()),
                 Err(StorageRuntimeError::WalRotationRequired) => {
-                    self.rotate_wal_tail::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace)?;
+                    self.rotate_wal_tail_with_progress::<REGION_SIZE, REGION_COUNT, IO>(
+                        flash, workspace,
+                    )?;
                 }
                 Err(error) => return Err(error),
             }
         }
+        Err(StorageRuntimeError::WalRotationRequired)
     }
 
     /// Appends an `alloc_begin` record for a free-list region.
@@ -1088,6 +1097,7 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
                 free_list_head: self.last_free_list_head,
             });
         }
+        self.validate_allocation_successor(region_index, free_list_head_after)?;
 
         self.append_record::<REGION_SIZE, REGION_COUNT, IO>(
             flash,
@@ -1520,6 +1530,7 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
             self.metadata,
             next_region_index,
         )?;
+        self.validate_allocation_successor(next_region_index, free_list_head_after)?;
 
         let reserves = self.rotation_reserves::<REGION_SIZE, REGION_COUNT>(
             workspace,
@@ -1619,6 +1630,28 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
             .find(|collection| collection.collection_id() == collection_id)
     }
 
+    fn validate_allocation_successor(
+        &self,
+        allocation_region: u32,
+        free_list_head_after: Option<u32>,
+    ) -> Result<(), StorageRuntimeError> {
+        let Some(successor) = free_list_head_after else {
+            return Ok(());
+        };
+        if successor == allocation_region
+            || successor == self.wal_head
+            || successor == self.wal_tail
+            || self.ready_region == Some(successor)
+        {
+            return Err(StorageRuntimeError::Startup(
+                StartupError::InvalidFreeListChain {
+                    region_index: successor,
+                },
+            ));
+        }
+        Ok(())
+    }
+
     fn append_record<const REGION_SIZE: usize, const REGION_COUNT: usize, IO: FlashIo>(
         &mut self,
         flash: &mut IO,
@@ -1639,15 +1672,18 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
         workspace: &mut StorageWorkspace<REGION_SIZE>,
         record: WalRecord<'_>,
     ) -> Result<(), StorageRuntimeError> {
-        loop {
+        for _attempt in 0..self.metadata.region_count {
             match self.append_record::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace, record) {
                 Ok(()) => return Ok(()),
                 Err(StorageRuntimeError::WalRotationRequired) => {
-                    self.rotate_wal_tail::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace)?;
+                    self.rotate_wal_tail_with_progress::<REGION_SIZE, REGION_COUNT, IO>(
+                        flash, workspace,
+                    )?;
                 }
                 Err(error) => return Err(error),
             }
         }
+        Err(StorageRuntimeError::WalRotationRequired)
     }
 
     #[cfg(test)]
@@ -1674,17 +1710,20 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
         workspace: &mut StorageWorkspace<REGION_SIZE>,
         record: WalRecord<'_>,
     ) -> Result<(), StorageRuntimeError> {
-        loop {
+        for _attempt in 0..self.metadata.region_count {
             match self
                 .ensure_append_reserve::<REGION_SIZE, REGION_COUNT, IO>(workspace, flash, record)
             {
                 Ok(()) => return Ok(()),
                 Err(StorageRuntimeError::WalRotationRequired) => {
-                    self.rotate_wal_tail::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace)?;
+                    self.rotate_wal_tail_with_progress::<REGION_SIZE, REGION_COUNT, IO>(
+                        flash, workspace,
+                    )?;
                 }
                 Err(error) => return Err(error),
             }
         }
+        Err(StorageRuntimeError::WalRotationRequired)
     }
 
     #[cfg(feature = "perf-counters")]
@@ -1699,7 +1738,7 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
         record: WalRecord<'_>,
         metrics: &mut StoragePerfMetrics,
     ) -> Result<(), StorageRuntimeError> {
-        loop {
+        for _attempt in 0..self.metadata.region_count {
             match self.append_record_metered::<REGION_SIZE, REGION_COUNT, IO>(
                 flash, workspace, record, metrics,
             ) {
@@ -1711,7 +1750,9 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
                         flash, workspace, metrics,
                     );
                     let rotation_timer = StoragePerfTimerGuard::start();
-                    self.rotate_wal_tail::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace)?;
+                    self.rotate_wal_tail_with_progress::<REGION_SIZE, REGION_COUNT, IO>(
+                        flash, workspace,
+                    )?;
                     metrics.add_nanos(
                         StoragePerfTimer::WalRotation,
                         rotation_timer.elapsed_nanos(),
@@ -1721,6 +1762,7 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
                 Err(error) => return Err(error),
             }
         }
+        Err(StorageRuntimeError::WalRotationRequired)
     }
 
     #[cfg(feature = "perf-counters")]
@@ -2017,7 +2059,7 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
         open_plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS>,
         #[cfg(feature = "perf-counters")] _metrics: Option<&mut StoragePerfMetrics>,
     ) -> Result<(), StorageRuntimeError> {
-        loop {
+        for _attempt in 0..self.metadata.region_count {
             match self.ensure_encoded_append_reserve::<REGION_SIZE, REGION_COUNT, IO>(
                 workspace,
                 flash,
@@ -2045,11 +2087,14 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
                     return Ok(());
                 }
                 Err(StorageRuntimeError::WalRotationRequired) => {
-                    self.rotate_wal_tail::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace)?;
+                    self.rotate_wal_tail_with_progress::<REGION_SIZE, REGION_COUNT, IO>(
+                        flash, workspace,
+                    )?;
                 }
                 Err(error) => return Err(error),
             }
         }
+        Err(StorageRuntimeError::WalRotationRequired)
     }
 
     fn append_empty_basis_snapshot_with_rotation<
@@ -2114,6 +2159,7 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
             self.metadata,
             allocation_region,
         )?;
+        self.validate_allocation_successor(allocation_region, free_list_head_after)?;
         let (physical, logical) = workspace.encode_buffers();
         let alloc_begin_len = encode_record_into(
             WalRecord::AllocBegin {
@@ -2209,6 +2255,7 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
             self.metadata,
             next_region_index,
         )?;
+        self.validate_allocation_successor(next_region_index, free_list_head_after)?;
         let reserves = self.rotation_reserves::<REGION_SIZE, REGION_COUNT>(
             workspace,
             next_region_index,
@@ -2259,6 +2306,36 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
                 Err(error) => return Err(error),
             }
         }
+    }
+
+    fn rotate_wal_tail_with_progress<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+    ) -> Result<(), StorageRuntimeError> {
+        let before = (
+            self.wal_tail,
+            self.wal_append_offset,
+            self.last_free_list_head,
+            self.ready_region,
+            self.pending_wal_recovery_boundary,
+        );
+        self.rotate_wal_tail::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace)?;
+        let after = (
+            self.wal_tail,
+            self.wal_append_offset,
+            self.last_free_list_head,
+            self.ready_region,
+            self.pending_wal_recovery_boundary,
+        );
+        if before == after {
+            return Err(StorageRuntimeError::WalRotationRequired);
+        }
+        Ok(())
     }
 
     fn bridge_early_rotation_window_gap<

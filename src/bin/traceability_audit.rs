@@ -715,20 +715,7 @@ fn is_functional_test_file(repo_root: &Path, path: &Path) -> bool {
         return false;
     }
 
-    let relative = path.strip_prefix(repo_root).unwrap_or(path);
-    if relative
-        .components()
-        .next()
-        .is_some_and(|component| component.as_os_str() == "tests")
-    {
-        return true;
-    }
-
-    if !is_dedicated_test_file(path) {
-        return false;
-    }
-
-    true
+    is_dedicated_test_file(path)
 }
 
 fn is_tooling_test_file(repo_root: &Path, path: &Path) -> bool {

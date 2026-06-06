@@ -1187,9 +1187,7 @@ impl<
                 .0
                 .checked_add(1)
                 .ok_or(StorageRuntimeError::TooManyTrackedCollections)?;
-            if candidate > next {
-                next = candidate;
-            }
+            next = next.max(candidate);
         }
         Ok(CollectionId(next))
     }

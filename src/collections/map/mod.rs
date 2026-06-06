@@ -1354,9 +1354,6 @@ where
 
         let compact_start = ref_to_usize(entry_ref.start)?;
         let compact_end = ref_to_usize(entry_ref.end)?;
-        if compact_start < ENTRY_COUNT_SIZE || compact_start >= compact_end {
-            return Err(MapStorageError::Map(MapError::SerializationError));
-        }
         let entry_start_in_snapshot = entries_offset
             .checked_add(
                 compact_start
@@ -1374,7 +1371,10 @@ where
         let entries_end = entries_offset
             .checked_add(entry_bytes_len)
             .ok_or(MapStorageError::Map(MapError::SerializationError))?;
-        if entry_end_in_snapshot > entries_end || entry_start_in_snapshot >= entry_end_in_snapshot {
+        if entry_end_in_snapshot > entries_end {
+            return Err(MapStorageError::Map(MapError::SerializationError));
+        }
+        if entry_start_in_snapshot >= entry_end_in_snapshot {
             return Err(MapStorageError::Map(MapError::SerializationError));
         }
 
@@ -2119,7 +2119,10 @@ where
     ) -> Result<(), MapStorageError> {
         match self.try_push_entry(workspace, &entry)? {
             true => self.increment_state_count(),
-            false if !self.segment.frontier_is_empty() => {
+            false => {
+                if self.segment.frontier_is_empty() {
+                    return Err(MapStorageError::Map(MapError::BufferTooSmall));
+                }
                 self.flush_segment::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
                     collection_id,
                     storage,
@@ -2135,7 +2138,6 @@ where
                 }
                 self.increment_state_count()
             }
-            false => Err(MapStorageError::Map(MapError::BufferTooSmall)),
         }
     }
 
@@ -2686,17 +2688,14 @@ where
         if ref_backup_scratch_end > scratch.len() {
             return Err(MapError::BufferTooSmall);
         }
-        if ref_backup_len > 0 {
-            let map_end = ref_backup_map_offset
-                .checked_add(ref_backup_len)
-                .ok_or(MapError::SerializationError)?;
-            let map_ref_bytes = self
-                .map
-                .get(ref_backup_map_offset..map_end)
-                .ok_or(MapError::IndexOutOfBounds)?;
-            scratch[ref_backup_scratch_offset..ref_backup_scratch_end]
-                .copy_from_slice(map_ref_bytes);
-        }
+        let map_end = ref_backup_map_offset
+            .checked_add(ref_backup_len)
+            .ok_or(MapError::SerializationError)?;
+        let map_ref_bytes = self
+            .map
+            .get(ref_backup_map_offset..map_end)
+            .ok_or(MapError::IndexOutOfBounds)?;
+        scratch[ref_backup_scratch_offset..ref_backup_scratch_end].copy_from_slice(map_ref_bytes);
 
         let undo = MapMutationUndo {
             record_count: self.record_count.0,
@@ -2755,10 +2754,10 @@ where
                     .offset(self.map)?
                     .checked_add(ENTRY_REF_SIZE)
                     .ok_or(MapError::SerializationError)?;
-                if end_offset > current_offset || current_offset > self.map.len() {
-                    return Err(MapError::IndexOutOfBounds);
-                }
-                Ok((end_offset, current_offset - end_offset))
+                let backup_len = current_offset
+                    .checked_sub(end_offset)
+                    .ok_or(MapError::IndexOutOfBounds)?;
+                Ok((end_offset, backup_len))
             }
         }
     }
@@ -3952,10 +3951,8 @@ where
         if backup_map_end > self.map.len() {
             return Err(MapError::IndexOutOfBounds);
         }
-        if undo.ref_backup_len > 0 {
-            self.map[undo.ref_backup_map_offset..backup_map_end]
-                .copy_from_slice(&scratch[undo.ref_backup_scratch_offset..backup_scratch_end]);
-        }
+        self.map[undo.ref_backup_map_offset..backup_map_end]
+            .copy_from_slice(&scratch[undo.ref_backup_scratch_offset..backup_scratch_end]);
 
         self.record_count = EntryCount(undo.record_count);
         self.next_record_offset = RecordOffset(undo.next_record_offset);

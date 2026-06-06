@@ -94,6 +94,27 @@ fn init_user_region_header<
     flash.write_region(region_index, 0, &header_bytes).unwrap();
 }
 
+fn write_free_pointer_footer<
+    const REGION_SIZE: usize,
+    const REGION_COUNT: usize,
+    const MAX_LOG: usize,
+>(
+    flash: &mut MockFlash<REGION_SIZE, REGION_COUNT, MAX_LOG>,
+    region_index: u32,
+    next_tail: Option<u32>,
+) {
+    let footer = FreePointerFooter { next_tail };
+    let mut footer_bytes = [0u8; FreePointerFooter::ENCODED_LEN];
+    footer.encode_into(&mut footer_bytes, 0xff).unwrap();
+    flash
+        .write_region(
+            region_index,
+            REGION_SIZE - FreePointerFooter::ENCODED_LEN,
+            &footer_bytes,
+        )
+        .unwrap();
+}
+
 fn collection_summary(state: &StartupState<8>, collection_id: CollectionId) -> StartupCollection {
     state
         .collections()
@@ -616,7 +637,7 @@ fn open_formatted_store_after_completed_wal_rotation() -> StartupState<8> {
 }
 
 fn open_formatted_store_from_fresh_format() -> (StorageMetadata, StartupState<8>) {
-    let mut flash = MockFlash::<64, 4, 32>::new(0xff);
+    let mut flash = MockFlash::<64, 4, 128>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
     let state = open_formatted_store::<64, 4, _>(&mut flash).unwrap();
     (metadata, state)
@@ -712,9 +733,41 @@ fn requirement_open_formatted_store_requires_wal_recovery_before_accepting_later
 //# at `last_free_list_head` until reaching a free region whose free-pointer slot is uninitialized.
 #[test]
 fn requirement_open_formatted_store_rejects_invalid_free_list_chain() {
+    let mut flash = MockFlash::<64, 4, 256>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+
+    assert_eq!(
+        read_free_pointer_successor(&mut flash, metadata, 1).unwrap(),
+        Some(2)
+    );
+    assert_eq!(
+        read_free_pointer_successor(&mut flash, metadata, 2).unwrap(),
+        Some(3)
+    );
+    assert_eq!(
+        read_free_pointer_successor(&mut flash, metadata, 3).unwrap(),
+        None
+    );
+    assert!(region_is_on_free_list_startup(&mut flash, metadata, Some(1), 1).unwrap());
+    assert!(region_is_on_free_list_startup(&mut flash, metadata, Some(1), 2).unwrap());
+    assert!(region_is_on_free_list_startup(&mut flash, metadata, Some(1), 3).unwrap());
+    assert!(!region_is_on_free_list_startup(&mut flash, metadata, Some(1), 0).unwrap());
+    assert!(!region_is_on_free_list_startup(&mut flash, metadata, None, 1).unwrap());
+    assert_eq!(
+        discover_free_list_head_from_footers(&mut flash, metadata).unwrap(),
+        Some(1)
+    );
+
+    write_free_pointer_footer(&mut flash, 1, Some(3));
+    write_free_pointer_footer(&mut flash, 2, Some(1));
+    write_free_pointer_footer(&mut flash, 3, None);
+    assert_eq!(
+        discover_free_list_head_from_footers(&mut flash, metadata).unwrap(),
+        Some(2)
+    );
+
     let mut flash = MockFlash::<64, 4, 32>::new(0xff);
     flash.format_empty_store(1, 8, 0xa5).unwrap();
-
     let footer = FreePointerFooter {
         next_tail: Some(99),
     };

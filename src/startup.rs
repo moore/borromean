@@ -1047,11 +1047,10 @@ fn append_recovered_transaction_allocation_frees<
     plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS>,
     collection_id: CollectionId,
 ) -> Result<(), StartupError> {
-    let mut index = 0usize;
-    while index < plan.transaction_allocations.len() {
+    let allocation_count = plan.transaction_allocations.len();
+    for index in 0..allocation_count {
         let region_index = plan.transaction_allocations[index];
         if plan.transaction_frees.contains(&region_index) {
-            index += 1;
             continue;
         }
         append_recovery_free_region_with_rotation::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
@@ -1063,7 +1062,6 @@ fn append_recovered_transaction_allocation_frees<
             FreeRegionPreparation::EraseToUnwrittenFooter,
         )?;
         push_unique_region(&mut plan.transaction_frees, region_index)?;
-        index += 1;
     }
     Ok(())
 }
@@ -1079,11 +1077,10 @@ fn append_missing_transaction_cleanup_frees<
     plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS>,
     collection_id: CollectionId,
 ) -> Result<(), StartupError> {
-    let mut index = 0usize;
-    while index < plan.transaction_cleanup_regions.len() {
+    let cleanup_region_count = plan.transaction_cleanup_regions.len();
+    for index in 0..cleanup_region_count {
         let region_index = plan.transaction_cleanup_regions[index];
         if plan.transaction_frees.contains(&region_index) {
-            index += 1;
             continue;
         }
         append_recovery_free_region_with_rotation::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
@@ -1095,7 +1092,6 @@ fn append_missing_transaction_cleanup_frees<
             FreeRegionPreparation::RequireUnwrittenFooter,
         )?;
         push_unique_region(&mut plan.transaction_frees, region_index)?;
-        index += 1;
     }
     Ok(())
 }

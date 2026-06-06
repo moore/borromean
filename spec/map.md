@@ -110,6 +110,8 @@ map handle. This keeps each `LsmMap` handle small enough that many
 collections can be open at once; the handle primarily tracks the
 collection id and borrows `LsmMapMemory` for cached frontier state and
 compaction scratch.
+The storage-owned hot frontier buffer cache is keyed by both collection
+id and generation; assigning the same owner reuses the current generation.
 
 The design-level map API is:
 

@@ -94,6 +94,36 @@ fn requirement_flash_io_trait_exposes_only_primitive_storage_operations() {
         u8,
     ) -> Result<StorageMetadata, StorageFormatError> =
         <SurfaceCheckedFlash as FlashIo>::format_empty_store;
+
+    #[cfg(feature = "embedded-storage")]
+    {
+        let io_error = crate::embedded_storage::EmbeddedStorageError::OutOfBounds;
+        assert_eq!(
+            StorageIoError::from(io_error),
+            StorageIoError::EmbeddedStorage(io_error)
+        );
+
+        let format_error = crate::embedded_storage::EmbeddedStorageFormatError::RegionCountTooLarge;
+        assert_eq!(
+            StorageFormatError::from(format_error),
+            StorageFormatError::EmbeddedStorage(format_error)
+        );
+    }
+
+    #[cfg(all(feature = "file-backing", target_os = "linux"))]
+    {
+        let io_error = crate::file_backing::FileBackingError::OutOfBounds;
+        assert_eq!(
+            StorageIoError::from(io_error),
+            StorageIoError::FileBacking(io_error)
+        );
+
+        let format_error = crate::file_backing::FileBackingFormatError::RegionCountTooLarge;
+        assert_eq!(
+            StorageFormatError::from(format_error),
+            StorageFormatError::FileBacking(format_error)
+        );
+    }
 }
 
 //= spec/implementation.md#i-o-requirements

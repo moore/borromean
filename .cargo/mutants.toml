@@ -17,7 +17,17 @@ exclude_globs = [
     "src/bin/file_backing_perf.rs",
 ]
 exclude_re = [
+    # Perf-counter branches are compiled only by the `perf-counters` feature.
+    # Cover them with focused `--features perf-counters` mutation runs instead
+    # of counting them as default-feature misses.
+    "perf_metrics|_metered|StoragePerf",
+
+    # Backend error conversions are compiled only by their backend features.
+    # Cover them with the embedded-storage and file-backing mutation configs.
+    "embedded_storage::EmbeddedStorage|file_backing::FileBacking",
+    "test_file_backing_scratch",
+
     # Equivalent through the public open path: startup and map opening still validate
     # live retained collection state before `Storage::open` can succeed.
-    "replace Storage<MAX_COLLECTIONS, MAX_PENDING_RECLAIMS>::validate_live_collections -> Result<\\(\\), StorageOpenError> with Ok\\(\\(\\)\\)",
+    "validate_live_collections -> Result<\\(\\), StorageOpenError> with Ok\\(\\(\\)\\)",
 ]

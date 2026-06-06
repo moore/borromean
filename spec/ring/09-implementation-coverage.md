@@ -47,10 +47,11 @@ rotation, reclaim, and WAL/state facade helpers.
     allocated regions and leave no abandoned ready regions live.
 16. `RING-IMPL-REGRESSION-076` Allocation cleanup MUST reject region indexes that do not match the
     current ready allocation state.
-17. `RING-IMPL-REGRESSION-077` Normal WAL appends MUST reject writes that would consume rotation
-    reserve until WAL rotation completes, after which appends may continue.
-18. `RING-IMPL-REGRESSION-078` WAL rotation start MUST reject calls made before the WAL tail has
-    entered the rotation window.
+17. `RING-IMPL-REGRESSION-077` Normal WAL append capacity MUST exclude a logical reserve large
+    enough for the rotation-link record, even though the link record does not occupy a fixed byte
+    position before rotation starts.
+18. `RING-IMPL-REGRESSION-078` WAL rotation start MUST be accepted only after normal append capacity
+    is exhausted and while the rotation-link reserve remains available.
 19. `RING-IMPL-REGRESSION-079` Head append room checks MUST perform WAL rotation when the current
     tail lacks room for a head record.
 20. `RING-IMPL-REGRESSION-080` Transaction cleanup append room checks MUST reject cleanup when

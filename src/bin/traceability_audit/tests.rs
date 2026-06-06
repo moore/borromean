@@ -2,10 +2,10 @@ use super::{
     check_annotation_shape, collect_annotation_block, collect_requirement_format_items,
     configured_duvet_specifications, contains_inline_test_body, contains_normative_language,
     extract_all_requirement_ids, extract_requirement_ids, functional_untraced_test_offenders,
-    inline_test_module_offenders, is_dedicated_test_file, is_functional_test_file,
-    multi_requirement_harness_offenders, normalize_requirement_whitespace, relative_display,
-    requirement_format_failures, spec_format_policy, spec_requirement_format_offenders,
-    strip_numbered_prefix, ParsedBlock, Summary,
+    has_stable_identifier_suffix, inline_test_module_offenders, is_dedicated_test_file,
+    is_functional_test_file, multi_requirement_harness_offenders, normalize_requirement_whitespace,
+    relative_display, requirement_format_failures, spec_format_policy,
+    spec_requirement_format_offenders, strip_numbered_prefix, ParsedBlock, Summary,
 };
 use std::fs;
 use std::path::PathBuf;
@@ -115,6 +115,56 @@ fn requirement_ring_impl_format_001_rejects_missing_stable_ids() {
     assert_eq!(failures.len(), 1, "{failures:#?}");
     assert!(failures[0].contains("spec/file.md#requirements-format"));
     assert!(failures[0].contains("configured through Duvet"));
+}
+
+#[test]
+fn configured_duvet_specifications_reports_precise_entry_errors() {
+    let workspace = TempWorkspace::new("");
+    workspace.write_file(
+        ".duvet/config.toml",
+        "[[specification]]\nformat = \"markdown\"\n[[other]]\n",
+    );
+
+    let error = configured_duvet_specifications(&workspace.root).unwrap_err();
+
+    assert!(error.contains(".duvet/config.toml:3"), "{error}");
+    assert!(error.contains("missing source"));
+
+    workspace.write_file(
+        ".duvet/config.toml",
+        "[[specification]]\nsource = \"spec/a.md\"\nsource = \"spec/b.md\"\n",
+    );
+    let error = configured_duvet_specifications(&workspace.root).unwrap_err();
+    assert!(error.contains(".duvet/config.toml:3"), "{error}");
+    assert!(error.contains("duplicate specification source"));
+
+    workspace.write_file(
+        ".duvet/config.toml",
+        "[[specification]]\nsource = \"spec/a.txt\"\n",
+    );
+    let error = configured_duvet_specifications(&workspace.root).unwrap_err();
+    assert!(error.contains(".duvet/config.toml:2"), "{error}");
+    assert!(error.contains("must be markdown"));
+}
+
+#[test]
+fn spec_format_policy_matches_only_supported_spec_paths() {
+    assert_eq!(
+        spec_format_policy("spec/ring/00-introduction.md").unwrap(),
+        super::SpecFormatPolicy {
+            prefixes: &["RING-"],
+            allow_empty: true,
+        }
+    );
+    assert_eq!(
+        spec_format_policy("spec/ring/09-implementation-coverage.md").unwrap(),
+        super::SpecFormatPolicy {
+            prefixes: &["RING-"],
+            allow_empty: false,
+        }
+    );
+    assert!(spec_format_policy("spec/ring/not-markdown.txt").is_none());
+    assert!(spec_format_policy("spec/not-ring/example.md").is_none());
 }
 
 //= spec/implementation-policy.md#requirements-format
@@ -622,6 +672,41 @@ fn accepts_spec_quotes_with_only_wrapping_differences() {
 }
 
 #[test]
+fn rejects_unknown_requirement_ids_and_unreadable_spec_files() {
+    let source = format!(
+        "\n{eq} spec/ring/00-introduction.md#anchor\n{eq} type=test\n{quote} `RING-EXAMPLE-999` Missing ids MUST be rejected.\n#[test]\nfn requirement_missing_spec_id() {{}}\n",
+        eq = "//=",
+        quote = "//#"
+    );
+    let workspace = TempWorkspace::new(&source);
+    workspace.write_spec(
+        "spec/ring/00-introduction.md",
+        "1. `RING-EXAMPLE-001` Present ids MUST pass.\n",
+    );
+    let mut errors = Vec::new();
+
+    check_annotation_shape(&workspace.root, &mut errors);
+
+    assert_eq!(errors.len(), 1, "{errors:#?}");
+    assert!(errors[0].contains("quotes an identifier that does not exist"));
+    assert!(errors[0].contains("RING-EXAMPLE-999"));
+
+    let unreadable_source = format!(
+        "\n{eq} spec/unreadable.md#anchor\n{eq} type=test\n{quote} `RING-EXAMPLE-001` Unreadable specs MUST be reported.\n#[test]\nfn requirement_unreadable_spec() {{}}\n",
+        eq = "//=",
+        quote = "//#"
+    );
+    let unreadable_workspace = TempWorkspace::new(&unreadable_source);
+    fs::create_dir_all(unreadable_workspace.root.join("spec/unreadable.md")).unwrap();
+    let mut errors = Vec::new();
+
+    check_annotation_shape(&unreadable_workspace.root, &mut errors);
+
+    assert_eq!(errors.len(), 1, "{errors:#?}");
+    assert!(errors[0].contains("spec/unreadable.md"));
+}
+
+#[test]
 fn rejects_missing_requirement_prefix() {
     let source = format!(
         "\n{eq} spec/ring/00-introduction.md#anchor\n{eq} type=test\n{quote} `RING-EXAMPLE-001` The parser MUST parse things.\n#[test]\nfn parses_things() {{}}\n",
@@ -761,6 +846,19 @@ fn requirement_format_identifier_boundaries_are_enforced() {
 }
 
 #[test]
+fn stable_identifier_suffix_boundaries_are_enforced() {
+    assert!(has_stable_identifier_suffix("001"));
+    assert!(has_stable_identifier_suffix("EXAMPLE-001"));
+    assert!(has_stable_identifier_suffix("EXAMPLE-001A"));
+    assert!(!has_stable_identifier_suffix(""));
+    assert!(!has_stable_identifier_suffix("-001"));
+    assert!(!has_stable_identifier_suffix("001-"));
+    assert!(!has_stable_identifier_suffix("EXAMPLE"));
+    assert!(!has_stable_identifier_suffix("EXAMPLE-001AB"));
+    assert!(!has_stable_identifier_suffix("EXAMPLE-001a"));
+}
+
+#[test]
 fn inline_and_dedicated_test_file_helpers_classify_paths_precisely() {
     assert!(contains_inline_test_body("#[test]\nfn direct() {}\n"));
     assert!(contains_inline_test_body("mod tests {\n}\n"));
@@ -825,6 +923,14 @@ fn extract_requirement_ids_and_relative_display_are_stable() {
     assert_eq!(
         extract_all_requirement_ids("1. `RING-EXAMPLE-003` Numbered specs work."),
         vec!["RING-EXAMPLE-003"]
+    );
+    assert_eq!(
+        extract_all_requirement_ids("1. `RING-` Prefix-only specs are ignored."),
+        Vec::<String>::new()
+    );
+    assert_eq!(
+        extract_all_requirement_ids("1. `MAP-` Prefix-only map specs are ignored."),
+        Vec::<String>::new()
     );
 
     let root = PathBuf::from("/tmp/trace-root");
