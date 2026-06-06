@@ -5,6 +5,17 @@ output = ".mutants.out"
 examine_globs = [
     "src/**/*.rs",
 ]
+exclude_globs = [
+    # The default cargo-mutants run uses default features, so feature-gated
+    # backends are covered by their own configs instead of counted here.
+    "src/embedded_storage.rs",
+    "src/file_backing.rs",
+    "src/perf_metrics.rs",
+
+    # The perf driver is operational tooling, not product behavior covered by
+    # the default library test suite.
+    "src/bin/file_backing_perf.rs",
+]
 exclude_re = [
     # Equivalent through the public open path: startup and map opening still validate
     # live retained collection state before `Storage::open` can succeed.

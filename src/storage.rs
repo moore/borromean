@@ -1650,6 +1650,20 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn append_raw_record_for_test<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        record: WalRecord<'_>,
+    ) -> Result<(), StorageRuntimeError> {
+        self.append_record_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace, record)
+    }
+
     fn ensure_record_append_room_with_rotation<
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,

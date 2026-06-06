@@ -1,0 +1,8 @@
+test_workspace = false
+timeout_multiplier = 2.0
+minimum_test_timeout = 5.0
+output = ".mutants.out/embedded-storage"
+features = ["embedded-storage"]
+examine_globs = [
+    "src/embedded_storage.rs",
+]

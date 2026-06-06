@@ -32,8 +32,7 @@ const OBJECT_CHUNK_FIXED_BODY_LEN: usize =
 const OBJECT_END_BODY_LEN: usize = size_of::<u64>() + HANDLE_ENCODED_LEN + HANDLE_ENCODED_LEN;
 const OBJECT_CHUNK_FLAG_PREV_VALID: u8 = 0x01;
 const OBJECT_CHUNK_FLAG_NEXT_VALID: u8 = 0x02;
-const OBJECT_CHUNK_FLAGS_VALID_MASK: u8 =
-    OBJECT_CHUNK_FLAG_PREV_VALID | OBJECT_CHUNK_FLAG_NEXT_VALID;
+const OBJECT_CHUNK_FLAGS_VALID_MASK: u8 = 0x03;
 
 const SNAPSHOT_MAGIC: [u8; 4] = *b"OLGS";
 const SNAPSHOT_VERSION: u16 = 4;
@@ -924,8 +923,16 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const LOG_METADAT
         &mut self,
         reserved: ReservedObjectLogRegion,
     ) -> Result<(), ObjectLogError> {
-        let start = u32::try_from(Header::ENCODED_LEN + self.object_payload_start()?)
-            .map_err(|_| ObjectLogError::LengthOverflow)?;
+        let start_usize = Header::ENCODED_LEN
+            .checked_add(self.object_payload_start()?)
+            .ok_or(ObjectLogError::LengthOverflow)?;
+        if start_usize > REGION_SIZE {
+            return Err(ObjectLogError::ObjectTooLarge {
+                len: start_usize,
+                capacity: REGION_SIZE,
+            });
+        }
+        let start = u32::try_from(start_usize).map_err(|_| ObjectLogError::LengthOverflow)?;
         let region = ObjectLogRegion {
             region_index: reserved.region_index,
             sequence: reserved.sequence,
@@ -1068,6 +1075,16 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const LOG_METADAT
             let nonfinal_capacity =
                 chunk_payload_capacity_at(record_offset, max_region_end, false)?;
             if nonfinal_capacity == 0 {
+                let occupied = region
+                    .end_offset
+                    .checked_sub(region.start_offset)
+                    .ok_or(ObjectLogError::InvalidFrame)?;
+                let Some(_) = core::num::NonZeroU32::new(occupied) else {
+                    return Err(ObjectLogError::ObjectTooLarge {
+                        len: bytes.len(),
+                        capacity: payload_capacity,
+                    });
+                };
                 self.materialize_current_frontier_in_transaction(storage)?;
                 continue;
             }
@@ -1205,6 +1222,12 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const LOG_METADAT
             }
 
             let chunk_len = nonfinal_capacity;
+            if chunk_len == 0 {
+                return Err(ObjectLogError::ObjectTooLarge {
+                    len: bytes.len(),
+                    capacity: payload_capacity,
+                });
+            }
             let reserved = self.reserve_region(storage, allocated_regions)?;
             let next_offset = u32::try_from(Header::ENCODED_LEN + self.object_payload_start()?)
                 .map_err(|_| ObjectLogError::LengthOverflow)?;
@@ -1504,16 +1527,8 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const LOG_METADAT
             region.first_committed_public_offset = None;
             region.first_planned_public_offset = None;
         }
-        let region_count = self.memory.regions.len();
         if let Some(head) = self.memory.regions.first_mut() {
             head.start_offset = retained_start.offset;
-            if head.start_offset == head.committed_end_offset && region_count > 1 {
-                let empty = *head;
-                freed_regions
-                    .push(empty.region_index)
-                    .map_err(|_| ObjectLogError::TooManyRegions)?;
-                self.memory.regions.remove(0);
-            }
         }
         let public_index = self
             .find_region(handle.region_index, handle.sequence)
@@ -1751,9 +1766,6 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const LOG_METADAT
                     checked_object_read_range(record.body_len, object_offset, len, scratch.len())?;
                 if range.is_empty() {
                     return Ok(read(&scratch[..0]));
-                }
-                if storage.memory.payload_scratch.len() < record.body_len {
-                    return Err(ObjectLogError::InvalidFrame);
                 }
                 self.read_record_body_into_storage_scratch(storage, region, handle, record, true)?;
                 let read_len = range.end - range.start;
@@ -2186,46 +2198,43 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const LOG_METADAT
                 return Err(ObjectLogError::InvalidFrame);
             }
 
-            if chunk_end > object_offset && chunk.logical_start < requested_end {
-                let (_, record, chunk) = self.read_chunk_info(storage, current, true)?;
-                let chunk_start = chunk.logical_start;
-                let chunk_end = chunk_start
-                    .checked_add(
-                        u64::try_from(chunk.chunk_len)
-                            .map_err(|_| ObjectLogError::LengthOverflow)?,
-                    )
-                    .ok_or(ObjectLogError::LengthOverflow)?;
-                let copy_start = object_offset.max(chunk_start);
-                let copy_end = requested_end.min(chunk_end);
-                let source_start = usize::try_from(
-                    copy_start
-                        .checked_sub(chunk_start)
-                        .ok_or(ObjectLogError::LengthOverflow)?,
+            let (_, record, chunk) = self.read_chunk_info(storage, current, true)?;
+            let chunk_start = chunk.logical_start;
+            let chunk_end = chunk_start
+                .checked_add(
+                    u64::try_from(chunk.chunk_len).map_err(|_| ObjectLogError::LengthOverflow)?,
                 )
-                .map_err(|_| ObjectLogError::LengthOverflow)?;
-                let source_end = usize::try_from(
-                    copy_end
-                        .checked_sub(chunk_start)
-                        .ok_or(ObjectLogError::LengthOverflow)?,
-                )
-                .map_err(|_| ObjectLogError::LengthOverflow)?;
-                let copy_len = source_end
-                    .checked_sub(source_start)
-                    .ok_or(ObjectLogError::LengthOverflow)?;
-                let destination_end = copied
-                    .checked_add(copy_len)
-                    .ok_or(ObjectLogError::LengthOverflow)?;
-                if destination_end > scratch.len() || destination_end > target_len {
-                    return Err(ObjectLogError::InvalidFrame);
-                }
-                let source_base = OBJECT_CHUNK_FIXED_BODY_LEN;
-                let source = &storage.memory.payload_scratch
-                    [source_base + source_start..source_base + source_end];
-                scratch[copied..destination_end].copy_from_slice(source);
-                copied = destination_end;
-                if record.body_len != OBJECT_CHUNK_FIXED_BODY_LEN + chunk.chunk_len {
-                    return Err(ObjectLogError::InvalidFrame);
-                }
+                .ok_or(ObjectLogError::LengthOverflow)?;
+            let copy_start = object_offset.max(chunk_start).min(chunk_end);
+            let copy_end = requested_end.min(chunk_end).max(copy_start);
+            let source_start = usize::try_from(
+                copy_start
+                    .checked_sub(chunk_start)
+                    .ok_or(ObjectLogError::LengthOverflow)?,
+            )
+            .map_err(|_| ObjectLogError::LengthOverflow)?;
+            let source_end = usize::try_from(
+                copy_end
+                    .checked_sub(chunk_start)
+                    .ok_or(ObjectLogError::LengthOverflow)?,
+            )
+            .map_err(|_| ObjectLogError::LengthOverflow)?;
+            let copy_len = source_end
+                .checked_sub(source_start)
+                .ok_or(ObjectLogError::LengthOverflow)?;
+            let destination_end = copied
+                .checked_add(copy_len)
+                .ok_or(ObjectLogError::LengthOverflow)?;
+            if destination_end > scratch.len() || destination_end > target_len {
+                return Err(ObjectLogError::InvalidFrame);
+            }
+            let source_base = OBJECT_CHUNK_FIXED_BODY_LEN;
+            let source = &storage.memory.payload_scratch
+                [source_base + source_start..source_base + source_end];
+            scratch[copied..destination_end].copy_from_slice(source);
+            copied = destination_end;
+            if record.body_len != OBJECT_CHUNK_FIXED_BODY_LEN + chunk.chunk_len {
+                return Err(ObjectLogError::InvalidFrame);
             }
 
             if chunk_end == object_end.total_object_len {
@@ -2279,9 +2288,6 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const LOG_METADAT
                     return Ok(Some(handle));
                 }
                 offset = record.record_end;
-            }
-            if offset > region.committed_end_offset {
-                return Err(ObjectLogError::InvalidFrame);
             }
         }
         Ok(None)

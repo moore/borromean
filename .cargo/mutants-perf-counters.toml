@@ -1,0 +1,8 @@
+test_workspace = false
+timeout_multiplier = 2.0
+minimum_test_timeout = 5.0
+output = ".mutants.out/perf-counters"
+features = ["perf-counters"]
+examine_globs = [
+    "src/perf_metrics.rs",
+]

@@ -1113,6 +1113,20 @@ impl<
     }
 
     #[cfg(test)]
+    pub(crate) fn append_raw_wal_record_for_test(
+        &mut self,
+        record: WalRecord<'_>,
+    ) -> Result<(), StorageRuntimeError> {
+        self.memory
+            .state
+            .append_raw_record_for_test::<REGION_SIZE, REGION_COUNT, IO>(
+                self.backing,
+                &mut self.memory.workspace,
+                record,
+            )
+    }
+
+    #[cfg(test)]
     pub(crate) fn with_io_workspace<T>(
         &mut self,
         operation: impl FnOnce(&mut IO, &mut StorageWorkspace<REGION_SIZE>) -> T,
