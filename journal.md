@@ -3,6 +3,63 @@
 This journal captures design ideas, motivation, and decision history before they
 are ready to become normative specification text.
 
+## 2026-06-05: Large Objects v2
+
+The current object-log design handles small objects well: each public handle
+names one object-log record, unflushed data can be rebuilt from the WAL, and
+truncation can advance through ordinary object-log order. Large objects need a
+different path because sending their bulk bytes through the WAL is expensive,
+but their storage layout still has to preserve simple truncation semantics.
+
+This design separates public object-log records from private large-object data:
+
+- A small record is a public inline object-log record. It stores the whole
+  object through the ordinary frontier and WAL path, and it is used when the
+  object fits within one chunk's logical capacity.
+- A large record entry is a public object-log record and the public handle
+  target for a large object. It stores the total logical object length and an
+  optional pointer to the first auxiliary region.
+- An auxiliary chunk is private large-object data in an auxiliary region. It
+  records its logical length and checksum.
+- A tail chunk is private large-object data written after the large record entry
+  through the ordinary object-log path.
+
+A large write uses one region-capacity scratch buffer. The writer fills that
+buffer with auxiliary chunks until the buffer contains a complete auxiliary
+region image, leaving only the reserved next-link slot. That full image is then
+materialized as an auxiliary region. If another auxiliary region follows, the
+previous auxiliary region's reserved next-link slot is written once to point to
+the new region.
+
+If the object ends exactly when scratch contains a full auxiliary image, that
+image becomes the final auxiliary region. If the object ends with partial
+scratch contents, the writer publishes the object through the ordinary
+object-log path by appending the large record entry followed immediately by the
+remaining private tail chunks. The large record entry and tail chunks are
+contiguous in ordinary object-log order, even if that span crosses ordinary
+object-log region boundaries.
+
+Auxiliary regions are not ordinary object-log chain regions. Each auxiliary
+region belongs to exactly one large object and is reachable only from that
+object's committed large record entry. Public traversal sees small records and
+large record entries; it skips auxiliary chunks and tail chunks. Truncating away
+a large record entry frees its whole auxiliary chain, without retaining
+unrelated object data beyond any ordinary log region that still contains the
+live head.
+
+Every auxiliary region is allocated and written inside the large-object
+transaction. Before commit, those regions are transaction-owned and recoverable.
+The commit publishes the large record entry that makes the auxiliary chain
+reachable from exactly one object. If the transaction aborts before commit, all
+reserved auxiliary regions are reclaimed. If it commits, the auxiliary data and
+auxiliary links are durable before the large record entry becomes visible.
+
+The current WAL transaction model still limits true concurrent large writes
+because it supports only one open transaction. This design keeps the future
+concurrency story simple: each in-flight large write needs one fixed-size
+scratch buffer, small writes can continue while auxiliary data is assembled, and
+only the final publish span serializes through the ordinary object log.
+
 ## 2026-06-05: Large ObjectLog Objects And Direct Region Materialization
 
 The current object-log design reserves a stable handle for a packed frame in one
