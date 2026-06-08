@@ -104,35 +104,3 @@ rotation, reclaim, and WAL/state facade helpers.
     writes, deletes, compactions, committed-region reclaims, WAL rollovers, and WAL-head reclaims.
 44. `RING-IMPL-REGRESSION-111` WAL-head reclaim capacity stress MUST reclaim a bounded WAL prefix
     when the full chain is longer than the cleanup batch capacity.
-
-## ObjectLog Current Implementation Regression Requirements
-
-These requirements trace the current ObjectLog large-object implementation while
-the object-log specification is being revised toward auxiliary-region large
-objects.
-
-1. `RING-IMPL-REGRESSION-135` Current ObjectLog large-object handles MUST point
-   to `ObjectEnd` records that carry total length plus first and last linked
-   chunk pointers.
-2. `RING-IMPL-REGRESSION-136` Current ObjectLog chunks MUST encode previous and
-   next link flags, logical start, chunk length, linked chunk pointers, and
-   chunk bytes, and validate corrupted chunk records through CRCs and bounds.
-3. `RING-IMPL-REGRESSION-137` Current ObjectLog large-object reads MUST reject
-   private chunk handles and malformed linked chunk runs before returning object
-   bytes.
-4. `RING-IMPL-REGRESSION-138` Current ObjectLog large-object runs MUST use
-   linked `ObjectChunk` records with previous and next links or start and end
-   markers rather than a map-style manifest.
-5. `RING-IMPL-REGRESSION-139` Current ObjectLog large-object append placement
-   MUST fill the current frontier first, directly materialize full frontier
-   images, and keep the trailing partial chunk plus `ObjectEnd` record
-   WAL-backed.
-6. `RING-IMPL-REGRESSION-140` Current ObjectLog large-object regions MUST be
-   transaction-reserved before write and recoverable if the transaction does not
-   commit.
-7. `RING-IMPL-REGRESSION-141` Current ObjectLog truncation before a large-object
-   handle MUST retain the chunk run reachable from that handle's `ObjectEnd`
-   record and free only regions wholly before the retained first chunk.
-8. `RING-IMPL-REGRESSION-142` Current ObjectLog append placement MUST preserve
-   stable handles and forward progress across exact-fit inline, oversized
-   large-object, no-progress geometry, and full-frontier materialization cases.

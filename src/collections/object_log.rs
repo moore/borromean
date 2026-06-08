@@ -18,21 +18,28 @@ const CRC32C: Crc<u32> = Crc::<u32>::new(&CRC_32_ISCSI);
 
 /// Stable committed-region format for object-log data regions.
 pub const OBJECT_LOG_DATA_V1_FORMAT: u16 = 7;
+/// Stable committed-region format for private object-log auxiliary regions.
+pub const OBJECT_LOG_AUX_V1_FORMAT: u16 = 8;
 
 const DATA_MAGIC: [u8; 4] = *b"OLOG";
 const DATA_VERSION: u16 = 1;
+const AUX_MAGIC: [u8; 4] = *b"OLAX";
+const AUX_VERSION: u16 = 1;
 const DATA_PROLOGUE_FIXED_LEN: usize =
     size_of::<u32>() + size_of::<u16>() + size_of::<u64>() + size_of::<u32>();
+const AUX_PROLOGUE_PREFIX_LEN: usize =
+    size_of::<u32>() + size_of::<u16>() + size_of::<u32>() + size_of::<u32>() + size_of::<u32>();
+const AUX_PROLOGUE_CRC_LEN: usize = size_of::<u32>();
 const RECORD_HEADER_LEN: usize = size_of::<u8>() + size_of::<u32>() + size_of::<u32>();
 const RECORD_INLINE_OBJECT: u8 = 0x01;
 const RECORD_OBJECT_CHUNK: u8 = 0x02;
-const RECORD_OBJECT_END: u8 = 0x03;
-const OBJECT_CHUNK_FIXED_BODY_LEN: usize =
-    size_of::<u8>() + size_of::<u64>() + size_of::<u32>() + HANDLE_ENCODED_LEN + HANDLE_ENCODED_LEN;
-const OBJECT_END_BODY_LEN: usize = size_of::<u64>() + HANDLE_ENCODED_LEN + HANDLE_ENCODED_LEN;
-const OBJECT_CHUNK_FLAG_PREV_VALID: u8 = 0x01;
-const OBJECT_CHUNK_FLAG_NEXT_VALID: u8 = 0x02;
-const OBJECT_CHUNK_FLAGS_VALID_MASK: u8 = 0x03;
+const RECORD_LARGE_RECORD_ENTRY: u8 = 0x03;
+const AUX_POINTER_ENCODED_LEN: usize = size_of::<u32>();
+const OBJECT_CHUNK_FIXED_BODY_LEN: usize = size_of::<u64>() + size_of::<u32>() + size_of::<u32>();
+const AUX_CHUNK_FIXED_LEN: usize = size_of::<u8>() + OBJECT_CHUNK_FIXED_BODY_LEN;
+const LARGE_RECORD_ENTRY_BODY_LEN: usize =
+    size_of::<u64>() + size_of::<u32>() + AUX_POINTER_ENCODED_LEN;
+const AUX_LINK_PRESENT_LEN: usize = size_of::<u8>() + AUX_POINTER_ENCODED_LEN + size_of::<u32>();
 
 const SNAPSHOT_MAGIC: [u8; 4] = *b"OLGS";
 const SNAPSHOT_VERSION: u16 = 4;
@@ -100,18 +107,65 @@ struct ObjectLogRecordInfo {
 
 #[derive(Clone, Copy)]
 struct ObjectChunkInfo {
-    flags: u8,
     logical_start: u64,
     chunk_len: usize,
-    prev: ObjectLogHandle,
-    next: ObjectLogHandle,
+    chunk_crc32c: u32,
 }
 
 #[derive(Clone, Copy)]
-struct ObjectEndInfo {
+struct AuxRegionPointer {
+    region_index: u32,
+}
+
+#[derive(Clone, Copy)]
+struct LargeRecordEntryInfo {
     total_object_len: u64,
-    first: ObjectLogHandle,
-    last: ObjectLogHandle,
+    tail_logical_len: u32,
+    first_aux: AuxRegionPointer,
+}
+
+#[derive(Clone, Copy)]
+struct AuxGeometry {
+    payload_capacity: usize,
+    prologue_len: usize,
+    chunk_slot_len: usize,
+    chunk_slot_count: usize,
+    chunk_logical_capacity: usize,
+    next_link_offset: usize,
+    next_link_len: usize,
+}
+
+#[derive(Clone, Copy)]
+struct LargeTailAppendPlan {
+    geometry: AuxGeometry,
+    total_object_len: u64,
+    tail_start: usize,
+    tail_logical_len: u32,
+    first_aux: AuxRegionPointer,
+}
+
+#[derive(Clone, Copy)]
+struct LargeReadRequest {
+    handle: ObjectLogHandle,
+    entry_record: ObjectLogRecordInfo,
+    large_entry: LargeRecordEntryInfo,
+    object_offset: u64,
+    len: u64,
+}
+
+#[derive(Clone, Copy)]
+struct TailChunkReadPlan {
+    large_handle: ObjectLogHandle,
+    entry_record: ObjectLogRecordInfo,
+    tail_start: u64,
+    total_object_len: u64,
+}
+
+struct LargeCopyWindow<'a> {
+    object_offset: u64,
+    requested_end: u64,
+    scratch: &'a mut [u8],
+    copied: &'a mut usize,
 }
 
 #[derive(Clone, Copy)]
@@ -241,9 +295,17 @@ impl<
     >
 {
     /// Appends an object to this transaction and returns its planned stable handle.
-    pub fn append(&mut self, bytes: &[u8]) -> Result<ObjectLogHandle, ObjectLogError> {
-        self.log
-            .append_transactional(self.storage, bytes, &mut self.allocated_regions)
+    pub fn append(
+        &mut self,
+        bytes: &[u8],
+        large_scratch: &mut [u8],
+    ) -> Result<ObjectLogHandle, ObjectLogError> {
+        self.log.append_transactional(
+            self.storage,
+            bytes,
+            large_scratch,
+            &mut self.allocated_regions,
+        )
     }
 }
 
@@ -340,11 +402,12 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const LOG_METADAT
         &mut self,
         storage: &mut Storage<'db, 'storage_mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
         bytes: &[u8],
+        large_scratch: &mut [u8],
     ) -> Result<ObjectLogHandle, ObjectLogError> {
         storage.enter_mode(StorageMode::UpdatingCollection(
             CollectionUpdateMode::Running,
         ))?;
-        let result = self.append_inner(storage, bytes);
+        let result = self.append_inner(storage, bytes, large_scratch);
         storage.finish_mode();
         result
     }
@@ -541,17 +604,22 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const LOG_METADAT
         &mut self,
         storage: &mut Storage<'db, 'storage_mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
         bytes: &[u8],
+        large_scratch: &mut [u8],
     ) -> Result<ObjectLogHandle, ObjectLogError> {
+        if self.object_requires_large_record(storage.metadata(), bytes.len())? {
+            return self.append_in_transaction(storage, bytes, large_scratch);
+        }
+
         let record_len = inline_record_len(bytes.len())?;
         let payload_capacity = committed_payload_capacity::<REGION_SIZE>(storage.metadata())?;
         if record_len
             > empty_region_record_capacity(payload_capacity, self.memory.log_metadata_len)?
         {
-            return self.append_in_transaction(storage, bytes);
+            return self.append_in_transaction(storage, bytes, large_scratch);
         }
 
         if self.needs_new_region(record_len, payload_capacity)? {
-            return self.append_in_transaction(storage, bytes);
+            return self.append_in_transaction(storage, bytes, large_scratch);
         }
 
         let region = self
@@ -595,6 +663,7 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const LOG_METADAT
         &mut self,
         storage: &mut Storage<'db, 'storage_mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
         bytes: &[u8],
+        large_scratch: &mut [u8],
     ) -> Result<ObjectLogHandle, ObjectLogError> {
         self.checkpoint_append_state()?;
         let mut allocated_regions = Vec::<u32, REGION_COUNT>::new();
@@ -606,7 +675,12 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const LOG_METADAT
                 &mut storage.memory.workspace,
                 self.collection_id,
             )?;
-        let handle = match self.append_transactional(storage, bytes, &mut allocated_regions) {
+        let handle = match self.append_transactional(
+            storage,
+            bytes,
+            large_scratch,
+            &mut allocated_regions,
+        ) {
             Ok(handle) => handle,
             Err(error) => {
                 return match self.rollback_transaction(storage, allocated_regions) {
@@ -738,14 +812,29 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const LOG_METADAT
         &mut self,
         storage: &mut Storage<'db, 'storage_mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
         bytes: &[u8],
+        large_scratch: &mut [u8],
         allocated_regions: &mut Vec<u32, REGION_COUNT>,
     ) -> Result<ObjectLogHandle, ObjectLogError> {
+        if self.object_requires_large_record(storage.metadata(), bytes.len())? {
+            return self.append_large_transactional(
+                storage,
+                bytes,
+                large_scratch,
+                allocated_regions,
+            );
+        }
+
         let record_len = inline_record_len(bytes.len())?;
         let payload_capacity = committed_payload_capacity::<REGION_SIZE>(storage.metadata())?;
         if record_len
             > empty_region_record_capacity(payload_capacity, self.memory.log_metadata_len)?
         {
-            return self.append_large_transactional(storage, bytes, allocated_regions);
+            return self.append_large_transactional(
+                storage,
+                bytes,
+                large_scratch,
+                allocated_regions,
+            );
         }
 
         if self.needs_new_region(record_len, payload_capacity)? {
@@ -758,7 +847,12 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const LOG_METADAT
             } else {
                 self.flush_current(storage)?;
             }
-            return self.append_transactional_new_region(storage, bytes, allocated_regions);
+            return self.append_transactional_new_region(
+                storage,
+                bytes,
+                large_scratch,
+                allocated_regions,
+            );
         }
 
         let region = self
@@ -797,14 +891,29 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const LOG_METADAT
         &mut self,
         storage: &mut Storage<'db, 'storage_mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
         bytes: &[u8],
+        large_scratch: &mut [u8],
         allocated_regions: &mut Vec<u32, REGION_COUNT>,
     ) -> Result<ObjectLogHandle, ObjectLogError> {
+        if self.object_requires_large_record(storage.metadata(), bytes.len())? {
+            return self.append_large_transactional(
+                storage,
+                bytes,
+                large_scratch,
+                allocated_regions,
+            );
+        }
+
         let record_len = inline_record_len(bytes.len())?;
         let payload_capacity = committed_payload_capacity::<REGION_SIZE>(storage.metadata())?;
         if record_len
             > empty_region_record_capacity(payload_capacity, self.memory.log_metadata_len)?
         {
-            return self.append_large_transactional(storage, bytes, allocated_regions);
+            return self.append_large_transactional(
+                storage,
+                bytes,
+                large_scratch,
+                allocated_regions,
+            );
         }
 
         let reserved = self.reserve_region(storage, allocated_regions)?;
@@ -1046,224 +1155,343 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const LOG_METADAT
         &mut self,
         storage: &mut Storage<'db, 'storage_mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
         bytes: &[u8],
+        large_scratch: &mut [u8],
         allocated_regions: &mut Vec<u32, REGION_COUNT>,
     ) -> Result<ObjectLogHandle, ObjectLogError> {
+        if large_scratch.len() < REGION_SIZE {
+            return Err(ObjectLogError::BufferTooSmall {
+                needed: REGION_SIZE,
+                available: large_scratch.len(),
+            });
+        }
+        let large_scratch = &mut large_scratch[..REGION_SIZE];
         let total_object_len =
             u64::try_from(bytes.len()).map_err(|_| ObjectLogError::LengthOverflow)?;
-        let payload_capacity = committed_payload_capacity::<REGION_SIZE>(storage.metadata())?;
-        let max_region_end = Header::ENCODED_LEN
-            .checked_add(payload_capacity)
-            .ok_or(ObjectLogError::LengthOverflow)?;
+        let geometry = self.aux_geometry(storage.metadata())?;
+        if geometry.chunk_logical_capacity == 0 {
+            return Err(ObjectLogError::ObjectTooLarge {
+                len: bytes.len(),
+                capacity: geometry.payload_capacity,
+            });
+        }
+
         let mut cursor = 0usize;
         let mut logical_start = 0u64;
-        let mut first_chunk = None::<ObjectLogHandle>;
-        let mut previous_chunk = None::<ObjectLogHandle>;
+        let mut scratch_chunk_count = 0usize;
+        let mut scratch_logical_len = 0usize;
+        let mut first_aux = None::<AuxRegionPointer>;
+        let mut previous_aux = None::<AuxRegionPointer>;
+        self.initialize_aux_scratch(storage.metadata(), geometry, large_scratch)?;
 
-        loop {
-            self.ensure_transaction_frontier(storage, allocated_regions)?;
-            let region = self
-                .memory
-                .regions
-                .last()
-                .copied()
-                .ok_or(ObjectLogError::MissingFrontier)?;
-            if region.flushed {
-                return Err(ObjectLogError::MissingFrontier);
-            }
-            let record_offset =
-                usize::try_from(region.end_offset).map_err(|_| ObjectLogError::LengthOverflow)?;
-            let nonfinal_capacity =
-                chunk_payload_capacity_at(record_offset, max_region_end, false)?;
-            if nonfinal_capacity == 0 {
-                let occupied = region
-                    .end_offset
-                    .checked_sub(region.start_offset)
-                    .ok_or(ObjectLogError::InvalidFrame)?;
-                let Some(_) = core::num::NonZeroU32::new(occupied) else {
-                    return Err(ObjectLogError::ObjectTooLarge {
-                        len: bytes.len(),
-                        capacity: payload_capacity,
-                    });
-                };
-                self.materialize_current_frontier_in_transaction(storage)?;
-                continue;
-            }
-
+        while cursor < bytes.len() {
             let remaining = bytes
                 .len()
                 .checked_sub(cursor)
                 .ok_or(ObjectLogError::LengthOverflow)?;
-            let final_same_region_capacity =
-                chunk_payload_capacity_at(record_offset, max_region_end, true)?;
-
-            if remaining <= final_same_region_capacity {
-                let chunk_handle =
-                    ObjectLogHandle::new(region.region_index, region.sequence, region.end_offset);
-                let chunk_len = remaining;
-                let end_offset = region
-                    .end_offset
-                    .checked_add(
-                        u32::try_from(chunk_record_len(chunk_len)?)
-                            .map_err(|_| ObjectLogError::LengthOverflow)?,
-                    )
-                    .ok_or(ObjectLogError::LengthOverflow)?;
-                let end_handle =
-                    ObjectLogHandle::new(region.region_index, region.sequence, end_offset);
-                let previous = previous_chunk.unwrap_or(ObjectLogHandle::new(0, 0, 0));
-                let flags = if previous_chunk.is_some() {
-                    OBJECT_CHUNK_FLAG_PREV_VALID
-                } else {
-                    0
-                };
-                let encoded = encode_chunk_append_update(
-                    chunk_handle,
-                    flags,
-                    logical_start,
-                    previous,
-                    ObjectLogHandle::new(0, 0, 0),
-                    &bytes[cursor..cursor + chunk_len],
-                    &mut storage.memory.payload_scratch,
-                )?;
-                storage
-                    .memory
-                    .state
-                    .append_update_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
-                        storage.backing,
-                        &mut storage.memory.workspace,
-                        self.collection_id,
-                        &storage.memory.payload_scratch[..encoded.used],
-                    )?;
-                self.apply_append_record(
-                    chunk_handle,
-                    &storage.memory.payload_scratch[encoded.record_start..encoded.used],
-                    AppendVisibility::Planned,
-                )?;
-                let first = first_chunk.unwrap_or(chunk_handle);
-                let encoded = encode_end_append_update(
-                    end_handle,
-                    total_object_len,
-                    first,
-                    chunk_handle,
-                    &mut storage.memory.payload_scratch,
-                )?;
-                storage
-                    .memory
-                    .state
-                    .append_update_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
-                        storage.backing,
-                        &mut storage.memory.workspace,
-                        self.collection_id,
-                        &storage.memory.payload_scratch[..encoded.used],
-                    )?;
-                self.apply_append_record(
-                    end_handle,
-                    &storage.memory.payload_scratch[encoded.record_start..encoded.used],
-                    AppendVisibility::Planned,
-                )?;
-                return Ok(end_handle);
-            }
-
-            if remaining <= nonfinal_capacity {
-                let chunk_handle =
-                    ObjectLogHandle::new(region.region_index, region.sequence, region.end_offset);
-                let previous = previous_chunk.unwrap_or(ObjectLogHandle::new(0, 0, 0));
-                let flags = if previous_chunk.is_some() {
-                    OBJECT_CHUNK_FLAG_PREV_VALID
-                } else {
-                    0
-                };
-                let record_len = encode_chunk_record(
-                    flags,
-                    logical_start,
-                    previous,
-                    ObjectLogHandle::new(0, 0, 0),
-                    &bytes[cursor..cursor + remaining],
-                    &mut storage.memory.payload_scratch,
-                )?;
-                self.apply_append_record(
-                    chunk_handle,
-                    &storage.memory.payload_scratch[..record_len],
-                    AppendVisibility::Planned,
-                )?;
-                self.materialize_current_frontier_in_transaction(storage)?;
-                let first = first_chunk.unwrap_or(chunk_handle);
-                let reserved = self.reserve_region(storage, allocated_regions)?;
-                self.install_reserved_frontier(reserved)?;
-                let region = self
-                    .memory
-                    .regions
-                    .last()
-                    .copied()
-                    .ok_or(ObjectLogError::MissingFrontier)?;
-                let end_handle =
-                    ObjectLogHandle::new(region.region_index, region.sequence, region.end_offset);
-                let encoded = encode_end_append_update(
-                    end_handle,
-                    total_object_len,
-                    first,
-                    chunk_handle,
-                    &mut storage.memory.payload_scratch,
-                )?;
-                storage
-                    .memory
-                    .state
-                    .append_update_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
-                        storage.backing,
-                        &mut storage.memory.workspace,
-                        self.collection_id,
-                        &storage.memory.payload_scratch[..encoded.used],
-                    )?;
-                self.apply_append_record(
-                    end_handle,
-                    &storage.memory.payload_scratch[encoded.record_start..encoded.used],
-                    AppendVisibility::Planned,
-                )?;
-                return Ok(end_handle);
-            }
-
-            let chunk_len = nonfinal_capacity;
-            if chunk_len == 0 {
-                return Err(ObjectLogError::ObjectTooLarge {
-                    len: bytes.len(),
-                    capacity: payload_capacity,
-                });
-            }
-            let reserved = self.reserve_region(storage, allocated_regions)?;
-            let next_offset = u32::try_from(Header::ENCODED_LEN + self.object_payload_start()?)
-                .map_err(|_| ObjectLogError::LengthOverflow)?;
-            let next_chunk =
-                ObjectLogHandle::new(reserved.region_index, reserved.sequence, next_offset);
-            let chunk_handle =
-                ObjectLogHandle::new(region.region_index, region.sequence, region.end_offset);
-            let previous = previous_chunk.unwrap_or(ObjectLogHandle::new(0, 0, 0));
-            let mut flags = OBJECT_CHUNK_FLAG_NEXT_VALID;
-            if previous_chunk.is_some() {
-                flags |= OBJECT_CHUNK_FLAG_PREV_VALID;
-            }
-            let record_len = encode_chunk_record(
-                flags,
+            let chunk_len = remaining.min(geometry.chunk_logical_capacity);
+            encode_aux_chunk_slot(
+                large_scratch,
+                geometry,
+                scratch_chunk_count,
                 logical_start,
-                previous,
-                next_chunk,
                 &bytes[cursor..cursor + chunk_len],
-                &mut storage.memory.payload_scratch,
             )?;
-            self.apply_append_record(
-                chunk_handle,
-                &storage.memory.payload_scratch[..record_len],
-                AppendVisibility::Planned,
-            )?;
-            self.materialize_current_frontier_in_transaction(storage)?;
-            first_chunk = Some(first_chunk.unwrap_or(chunk_handle));
-            previous_chunk = Some(chunk_handle);
+            scratch_chunk_count = scratch_chunk_count
+                .checked_add(1)
+                .ok_or(ObjectLogError::LengthOverflow)?;
+            scratch_logical_len = scratch_logical_len
+                .checked_add(chunk_len)
+                .ok_or(ObjectLogError::LengthOverflow)?;
             cursor = cursor
                 .checked_add(chunk_len)
                 .ok_or(ObjectLogError::LengthOverflow)?;
             logical_start = logical_start
                 .checked_add(u64::try_from(chunk_len).map_err(|_| ObjectLogError::LengthOverflow)?)
                 .ok_or(ObjectLogError::LengthOverflow)?;
-            self.install_reserved_frontier(reserved)?;
+
+            if scratch_chunk_count == geometry.chunk_slot_count {
+                let current_aux = self.materialize_aux_scratch(
+                    storage,
+                    geometry,
+                    large_scratch,
+                    allocated_regions,
+                )?;
+                if let Some(previous) = previous_aux {
+                    self.write_aux_next_link(storage, geometry, previous, current_aux)?;
+                } else {
+                    first_aux = Some(current_aux);
+                }
+                previous_aux = Some(current_aux);
+                scratch_chunk_count = 0;
+                scratch_logical_len = 0;
+                if cursor < bytes.len() {
+                    self.initialize_aux_scratch(storage.metadata(), geometry, large_scratch)?;
+                }
+            }
         }
+
+        let tail_logical_len =
+            u32::try_from(scratch_logical_len).map_err(|_| ObjectLogError::LengthOverflow)?;
+        let tail_start = bytes
+            .len()
+            .checked_sub(scratch_logical_len)
+            .ok_or(ObjectLogError::LengthOverflow)?;
+        self.append_large_entry_and_tail(
+            storage,
+            LargeTailAppendPlan {
+                geometry,
+                total_object_len,
+                tail_start,
+                tail_logical_len,
+                first_aux: first_aux.unwrap_or(AuxRegionPointer { region_index: 0 }),
+            },
+            &bytes[tail_start..],
+            allocated_regions,
+        )
+    }
+
+    fn object_requires_large_record(
+        &self,
+        metadata: StorageMetadata,
+        len: usize,
+    ) -> Result<bool, ObjectLogError> {
+        let payload_capacity = committed_payload_capacity::<REGION_SIZE>(metadata)?;
+        let inline_capacity = inline_body_capacity(payload_capacity, self.memory.log_metadata_len)?;
+        if len > inline_capacity {
+            return Ok(true);
+        }
+        match self.aux_geometry(metadata) {
+            Ok(geometry) => Ok(len > geometry.chunk_logical_capacity),
+            Err(_) => Ok(false),
+        }
+    }
+
+    fn aux_geometry(&self, metadata: StorageMetadata) -> Result<AuxGeometry, ObjectLogError> {
+        aux_geometry::<REGION_SIZE>(metadata, self.memory.log_metadata_len)
+    }
+
+    fn append_large_entry_and_tail<
+        'db,
+        'storage_mem,
+        IO: FlashIo,
+        const REGION_COUNT: usize,
+        const MAX_COLLECTIONS: usize,
+    >(
+        &mut self,
+        storage: &mut Storage<'db, 'storage_mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
+        plan: LargeTailAppendPlan,
+        tail_bytes: &[u8],
+        allocated_regions: &mut Vec<u32, REGION_COUNT>,
+    ) -> Result<ObjectLogHandle, ObjectLogError> {
+        let handle = self.append_generated_record_transactional(
+            storage,
+            large_entry_record_len()?,
+            allocated_regions,
+            |handle, output| {
+                encode_large_entry_append_update(
+                    handle,
+                    plan.total_object_len,
+                    plan.tail_logical_len,
+                    plan.first_aux,
+                    output,
+                )
+            },
+        )?;
+
+        let mut cursor = 0usize;
+        let mut logical_start =
+            u64::try_from(plan.tail_start).map_err(|_| ObjectLogError::LengthOverflow)?;
+        while cursor < tail_bytes.len() {
+            let remaining = tail_bytes
+                .len()
+                .checked_sub(cursor)
+                .ok_or(ObjectLogError::LengthOverflow)?;
+            let chunk_len = remaining.min(plan.geometry.chunk_logical_capacity);
+            self.append_generated_record_transactional(
+                storage,
+                chunk_record_len(chunk_len)?,
+                allocated_regions,
+                |handle, output| {
+                    encode_chunk_append_update(
+                        handle,
+                        logical_start,
+                        &tail_bytes[cursor..cursor + chunk_len],
+                        output,
+                    )
+                },
+            )?;
+            cursor = cursor
+                .checked_add(chunk_len)
+                .ok_or(ObjectLogError::LengthOverflow)?;
+            logical_start = logical_start
+                .checked_add(u64::try_from(chunk_len).map_err(|_| ObjectLogError::LengthOverflow)?)
+                .ok_or(ObjectLogError::LengthOverflow)?;
+        }
+        Ok(handle)
+    }
+
+    fn append_generated_record_transactional<
+        'db,
+        'storage_mem,
+        IO: FlashIo,
+        F,
+        const REGION_COUNT: usize,
+        const MAX_COLLECTIONS: usize,
+    >(
+        &mut self,
+        storage: &mut Storage<'db, 'storage_mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
+        record_len: usize,
+        allocated_regions: &mut Vec<u32, REGION_COUNT>,
+        mut encode: F,
+    ) -> Result<ObjectLogHandle, ObjectLogError>
+    where
+        F: FnMut(ObjectLogHandle, &mut [u8]) -> Result<EncodedRecordUpdate, ObjectLogError>,
+    {
+        let payload_capacity = committed_payload_capacity::<REGION_SIZE>(storage.metadata())?;
+        let empty_capacity =
+            empty_region_record_capacity(payload_capacity, self.memory.log_metadata_len)?;
+        if record_len > empty_capacity {
+            return Err(ObjectLogError::ObjectTooLarge {
+                len: record_len,
+                capacity: empty_capacity,
+            });
+        }
+
+        loop {
+            self.ensure_transaction_frontier(storage, allocated_regions)?;
+            if !self.needs_new_region(record_len, payload_capacity)? {
+                let region = self
+                    .memory
+                    .regions
+                    .last()
+                    .copied()
+                    .ok_or(ObjectLogError::MissingFrontier)?;
+                let handle =
+                    ObjectLogHandle::new(region.region_index, region.sequence, region.end_offset);
+                let encoded = encode(handle, &mut storage.memory.payload_scratch)?;
+                storage
+                    .memory
+                    .state
+                    .append_update_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
+                        storage.backing,
+                        &mut storage.memory.workspace,
+                        self.collection_id,
+                        &storage.memory.payload_scratch[..encoded.used],
+                    )?;
+                self.apply_append_record(
+                    handle,
+                    &storage.memory.payload_scratch[encoded.record_start..encoded.used],
+                    AppendVisibility::Planned,
+                )?;
+                return Ok(handle);
+            }
+
+            let region = self
+                .memory
+                .regions
+                .last()
+                .copied()
+                .ok_or(ObjectLogError::MissingFrontier)?;
+            if region.end_offset == region.start_offset {
+                return Err(ObjectLogError::ObjectTooLarge {
+                    len: record_len,
+                    capacity: empty_capacity,
+                });
+            }
+            self.materialize_current_frontier_in_transaction(storage)?;
+        }
+    }
+
+    fn initialize_aux_scratch(
+        &self,
+        metadata: StorageMetadata,
+        geometry: AuxGeometry,
+        scratch: &mut [u8],
+    ) -> Result<(), ObjectLogError> {
+        let scratch_len = scratch.len();
+        let payload =
+            scratch
+                .get_mut(..geometry.payload_capacity)
+                .ok_or(ObjectLogError::BufferTooSmall {
+                    needed: geometry.payload_capacity,
+                    available: scratch_len,
+                })?;
+        payload.fill(0);
+        encode_aux_prologue(
+            geometry,
+            &self.memory.log_metadata[..self.memory.log_metadata_len],
+            payload,
+        )?;
+        let link_end = geometry
+            .next_link_offset
+            .checked_add(geometry.next_link_len)
+            .ok_or(ObjectLogError::LengthOverflow)?;
+        payload[geometry.next_link_offset..link_end].fill(metadata.erased_byte);
+        Ok(())
+    }
+
+    fn materialize_aux_scratch<
+        'db,
+        'storage_mem,
+        IO: FlashIo,
+        const REGION_COUNT: usize,
+        const MAX_COLLECTIONS: usize,
+    >(
+        &mut self,
+        storage: &mut Storage<'db, 'storage_mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
+        geometry: AuxGeometry,
+        scratch: &[u8],
+        allocated_regions: &mut Vec<u32, REGION_COUNT>,
+    ) -> Result<AuxRegionPointer, ObjectLogError> {
+        let reserved = self.reserve_region(storage, allocated_regions)?;
+        storage
+            .memory
+            .state
+            .write_committed_region::<REGION_SIZE, REGION_COUNT, IO>(
+                storage.backing,
+                &mut storage.memory.workspace,
+                reserved.region_index,
+                self.collection_id,
+                OBJECT_LOG_AUX_V1_FORMAT,
+                &scratch[..geometry.payload_capacity],
+            )?;
+        Ok(AuxRegionPointer {
+            region_index: reserved.region_index,
+        })
+    }
+
+    fn write_aux_next_link<
+        'db,
+        'storage_mem,
+        IO: FlashIo,
+        const REGION_COUNT: usize,
+        const MAX_COLLECTIONS: usize,
+    >(
+        &mut self,
+        storage: &mut Storage<'db, 'storage_mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
+        geometry: AuxGeometry,
+        previous: AuxRegionPointer,
+        next: AuxRegionPointer,
+    ) -> Result<(), ObjectLogError> {
+        if storage.memory.payload_scratch.len() < geometry.next_link_len {
+            return Err(ObjectLogError::InvalidFrame);
+        }
+        let erased_byte = storage.metadata().erased_byte;
+        storage.memory.payload_scratch[..geometry.next_link_len].fill(erased_byte);
+        encode_aux_next_link(
+            next,
+            &mut storage.memory.payload_scratch[..geometry.next_link_len],
+        )?;
+        storage
+            .backing
+            .write_region(
+                previous.region_index,
+                Header::ENCODED_LEN + geometry.next_link_offset,
+                &storage.memory.payload_scratch[..geometry.next_link_len],
+            )
+            .map_err(StorageRuntimeError::from)?;
+        storage.backing.sync().map_err(StorageRuntimeError::from)?;
+        Ok(())
     }
 
     fn needs_new_region(
@@ -1482,11 +1710,11 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const LOG_METADAT
         }
     }
 
-    fn apply_truncate_before(
+    fn apply_truncate_before<const FREED_CAP: usize>(
         &mut self,
         handle: ObjectLogHandle,
         retained_start: ObjectLogHandle,
-        freed_regions: &mut Vec<u32, MAX_REGIONS>,
+        freed_regions: &mut Vec<u32, FREED_CAP>,
     ) -> Result<(), ObjectLogError> {
         freed_regions.clear();
         let retained_index = self
@@ -1552,11 +1780,21 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const LOG_METADAT
         storage: &mut Storage<'db, 'storage_mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
         handle: ObjectLogHandle,
     ) -> Result<(), ObjectLogError> {
-        let mut freed_regions = Vec::<u32, MAX_REGIONS>::new();
+        let mut freed_regions = Vec::<u32, REGION_COUNT>::new();
+        let mut freed_aux_regions = Vec::<u32, REGION_COUNT>::new();
         self.validate_live_handle(storage, handle)?;
         let retained_start = self.retained_start_for_truncate(storage, handle)?;
+        self.collect_aux_regions_truncated_before(storage, retained_start, &mut freed_aux_regions)?;
         let used =
             encode_truncate_update(handle, retained_start, &mut storage.memory.payload_scratch)?;
+        storage
+            .memory
+            .state
+            .begin_collection_transaction::<REGION_SIZE, REGION_COUNT, IO>(
+                storage.backing,
+                &mut storage.memory.workspace,
+                self.collection_id,
+            )?;
         storage
             .memory
             .state
@@ -1566,17 +1804,20 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const LOG_METADAT
                 self.collection_id,
                 &storage.memory.payload_scratch[..used],
             )?;
+        storage
+            .memory
+            .state
+            .commit_collection_transaction::<REGION_SIZE, REGION_COUNT, IO>(
+                storage.backing,
+                &mut storage.memory.workspace,
+                self.collection_id,
+            )?;
         self.apply_truncate_before(handle, retained_start, &mut freed_regions)?;
+        for region_index in freed_aux_regions {
+            push_unique_region_index(&mut freed_regions, region_index)?;
+        }
 
-        for region_index in freed_regions {
-            storage
-                .memory
-                .state
-                .begin_collection_transaction::<REGION_SIZE, REGION_COUNT, IO>(
-                    storage.backing,
-                    &mut storage.memory.workspace,
-                    self.collection_id,
-                )?;
+        for region_index in freed_regions.iter().copied() {
             storage
                 .memory
                 .state
@@ -1586,24 +1827,116 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const LOG_METADAT
                     self.collection_id,
                     region_index,
                 )?;
-            storage
+        }
+        storage
+            .memory
+            .state
+            .finish_collection_transaction::<REGION_SIZE, REGION_COUNT, IO>(
+                storage.backing,
+                &mut storage.memory.workspace,
+                self.collection_id,
+            )?;
+        Ok(())
+    }
+
+    fn collect_aux_regions_truncated_before<
+        'db,
+        'storage_mem,
+        IO: FlashIo,
+        const REGION_COUNT: usize,
+        const MAX_COLLECTIONS: usize,
+    >(
+        &self,
+        storage: &mut Storage<'db, 'storage_mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
+        retained_start: ObjectLogHandle,
+        freed_aux_regions: &mut Vec<u32, REGION_COUNT>,
+    ) -> Result<(), ObjectLogError> {
+        freed_aux_regions.clear();
+        let retained_index = self
+            .find_region(retained_start.region_index, retained_start.sequence)
+            .ok_or(ObjectLogError::InvalidHandle)?;
+        for index in 0..=retained_index {
+            let region = self
                 .memory
-                .state
-                .commit_collection_transaction::<REGION_SIZE, REGION_COUNT, IO>(
-                    storage.backing,
-                    &mut storage.memory.workspace,
-                    self.collection_id,
-                )?;
-            storage
-                .memory
-                .state
-                .finish_collection_transaction::<REGION_SIZE, REGION_COUNT, IO>(
-                    storage.backing,
-                    &mut storage.memory.workspace,
-                    self.collection_id,
-                )?;
+                .regions
+                .get(index)
+                .copied()
+                .ok_or(ObjectLogError::InvalidHandle)?;
+            let limit = if index == retained_index {
+                retained_start.offset
+            } else {
+                region.committed_end_offset
+            };
+            let mut offset = region.start_offset;
+            while offset < limit {
+                let handle = ObjectLogHandle::new(region.region_index, region.sequence, offset);
+                let record = self.read_record_info(storage, region, handle)?;
+                if record.record_end > limit {
+                    return Err(ObjectLogError::InvalidFrame);
+                }
+                if record.record_type == RECORD_LARGE_RECORD_ENTRY {
+                    let large_entry = self.read_large_entry(storage, region, handle, record)?;
+                    self.collect_aux_chain_regions(storage, large_entry, freed_aux_regions)?;
+                }
+                offset = record.record_end;
+            }
         }
         Ok(())
+    }
+
+    fn collect_aux_chain_regions<
+        'db,
+        'storage_mem,
+        IO: FlashIo,
+        const REGION_COUNT: usize,
+        const MAX_COLLECTIONS: usize,
+    >(
+        &self,
+        storage: &mut Storage<'db, 'storage_mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
+        large_entry: LargeRecordEntryInfo,
+        freed_aux_regions: &mut Vec<u32, REGION_COUNT>,
+    ) -> Result<(), ObjectLogError> {
+        let aux_logical_len = large_entry
+            .total_object_len
+            .checked_sub(u64::from(large_entry.tail_logical_len))
+            .ok_or(ObjectLogError::InvalidFrame)?;
+        if aux_logical_len == 0 {
+            return Ok(());
+        }
+        let geometry = self.aux_geometry(storage.metadata())?;
+        let mut current = large_entry.first_aux;
+        let mut expected_logical_start = 0u64;
+        for _ in 0..REGION_COUNT {
+            push_unique_region_index(freed_aux_regions, current.region_index)?;
+            let next = self.read_aux_region_into_storage_scratch(storage, geometry, current)?;
+            for slot_index in 0..geometry.chunk_slot_count {
+                let (chunk, _) = decode_aux_chunk_slot(
+                    &storage.memory.payload_scratch[..geometry.payload_capacity],
+                    geometry,
+                    slot_index,
+                )?;
+                if chunk.logical_start != expected_logical_start {
+                    return Err(ObjectLogError::InvalidFrame);
+                }
+                expected_logical_start = expected_logical_start
+                    .checked_add(
+                        u64::try_from(chunk.chunk_len)
+                            .map_err(|_| ObjectLogError::LengthOverflow)?,
+                    )
+                    .ok_or(ObjectLogError::LengthOverflow)?;
+                if expected_logical_start > aux_logical_len {
+                    return Err(ObjectLogError::InvalidFrame);
+                }
+                if expected_logical_start == aux_logical_len {
+                    if slot_index + 1 != geometry.chunk_slot_count || next.is_some() {
+                        return Err(ObjectLogError::InvalidFrame);
+                    }
+                    return Ok(());
+                }
+            }
+            current = next.ok_or(ObjectLogError::InvalidFrame)?;
+        }
+        Err(ObjectLogError::InvalidFrame)
     }
 
     fn flush_current<
@@ -1693,9 +2026,9 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const LOG_METADAT
                 self.read_record_body_into(storage, region, handle, record, scratch, true)?;
                 Ok(read(&scratch[..record.body_len]))
             }
-            RECORD_OBJECT_END => {
-                let object_end = self.read_object_end(storage, region, handle, record)?;
-                let object_len = usize::try_from(object_end.total_object_len)
+            RECORD_LARGE_RECORD_ENTRY => {
+                let large_entry = self.read_large_entry(storage, region, handle, record)?;
+                let object_len = usize::try_from(large_entry.total_object_len)
                     .map_err(|_| ObjectLogError::LengthOverflow)?;
                 if scratch.len() < object_len {
                     return Err(ObjectLogError::BufferTooSmall {
@@ -1705,9 +2038,13 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const LOG_METADAT
                 }
                 self.copy_large_object_range(
                     storage,
-                    object_end,
-                    0,
-                    object_end.total_object_len,
+                    LargeReadRequest {
+                        handle,
+                        entry_record: record,
+                        large_entry,
+                        object_offset: 0,
+                        len: large_entry.total_object_len,
+                    },
                     scratch,
                 )?;
                 Ok(read(&scratch[..object_len]))
@@ -1732,8 +2069,8 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const LOG_METADAT
             RECORD_INLINE_OBJECT => {
                 u64::try_from(record.body_len).map_err(|_| ObjectLogError::LengthOverflow)
             }
-            RECORD_OBJECT_END => Ok(self
-                .read_object_end(storage, region, handle, record)?
+            RECORD_LARGE_RECORD_ENTRY => Ok(self
+                .read_large_entry(storage, region, handle, record)?
                 .total_object_len),
             _ => Err(ObjectLogError::InvalidHandle),
         }
@@ -1773,10 +2110,10 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const LOG_METADAT
                     .copy_from_slice(&storage.memory.payload_scratch[..record.body_len][range]);
                 Ok(read(&scratch[..read_len]))
             }
-            RECORD_OBJECT_END => {
-                let object_end = self.read_object_end(storage, region, handle, record)?;
+            RECORD_LARGE_RECORD_ENTRY => {
+                let large_entry = self.read_large_entry(storage, region, handle, record)?;
                 let range = checked_object_read_range_u64(
-                    object_end.total_object_len,
+                    large_entry.total_object_len,
                     object_offset,
                     len,
                     scratch.len(),
@@ -1786,9 +2123,13 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const LOG_METADAT
                 }
                 self.copy_large_object_range(
                     storage,
-                    object_end,
-                    range.offset,
-                    range.len,
+                    LargeReadRequest {
+                        handle,
+                        entry_record: record,
+                        large_entry,
+                        object_offset: range.offset,
+                        len: range.len,
+                    },
                     scratch,
                 )?;
                 let read_len =
@@ -2094,7 +2435,7 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const LOG_METADAT
         Ok(())
     }
 
-    fn read_object_end<
+    fn read_large_entry<
         'db,
         'storage_mem,
         IO: FlashIo,
@@ -2106,12 +2447,14 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const LOG_METADAT
         region: ObjectLogRegion,
         handle: ObjectLogHandle,
         record: ObjectLogRecordInfo,
-    ) -> Result<ObjectEndInfo, ObjectLogError> {
-        if record.record_type != RECORD_OBJECT_END || record.body_len != OBJECT_END_BODY_LEN {
+    ) -> Result<LargeRecordEntryInfo, ObjectLogError> {
+        if record.record_type != RECORD_LARGE_RECORD_ENTRY
+            || record.body_len != LARGE_RECORD_ENTRY_BODY_LEN
+        {
             return Err(ObjectLogError::InvalidFrame);
         }
         self.read_record_body_into_storage_scratch(storage, region, handle, record, true)?;
-        decode_object_end_body(&storage.memory.payload_scratch[..record.body_len])
+        decode_large_entry_body(&storage.memory.payload_scratch[..record.body_len])
     }
 
     fn read_chunk_info<
@@ -2160,33 +2503,169 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const LOG_METADAT
     >(
         &self,
         storage: &mut Storage<'db, 'storage_mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
-        object_end: ObjectEndInfo,
-        object_offset: u64,
-        len: u64,
+        request: LargeReadRequest,
         scratch: &mut [u8],
     ) -> Result<(), ObjectLogError> {
-        let requested_end = object_offset
-            .checked_add(len)
+        let requested_end = request
+            .object_offset
+            .checked_add(request.len)
             .ok_or(ObjectLogError::LengthOverflow)?;
-        let mut current = object_end.first;
-        let mut previous = None::<ObjectLogHandle>;
-        let mut expected_logical_start = 0u64;
+        let target_len =
+            usize::try_from(request.len).map_err(|_| ObjectLogError::LengthOverflow)?;
+        let aux_logical_len = request
+            .large_entry
+            .total_object_len
+            .checked_sub(u64::from(request.large_entry.tail_logical_len))
+            .ok_or(ObjectLogError::InvalidFrame)?;
+        let geometry = self.aux_geometry(storage.metadata())?;
         let mut copied = 0usize;
-        let target_len = usize::try_from(len).map_err(|_| ObjectLogError::LengthOverflow)?;
 
-        for _ in 0..MAX_REGIONS {
-            let (_, _, chunk) = self.read_chunk_info(storage, current, false)?;
-            if chunk.logical_start != expected_logical_start {
-                return Err(ObjectLogError::InvalidFrame);
+        {
+            let mut copy = LargeCopyWindow {
+                object_offset: request.object_offset,
+                requested_end,
+                scratch,
+                copied: &mut copied,
+            };
+
+            if aux_logical_len > 0 {
+                self.copy_aux_chain_range(
+                    storage,
+                    geometry,
+                    request.large_entry.first_aux,
+                    aux_logical_len,
+                    &mut copy,
+                )?;
             }
-            if previous.is_none() && chunk.flags & OBJECT_CHUNK_FLAG_PREV_VALID != 0 {
-                return Err(ObjectLogError::InvalidFrame);
+
+            if request.large_entry.tail_logical_len > 0 {
+                self.copy_tail_chunk_range(
+                    storage,
+                    TailChunkReadPlan {
+                        large_handle: request.handle,
+                        entry_record: request.entry_record,
+                        tail_start: aux_logical_len,
+                        total_object_len: request.large_entry.total_object_len,
+                    },
+                    &mut copy,
+                )?;
             }
-            if let Some(previous_handle) = previous {
-                if chunk.flags & OBJECT_CHUNK_FLAG_PREV_VALID == 0 || chunk.prev != previous_handle
-                {
+        }
+
+        if copied != target_len {
+            return Err(ObjectLogError::InvalidFrame);
+        }
+        Ok(())
+    }
+
+    fn copy_aux_chain_range<
+        'db,
+        'storage_mem,
+        IO: FlashIo,
+        const REGION_COUNT: usize,
+        const MAX_COLLECTIONS: usize,
+    >(
+        &self,
+        storage: &mut Storage<'db, 'storage_mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
+        geometry: AuxGeometry,
+        first_aux: AuxRegionPointer,
+        aux_logical_len: u64,
+        copy: &mut LargeCopyWindow<'_>,
+    ) -> Result<(), ObjectLogError> {
+        let mut current = first_aux;
+        let mut expected_logical_start = 0u64;
+        for _ in 0..REGION_COUNT {
+            let next = self.read_aux_region_into_storage_scratch(storage, geometry, current)?;
+            for slot_index in 0..geometry.chunk_slot_count {
+                let (chunk, chunk_range) = decode_aux_chunk_slot(
+                    &storage.memory.payload_scratch[..geometry.payload_capacity],
+                    geometry,
+                    slot_index,
+                )?;
+                if chunk.logical_start != expected_logical_start {
                     return Err(ObjectLogError::InvalidFrame);
                 }
+                let chunk_end = chunk
+                    .logical_start
+                    .checked_add(
+                        u64::try_from(chunk.chunk_len)
+                            .map_err(|_| ObjectLogError::LengthOverflow)?,
+                    )
+                    .ok_or(ObjectLogError::LengthOverflow)?;
+                if chunk_end > aux_logical_len {
+                    return Err(ObjectLogError::InvalidFrame);
+                }
+                copy_chunk_intersection(
+                    chunk.logical_start,
+                    &storage.memory.payload_scratch[chunk_range],
+                    copy.object_offset,
+                    copy.requested_end,
+                    &mut *copy.scratch,
+                    &mut *copy.copied,
+                )?;
+                expected_logical_start = chunk_end;
+                if expected_logical_start == aux_logical_len {
+                    if slot_index + 1 != geometry.chunk_slot_count || next.is_some() {
+                        return Err(ObjectLogError::InvalidFrame);
+                    }
+                    return Ok(());
+                }
+            }
+            current = next.ok_or(ObjectLogError::InvalidFrame)?;
+        }
+        Err(ObjectLogError::InvalidFrame)
+    }
+
+    fn copy_tail_chunk_range<
+        'db,
+        'storage_mem,
+        IO: FlashIo,
+        const REGION_COUNT: usize,
+        const MAX_COLLECTIONS: usize,
+    >(
+        &self,
+        storage: &mut Storage<'db, 'storage_mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
+        plan: TailChunkReadPlan,
+        copy: &mut LargeCopyWindow<'_>,
+    ) -> Result<(), ObjectLogError> {
+        let mut region_index = self
+            .find_region(plan.large_handle.region_index, plan.large_handle.sequence)
+            .ok_or(ObjectLogError::InvalidHandle)?;
+        let mut offset = plan.entry_record.record_end;
+        let mut expected_logical_start = plan.tail_start;
+
+        while expected_logical_start < plan.total_object_len {
+            while {
+                let region = self
+                    .memory
+                    .regions
+                    .get(region_index)
+                    .copied()
+                    .ok_or(ObjectLogError::InvalidFrame)?;
+                offset >= region.committed_end_offset
+            } {
+                region_index = region_index
+                    .checked_add(1)
+                    .ok_or(ObjectLogError::LengthOverflow)?;
+                let region = self
+                    .memory
+                    .regions
+                    .get(region_index)
+                    .copied()
+                    .ok_or(ObjectLogError::InvalidFrame)?;
+                offset = region.start_offset;
+            }
+
+            let region = self
+                .memory
+                .regions
+                .get(region_index)
+                .copied()
+                .ok_or(ObjectLogError::InvalidFrame)?;
+            let chunk_handle = ObjectLogHandle::new(region.region_index, region.sequence, offset);
+            let (_, record, chunk) = self.read_chunk_info(storage, chunk_handle, true)?;
+            if chunk.logical_start != expected_logical_start {
+                return Err(ObjectLogError::InvalidFrame);
             }
             let chunk_end = chunk
                 .logical_start
@@ -2194,66 +2673,69 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const LOG_METADAT
                     u64::try_from(chunk.chunk_len).map_err(|_| ObjectLogError::LengthOverflow)?,
                 )
                 .ok_or(ObjectLogError::LengthOverflow)?;
-            if chunk_end > object_end.total_object_len {
+            if chunk_end > plan.total_object_len {
                 return Err(ObjectLogError::InvalidFrame);
             }
-
-            let (_, record, chunk) = self.read_chunk_info(storage, current, true)?;
-            let chunk_start = chunk.logical_start;
-            let chunk_end = chunk_start
-                .checked_add(
-                    u64::try_from(chunk.chunk_len).map_err(|_| ObjectLogError::LengthOverflow)?,
-                )
-                .ok_or(ObjectLogError::LengthOverflow)?;
-            let copy_start = object_offset.max(chunk_start).min(chunk_end);
-            let copy_end = requested_end.min(chunk_end).max(copy_start);
-            let source_start = usize::try_from(
-                copy_start
-                    .checked_sub(chunk_start)
-                    .ok_or(ObjectLogError::LengthOverflow)?,
-            )
-            .map_err(|_| ObjectLogError::LengthOverflow)?;
-            let source_end = usize::try_from(
-                copy_end
-                    .checked_sub(chunk_start)
-                    .ok_or(ObjectLogError::LengthOverflow)?,
-            )
-            .map_err(|_| ObjectLogError::LengthOverflow)?;
-            let copy_len = source_end
-                .checked_sub(source_start)
-                .ok_or(ObjectLogError::LengthOverflow)?;
-            let destination_end = copied
-                .checked_add(copy_len)
-                .ok_or(ObjectLogError::LengthOverflow)?;
-            if destination_end > scratch.len() || destination_end > target_len {
-                return Err(ObjectLogError::InvalidFrame);
-            }
-            let source_base = OBJECT_CHUNK_FIXED_BODY_LEN;
-            let source = &storage.memory.payload_scratch
-                [source_base + source_start..source_base + source_end];
-            scratch[copied..destination_end].copy_from_slice(source);
-            copied = destination_end;
-            if record.body_len != OBJECT_CHUNK_FIXED_BODY_LEN + chunk.chunk_len {
-                return Err(ObjectLogError::InvalidFrame);
-            }
-
-            if chunk_end == object_end.total_object_len {
-                if current != object_end.last || chunk.flags & OBJECT_CHUNK_FLAG_NEXT_VALID != 0 {
-                    return Err(ObjectLogError::InvalidFrame);
-                }
-                if copied != target_len {
-                    return Err(ObjectLogError::InvalidFrame);
-                }
-                return Ok(());
-            }
-            if chunk.flags & OBJECT_CHUNK_FLAG_NEXT_VALID == 0 {
-                return Err(ObjectLogError::InvalidFrame);
-            }
-            previous = Some(current);
-            current = chunk.next;
+            let chunk_bytes = &storage.memory.payload_scratch
+                [OBJECT_CHUNK_FIXED_BODY_LEN..OBJECT_CHUNK_FIXED_BODY_LEN + chunk.chunk_len];
+            copy_chunk_intersection(
+                chunk.logical_start,
+                chunk_bytes,
+                copy.object_offset,
+                copy.requested_end,
+                &mut *copy.scratch,
+                &mut *copy.copied,
+            )?;
+            offset = record.record_end;
             expected_logical_start = chunk_end;
         }
-        Err(ObjectLogError::InvalidFrame)
+        Ok(())
+    }
+
+    fn read_aux_region_into_storage_scratch<
+        'db,
+        'storage_mem,
+        IO: FlashIo,
+        const REGION_COUNT: usize,
+        const MAX_COLLECTIONS: usize,
+    >(
+        &self,
+        storage: &mut Storage<'db, 'storage_mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
+        geometry: AuxGeometry,
+        pointer: AuxRegionPointer,
+    ) -> Result<Option<AuxRegionPointer>, ObjectLogError> {
+        let header = storage
+            .backing
+            .read_region(pointer.region_index, 0, Header::ENCODED_LEN, Header::decode)
+            .map_err(StorageRuntimeError::from)?
+            .map_err(|_| ObjectLogError::InvalidFrame)?;
+        if header.collection_id != self.collection_id
+            || header.collection_format != OBJECT_LOG_AUX_V1_FORMAT
+        {
+            return Err(ObjectLogError::InvalidFrame);
+        }
+        storage
+            .backing
+            .read_region(
+                pointer.region_index,
+                Header::ENCODED_LEN,
+                geometry.payload_capacity,
+                |bytes| {
+                    storage.memory.payload_scratch[..geometry.payload_capacity]
+                        .copy_from_slice(bytes)
+                },
+            )
+            .map_err(StorageRuntimeError::from)?;
+        decode_aux_prologue(
+            &storage.memory.payload_scratch[..geometry.payload_capacity],
+            geometry,
+            &self.memory.log_metadata[..self.memory.log_metadata_len],
+        )?;
+        decode_aux_next_link(
+            &storage.memory.payload_scratch
+                [geometry.next_link_offset..geometry.next_link_offset + geometry.next_link_len],
+            storage.metadata().erased_byte,
+        )
     }
 
     fn find_next_public_handle<
@@ -2307,7 +2789,10 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const LOG_METADAT
         let (region, record) = self.read_public_record_info(storage, handle)?;
         match record.record_type {
             RECORD_INLINE_OBJECT => Ok(handle),
-            RECORD_OBJECT_END => Ok(self.read_object_end(storage, region, handle, record)?.first),
+            RECORD_LARGE_RECORD_ENTRY => {
+                let _ = self.read_large_entry(storage, region, handle, record)?;
+                Ok(handle)
+            }
             _ => Err(ObjectLogError::InvalidHandle),
         }
     }
@@ -2691,10 +3176,7 @@ fn encode_inline_append_update(
 
 fn encode_chunk_append_update(
     handle: ObjectLogHandle,
-    flags: u8,
     logical_start: u64,
-    prev: ObjectLogHandle,
-    next: ObjectLogHandle,
     chunk_bytes: &[u8],
     output: &mut [u8],
 ) -> Result<EncodedRecordUpdate, ObjectLogError> {
@@ -2713,10 +3195,7 @@ fn encode_chunk_append_update(
         .ok_or(ObjectLogError::LengthOverflow)?;
     let available = output.len();
     encode_chunk_record(
-        flags,
         logical_start,
-        prev,
-        next,
         chunk_bytes,
         output
             .get_mut(record_start..record_end)
@@ -2731,14 +3210,14 @@ fn encode_chunk_append_update(
     })
 }
 
-fn encode_end_append_update(
+fn encode_large_entry_append_update(
     handle: ObjectLogHandle,
     total_object_len: u64,
-    first: ObjectLogHandle,
-    last: ObjectLogHandle,
+    tail_logical_len: u32,
+    first_aux: AuxRegionPointer,
     output: &mut [u8],
 ) -> Result<EncodedRecordUpdate, ObjectLogError> {
-    let record_len = end_record_len()?;
+    let record_len = large_entry_record_len()?;
     let mut offset = 0usize;
     offset = write_u8(output, offset, UPDATE_APPEND)?;
     offset = write_handle(output, offset, handle)?;
@@ -2752,10 +3231,10 @@ fn encode_end_append_update(
         .checked_add(record_len)
         .ok_or(ObjectLogError::LengthOverflow)?;
     let available = output.len();
-    encode_end_record(
+    encode_large_entry_record(
         total_object_len,
-        first,
-        last,
+        tail_logical_len,
+        first_aux,
         output
             .get_mut(record_start..record_end)
             .ok_or(ObjectLogError::BufferTooSmall {
@@ -2976,14 +3455,10 @@ fn encode_inline_record(bytes: &[u8], output: &mut [u8]) -> Result<usize, Object
 }
 
 fn encode_chunk_record(
-    flags: u8,
     logical_start: u64,
-    prev: ObjectLogHandle,
-    next: ObjectLogHandle,
     chunk_bytes: &[u8],
     output: &mut [u8],
 ) -> Result<usize, ObjectLogError> {
-    validate_chunk_flags(flags)?;
     let body_len = OBJECT_CHUNK_FIXED_BODY_LEN
         .checked_add(chunk_bytes.len())
         .ok_or(ObjectLogError::LengthOverflow)?;
@@ -2999,15 +3474,13 @@ fn encode_chunk_record(
         .checked_add(body_len)
         .ok_or(ObjectLogError::LengthOverflow)?;
     let mut body_offset = body_start;
-    body_offset = write_u8(output, body_offset, flags)?;
     body_offset = write_u64(output, body_offset, logical_start)?;
     body_offset = write_u32(
         output,
         body_offset,
         u32::try_from(chunk_bytes.len()).map_err(|_| ObjectLogError::LengthOverflow)?,
     )?;
-    body_offset = write_handle(output, body_offset, prev)?;
-    body_offset = write_handle(output, body_offset, next)?;
+    body_offset = write_u32(output, body_offset, crc32(chunk_bytes))?;
     let _ = write_bytes(output, body_offset, chunk_bytes)?;
     let body_crc32c = crc32(&output[body_start..body_end]);
     encode_record_header_parts(
@@ -3019,13 +3492,13 @@ fn encode_chunk_record(
     Ok(record_len)
 }
 
-fn encode_end_record(
+fn encode_large_entry_record(
     total_object_len: u64,
-    first: ObjectLogHandle,
-    last: ObjectLogHandle,
+    tail_logical_len: u32,
+    first_aux: AuxRegionPointer,
     output: &mut [u8],
 ) -> Result<usize, ObjectLogError> {
-    let record_len = end_record_len()?;
+    let record_len = large_entry_record_len()?;
     if output.len() < record_len {
         return Err(ObjectLogError::BufferTooSmall {
             needed: record_len,
@@ -3034,16 +3507,16 @@ fn encode_end_record(
     }
     let body_start = RECORD_HEADER_LEN;
     let body_end = body_start
-        .checked_add(OBJECT_END_BODY_LEN)
+        .checked_add(LARGE_RECORD_ENTRY_BODY_LEN)
         .ok_or(ObjectLogError::LengthOverflow)?;
     let mut body_offset = body_start;
     body_offset = write_u64(output, body_offset, total_object_len)?;
-    body_offset = write_handle(output, body_offset, first)?;
-    let _ = write_handle(output, body_offset, last)?;
+    body_offset = write_u32(output, body_offset, tail_logical_len)?;
+    let _ = write_aux_pointer(output, body_offset, first_aux)?;
     let body_crc32c = crc32(&output[body_start..body_end]);
     encode_record_header_parts(
-        RECORD_OBJECT_END,
-        OBJECT_END_BODY_LEN,
+        RECORD_LARGE_RECORD_ENTRY,
+        LARGE_RECORD_ENTRY_BODY_LEN,
         body_crc32c,
         &mut output[..RECORD_HEADER_LEN],
     )?;
@@ -3146,11 +3619,11 @@ fn validate_record_body_shape(record_type: u8, body: &[u8]) -> Result<(), Object
             let _ = decode_chunk_body_info(body)?;
             Ok(())
         }
-        RECORD_OBJECT_END => {
-            if body.len() != OBJECT_END_BODY_LEN {
+        RECORD_LARGE_RECORD_ENTRY => {
+            if body.len() != LARGE_RECORD_ENTRY_BODY_LEN {
                 return Err(ObjectLogError::InvalidFrame);
             }
-            let _ = decode_object_end_body(body)?;
+            let _ = decode_large_entry_body(body)?;
             Ok(())
         }
         _ => Err(ObjectLogError::InvalidFrame),
@@ -3160,6 +3633,12 @@ fn validate_record_body_shape(record_type: u8, body: &[u8]) -> Result<(), Object
 fn decode_chunk_body_info(body: &[u8]) -> Result<ObjectChunkInfo, ObjectLogError> {
     let chunk = decode_chunk_body_prefix(body, body.len())?;
     if body.len() != OBJECT_CHUNK_FIXED_BODY_LEN + chunk.chunk_len {
+        return Err(ObjectLogError::InvalidFrame);
+    }
+    let chunk_bytes = body
+        .get(OBJECT_CHUNK_FIXED_BODY_LEN..)
+        .ok_or(ObjectLogError::InvalidFrame)?;
+    if crc32(chunk_bytes) != chunk.chunk_crc32c {
         return Err(ObjectLogError::InvalidFrame);
     }
     Ok(chunk)
@@ -3173,57 +3652,53 @@ fn decode_chunk_body_prefix(
         return Err(ObjectLogError::InvalidFrame);
     }
     let mut offset = 0usize;
-    let flags = read_u8(body, &mut offset)?;
-    validate_chunk_flags(flags)?;
     let logical_start = read_u64(body, &mut offset)?;
     let chunk_len = usize::try_from(read_u32(body, &mut offset)?)
         .map_err(|_| ObjectLogError::LengthOverflow)?;
-    let prev = read_handle(body, &mut offset)?;
-    let next = read_handle(body, &mut offset)?;
+    let chunk_crc32c = read_u32(body, &mut offset)?;
     if full_body_len != OBJECT_CHUNK_FIXED_BODY_LEN + chunk_len {
         return Err(ObjectLogError::InvalidFrame);
     }
     Ok(ObjectChunkInfo {
-        flags,
         logical_start,
         chunk_len,
-        prev,
-        next,
+        chunk_crc32c,
     })
 }
 
-fn decode_object_end_body(body: &[u8]) -> Result<ObjectEndInfo, ObjectLogError> {
-    if body.len() != OBJECT_END_BODY_LEN {
+fn decode_large_entry_body(body: &[u8]) -> Result<LargeRecordEntryInfo, ObjectLogError> {
+    if body.len() != LARGE_RECORD_ENTRY_BODY_LEN {
         return Err(ObjectLogError::InvalidFrame);
     }
     let mut offset = 0usize;
     let total_object_len = read_u64(body, &mut offset)?;
-    let first = read_handle(body, &mut offset)?;
-    let last = read_handle(body, &mut offset)?;
-    Ok(ObjectEndInfo {
+    let tail_logical_len = read_u32(body, &mut offset)?;
+    let first_aux = read_aux_pointer(body, &mut offset)?;
+    if u64::from(tail_logical_len) > total_object_len {
+        return Err(ObjectLogError::InvalidFrame);
+    }
+    if total_object_len == u64::from(tail_logical_len) && first_aux.region_index != 0 {
+        return Err(ObjectLogError::InvalidFrame);
+    }
+    Ok(LargeRecordEntryInfo {
         total_object_len,
-        first,
-        last,
+        tail_logical_len,
+        first_aux,
     })
 }
 
 fn validate_record_type(record_type: u8) -> Result<(), ObjectLogError> {
     match record_type {
-        RECORD_INLINE_OBJECT | RECORD_OBJECT_CHUNK | RECORD_OBJECT_END => Ok(()),
+        RECORD_INLINE_OBJECT | RECORD_OBJECT_CHUNK | RECORD_LARGE_RECORD_ENTRY => Ok(()),
         _ => Err(ObjectLogError::InvalidFrame),
     }
 }
 
 fn record_type_is_public(record_type: u8) -> bool {
-    matches!(record_type, RECORD_INLINE_OBJECT | RECORD_OBJECT_END)
-}
-
-fn validate_chunk_flags(flags: u8) -> Result<(), ObjectLogError> {
-    if flags & !OBJECT_CHUNK_FLAGS_VALID_MASK == 0 {
-        Ok(())
-    } else {
-        Err(ObjectLogError::InvalidFrame)
-    }
+    matches!(
+        record_type,
+        RECORD_INLINE_OBJECT | RECORD_LARGE_RECORD_ENTRY
+    )
 }
 
 fn record_len(body_len: usize) -> Result<usize, ObjectLogError> {
@@ -3244,8 +3719,8 @@ fn chunk_record_len(chunk_len: usize) -> Result<usize, ObjectLogError> {
     )
 }
 
-fn end_record_len() -> Result<usize, ObjectLogError> {
-    record_len(OBJECT_END_BODY_LEN)
+fn large_entry_record_len() -> Result<usize, ObjectLogError> {
+    record_len(LARGE_RECORD_ENTRY_BODY_LEN)
 }
 
 fn validate_log_metadata_len<const LOG_METADATA_MAX: usize>(
@@ -3276,23 +3751,407 @@ fn empty_region_record_capacity(
     Ok(payload_capacity.saturating_sub(data_prologue_len(log_metadata_len)?))
 }
 
-fn chunk_payload_capacity_at(
-    record_offset: usize,
-    max_region_end: usize,
-    reserve_end_record: bool,
+fn inline_body_capacity(
+    payload_capacity: usize,
+    log_metadata_len: usize,
 ) -> Result<usize, ObjectLogError> {
-    let reserved = if reserve_end_record {
-        end_record_len()?
-    } else {
-        0
-    };
-    let overhead = RECORD_HEADER_LEN
-        .checked_add(OBJECT_CHUNK_FIXED_BODY_LEN)
-        .and_then(|value| value.checked_add(reserved))
+    Ok(
+        empty_region_record_capacity(payload_capacity, log_metadata_len)?
+            .saturating_sub(RECORD_HEADER_LEN),
+    )
+}
+
+fn tail_chunk_body_capacity(
+    payload_capacity: usize,
+    log_metadata_len: usize,
+) -> Result<usize, ObjectLogError> {
+    Ok(
+        empty_region_record_capacity(payload_capacity, log_metadata_len)?
+            .saturating_sub(RECORD_HEADER_LEN + OBJECT_CHUNK_FIXED_BODY_LEN),
+    )
+}
+
+fn aux_geometry<const REGION_SIZE: usize>(
+    metadata: StorageMetadata,
+    log_metadata_len: usize,
+) -> Result<AuxGeometry, ObjectLogError> {
+    let granule =
+        usize::try_from(metadata.wal_write_granule).map_err(|_| ObjectLogError::LengthOverflow)?;
+    if granule == 0 {
+        return Err(ObjectLogError::InvalidEncoding);
+    }
+    let payload_capacity = committed_payload_capacity::<REGION_SIZE>(metadata)?;
+    let raw_prologue_len = AUX_PROLOGUE_PREFIX_LEN
+        .checked_add(log_metadata_len)
+        .and_then(|value| value.checked_add(AUX_PROLOGUE_CRC_LEN))
         .ok_or(ObjectLogError::LengthOverflow)?;
-    Ok(max_region_end
-        .saturating_sub(record_offset)
-        .saturating_sub(overhead))
+    let prologue_end = align_up(
+        Header::ENCODED_LEN
+            .checked_add(raw_prologue_len)
+            .ok_or(ObjectLogError::LengthOverflow)?,
+        granule,
+    )?;
+    let prologue_len = prologue_end
+        .checked_sub(Header::ENCODED_LEN)
+        .ok_or(ObjectLogError::LengthOverflow)?;
+    let next_link_len = align_up(AUX_LINK_PRESENT_LEN, granule)?;
+    let committed_end = Header::ENCODED_LEN
+        .checked_add(payload_capacity)
+        .ok_or(ObjectLogError::LengthOverflow)?;
+    let next_link_start = committed_end
+        .checked_sub(next_link_len)
+        .ok_or(ObjectLogError::InvalidEncoding)?;
+    let next_link_offset = next_link_start
+        .checked_sub(Header::ENCODED_LEN)
+        .ok_or(ObjectLogError::InvalidEncoding)?;
+    let chunk_area = next_link_offset
+        .checked_sub(prologue_len)
+        .ok_or(ObjectLogError::InvalidEncoding)?;
+
+    let mut chunk_slot_len = 0usize;
+    let mut candidate = chunk_area;
+    while candidate >= granule {
+        if candidate % granule == 0
+            && chunk_area % candidate == 0
+            && chunk_area / candidate >= 2
+            && candidate > AUX_CHUNK_FIXED_LEN
+        {
+            chunk_slot_len = candidate;
+            break;
+        }
+        candidate = candidate.saturating_sub(1);
+    }
+    if chunk_slot_len == 0 {
+        return Err(ObjectLogError::ObjectTooLarge {
+            len: raw_prologue_len + next_link_len,
+            capacity: payload_capacity,
+        });
+    }
+    let chunk_slot_count = chunk_area / chunk_slot_len;
+    let aux_slot_payload_capacity = chunk_slot_len
+        .checked_sub(AUX_CHUNK_FIXED_LEN)
+        .ok_or(ObjectLogError::InvalidEncoding)?;
+    let chunk_logical_capacity = aux_slot_payload_capacity
+        .min(inline_body_capacity(payload_capacity, log_metadata_len)?)
+        .min(tail_chunk_body_capacity(
+            payload_capacity,
+            log_metadata_len,
+        )?);
+    if chunk_logical_capacity == 0 {
+        return Err(ObjectLogError::ObjectTooLarge {
+            len: 1,
+            capacity: payload_capacity,
+        });
+    }
+
+    Ok(AuxGeometry {
+        payload_capacity,
+        prologue_len,
+        chunk_slot_len,
+        chunk_slot_count,
+        chunk_logical_capacity,
+        next_link_offset,
+        next_link_len,
+    })
+}
+
+fn align_up(value: usize, granule: usize) -> Result<usize, ObjectLogError> {
+    if granule == 0 {
+        return Err(ObjectLogError::InvalidEncoding);
+    }
+    let remainder = value % granule;
+    if remainder == 0 {
+        return Ok(value);
+    }
+    value
+        .checked_add(granule - remainder)
+        .ok_or(ObjectLogError::LengthOverflow)
+}
+
+fn encode_aux_prologue(
+    geometry: AuxGeometry,
+    log_metadata: &[u8],
+    output: &mut [u8],
+) -> Result<(), ObjectLogError> {
+    if output.len() < geometry.prologue_len {
+        return Err(ObjectLogError::BufferTooSmall {
+            needed: geometry.prologue_len,
+            available: output.len(),
+        });
+    }
+    let mut offset = 0usize;
+    offset = write_bytes(output, offset, &AUX_MAGIC)?;
+    offset = write_u16(output, offset, AUX_VERSION)?;
+    offset = write_u32(
+        output,
+        offset,
+        u32::try_from(geometry.chunk_slot_len).map_err(|_| ObjectLogError::LengthOverflow)?,
+    )?;
+    offset = write_u32(
+        output,
+        offset,
+        u32::try_from(geometry.chunk_slot_count).map_err(|_| ObjectLogError::LengthOverflow)?,
+    )?;
+    offset = write_u32(
+        output,
+        offset,
+        u32::try_from(log_metadata.len()).map_err(|_| ObjectLogError::LengthOverflow)?,
+    )?;
+    offset = write_bytes(output, offset, log_metadata)?;
+    let checksum = crc32(&output[..offset]);
+    offset = write_u32(output, offset, checksum)?;
+    output[offset..geometry.prologue_len].fill(0);
+    Ok(())
+}
+
+fn decode_aux_prologue(
+    input: &[u8],
+    geometry: AuxGeometry,
+    log_metadata: &[u8],
+) -> Result<(), ObjectLogError> {
+    if input.len() < geometry.prologue_len {
+        return Err(ObjectLogError::InvalidFrame);
+    }
+    let mut offset = 0usize;
+    if read_bytes(input, &mut offset, AUX_MAGIC.len())? != AUX_MAGIC.as_slice() {
+        return Err(ObjectLogError::InvalidFrame);
+    }
+    if read_u16(input, &mut offset)? != AUX_VERSION {
+        return Err(ObjectLogError::InvalidFrame);
+    }
+    if usize::try_from(read_u32(input, &mut offset)?).map_err(|_| ObjectLogError::LengthOverflow)?
+        != geometry.chunk_slot_len
+    {
+        return Err(ObjectLogError::InvalidFrame);
+    }
+    if usize::try_from(read_u32(input, &mut offset)?).map_err(|_| ObjectLogError::LengthOverflow)?
+        != geometry.chunk_slot_count
+    {
+        return Err(ObjectLogError::InvalidFrame);
+    }
+    let log_metadata_len = usize::try_from(read_u32(input, &mut offset)?)
+        .map_err(|_| ObjectLogError::LengthOverflow)?;
+    if log_metadata_len != log_metadata.len() {
+        return Err(ObjectLogError::InvalidFrame);
+    }
+    if read_bytes(input, &mut offset, log_metadata_len)? != log_metadata {
+        return Err(ObjectLogError::InvalidFrame);
+    }
+    let expected_crc = crc32(&input[..offset]);
+    if read_u32(input, &mut offset)? != expected_crc {
+        return Err(ObjectLogError::InvalidFrame);
+    }
+    if input[offset..geometry.prologue_len]
+        .iter()
+        .any(|byte| *byte != 0)
+    {
+        return Err(ObjectLogError::InvalidFrame);
+    }
+    Ok(())
+}
+
+fn encode_aux_chunk_slot(
+    output: &mut [u8],
+    geometry: AuxGeometry,
+    slot_index: usize,
+    logical_start: u64,
+    chunk_bytes: &[u8],
+) -> Result<(), ObjectLogError> {
+    if slot_index >= geometry.chunk_slot_count
+        || chunk_bytes.len() > geometry.chunk_logical_capacity
+    {
+        return Err(ObjectLogError::InvalidFrame);
+    }
+    let slot_start = geometry
+        .prologue_len
+        .checked_add(
+            slot_index
+                .checked_mul(geometry.chunk_slot_len)
+                .ok_or(ObjectLogError::LengthOverflow)?,
+        )
+        .ok_or(ObjectLogError::LengthOverflow)?;
+    let slot_end = slot_start
+        .checked_add(geometry.chunk_slot_len)
+        .ok_or(ObjectLogError::LengthOverflow)?;
+    let slot = output
+        .get_mut(slot_start..slot_end)
+        .ok_or(ObjectLogError::InvalidFrame)?;
+    slot.fill(0);
+    let mut offset = 0usize;
+    offset = write_u8(slot, offset, RECORD_OBJECT_CHUNK)?;
+    offset = write_u64(slot, offset, logical_start)?;
+    offset = write_u32(
+        slot,
+        offset,
+        u32::try_from(chunk_bytes.len()).map_err(|_| ObjectLogError::LengthOverflow)?,
+    )?;
+    offset = write_u32(slot, offset, crc32(chunk_bytes))?;
+    let _ = write_bytes(slot, offset, chunk_bytes)?;
+    Ok(())
+}
+
+fn decode_aux_chunk_slot(
+    input: &[u8],
+    geometry: AuxGeometry,
+    slot_index: usize,
+) -> Result<(ObjectChunkInfo, core::ops::Range<usize>), ObjectLogError> {
+    if slot_index >= geometry.chunk_slot_count {
+        return Err(ObjectLogError::InvalidFrame);
+    }
+    let slot_start = geometry
+        .prologue_len
+        .checked_add(
+            slot_index
+                .checked_mul(geometry.chunk_slot_len)
+                .ok_or(ObjectLogError::LengthOverflow)?,
+        )
+        .ok_or(ObjectLogError::LengthOverflow)?;
+    let slot_end = slot_start
+        .checked_add(geometry.chunk_slot_len)
+        .ok_or(ObjectLogError::LengthOverflow)?;
+    let slot = input
+        .get(slot_start..slot_end)
+        .ok_or(ObjectLogError::InvalidFrame)?;
+    let mut offset = 0usize;
+    if read_u8(slot, &mut offset)? != RECORD_OBJECT_CHUNK {
+        return Err(ObjectLogError::InvalidFrame);
+    }
+    let logical_start = read_u64(slot, &mut offset)?;
+    let chunk_len = usize::try_from(read_u32(slot, &mut offset)?)
+        .map_err(|_| ObjectLogError::LengthOverflow)?;
+    let chunk_crc32c = read_u32(slot, &mut offset)?;
+    if chunk_len == 0 || chunk_len > geometry.chunk_logical_capacity {
+        return Err(ObjectLogError::InvalidFrame);
+    }
+    let chunk_start = slot_start
+        .checked_add(offset)
+        .ok_or(ObjectLogError::LengthOverflow)?;
+    let chunk_end = chunk_start
+        .checked_add(chunk_len)
+        .ok_or(ObjectLogError::LengthOverflow)?;
+    let zero_start = offset
+        .checked_add(chunk_len)
+        .ok_or(ObjectLogError::LengthOverflow)?;
+    if zero_start > slot.len() {
+        return Err(ObjectLogError::InvalidFrame);
+    }
+    if crc32(&input[chunk_start..chunk_end]) != chunk_crc32c {
+        return Err(ObjectLogError::InvalidFrame);
+    }
+    if slot[zero_start..].iter().any(|byte| *byte != 0) {
+        return Err(ObjectLogError::InvalidFrame);
+    }
+    Ok((
+        ObjectChunkInfo {
+            logical_start,
+            chunk_len,
+            chunk_crc32c,
+        },
+        chunk_start..chunk_end,
+    ))
+}
+
+fn encode_aux_next_link(
+    next: AuxRegionPointer,
+    output: &mut [u8],
+) -> Result<usize, ObjectLogError> {
+    if output.len() < AUX_LINK_PRESENT_LEN {
+        return Err(ObjectLogError::BufferTooSmall {
+            needed: AUX_LINK_PRESENT_LEN,
+            available: output.len(),
+        });
+    }
+    let mut offset = 0usize;
+    offset = write_u8(output, offset, 1)?;
+    offset = write_aux_pointer(output, offset, next)?;
+    let checksum = crc32(&output[..offset]);
+    write_u32(output, offset, checksum)
+}
+
+fn decode_aux_next_link(
+    input: &[u8],
+    erased_byte: u8,
+) -> Result<Option<AuxRegionPointer>, ObjectLogError> {
+    if input.iter().all(|byte| *byte == erased_byte) {
+        return Ok(None);
+    }
+    if input.len() < AUX_LINK_PRESENT_LEN {
+        return Err(ObjectLogError::InvalidFrame);
+    }
+    let mut offset = 0usize;
+    match read_u8(input, &mut offset)? {
+        1 => {}
+        _ => return Err(ObjectLogError::InvalidFrame),
+    }
+    let next = read_aux_pointer(input, &mut offset)?;
+    let expected = crc32(&input[..offset]);
+    if read_u32(input, &mut offset)? != expected {
+        return Err(ObjectLogError::InvalidFrame);
+    }
+    if input[offset..].iter().any(|byte| *byte != erased_byte) {
+        return Err(ObjectLogError::InvalidFrame);
+    }
+    Ok(Some(next))
+}
+
+fn copy_chunk_intersection(
+    chunk_logical_start: u64,
+    chunk_bytes: &[u8],
+    object_offset: u64,
+    requested_end: u64,
+    scratch: &mut [u8],
+    copied: &mut usize,
+) -> Result<(), ObjectLogError> {
+    let chunk_len = u64::try_from(chunk_bytes.len()).map_err(|_| ObjectLogError::LengthOverflow)?;
+    let chunk_end = chunk_logical_start
+        .checked_add(chunk_len)
+        .ok_or(ObjectLogError::LengthOverflow)?;
+    let copy_start = object_offset.max(chunk_logical_start).min(chunk_end);
+    let copy_end = requested_end.min(chunk_end).max(copy_start);
+    let copy_len_u64 = copy_end
+        .checked_sub(copy_start)
+        .ok_or(ObjectLogError::LengthOverflow)?;
+    if copy_len_u64 == 0 {
+        return Ok(());
+    }
+    let source_start = usize::try_from(
+        copy_start
+            .checked_sub(chunk_logical_start)
+            .ok_or(ObjectLogError::LengthOverflow)?,
+    )
+    .map_err(|_| ObjectLogError::LengthOverflow)?;
+    let copy_len = usize::try_from(copy_len_u64).map_err(|_| ObjectLogError::LengthOverflow)?;
+    let source_end = source_start
+        .checked_add(copy_len)
+        .ok_or(ObjectLogError::LengthOverflow)?;
+    let destination_start = usize::try_from(
+        copy_start
+            .checked_sub(object_offset)
+            .ok_or(ObjectLogError::LengthOverflow)?,
+    )
+    .map_err(|_| ObjectLogError::LengthOverflow)?;
+    let destination_end = destination_start
+        .checked_add(copy_len)
+        .ok_or(ObjectLogError::LengthOverflow)?;
+    if source_end > chunk_bytes.len() || destination_end > scratch.len() {
+        return Err(ObjectLogError::InvalidFrame);
+    }
+    scratch[destination_start..destination_end]
+        .copy_from_slice(&chunk_bytes[source_start..source_end]);
+    *copied = (*copied).max(destination_end);
+    Ok(())
+}
+
+fn push_unique_region_index<const CAP: usize>(
+    regions: &mut Vec<u32, CAP>,
+    region_index: u32,
+) -> Result<(), ObjectLogError> {
+    if !regions.contains(&region_index) {
+        regions
+            .push(region_index)
+            .map_err(|_| ObjectLogError::TooManyRegions)?;
+    }
+    Ok(())
 }
 
 fn checked_object_read_range(
@@ -3415,6 +4274,20 @@ fn read_handle(input: &[u8], offset: &mut usize) -> Result<ObjectLogHandle, Obje
         region_index: read_u32(input, offset)?,
         sequence: read_u64(input, offset)?,
         offset: read_u32(input, offset)?,
+    })
+}
+
+fn write_aux_pointer(
+    output: &mut [u8],
+    offset: usize,
+    pointer: AuxRegionPointer,
+) -> Result<usize, ObjectLogError> {
+    write_u32(output, offset, pointer.region_index)
+}
+
+fn read_aux_pointer(input: &[u8], offset: &mut usize) -> Result<AuxRegionPointer, ObjectLogError> {
+    Ok(AuxRegionPointer {
+        region_index: read_u32(input, offset)?,
     })
 }
 

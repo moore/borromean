@@ -166,9 +166,10 @@ path. The auxiliary logical length is
 `total_object_len - tail_logical_len`. If `total_object_len ==
 tail_logical_len`, there is no auxiliary chain and the `first_aux` pointer bytes
 MUST be zero. If `total_object_len > tail_logical_len`, `first_aux` names the
-first auxiliary region. `tail_logical_len` MUST NOT exceed `total_object_len`
-and MUST be less than one complete auxiliary-region image's logical chunk
-capacity.
+first auxiliary region; region index zero is valid in that case if it names an
+allocated auxiliary region. `tail_logical_len` MUST NOT exceed
+`total_object_len` and MUST be less than one complete auxiliary-region image's
+logical chunk capacity.
 
 Large-object auxiliary regions use the ordinary Borromean region header, then
 an object-log auxiliary prologue with its own version. The auxiliary prologue is:
@@ -248,8 +249,9 @@ that record.
 7. `RING-OBJECT-019` Large-object handles MUST point to public record type
 `0x03` `LargeRecordEntry` records encoded as `[total_object_len:u64
 little-endian][tail_logical_len:u32 little-endian][first_aux:AuxRegionPointer]`,
-where `tail_logical_len` names the contiguous ordinary-log tail byte count and
-`first_aux` is zero only when the whole large object is stored in tail chunks.
+where `tail_logical_len` names the contiguous ordinary-log tail byte count;
+when `tail_logical_len == total_object_len`, `first_aux` bytes are zero, and
+otherwise `first_aux` names the first allocated auxiliary region.
 8. `RING-OBJECT-020` Object chunks MUST be private record type `0x02`
 `ObjectChunk` records encoded as `[logical_start:u64 little-endian]
 [chunk_len:u32 little-endian][chunk_crc32c:u32 little-endian][chunk_bytes]`

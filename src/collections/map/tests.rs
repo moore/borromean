@@ -442,7 +442,7 @@ fn requirement_v2_entry_layout_validates_headers_and_lengths() {
     let mut header_only_delete = [0u8; ENTRY_HEADER_SIZE];
     header_only_delete[0] = ENTRY_KIND_DELETE;
     let parsed = parse_encoded_entry(&header_only_delete).unwrap();
-    assert_eq!(parsed.key, &[]);
+    assert_eq!(parsed.key, &[] as &[u8]);
     assert_eq!(parsed.value, None);
     assert_eq!(
         encoded_entry_lookup_value::<u16>(&encoded[..delete_used]).unwrap(),
@@ -457,7 +457,10 @@ fn requirement_v2_entry_layout_validates_headers_and_lengths() {
     let mut exact_header = [0u8; ENTRY_HEADER_SIZE];
     let used = encode_entry_into::<(), u16>(&(), None, &mut exact_header).unwrap();
     assert_eq!(used, ENTRY_HEADER_SIZE);
-    assert_eq!(parse_encoded_entry(&exact_header).unwrap().key, &[]);
+    assert_eq!(
+        parse_encoded_entry(&exact_header).unwrap().key,
+        &[] as &[u8]
+    );
 
     let mut too_small_for_key = [0u8; ENTRY_HEADER_SIZE];
     assert!(matches!(

@@ -6,6 +6,20 @@ use std::format;
 
 const LOG_METADATA: &[u8] = b"log-meta";
 
+macro_rules! append_with_scratch {
+    ($log:expr, $storage:expr, $bytes:expr) => {{
+        let mut large_scratch = [0u8; REGION_SIZE];
+        $log.append($storage, $bytes, &mut large_scratch)
+    }};
+}
+
+macro_rules! tx_append_with_scratch {
+    ($tx:expr, $bytes:expr) => {{
+        let mut large_scratch = [0u8; REGION_SIZE];
+        $tx.append($bytes, &mut large_scratch)
+    }};
+}
+
 fn assert_get<
     IO: FlashIo,
     const REGION_SIZE: usize,
@@ -142,6 +156,12 @@ fn fill_pattern(bytes: &mut [u8]) {
     }
 }
 
+fn patterned_vec(len: usize) -> std::vec::Vec<u8> {
+    let mut bytes = std::vec![0u8; len];
+    fill_pattern(&mut bytes);
+    bytes
+}
+
 fn assert_get_bytes<
     IO: FlashIo,
     const REGION_SIZE: usize,
@@ -182,7 +202,7 @@ fn record_info_for<
     (region, record)
 }
 
-fn object_end_for<
+fn large_entry_for<
     IO: FlashIo,
     const REGION_SIZE: usize,
     const REGION_COUNT: usize,
@@ -193,9 +213,9 @@ fn object_end_for<
     log: &ObjectLog<'_, REGION_SIZE, MAX_REGIONS, LOG_METADATA_MAX>,
     storage: &mut Storage<'_, '_, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
     handle: ObjectLogHandle,
-) -> ObjectEndInfo {
+) -> LargeRecordEntryInfo {
     let (region, record) = record_info_for(log, storage, handle);
-    log.read_object_end(storage, region, handle, record)
+    log.read_large_entry(storage, region, handle, record)
         .unwrap()
 }
 
@@ -454,11 +474,13 @@ fn requirement_object_log_durable_state_is_canonical_and_self_delimiting() {
     check_object_log_update_payloads_validate_truncate_and_materialized_region_records();
 }
 
-//= spec/ring/09-implementation-coverage.md#objectlog-current-implementation-regression-requirements
+//= spec/object-log.md#durability
 //= type=test
-//# `RING-IMPL-REGRESSION-142` Current ObjectLog append placement MUST preserve
-//# stable handles and forward progress across exact-fit inline, oversized
-//# large-object, no-progress geometry, and full-frontier materialization cases.
+//# `RING-OBJECT-026` Object-log append placement MUST preserve stable handles
+//# at ordinary frontier boundaries: a small inline record that exactly fits the
+//# current reserved frontier MUST be written there, and insufficient remaining
+//# frontier space MUST materialize the frontier and continue in the next reserved
+//# ordinary region without changing already returned handles.
 #[test]
 fn requirement_object_log_append_placement_preserves_handles_and_progress() {
     check_object_log_exact_fit_capacity_boundaries_are_stable();
@@ -494,24 +516,30 @@ fn requirement_object_log_reads_treat_scratch_as_minimum_capacity() {
     check_object_log_reads_accept_exact_scratch_lengths();
 }
 
-//= spec/ring/09-implementation-coverage.md#objectlog-current-implementation-regression-requirements
+//= spec/object-log.md#durability
 //= type=test
-//# `RING-IMPL-REGRESSION-137` Current ObjectLog large-object reads MUST reject
-//# private chunk handles and malformed linked chunk runs before returning object
-//# bytes.
+//# `RING-OBJECT-028` Before returning object bytes, Object-log reads MUST
+//# validate that flushed data-region headers and prologues still identify the
+//# live collection and that large objects expose only public `LargeRecordEntry`
+//# handles with valid auxiliary-region identity, auxiliary links, fixed-slot
+//# chunk bounds, tail chunk ordering, logical positions, and CRCs.
 #[test]
 fn requirement_object_log_reads_validate_identity_and_large_chunk_runs() {
     check_object_log_flushed_region_prologue_is_validated_on_read();
-    check_object_log_large_object_reads_reject_private_or_malformed_chunks();
+    check_object_log_reads_validate_auxiliary_large_objects();
 }
 
 fn check_object_log_layout_lengths_are_exact() {
     assert_eq!(HANDLE_ENCODED_LEN, 16);
     assert_eq!(DATA_PROLOGUE_FIXED_LEN, 18);
+    assert_eq!(AUX_PROLOGUE_PREFIX_LEN, 18);
+    assert_eq!(AUX_PROLOGUE_CRC_LEN, 4);
     assert_eq!(RECORD_HEADER_LEN, 9);
-    assert_eq!(OBJECT_CHUNK_FIXED_BODY_LEN, 45);
-    assert_eq!(OBJECT_END_BODY_LEN, 40);
-    assert_eq!(OBJECT_CHUNK_FLAGS_VALID_MASK, 0x03);
+    assert_eq!(AUX_POINTER_ENCODED_LEN, 4);
+    assert_eq!(OBJECT_CHUNK_FIXED_BODY_LEN, 16);
+    assert_eq!(AUX_CHUNK_FIXED_LEN, 17);
+    assert_eq!(LARGE_RECORD_ENTRY_BODY_LEN, 16);
+    assert_eq!(AUX_LINK_PRESENT_LEN, 9);
 
     assert_eq!(
         data_prologue_len(LOG_METADATA.len()).unwrap(),
@@ -524,30 +552,15 @@ fn check_object_log_layout_lengths_are_exact() {
         RECORD_HEADER_LEN + OBJECT_CHUNK_FIXED_BODY_LEN + 5
     );
     assert_eq!(
-        end_record_len().unwrap(),
-        RECORD_HEADER_LEN + OBJECT_END_BODY_LEN
+        large_entry_record_len().unwrap(),
+        RECORD_HEADER_LEN + LARGE_RECORD_ENTRY_BODY_LEN
     );
 }
 
 fn check_object_log_helper_boundaries_are_exact() {
-    let both_chunk_links = OBJECT_CHUNK_FLAG_PREV_VALID + OBJECT_CHUNK_FLAG_NEXT_VALID;
-    assert_eq!(OBJECT_CHUNK_FLAGS_VALID_MASK, both_chunk_links);
-    for flags in [
-        0,
-        OBJECT_CHUNK_FLAG_PREV_VALID,
-        OBJECT_CHUNK_FLAG_NEXT_VALID,
-        OBJECT_CHUNK_FLAGS_VALID_MASK,
-    ] {
-        validate_chunk_flags(flags).unwrap();
-    }
-    assert!(matches!(
-        validate_chunk_flags(OBJECT_CHUNK_FLAGS_VALID_MASK + 1),
-        Err(ObjectLogError::InvalidFrame)
-    ));
-
     assert!(record_type_is_public(RECORD_INLINE_OBJECT));
     assert!(!record_type_is_public(RECORD_OBJECT_CHUNK));
-    assert!(record_type_is_public(RECORD_OBJECT_END));
+    assert!(record_type_is_public(RECORD_LARGE_RECORD_ENTRY));
 
     validate_log_metadata_len::<3>(1).unwrap();
     validate_log_metadata_len::<3>(3).unwrap();
@@ -591,21 +604,21 @@ fn check_object_log_helper_boundaries_are_exact() {
         }) if needed == prologue_len && available == prologue_len - 1
     ));
 
-    let first = ObjectLogHandle::new(1, 2, 3);
-    let last = ObjectLogHandle::new(4, 5, 6);
-    let mut end_record = [0u8; RECORD_HEADER_LEN + OBJECT_END_BODY_LEN];
+    let first_aux = AuxRegionPointer { region_index: 7 };
+    let mut large_entry_record = [0u8; RECORD_HEADER_LEN + LARGE_RECORD_ENTRY_BODY_LEN];
     assert_eq!(
-        encode_end_record(7, first, last, &mut end_record).unwrap(),
-        end_record.len()
+        encode_large_entry_record(7, 3, first_aux, &mut large_entry_record).unwrap(),
+        large_entry_record.len()
     );
-    let mut oversized_end_record = [0u8; RECORD_HEADER_LEN + OBJECT_END_BODY_LEN + 1];
+    let mut oversized_large_entry_record =
+        [0u8; RECORD_HEADER_LEN + LARGE_RECORD_ENTRY_BODY_LEN + 1];
     assert_eq!(
-        encode_end_record(7, first, last, &mut oversized_end_record).unwrap(),
-        end_record.len()
+        encode_large_entry_record(7, 3, first_aux, &mut oversized_large_entry_record).unwrap(),
+        large_entry_record.len()
     );
-    let mut short_end_record = [0u8; RECORD_HEADER_LEN + OBJECT_END_BODY_LEN - 1];
+    let mut short_large_entry_record = [0u8; RECORD_HEADER_LEN + LARGE_RECORD_ENTRY_BODY_LEN - 1];
     assert!(matches!(
-        encode_end_record(7, first, last, &mut short_end_record),
+        encode_large_entry_record(7, 3, first_aux, &mut short_large_entry_record),
         Err(ObjectLogError::BufferTooSmall { .. })
     ));
 
@@ -638,20 +651,12 @@ fn check_object_log_helper_boundaries_are_exact() {
     ));
 
     let mut chunk_record = [0u8; RECORD_HEADER_LEN + OBJECT_CHUNK_FIXED_BODY_LEN + 3];
-    let chunk_record_len = encode_chunk_record(
-        OBJECT_CHUNK_FLAG_PREV_VALID | OBJECT_CHUNK_FLAG_NEXT_VALID,
-        11,
-        first,
-        last,
-        b"abc",
-        &mut chunk_record,
-    )
-    .unwrap();
+    let chunk_record_len = encode_chunk_record(11, b"abc", &mut chunk_record).unwrap();
     assert_eq!(chunk_record_len, chunk_record.len());
     let chunk_body = &chunk_record[RECORD_HEADER_LEN..];
     validate_record_body_shape(RECORD_OBJECT_CHUNK, chunk_body).unwrap();
     let mut zero_chunk_record = [0u8; RECORD_HEADER_LEN + OBJECT_CHUNK_FIXED_BODY_LEN];
-    encode_chunk_record(0, 0, first, last, &[], &mut zero_chunk_record).unwrap();
+    encode_chunk_record(0, &[], &mut zero_chunk_record).unwrap();
     let zero_chunk_body = &zero_chunk_record[RECORD_HEADER_LEN..];
     decode_chunk_body_prefix(
         &zero_chunk_body[..OBJECT_CHUNK_FIXED_BODY_LEN],
@@ -689,11 +694,15 @@ fn check_object_log_helper_boundaries_are_exact() {
     ));
 
     validate_record_body_shape(RECORD_INLINE_OBJECT, &[]).unwrap();
-    validate_record_body_shape(RECORD_OBJECT_END, &end_record[RECORD_HEADER_LEN..]).unwrap();
+    validate_record_body_shape(
+        RECORD_LARGE_RECORD_ENTRY,
+        &large_entry_record[RECORD_HEADER_LEN..],
+    )
+    .unwrap();
     assert!(matches!(
         validate_record_body_shape(
-            RECORD_OBJECT_END,
-            &end_record[RECORD_HEADER_LEN..end_record.len() - 1]
+            RECORD_LARGE_RECORD_ENTRY,
+            &large_entry_record[RECORD_HEADER_LEN..large_entry_record.len() - 1]
         ),
         Err(ObjectLogError::InvalidFrame)
     ));
@@ -935,7 +944,7 @@ fn check_object_log_exact_fit_capacity_boundaries_are_stable() {
     const REGION_SIZE: usize = 512;
     const REGION_COUNT: usize = 24;
 
-    let mut log_metadata = [0x42u8; 192];
+    let log_metadata = [0x42u8; 192];
     let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 8192>::new(0xff);
     let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT>::format(
         &mut flash,
@@ -958,7 +967,7 @@ fn check_object_log_exact_fit_capacity_boundaries_are_stable() {
     let mut memory = ObjectLogMemory::<REGION_SIZE, 16, 224>::new();
     let mut log = ObjectLog::new(&mut storage, &mut memory, &log_metadata).unwrap();
     let exact = std::vec![0x5au8; exact_inline_len];
-    let exact_handle = log.append(&mut storage, &exact).unwrap();
+    let exact_handle = append_with_scratch!(log, &mut storage, &exact).unwrap();
     let (region, record) = record_info_for(&log, &mut storage, exact_handle);
     assert_eq!(record.record_type, RECORD_INLINE_OBJECT);
     assert_eq!(record.body_len, exact_inline_len);
@@ -969,14 +978,13 @@ fn check_object_log_exact_fit_capacity_boundaries_are_stable() {
     assert_eq!(region.end_offset, record.record_end);
     assert_eq!(region.committed_end_offset, record.record_end);
 
-    let next = log.append(&mut storage, b"x").unwrap();
+    let next = append_with_scratch!(log, &mut storage, b"x").unwrap();
     assert_ne!(next.region_index, exact_handle.region_index);
     assert_eq!(next.sequence, exact_handle.sequence + 1);
     let mut scratch = std::vec![0u8; exact.len()];
     assert_get_bytes(&log, &mut storage, exact_handle, &exact, &mut scratch);
     assert_get(&log, &mut storage, next, b"x");
 
-    log_metadata[0] = 0x24;
     let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 8192>::new(0xff);
     let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT>::format(
         &mut flash,
@@ -984,12 +992,13 @@ fn check_object_log_exact_fit_capacity_boundaries_are_stable() {
         crate::test_storage_memory(),
     )
     .unwrap();
-    let mut memory = ObjectLogMemory::<REGION_SIZE, 16, 224>::new();
-    let mut log = ObjectLog::new(&mut storage, &mut memory, &log_metadata).unwrap();
-    let too_large_for_inline = std::vec![0x33u8; exact_inline_len + 1];
-    let large_handle = log.append(&mut storage, &too_large_for_inline).unwrap();
+    let mut memory = ObjectLogMemory::<REGION_SIZE, 16, 16>::new();
+    let mut log = ObjectLog::new(&mut storage, &mut memory, LOG_METADATA).unwrap();
+    let geometry = log.aux_geometry(storage.metadata()).unwrap();
+    let too_large_for_inline = std::vec![0x33u8; geometry.chunk_logical_capacity + 1];
+    let large_handle = append_with_scratch!(log, &mut storage, &too_large_for_inline).unwrap();
     let (_, large_record) = record_info_for(&log, &mut storage, large_handle);
-    assert_eq!(large_record.record_type, RECORD_OBJECT_END);
+    assert_eq!(large_record.record_type, RECORD_LARGE_RECORD_ENTRY);
 }
 
 fn check_object_log_direct_inline_append_routing_does_not_start_transactions() {
@@ -997,18 +1006,6 @@ fn check_object_log_direct_inline_append_routing_does_not_start_transactions() {
     const REGION_COUNT: usize = 16;
 
     let log_metadata = [0x42u8; 300];
-    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 8192>::new(0xff);
-    let storage = Storage::<_, REGION_SIZE, REGION_COUNT>::format(
-        &mut flash,
-        StorageFormatConfig::new(2, 8, 0xa5),
-        crate::test_storage_memory(),
-    )
-    .unwrap();
-    let payload_capacity = committed_payload_capacity::<REGION_SIZE>(storage.metadata()).unwrap();
-    let object_capacity =
-        empty_region_record_capacity(payload_capacity, log_metadata.len()).unwrap();
-    let exact_inline_len = object_capacity - RECORD_HEADER_LEN;
-
     let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 8192>::new(0xff);
     let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT>::format(
         &mut flash,
@@ -1024,12 +1021,20 @@ fn check_object_log_direct_inline_append_routing_does_not_start_transactions() {
     })
     .unwrap();
     let begin_before = count_wal_records(&mut storage, WalRecordType::BeginTransaction);
-    let exact = std::vec![0x5au8; exact_inline_len];
-    let exact_handle = log.append_inner(&mut storage, &exact).unwrap();
+    let exact_len = log
+        .aux_geometry(storage.metadata())
+        .unwrap()
+        .chunk_logical_capacity;
+    let exact = std::vec![0x5au8; exact_len];
+    let mut large_scratch = [0u8; REGION_SIZE];
+    let exact_handle = log
+        .append_inner(&mut storage, &exact, &mut large_scratch)
+        .unwrap();
     assert_eq!(exact_handle.offset, log.memory.regions[0].start_offset);
     assert_eq!(
         log.memory.regions[0].end_offset as usize,
-        Header::ENCODED_LEN + payload_capacity
+        usize::try_from(log.memory.regions[0].start_offset).unwrap()
+            + inline_record_len(exact.len()).unwrap()
     );
     assert_eq!(
         count_wal_records(&mut storage, WalRecordType::BeginTransaction),
@@ -1051,7 +1056,10 @@ fn check_object_log_direct_inline_append_routing_does_not_start_transactions() {
     })
     .unwrap();
     let begin_before = count_wal_records(&mut storage, WalRecordType::BeginTransaction);
-    let small = log.append_inner(&mut storage, b"x").unwrap();
+    let mut large_scratch = [0u8; REGION_SIZE];
+    let small = log
+        .append_inner(&mut storage, b"x", &mut large_scratch)
+        .unwrap();
     assert_eq!(small.offset, log.memory.regions[0].start_offset);
     assert_eq!(
         count_wal_records(&mut storage, WalRecordType::BeginTransaction),
@@ -1096,12 +1104,15 @@ fn check_object_log_large_append_rejects_zero_chunk_capacity_frontier() {
     .unwrap();
     let too_large_for_inline = std::vec![0x11u8; inline_body_capacity + 1];
     let mut allocated_regions = Vec::<u32, REGION_COUNT>::new();
+    let mut large_scratch = [0u8; REGION_SIZE];
     assert!(matches!(
-        log.append_large_transactional(&mut storage, &too_large_for_inline, &mut allocated_regions),
-        Err(ObjectLogError::ObjectTooLarge {
-            len,
-            capacity
-        }) if len == too_large_for_inline.len() && capacity == payload_capacity
+        log.append_large_transactional(
+            &mut storage,
+            &too_large_for_inline,
+            &mut large_scratch,
+            &mut allocated_regions
+        ),
+        Err(ObjectLogError::ObjectTooLarge { .. })
     ));
 }
 
@@ -1154,7 +1165,12 @@ fn check_object_log_large_append_progresses_past_full_nonempty_frontier() {
     let mut object = std::vec![0u8; inline_body_capacity + 512];
     fill_pattern(&mut object);
     let handle = log
-        .append_large_transactional(&mut storage, &object, &mut allocated_regions)
+        .append_large_transactional(
+            &mut storage,
+            &object,
+            &mut [0u8; REGION_SIZE],
+            &mut allocated_regions,
+        )
         .unwrap();
     storage
         .memory
@@ -1202,7 +1218,7 @@ fn requirement_object_log_replays_unflushed_frontier_from_wal_updates() {
         .unwrap();
         let mut memory = ObjectLogMemory::<REGION_SIZE, 4, 16>::new();
         let mut log = ObjectLog::new(&mut storage, &mut memory, b"log-meta").unwrap();
-        let handle = log.append(&mut storage, b"alpha").unwrap();
+        let handle = append_with_scratch!(log, &mut storage, b"alpha").unwrap();
 
         assert_get(&log, &mut storage, handle, b"alpha");
         (log.collection_id(), handle)
@@ -1231,19 +1247,21 @@ fn check_object_log_replay_filters_unrelated_collection_records() {
         let (target_id, target_handle) = {
             let mut target_memory = ObjectLogMemory::<REGION_SIZE, 4, 16>::new();
             let mut target = ObjectLog::new(&mut storage, &mut target_memory, b"target").unwrap();
-            let handle = target.append(&mut storage, b"alpha").unwrap();
+            let handle = append_with_scratch!(target, &mut storage, b"alpha").unwrap();
             target.flush(&mut storage).unwrap();
             (target.collection_id(), handle)
         };
         let other_id = {
             let mut other_memory = ObjectLogMemory::<REGION_SIZE, 4, 16>::new();
             let mut other = ObjectLog::new(&mut storage, &mut other_memory, b"other").unwrap();
-            other.append(&mut storage, b"beta").unwrap();
+            append_with_scratch!(other, &mut storage, b"beta").unwrap();
             let _: ObjectLogHandle = other
-                .transaction(&mut storage, |tx| tx.append(b"committed-other"))
+                .transaction(&mut storage, |tx| {
+                    tx_append_with_scratch!(tx, b"committed-other")
+                })
                 .unwrap();
             let failed: Result<(), ObjectLogError> = other.transaction(&mut storage, |tx| {
-                let _ = tx.append(b"rolled-back-other")?;
+                let _ = tx_append_with_scratch!(tx, b"rolled-back-other")?;
                 Err(ObjectLogError::InvalidHandle)
             });
             assert!(matches!(failed, Err(ObjectLogError::InvalidHandle)));
@@ -1589,7 +1607,7 @@ fn requirement_object_log_range_reads_return_requested_subrange() {
     .unwrap();
     let mut memory = ObjectLogMemory::<REGION_SIZE, 4, 16>::new();
     let mut log = ObjectLog::new(&mut storage, &mut memory, b"log-meta").unwrap();
-    let handle = log.append(&mut storage, OBJECT).unwrap();
+    let handle = append_with_scratch!(log, &mut storage, OBJECT).unwrap();
 
     assert_get_range(&log, &mut storage, handle, 2, b"cdefg");
     let mut empty_scratch = [];
@@ -1656,7 +1674,7 @@ fn requirement_object_log_reports_object_len_and_full_read_buffer_size() {
     .unwrap();
     let mut memory = ObjectLogMemory::<REGION_SIZE, 4, 16>::new();
     let mut log = ObjectLog::new(&mut storage, &mut memory, b"log-meta").unwrap();
-    let handle = log.append(&mut storage, OBJECT).unwrap();
+    let handle = append_with_scratch!(log, &mut storage, OBJECT).unwrap();
 
     assert_eq!(
         log.get_object_len(&mut storage, handle).unwrap(),
@@ -1701,7 +1719,7 @@ fn check_object_log_reads_accept_exact_scratch_lengths() {
     .unwrap();
     let mut memory = ObjectLogMemory::<REGION_SIZE, 16, 16>::new();
     let mut log = ObjectLog::new(&mut storage, &mut memory, LOG_METADATA).unwrap();
-    let inline = log.append(&mut storage, INLINE).unwrap();
+    let inline = append_with_scratch!(log, &mut storage, INLINE).unwrap();
     let mut exact_inline = [0u8; INLINE.len()];
     assert_eq!(
         log.get(&mut storage, inline, &mut exact_inline, |bytes| {
@@ -1723,7 +1741,7 @@ fn check_object_log_reads_accept_exact_scratch_lengths() {
 
     let mut object = [0u8; 420];
     fill_pattern(&mut object);
-    let large = log.append(&mut storage, &object).unwrap();
+    let large = append_with_scratch!(log, &mut storage, &object).unwrap();
     let mut exact_large = [0u8; 420];
     assert_get_bytes(&log, &mut storage, large, &object, &mut exact_large);
     let mut exact_large_range = [0u8; 17];
@@ -1830,23 +1848,27 @@ fn check_object_log_read_helpers_validate_exact_storage_scratch_boundaries() {
         Err(ObjectLogError::InvalidFrame)
     ));
 
-    let first = ObjectLogHandle::new(1, 0, 9);
-    let last = ObjectLogHandle::new(1, 0, 58);
-    let mut end_record = [0u8; RECORD_HEADER_LEN + OBJECT_END_BODY_LEN];
-    encode_end_record(7, first, last, &mut end_record).unwrap();
+    let mut large_entry_record = [0u8; RECORD_HEADER_LEN + LARGE_RECORD_ENTRY_BODY_LEN];
+    encode_large_entry_record(
+        7,
+        7,
+        AuxRegionPointer { region_index: 0 },
+        &mut large_entry_record,
+    )
+    .unwrap();
     storage
         .backing
-        .write_region(1, 0, &end_record[RECORD_HEADER_LEN..])
+        .write_region(1, 0, &large_entry_record[RECORD_HEADER_LEN..])
         .unwrap();
-    let wrong_type_end = ObjectLogRecordInfo {
+    let wrong_type_large_entry = ObjectLogRecordInfo {
         record_type: RECORD_INLINE_OBJECT,
-        body_len: OBJECT_END_BODY_LEN,
-        body_crc32c: crc32(&end_record[RECORD_HEADER_LEN..]),
+        body_len: LARGE_RECORD_ENTRY_BODY_LEN,
+        body_crc32c: crc32(&large_entry_record[RECORD_HEADER_LEN..]),
         body_start: 0,
-        record_end: OBJECT_END_BODY_LEN as u32,
+        record_end: LARGE_RECORD_ENTRY_BODY_LEN as u32,
     };
     assert!(matches!(
-        log.read_object_end(&mut storage, flushed_region, handle, wrong_type_end),
+        log.read_large_entry(&mut storage, flushed_region, handle, wrong_type_large_entry),
         Err(ObjectLogError::InvalidFrame)
     ));
 }
@@ -1873,11 +1895,11 @@ fn requirement_object_log_handles_survive_flush_and_reopen() {
         let mut memory = ObjectLogMemory::<REGION_SIZE, 4, 16>::new();
         let mut log = ObjectLog::new(&mut storage, &mut memory, b"log-meta").unwrap();
 
-        let first = log.append(&mut storage, b"alpha").unwrap();
+        let first = append_with_scratch!(log, &mut storage, b"alpha").unwrap();
         log.flush(&mut storage).unwrap();
         assert_get(&log, &mut storage, first, b"alpha");
 
-        let second = log.append(&mut storage, b"beta").unwrap();
+        let second = append_with_scratch!(log, &mut storage, b"beta").unwrap();
         assert_ne!(first.region_index, second.region_index);
         assert_ne!(first.sequence, second.sequence);
         assert_get(&log, &mut storage, second, b"beta");
@@ -1923,7 +1945,10 @@ fn check_object_log_empty_or_flushed_frontiers_are_not_materialized_again() {
         .unwrap();
     assert!(!log.memory.regions[0].flushed);
 
-    let handle = log.append_inner(&mut storage, b"alpha").unwrap();
+    let mut large_scratch = [0u8; REGION_SIZE];
+    let handle = log
+        .append_inner(&mut storage, b"alpha", &mut large_scratch)
+        .unwrap();
     log.flush_current(&mut storage).unwrap();
     assert!(log.memory.regions[0].flushed);
     let updates_before = count_wal_records(&mut storage, WalRecordType::Update);
@@ -1958,9 +1983,9 @@ fn requirement_object_log_truncate_before_handle_retains_boundary_handle() {
     let mut memory = ObjectLogMemory::<REGION_SIZE, 4, 16>::new();
     let mut log = ObjectLog::new(&mut storage, &mut memory, b"log-meta").unwrap();
 
-    let first = log.append(&mut storage, b"alpha").unwrap();
+    let first = append_with_scratch!(log, &mut storage, b"alpha").unwrap();
     log.flush(&mut storage).unwrap();
-    let second = log.append(&mut storage, b"beta").unwrap();
+    let second = append_with_scratch!(log, &mut storage, b"beta").unwrap();
     let previous_tail = storage.free_list_tail();
 
     log.truncate_before(&mut storage, second).unwrap();
@@ -1974,35 +1999,22 @@ fn requirement_object_log_truncate_before_handle_retains_boundary_handle() {
     assert_ne!(storage.free_list_tail(), previous_tail);
     assert_eq!(storage.free_list_tail(), Some(first.region_index));
 
-    let third = log.append(&mut storage, b"gamma").unwrap();
+    let third = append_with_scratch!(log, &mut storage, b"gamma").unwrap();
     assert_get(&log, &mut storage, third, b"gamma");
 }
 
 //= spec/object-log.md#truncation
-//= type=todo
+//= type=test
 //# `RING-OBJECT-029` Large-object truncation MUST retain the auxiliary chain
 //# and private tail chunks for a retained boundary `LargeRecordEntry`, free the
 //# entire auxiliary chain for any truncated-away `LargeRecordEntry`, and retain
 //# no unrelated object data beyond ordinary object-log regions that still
 //# contain the live head.
 #[test]
-fn todo_object_log_large_truncation_frees_auxiliary_chains() {}
-
-//= spec/ring/09-implementation-coverage.md#objectlog-current-implementation-regression-requirements
-//= type=test
-//# `RING-IMPL-REGRESSION-141` Current ObjectLog truncation before a large-object
-//# handle MUST retain the chunk run reachable from that handle's `ObjectEnd`
-//# record and free only regions wholly before the retained first chunk.
-#[test]
-fn requirement_object_log_truncate_before_large_object_retains_reachable_run() {
-    check_object_log_truncate_before_large_object_retains_object_run();
-}
-
-fn check_object_log_truncate_before_large_object_retains_object_run() {
+fn requirement_object_log_large_truncation_frees_auxiliary_chains() {
     const REGION_SIZE: usize = 512;
     const REGION_COUNT: usize = 64;
 
-    let log_metadata = [0x42u8; 192];
     let mut object = [0u8; 270];
     fill_pattern(&mut object);
     let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 32768>::new(0xff);
@@ -2012,13 +2024,14 @@ fn check_object_log_truncate_before_large_object_retains_object_run() {
         crate::test_storage_memory(),
     )
     .unwrap();
-    let mut memory = ObjectLogMemory::<REGION_SIZE, 16, 224>::new();
-    let mut log = ObjectLog::new(&mut storage, &mut memory, &log_metadata).unwrap();
-    let first = log.append(&mut storage, b"before").unwrap();
+    let mut memory = ObjectLogMemory::<REGION_SIZE, 16, 16>::new();
+    let mut log = ObjectLog::new(&mut storage, &mut memory, LOG_METADATA).unwrap();
+    let first = append_with_scratch!(log, &mut storage, b"before").unwrap();
     log.flush(&mut storage).unwrap();
-    let large = log.append(&mut storage, &object).unwrap();
-    let retained_start = object_end_for(&log, &mut storage, large).first;
-    assert_ne!(retained_start.region_index, first.region_index);
+    let large = append_with_scratch!(log, &mut storage, &object).unwrap();
+    let retained_start = large;
+    let (_, large_record) = record_info_for(&log, &mut storage, large);
+    assert_eq!(large_record.record_type, RECORD_LARGE_RECORD_ENTRY);
     let previous_tail = storage.free_list_tail();
 
     log.truncate_before(&mut storage, large).unwrap();
@@ -2079,7 +2092,7 @@ fn requirement_object_log_metadata_is_immutable_and_reopens_from_wal() {
             }),
             LOG_METADATA.len()
         );
-        let handle = log.append(&mut storage, b"alpha").unwrap();
+        let handle = append_with_scratch!(log, &mut storage, b"alpha").unwrap();
         assert_get(&log, &mut storage, handle, b"alpha");
         (log.collection_id(), handle)
     };
@@ -2121,9 +2134,9 @@ fn requirement_object_log_data_regions_carry_immutable_log_metadata() {
         let mut memory = ObjectLogMemory::<REGION_SIZE, 4, 16>::new();
         let mut log = ObjectLog::new(&mut storage, &mut memory, LOG_METADATA).unwrap();
 
-        let first = log.append(&mut storage, b"alpha").unwrap();
+        let first = append_with_scratch!(log, &mut storage, b"alpha").unwrap();
         log.flush(&mut storage).unwrap();
-        let second = log.append(&mut storage, b"beta").unwrap();
+        let second = append_with_scratch!(log, &mut storage, b"beta").unwrap();
         log.flush(&mut storage).unwrap();
         assert_get(&log, &mut storage, first, b"alpha");
         assert_get(&log, &mut storage, second, b"beta");
@@ -2175,7 +2188,7 @@ fn check_object_log_flushed_region_prologue_is_validated_on_read() {
     .unwrap();
     let mut memory = ObjectLogMemory::<REGION_SIZE, 4, 16>::new();
     let mut log = ObjectLog::new(&mut storage, &mut memory, LOG_METADATA).unwrap();
-    let handle = log.append(&mut storage, b"alpha").unwrap();
+    let handle = append_with_scratch!(log, &mut storage, b"alpha").unwrap();
     log.flush(&mut storage).unwrap();
     let original_region = *storage.backing.region_bytes(handle.region_index).unwrap();
     let mut scratch = [0u8; 16];
@@ -2361,7 +2374,7 @@ fn requirement_object_log_rejects_forged_handles() {
     .unwrap();
     let mut memory = ObjectLogMemory::<REGION_SIZE, 4, 16>::new();
     let mut log = ObjectLog::new(&mut storage, &mut memory, b"log-meta").unwrap();
-    let handle = log.append(&mut storage, b"alpha").unwrap();
+    let handle = append_with_scratch!(log, &mut storage, b"alpha").unwrap();
     let forged = ObjectLogHandle::new(
         handle.region_index,
         handle.sequence.wrapping_add(1),
@@ -2709,10 +2722,10 @@ fn requirement_object_log_traverses_live_handles() {
 
     assert_eq!(log.first_handle(), None);
 
-    let first = log.append(&mut storage, b"alpha").unwrap();
+    let first = append_with_scratch!(log, &mut storage, b"alpha").unwrap();
     log.flush(&mut storage).unwrap();
-    let second = log.append(&mut storage, b"beta").unwrap();
-    let third = log.append(&mut storage, b"gamma").unwrap();
+    let second = append_with_scratch!(log, &mut storage, b"beta").unwrap();
+    let third = append_with_scratch!(log, &mut storage, b"gamma").unwrap();
 
     assert_eq!(log.first_handle(), Some(first));
     assert_eq!(log.next_handle(&mut storage, first).unwrap(), Some(second));
@@ -2748,7 +2761,7 @@ fn requirement_object_log_failed_transaction_does_not_publish_planned_handles() 
     let mut planned = None;
 
     let result: Result<(), ObjectLogError> = log.transaction(&mut storage, |tx| {
-        let handle = tx.append(b"staged")?;
+        let handle = tx_append_with_scratch!(tx, b"staged")?;
         planned = Some(handle);
         Err(ObjectLogError::InvalidHandle)
     });
@@ -2766,7 +2779,7 @@ fn requirement_object_log_failed_transaction_does_not_publish_planned_handles() 
         Err(ObjectLogError::InvalidHandle)
     ));
 
-    let committed = log.append(&mut storage, b"committed").unwrap();
+    let committed = append_with_scratch!(log, &mut storage, b"committed").unwrap();
     log.checkpoint_append_state().unwrap();
     storage
         .memory
@@ -2779,7 +2792,12 @@ fn requirement_object_log_failed_transaction_does_not_publish_planned_handles() 
         .unwrap();
     let mut allocated_regions = Vec::<u32, REGION_COUNT>::new();
     let planned = log
-        .append_transactional(&mut storage, b"planned", &mut allocated_regions)
+        .append_transactional(
+            &mut storage,
+            b"planned",
+            &mut [0u8; REGION_SIZE],
+            &mut allocated_regions,
+        )
         .unwrap();
 
     assert_eq!(log.first_handle(), Some(committed));
@@ -2814,23 +2832,20 @@ fn requirement_object_log_committed_transaction_publishes_handles() {
     .unwrap();
     let mut memory = ObjectLogMemory::<REGION_SIZE, 4, 16>::new();
     let mut log = ObjectLog::new(&mut storage, &mut memory, b"log-meta").unwrap();
-    let first = log.append(&mut storage, b"before").unwrap();
-    let alpha = [0x11u8; 200];
-    let beta = [0x22u8; 200];
-    let gamma = [0x33u8; 200];
+    let first = append_with_scratch!(log, &mut storage, b"before").unwrap();
+    let alpha = [0x11u8; 32];
+    let beta = [0x22u8; 32];
+    let gamma = [0x33u8; 32];
 
     let (second, third, fourth) = log
         .transaction(&mut storage, |tx| {
-            let second = tx.append(&alpha)?;
-            let third = tx.append(&beta)?;
-            let fourth = tx.append(&gamma)?;
+            let second = tx_append_with_scratch!(tx, &alpha)?;
+            let third = tx_append_with_scratch!(tx, &beta)?;
+            let fourth = tx_append_with_scratch!(tx, &gamma)?;
             Ok((second, third, fourth))
         })
         .unwrap();
 
-    assert_eq!(first.region_index, second.region_index);
-    assert_eq!(second.region_index, third.region_index);
-    assert_ne!(third.region_index, fourth.region_index);
     assert_eq!(log.first_handle(), Some(first));
     assert_eq!(log.next_handle(&mut storage, first).unwrap(), Some(second));
     assert_eq!(log.next_handle(&mut storage, second).unwrap(), Some(third));
@@ -2886,7 +2901,7 @@ fn requirement_object_log_failed_transaction_rolls_back_allocations() {
     let mut planned = None;
 
     let result: Result<(), ObjectLogError> = log.transaction(&mut storage, |tx| {
-        let handle = tx.append(b"staged")?;
+        let handle = tx_append_with_scratch!(tx, b"staged")?;
         planned = Some(handle);
         Err(ObjectLogError::InvalidHandle)
     });
@@ -2894,7 +2909,7 @@ fn requirement_object_log_failed_transaction_rolls_back_allocations() {
 
     let planned = planned.unwrap();
     assert_eq!(storage.free_list_tail(), Some(planned.region_index));
-    let committed = log.append(&mut storage, b"committed").unwrap();
+    let committed = append_with_scratch!(log, &mut storage, b"committed").unwrap();
     let mut scratch = [0u8; 64];
     assert!(matches!(
         log.get(&mut storage, planned, &mut scratch, |_| ()),
@@ -2924,7 +2939,12 @@ fn requirement_object_log_failed_transaction_rolls_back_allocations() {
             .unwrap();
         let mut allocated_regions = Vec::<u32, REGION_COUNT>::new();
         let planned = log
-            .append_transactional_new_region(&mut storage, b"staged", &mut allocated_regions)
+            .append_transactional_new_region(
+                &mut storage,
+                b"staged",
+                &mut [0u8; REGION_SIZE],
+                &mut allocated_regions,
+            )
             .unwrap();
         (collection_id, planned)
     };
@@ -2956,9 +2976,9 @@ fn check_object_log_update_payloads_validate_truncate_and_materialized_region_re
     .unwrap();
     let mut memory = ObjectLogMemory::<REGION_SIZE, 4, 16>::new();
     let mut log = ObjectLog::new(&mut storage, &mut memory, LOG_METADATA).unwrap();
-    let first = log.append(&mut storage, b"alpha").unwrap();
+    let first = append_with_scratch!(log, &mut storage, b"alpha").unwrap();
     log.flush(&mut storage).unwrap();
-    let second = log.append(&mut storage, b"beta").unwrap();
+    let second = append_with_scratch!(log, &mut storage, b"beta").unwrap();
     let retained_start = log
         .retained_start_for_truncate(&mut storage, second)
         .unwrap();
@@ -3041,7 +3061,7 @@ fn requirement_object_log_v1_data_regions_use_typed_record_headers() {
     .unwrap();
     let mut memory = ObjectLogMemory::<REGION_SIZE, 4, 16>::new();
     let mut log = ObjectLog::new(&mut storage, &mut memory, LOG_METADATA).unwrap();
-    let handle = log.append(&mut storage, b"alpha").unwrap();
+    let handle = append_with_scratch!(log, &mut storage, b"alpha").unwrap();
     log.flush(&mut storage).unwrap();
 
     let region = storage.backing.region_bytes(handle.region_index).unwrap();
@@ -3073,7 +3093,7 @@ fn requirement_object_log_v1_data_regions_use_typed_record_headers() {
     .unwrap();
     let mut memory = ObjectLogMemory::<REGION_SIZE, 4, 16>::new();
     let mut log = ObjectLog::new(&mut storage, &mut memory, LOG_METADATA).unwrap();
-    let handle = log.append(&mut storage, b"beta").unwrap();
+    let handle = append_with_scratch!(log, &mut storage, b"beta").unwrap();
     log.flush(&mut storage).unwrap();
     storage
         .backing
@@ -3109,7 +3129,7 @@ fn requirement_object_log_inline_objects_use_inline_object_records() {
     .unwrap();
     let mut memory = ObjectLogMemory::<REGION_SIZE, 4, 16>::new();
     let mut log = ObjectLog::new(&mut storage, &mut memory, LOG_METADATA).unwrap();
-    let handle = log.append(&mut storage, b"inline").unwrap();
+    let handle = append_with_scratch!(log, &mut storage, b"inline").unwrap();
 
     let (region, record) = record_info_for(&log, &mut storage, handle);
     assert!(!region.flushed);
@@ -3120,77 +3140,659 @@ fn requirement_object_log_inline_objects_use_inline_object_records() {
 }
 
 //= spec/object-log.md#durability
-//= type=todo
+//= type=test
 //# `RING-OBJECT-019` Large-object handles MUST point to public record type
 //# `0x03` `LargeRecordEntry` records encoded as `[total_object_len:u64
 //# little-endian][tail_logical_len:u32 little-endian][first_aux:AuxRegionPointer]`,
-//# where `tail_logical_len` names the contiguous ordinary-log tail byte count and
-//# `first_aux` is zero only when the whole large object is stored in tail chunks.
+//# where `tail_logical_len` names the contiguous ordinary-log tail byte count;
+//# when `tail_logical_len == total_object_len`, `first_aux` bytes are zero, and
+//# otherwise `first_aux` names the first allocated auxiliary region.
 #[test]
-fn todo_object_log_large_record_entry_layout() {}
+fn requirement_object_log_large_record_entry_layout() {
+    const REGION_SIZE: usize = 512;
+    const REGION_COUNT: usize = 32;
+
+    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 16384>::new(0xff);
+    let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT>::format(
+        &mut flash,
+        StorageFormatConfig::new(2, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
+    let mut memory = ObjectLogMemory::<REGION_SIZE, 8, 16>::new();
+    let mut log = ObjectLog::new(&mut storage, &mut memory, LOG_METADATA).unwrap();
+    let geometry = log.aux_geometry(storage.metadata()).unwrap();
+    let aux_image_logical_len = geometry.chunk_logical_capacity * geometry.chunk_slot_count;
+    let object = patterned_vec(aux_image_logical_len);
+
+    let handle = append_with_scratch!(log, &mut storage, &object).unwrap();
+    let (region, record) = record_info_for(&log, &mut storage, handle);
+    assert_eq!(record.record_type, RECORD_LARGE_RECORD_ENTRY);
+    assert_eq!(record.body_len, LARGE_RECORD_ENTRY_BODY_LEN);
+    log.read_record_body_into_storage_scratch(&mut storage, region, handle, record, true)
+        .unwrap();
+    let body = &storage.memory.payload_scratch[..record.body_len];
+    assert_eq!(read_u64_at(body, 0), object.len() as u64);
+    assert_eq!(read_u32_at(body, 8), 0);
+
+    let entry = decode_large_entry_body(body).unwrap();
+    assert_eq!(entry.total_object_len, object.len() as u64);
+    assert_eq!(entry.tail_logical_len, 0);
+    assert!(log
+        .read_aux_region_into_storage_scratch(&mut storage, geometry, entry.first_aux)
+        .unwrap()
+        .is_none());
+    assert_get_bytes(
+        &log,
+        &mut storage,
+        handle,
+        &object,
+        &mut std::vec![0; object.len()],
+    );
+
+    let mut encoded = [0u8; RECORD_HEADER_LEN + LARGE_RECORD_ENTRY_BODY_LEN];
+    encode_large_entry_record(7, 7, AuxRegionPointer { region_index: 0 }, &mut encoded).unwrap();
+    let no_aux = decode_large_entry_body(&encoded[RECORD_HEADER_LEN..]).unwrap();
+    assert_eq!(no_aux.total_object_len, 7);
+    assert_eq!(no_aux.tail_logical_len, 7);
+    assert_eq!(no_aux.first_aux.region_index, 0);
+}
 
 //= spec/object-log.md#durability
-//= type=todo
+//= type=test
 //# `RING-OBJECT-020` Object chunks MUST be private record type `0x02`
 //# `ObjectChunk` records encoded as `[logical_start:u64 little-endian]
 //# [chunk_len:u32 little-endian][chunk_crc32c:u32 little-endian][chunk_bytes]`
 //# in ordinary object-log regions and fixed auxiliary chunk slots, and MUST
 //# validate `chunk_crc32c` over exactly the logical `chunk_bytes`.
 #[test]
-fn todo_object_log_private_chunk_layout_and_crc() {}
+fn requirement_object_log_private_chunk_layout_and_crc() {
+    const REGION_SIZE: usize = 512;
+    const REGION_COUNT: usize = 32;
+
+    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 16384>::new(0xff);
+    let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT>::format(
+        &mut flash,
+        StorageFormatConfig::new(2, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
+    let mut memory = ObjectLogMemory::<REGION_SIZE, 8, 16>::new();
+    let mut log = ObjectLog::new(&mut storage, &mut memory, LOG_METADATA).unwrap();
+    let geometry = log.aux_geometry(storage.metadata()).unwrap();
+    let aux_image_logical_len = geometry.chunk_logical_capacity * geometry.chunk_slot_count;
+    let object = patterned_vec(aux_image_logical_len + 3);
+    let handle = append_with_scratch!(log, &mut storage, &object).unwrap();
+    let (entry_region, entry_record) = record_info_for(&log, &mut storage, handle);
+    assert_eq!(entry_record.record_type, RECORD_LARGE_RECORD_ENTRY);
+
+    let first_chunk_handle = ObjectLogHandle::new(
+        handle.region_index,
+        handle.sequence,
+        entry_record.record_end,
+    );
+    let (chunk_region, chunk_record, chunk) = log
+        .read_chunk_info(&mut storage, first_chunk_handle, true)
+        .unwrap();
+    assert_eq!(chunk_record.record_type, RECORD_OBJECT_CHUNK);
+    assert_eq!(
+        chunk_record.body_len,
+        OBJECT_CHUNK_FIXED_BODY_LEN + chunk.chunk_len
+    );
+    assert_eq!(chunk.logical_start, aux_image_logical_len as u64);
+    assert_eq!(chunk.chunk_len, 3);
+    log.read_record_body_into_storage_scratch(
+        &mut storage,
+        chunk_region,
+        first_chunk_handle,
+        chunk_record,
+        true,
+    )
+    .unwrap();
+    let body = &storage.memory.payload_scratch[..chunk_record.body_len];
+    assert_eq!(read_u64_at(body, 0), aux_image_logical_len as u64);
+    assert_eq!(read_u32_at(body, 8), 3);
+    assert_eq!(
+        read_u32_at(body, 12),
+        crc32(&object[aux_image_logical_len..])
+    );
+    assert_eq!(
+        &body[OBJECT_CHUNK_FIXED_BODY_LEN..],
+        &object[aux_image_logical_len..]
+    );
+
+    let mut scratch = std::vec![0u8; object.len()];
+    assert!(matches!(
+        log.get(&mut storage, first_chunk_handle, &mut scratch, |_| ()),
+        Err(ObjectLogError::InvalidHandle)
+    ));
+
+    let saved_region = storage
+        .backing
+        .region_bytes(chunk_region.region_index)
+        .copied()
+        .unwrap_or([0u8; REGION_SIZE]);
+    let saved_frontier = write_region_or_frontier(
+        &mut log,
+        &mut storage,
+        chunk_region,
+        u32::try_from(chunk_record.body_start + size_of::<u64>() + size_of::<u32>()).unwrap(),
+        &0u32.to_le_bytes(),
+    );
+    refresh_record_crc(&mut log, &mut storage, chunk_region, chunk_record);
+    assert!(matches!(
+        log.get(&mut storage, handle, &mut scratch, |_| ()),
+        Err(ObjectLogError::InvalidFrame)
+    ));
+    restore_region_or_frontier(
+        &mut log,
+        &mut storage,
+        chunk_region,
+        saved_frontier,
+        &saved_region,
+    );
+
+    let entry = log
+        .read_large_entry(&mut storage, entry_region, handle, entry_record)
+        .unwrap();
+    assert_eq!(entry.tail_logical_len, 3);
+}
 
 //= spec/object-log.md#durability
-//= type=todo
-//# `RING-OBJECT-026` Object-log append placement MUST preserve stable handles
-//# at ordinary frontier boundaries: a small inline record that exactly fits the
-//# current reserved frontier MUST be written there, and insufficient remaining
-//# frontier space MUST materialize the frontier and continue in the next reserved
-//# ordinary region without changing already returned handles.
-#[test]
-fn todo_object_log_auxiliary_append_placement_preserves_handles() {}
-
-//= spec/object-log.md#durability
-//= type=todo
+//= type=test
 //# `RING-OBJECT-030` Object-log append routing MUST classify objects by chunk
 //# count rather than current frontier free space: objects with length less than
 //# or equal to one chunk's logical capacity use `InlineObject`, and objects
 //# requiring more than one chunk use one public `LargeRecordEntry` plus private
 //# chunks.
 #[test]
-fn todo_object_log_append_routing_classifies_by_chunk_count() {}
+fn requirement_object_log_append_routing_classifies_by_chunk_count() {
+    const REGION_SIZE: usize = 512;
+    const REGION_COUNT: usize = 32;
+
+    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 16384>::new(0xff);
+    let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT>::format(
+        &mut flash,
+        StorageFormatConfig::new(2, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
+    let mut memory = ObjectLogMemory::<REGION_SIZE, 8, 16>::new();
+    let mut log = ObjectLog::new(&mut storage, &mut memory, LOG_METADATA).unwrap();
+    let geometry = log.aux_geometry(storage.metadata()).unwrap();
+
+    let small = patterned_vec(geometry.chunk_logical_capacity);
+    let mut empty_scratch = [];
+    let small_handle = log
+        .append(&mut storage, &small, &mut empty_scratch)
+        .unwrap();
+    let (_, small_record) = record_info_for(&log, &mut storage, small_handle);
+    assert_eq!(small_record.record_type, RECORD_INLINE_OBJECT);
+    assert_get_bytes(
+        &log,
+        &mut storage,
+        small_handle,
+        &small,
+        &mut std::vec![0; small.len()],
+    );
+
+    let large = patterned_vec(geometry.chunk_logical_capacity + 1);
+    let mut short_scratch = [0u8; REGION_SIZE - 1];
+    assert!(matches!(
+        log.append(&mut storage, &large, &mut short_scratch),
+        Err(ObjectLogError::BufferTooSmall {
+            needed: REGION_SIZE,
+            available
+        }) if available == REGION_SIZE - 1
+    ));
+
+    let mut oversized_scratch = [0u8; REGION_SIZE + 17];
+    let large_handle = log
+        .append(&mut storage, &large, &mut oversized_scratch)
+        .unwrap();
+    let (_, large_record) = record_info_for(&log, &mut storage, large_handle);
+    assert_eq!(large_record.record_type, RECORD_LARGE_RECORD_ENTRY);
+    assert_get_bytes(
+        &log,
+        &mut storage,
+        large_handle,
+        &large,
+        &mut std::vec![0; large.len()],
+    );
+}
 
 //= spec/object-log.md#durability
-//= type=todo
+//= type=test
 //# `RING-OBJECT-031` Large-object append placement MUST fail impossible
 //# no-progress geometries and MUST keep each private auxiliary or tail chunk
 //# span associated with exactly one public `LargeRecordEntry`.
 #[test]
-fn todo_object_log_large_append_rejects_no_progress_geometry() {}
+fn requirement_object_log_large_append_rejects_no_progress_geometry() {
+    check_object_log_large_append_rejects_zero_chunk_capacity_frontier();
 
-//= spec/object-log.md#durability
-//= type=todo
-//# `RING-OBJECT-028` Before returning object bytes, Object-log reads MUST
-//# validate that flushed data-region headers and prologues still identify the
-//# live collection and that large objects expose only public `LargeRecordEntry`
-//# handles with valid auxiliary-region identity, auxiliary links, fixed-slot
-//# chunk bounds, tail chunk ordering, logical positions, and CRCs.
-#[test]
-fn todo_object_log_reads_validate_auxiliary_large_objects() {}
-
-//= spec/ring/09-implementation-coverage.md#objectlog-current-implementation-regression-requirements
-//= type=test
-//# `RING-IMPL-REGRESSION-135` Current ObjectLog large-object handles MUST point
-//# to `ObjectEnd` records that carry total length plus first and last linked
-//# chunk pointers.
-#[test]
-fn requirement_object_log_large_object_handles_point_to_end_records() {
     const REGION_SIZE: usize = 512;
-    const REGION_COUNT: usize = 18;
+    const REGION_COUNT: usize = 32;
 
-    let mut object = [0u8; 900];
-    fill_pattern(&mut object);
-    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 8192>::new(0xff);
-    let (collection_id, handle) = {
+    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 16384>::new(0xff);
+    let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT>::format(
+        &mut flash,
+        StorageFormatConfig::new(2, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
+    let mut memory = ObjectLogMemory::<REGION_SIZE, 8, 16>::new();
+    let mut log = ObjectLog::new(&mut storage, &mut memory, LOG_METADATA).unwrap();
+    let geometry = log.aux_geometry(storage.metadata()).unwrap();
+    let aux_image_logical_len = geometry.chunk_logical_capacity * geometry.chunk_slot_count;
+    let object = patterned_vec(aux_image_logical_len + 5);
+    let handle = append_with_scratch!(log, &mut storage, &object).unwrap();
+    let (_, entry_record) = record_info_for(&log, &mut storage, handle);
+    let private_chunk = ObjectLogHandle::new(
+        handle.region_index,
+        handle.sequence,
+        entry_record.record_end,
+    );
+    let public_after = append_with_scratch!(log, &mut storage, b"after").unwrap();
+
+    let mut scratch = std::vec![0u8; object.len()];
+    assert!(matches!(
+        log.get(&mut storage, private_chunk, &mut scratch, |_| ()),
+        Err(ObjectLogError::InvalidHandle)
+    ));
+    assert_eq!(
+        log.next_handle(&mut storage, handle).unwrap(),
+        Some(public_after)
+    );
+    assert_get(&log, &mut storage, public_after, b"after");
+}
+
+fn check_object_log_reads_validate_auxiliary_large_objects() {
+    const REGION_SIZE: usize = 512;
+    const REGION_COUNT: usize = 64;
+
+    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 32768>::new(0xff);
+    let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT>::format(
+        &mut flash,
+        StorageFormatConfig::new(2, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
+    let mut memory = ObjectLogMemory::<REGION_SIZE, 16, 16>::new();
+    let mut log = ObjectLog::new(&mut storage, &mut memory, LOG_METADATA).unwrap();
+    let geometry = log.aux_geometry(storage.metadata()).unwrap();
+    let aux_image_logical_len = geometry
+        .chunk_logical_capacity
+        .checked_mul(geometry.chunk_slot_count)
+        .unwrap();
+    let object = patterned_vec(aux_image_logical_len * 2 + 3);
+    let handle = append_with_scratch!(log, &mut storage, &object).unwrap();
+    let (entry_region, entry_record) = record_info_for(&log, &mut storage, handle);
+    let entry = log
+        .read_large_entry(&mut storage, entry_region, handle, entry_record)
+        .unwrap();
+    assert_eq!(entry.tail_logical_len, 3);
+    let first_aux = entry.first_aux;
+    let second_aux = log
+        .read_aux_region_into_storage_scratch(&mut storage, geometry, first_aux)
+        .unwrap()
+        .unwrap();
+    assert!(log
+        .read_aux_region_into_storage_scratch(&mut storage, geometry, second_aux)
+        .unwrap()
+        .is_none());
+    assert_get_bytes(
+        &log,
+        &mut storage,
+        handle,
+        &object,
+        &mut std::vec![0; object.len()],
+    );
+
+    let original_first = *storage
+        .backing
+        .region_bytes(first_aux.region_index)
+        .unwrap();
+    let original_second = *storage
+        .backing
+        .region_bytes(second_aux.region_index)
+        .unwrap();
+    let first_payload = Header::ENCODED_LEN;
+    let first_slot = Header::ENCODED_LEN + geometry.prologue_len;
+    let chunk_start = first_slot + AUX_CHUNK_FIXED_LEN;
+    let link_crc =
+        Header::ENCODED_LEN + geometry.next_link_offset + size_of::<u8>() + AUX_POINTER_ENCODED_LEN;
+
+    storage
+        .backing
+        .write_region(first_aux.region_index, first_payload, b"BAD!")
+        .unwrap();
+    assert!(matches!(
+        log.get(
+            &mut storage,
+            handle,
+            &mut std::vec![0; object.len()],
+            |_| ()
+        ),
+        Err(ObjectLogError::InvalidFrame)
+    ));
+    storage
+        .backing
+        .write_region(first_aux.region_index, 0, &original_first)
+        .unwrap();
+
+    storage
+        .backing
+        .write_region(first_aux.region_index, link_crc, &0u32.to_le_bytes())
+        .unwrap();
+    assert!(matches!(
+        log.get(
+            &mut storage,
+            handle,
+            &mut std::vec![0; object.len()],
+            |_| ()
+        ),
+        Err(ObjectLogError::InvalidFrame)
+    ));
+    storage
+        .backing
+        .write_region(first_aux.region_index, 0, &original_first)
+        .unwrap();
+
+    storage
+        .backing
+        .write_region(first_aux.region_index, chunk_start, &[object[0] ^ 0xff])
+        .unwrap();
+    assert!(matches!(
+        log.get(
+            &mut storage,
+            handle,
+            &mut std::vec![0; object.len()],
+            |_| ()
+        ),
+        Err(ObjectLogError::InvalidFrame)
+    ));
+    storage
+        .backing
+        .write_region(first_aux.region_index, 0, &original_first)
+        .unwrap();
+
+    storage
+        .backing
+        .write_region(
+            second_aux.region_index,
+            Header::ENCODED_LEN + geometry.prologue_len + size_of::<u8>(),
+            &1u64.to_le_bytes(),
+        )
+        .unwrap();
+    assert!(matches!(
+        log.get(
+            &mut storage,
+            handle,
+            &mut std::vec![0; object.len()],
+            |_| ()
+        ),
+        Err(ObjectLogError::InvalidFrame)
+    ));
+    storage
+        .backing
+        .write_region(second_aux.region_index, 0, &original_second)
+        .unwrap();
+
+    let first_tail = ObjectLogHandle::new(
+        handle.region_index,
+        handle.sequence,
+        entry_record.record_end,
+    );
+    let (tail_region, tail_record, _) =
+        log.read_chunk_info(&mut storage, first_tail, true).unwrap();
+    let saved_region = storage
+        .backing
+        .region_bytes(tail_region.region_index)
+        .copied()
+        .unwrap_or([0u8; REGION_SIZE]);
+    let saved_frontier = write_region_or_frontier(
+        &mut log,
+        &mut storage,
+        tail_region,
+        u32::try_from(tail_record.body_start).unwrap(),
+        &(u64::try_from(aux_image_logical_len * 2).unwrap() + 1).to_le_bytes(),
+    );
+    refresh_record_crc(&mut log, &mut storage, tail_region, tail_record);
+    assert!(matches!(
+        log.get(
+            &mut storage,
+            handle,
+            &mut std::vec![0; object.len()],
+            |_| ()
+        ),
+        Err(ObjectLogError::InvalidFrame)
+    ));
+    restore_region_or_frontier(
+        &mut log,
+        &mut storage,
+        tail_region,
+        saved_frontier,
+        &saved_region,
+    );
+
+    let short_aux_object = patterned_vec(aux_image_logical_len - 1);
+    let short_handle = append_with_scratch!(log, &mut storage, &short_aux_object).unwrap();
+    let short_entry = large_entry_for(&log, &mut storage, short_handle);
+    let original_short = *storage
+        .backing
+        .region_bytes(short_entry.first_aux.region_index)
+        .unwrap();
+    let last_slot = Header::ENCODED_LEN
+        + geometry.prologue_len
+        + (geometry.chunk_slot_count - 1) * geometry.chunk_slot_len;
+    let zero_fill = last_slot + AUX_CHUNK_FIXED_LEN + geometry.chunk_logical_capacity - 1;
+    storage
+        .backing
+        .write_region(short_entry.first_aux.region_index, zero_fill, &[0x7f])
+        .unwrap();
+    assert!(matches!(
+        log.get(
+            &mut storage,
+            short_handle,
+            &mut std::vec![0; short_aux_object.len()],
+            |_| ()
+        ),
+        Err(ObjectLogError::InvalidFrame)
+    ));
+    storage
+        .backing
+        .write_region(short_entry.first_aux.region_index, 0, &original_short)
+        .unwrap();
+}
+
+//= spec/object-log.md#large-objects
+//= type=test
+//# `RING-OBJECT-021` Auxiliary regions MUST use the `OLAX` auxiliary prologue
+//# with version `1`, exact fixed chunk slots that divide the auxiliary chunk
+//# area, chunk slots whose physical length is a multiple of `wal_write_granule`,
+//# and a reserved next-link slot that is either erased/all-empty or a
+//# CRC-protected `AuxRegionPointer`.
+#[test]
+fn requirement_object_log_auxiliary_region_layout_and_link_slot() {
+    const REGION_SIZE: usize = 512;
+    const REGION_COUNT: usize = 64;
+
+    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 32768>::new(0xff);
+    let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT>::format(
+        &mut flash,
+        StorageFormatConfig::new(2, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
+    let mut memory = ObjectLogMemory::<REGION_SIZE, 16, 16>::new();
+    let mut log = ObjectLog::new(&mut storage, &mut memory, LOG_METADATA).unwrap();
+    let geometry = log.aux_geometry(storage.metadata()).unwrap();
+    let aux_image_logical_len = geometry.chunk_logical_capacity * geometry.chunk_slot_count;
+    let object = patterned_vec(aux_image_logical_len * 2);
+
+    let handle = append_with_scratch!(log, &mut storage, &object).unwrap();
+    let entry = large_entry_for(&log, &mut storage, handle);
+    assert_eq!(entry.tail_logical_len, 0);
+    let first_aux = entry.first_aux;
+    let second_aux = log
+        .read_aux_region_into_storage_scratch(&mut storage, geometry, first_aux)
+        .unwrap()
+        .unwrap();
+
+    let header = storage
+        .backing
+        .read_region(
+            first_aux.region_index,
+            0,
+            Header::ENCODED_LEN,
+            Header::decode,
+        )
+        .unwrap()
+        .unwrap();
+    assert_eq!(header.collection_id, log.collection_id());
+    assert_eq!(header.collection_format, OBJECT_LOG_AUX_V1_FORMAT);
+
+    let first_bytes = storage
+        .backing
+        .region_bytes(first_aux.region_index)
+        .unwrap();
+    let payload =
+        &first_bytes[Header::ENCODED_LEN..Header::ENCODED_LEN + geometry.payload_capacity];
+    assert_eq!(&payload[..4], AUX_MAGIC.as_slice());
+    assert_eq!(read_u16_at(payload, 4), AUX_VERSION);
+    assert_eq!(read_u32_at(payload, 6), geometry.chunk_slot_len as u32);
+    assert_eq!(read_u32_at(payload, 10), geometry.chunk_slot_count as u32);
+    assert_eq!(read_u32_at(payload, 14), LOG_METADATA.len() as u32);
+    decode_aux_prologue(payload, geometry, LOG_METADATA).unwrap();
+    assert_eq!(
+        geometry.chunk_slot_len % storage.metadata().wal_write_granule as usize,
+        0
+    );
+    assert_eq!(
+        (geometry.next_link_offset - geometry.prologue_len) % geometry.chunk_slot_len,
+        0
+    );
+    let (chunk, range) = decode_aux_chunk_slot(payload, geometry, 0).unwrap();
+    assert_eq!(chunk.logical_start, 0);
+    assert_eq!(chunk.chunk_len, geometry.chunk_logical_capacity);
+    assert_eq!(chunk.chunk_crc32c, crc32(&payload[range]));
+
+    let first_next = decode_aux_next_link(
+        &payload[geometry.next_link_offset..geometry.next_link_offset + geometry.next_link_len],
+        storage.metadata().erased_byte,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(first_next.region_index, second_aux.region_index);
+
+    let second_bytes = storage
+        .backing
+        .region_bytes(second_aux.region_index)
+        .unwrap();
+    let second_payload =
+        &second_bytes[Header::ENCODED_LEN..Header::ENCODED_LEN + geometry.payload_capacity];
+    assert!(decode_aux_next_link(
+        &second_payload
+            [geometry.next_link_offset..geometry.next_link_offset + geometry.next_link_len],
+        storage.metadata().erased_byte,
+    )
+    .unwrap()
+    .is_none());
+}
+
+//= spec/object-log.md#large-objects
+//= type=test
+//# `RING-OBJECT-022` Large-object append placement MUST use one
+//# region-capacity scratch buffer, materialize only complete auxiliary-region
+//# images before object completion, write each prior auxiliary next-link slot at
+//# most once when another auxiliary region follows, and publish any final
+//# partial scratch contents as contiguous private tail chunks immediately after
+//# the public `LargeRecordEntry`.
+#[test]
+fn requirement_object_log_large_append_uses_auxiliary_scratch_buffer() {
+    const REGION_SIZE: usize = 512;
+    const REGION_COUNT: usize = 64;
+
+    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 32768>::new(0xff);
+    let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT>::format(
+        &mut flash,
+        StorageFormatConfig::new(2, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
+    let mut memory = ObjectLogMemory::<REGION_SIZE, 16, 16>::new();
+    let mut log = ObjectLog::new(&mut storage, &mut memory, LOG_METADATA).unwrap();
+    let geometry = log.aux_geometry(storage.metadata()).unwrap();
+    let aux_image_logical_len = geometry.chunk_logical_capacity * geometry.chunk_slot_count;
+
+    let exact_aux = patterned_vec(aux_image_logical_len);
+    let exact_aux_handle = append_with_scratch!(log, &mut storage, &exact_aux).unwrap();
+    let exact_aux_entry = large_entry_for(&log, &mut storage, exact_aux_handle);
+    assert_eq!(exact_aux_entry.tail_logical_len, 0);
+    assert!(log
+        .read_aux_region_into_storage_scratch(&mut storage, geometry, exact_aux_entry.first_aux)
+        .unwrap()
+        .is_none());
+
+    let mixed = patterned_vec(aux_image_logical_len * 2 + 3);
+    let mut oversized_scratch = [0u8; REGION_SIZE + 23];
+    let mixed_handle = log
+        .append(&mut storage, &mixed, &mut oversized_scratch)
+        .unwrap();
+    let (entry_region, entry_record) = record_info_for(&log, &mut storage, mixed_handle);
+    let mixed_entry = log
+        .read_large_entry(&mut storage, entry_region, mixed_handle, entry_record)
+        .unwrap();
+    assert_eq!(mixed_entry.tail_logical_len, 3);
+    let second_aux = log
+        .read_aux_region_into_storage_scratch(&mut storage, geometry, mixed_entry.first_aux)
+        .unwrap()
+        .unwrap();
+    assert!(log
+        .read_aux_region_into_storage_scratch(&mut storage, geometry, second_aux)
+        .unwrap()
+        .is_none());
+
+    let first_tail = ObjectLogHandle::new(
+        mixed_handle.region_index,
+        mixed_handle.sequence,
+        entry_record.record_end,
+    );
+    let (_, first_tail_record, first_tail_chunk) =
+        log.read_chunk_info(&mut storage, first_tail, true).unwrap();
+    assert_eq!(
+        first_tail_chunk.logical_start,
+        (aux_image_logical_len * 2) as u64
+    );
+    assert_eq!(first_tail_chunk.chunk_len, 3);
+    assert_eq!(
+        first_tail_record.record_end,
+        log.region_for_handle(mixed_handle)
+            .unwrap()
+            .committed_end_offset
+    );
+    assert_get_bytes(
+        &log,
+        &mut storage,
+        mixed_handle,
+        &mixed,
+        &mut std::vec![0; mixed.len()],
+    );
+}
+
+//= spec/object-log.md#large-objects
+//= type=test
+//# `RING-OBJECT-023` Every auxiliary region written for a large object MUST be
+//# transaction-reserved before write, transaction-owned and recoverable before
+//# commit, reachable from exactly one committed `LargeRecordEntry` after commit,
+//# and reclaimed if the transaction aborts before commit.
+#[test]
+fn requirement_object_log_auxiliary_regions_are_transaction_owned() {
+    const REGION_SIZE: usize = 512;
+    const REGION_COUNT: usize = 64;
+
+    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 32768>::new(0xff);
+    let (collection_id, committed_handle, object) = {
         let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT>::format(
             &mut flash,
             StorageFormatConfig::new(2, 8, 0xa5),
@@ -3199,34 +3801,29 @@ fn requirement_object_log_large_object_handles_point_to_end_records() {
         .unwrap();
         let mut memory = ObjectLogMemory::<REGION_SIZE, 16, 16>::new();
         let mut log = ObjectLog::new(&mut storage, &mut memory, LOG_METADATA).unwrap();
-        let handle = log.append(&mut storage, &object).unwrap();
+        let geometry = log.aux_geometry(storage.metadata()).unwrap();
+        let aux_image_logical_len = geometry.chunk_logical_capacity * geometry.chunk_slot_count;
+        let object = patterned_vec(aux_image_logical_len);
+        let mut planned = None;
+        let result: Result<(), ObjectLogError> = log.transaction(&mut storage, |tx| {
+            let handle = tx_append_with_scratch!(tx, &object)?;
+            planned = Some(handle);
+            Err(ObjectLogError::InvalidHandle)
+        });
+        assert!(matches!(result, Err(ObjectLogError::InvalidHandle)));
+        assert_eq!(log.first_handle(), None);
+        let mut scratch = std::vec![0u8; object.len()];
+        assert!(matches!(
+            log.get(&mut storage, planned.unwrap(), &mut scratch, |_| ()),
+            Err(ObjectLogError::InvalidHandle)
+        ));
+        assert!(storage.free_list_tail().is_some());
 
-        let (_, record) = record_info_for(&log, &mut storage, handle);
-        assert_eq!(record.record_type, RECORD_OBJECT_END);
-        let object_end = object_end_for(&log, &mut storage, handle);
-        assert_eq!(object_end.total_object_len, object.len() as u64);
-        assert_eq!(
-            record_info_for(&log, &mut storage, object_end.first)
-                .1
-                .record_type,
-            RECORD_OBJECT_CHUNK
-        );
-        assert_eq!(
-            record_info_for(&log, &mut storage, object_end.last)
-                .1
-                .record_type,
-            RECORD_OBJECT_CHUNK
-        );
-
-        let mut scratch = [0u8; 900];
-        assert_get_bytes(&log, &mut storage, handle, &object, &mut scratch);
-        assert_get_range(&log, &mut storage, handle, 140, &object[140..156]);
-        assert_eq!(
-            log.get_object_len(&mut storage, handle).unwrap(),
-            object.len() as u64
-        );
-        log.flush(&mut storage).unwrap();
-        (log.collection_id(), handle)
+        let committed_handle = append_with_scratch!(log, &mut storage, &object).unwrap();
+        let entry = large_entry_for(&log, &mut storage, committed_handle);
+        assert!(entry.total_object_len > u64::from(entry.tail_logical_len));
+        assert_get_bytes(&log, &mut storage, committed_handle, &object, &mut scratch);
+        (log.collection_id(), committed_handle, object)
     };
 
     let mut reopened =
@@ -3234,510 +3831,11 @@ fn requirement_object_log_large_object_handles_point_to_end_records() {
             .unwrap();
     let mut reopened_memory = ObjectLogMemory::<REGION_SIZE, 16, 16>::new();
     let reopened_log = ObjectLog::open(collection_id, &mut reopened, &mut reopened_memory).unwrap();
-    let mut scratch = [0u8; 900];
-    assert_get_bytes(&reopened_log, &mut reopened, handle, &object, &mut scratch);
-    assert_get_range(&reopened_log, &mut reopened, handle, 200, &object[200..216]);
-    assert_eq!(
-        reopened_log.get_object_len(&mut reopened, handle).unwrap(),
-        object.len() as u64
+    assert_get_bytes(
+        &reopened_log,
+        &mut reopened,
+        committed_handle,
+        &object,
+        &mut std::vec![0; object.len()],
     );
-}
-
-//= spec/ring/09-implementation-coverage.md#objectlog-current-implementation-regression-requirements
-//= type=test
-//# `RING-IMPL-REGRESSION-136` Current ObjectLog chunks MUST encode previous and
-//# next link flags, logical start, chunk length, linked chunk pointers, and
-//# chunk bytes, and validate corrupted chunk records through CRCs and bounds.
-#[test]
-fn requirement_object_log_chunks_encode_links_and_validate_crc() {
-    const REGION_SIZE: usize = 256;
-    const REGION_COUNT: usize = 18;
-
-    let mut object = [0u8; 420];
-    fill_pattern(&mut object);
-    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 8192>::new(0xff);
-    let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT>::format(
-        &mut flash,
-        StorageFormatConfig::new(2, 8, 0xa5),
-        crate::test_storage_memory(),
-    )
-    .unwrap();
-    let mut memory = ObjectLogMemory::<REGION_SIZE, 16, 16>::new();
-    let mut log = ObjectLog::new(&mut storage, &mut memory, LOG_METADATA).unwrap();
-    let handle = log.append(&mut storage, &object).unwrap();
-    let object_end = object_end_for(&log, &mut storage, handle);
-
-    let (_, _, first_chunk) = log
-        .read_chunk_info(&mut storage, object_end.first, true)
-        .unwrap();
-    assert_eq!(first_chunk.flags & OBJECT_CHUNK_FLAG_PREV_VALID, 0);
-    assert_ne!(first_chunk.flags & OBJECT_CHUNK_FLAG_NEXT_VALID, 0);
-    assert_eq!(first_chunk.logical_start, 0);
-    let second = first_chunk.next;
-    let (_, _, second_chunk) = log.read_chunk_info(&mut storage, second, true).unwrap();
-    assert_ne!(second_chunk.flags & OBJECT_CHUNK_FLAG_PREV_VALID, 0);
-    assert_eq!(second_chunk.prev, object_end.first);
-
-    let crc_offset = usize::try_from(object_end.first.offset).unwrap() + 5;
-    storage
-        .backing
-        .write_region(
-            object_end.first.region_index,
-            crc_offset,
-            &0u32.to_le_bytes(),
-        )
-        .unwrap();
-    let mut scratch = [0u8; 8];
-    assert!(matches!(
-        log.get_range(&mut storage, handle, 0, 8, &mut scratch, |_| ()),
-        Err(ObjectLogError::InvalidFrame)
-    ));
-}
-
-fn check_object_log_large_object_reads_reject_private_or_malformed_chunks() {
-    const REGION_SIZE: usize = 256;
-    const REGION_COUNT: usize = 18;
-
-    let mut object = [0u8; 420];
-    fill_pattern(&mut object);
-    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 8192>::new(0xff);
-    let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT>::format(
-        &mut flash,
-        StorageFormatConfig::new(2, 8, 0xa5),
-        crate::test_storage_memory(),
-    )
-    .unwrap();
-    let mut memory = ObjectLogMemory::<REGION_SIZE, 16, 16>::new();
-    let mut log = ObjectLog::new(&mut storage, &mut memory, LOG_METADATA).unwrap();
-    let handle = log.append(&mut storage, &object).unwrap();
-    let object_end = object_end_for(&log, &mut storage, handle);
-    let (first_region, first_record, first_chunk) = log
-        .read_chunk_info(&mut storage, object_end.first, true)
-        .unwrap();
-    assert!(first_region.flushed);
-    assert_ne!(first_chunk.flags & OBJECT_CHUNK_FLAG_NEXT_VALID, 0);
-
-    let mut scratch = [0u8; 420];
-    assert!(matches!(
-        log.get(&mut storage, object_end.first, &mut scratch, |_| ()),
-        Err(ObjectLogError::InvalidHandle)
-    ));
-
-    let original_region = *storage
-        .backing
-        .region_bytes(first_region.region_index)
-        .unwrap();
-    let first_len = first_chunk.chunk_len;
-    let mut first_exact = std::vec![0u8; first_len];
-    assert_eq!(
-        log.get_range(
-            &mut storage,
-            handle,
-            0,
-            first_len as u64,
-            &mut first_exact,
-            |bytes| {
-                assert_eq!(bytes, &object[..first_len]);
-                bytes.len()
-            },
-        )
-        .unwrap(),
-        first_len
-    );
-    let mut boundary = [0u8; 1];
-    assert_eq!(
-        log.get_range(
-            &mut storage,
-            handle,
-            first_len as u64,
-            1,
-            &mut boundary,
-            |bytes| {
-                assert_eq!(bytes, &object[first_len..first_len + 1]);
-                bytes.len()
-            },
-        )
-        .unwrap(),
-        1
-    );
-    let mut too_short_for_copy = [0u8; 1];
-    assert!(matches!(
-        log.copy_large_object_range(&mut storage, object_end, 0, 2, &mut too_short_for_copy),
-        Err(ObjectLogError::InvalidFrame)
-    ));
-
-    storage
-        .backing
-        .write_region(
-            first_region.region_index,
-            first_record.body_start,
-            &[first_chunk.flags | OBJECT_CHUNK_FLAG_PREV_VALID],
-        )
-        .unwrap();
-    assert!(matches!(
-        log.get(&mut storage, handle, &mut scratch, |_| ()),
-        Err(ObjectLogError::InvalidFrame)
-    ));
-    storage
-        .backing
-        .write_region(first_region.region_index, 0, &original_region[..])
-        .unwrap();
-
-    storage
-        .backing
-        .write_region(
-            first_region.region_index,
-            first_record.body_start,
-            &[first_chunk.flags | 0x80],
-        )
-        .unwrap();
-    let mut one_byte = [0u8; 1];
-    assert!(matches!(
-        log.copy_large_object_range(
-            &mut storage,
-            object_end,
-            first_chunk.chunk_len as u64,
-            1,
-            &mut one_byte,
-        ),
-        Err(ObjectLogError::InvalidFrame)
-    ));
-    storage
-        .backing
-        .write_region(first_region.region_index, 0, &original_region[..])
-        .unwrap();
-
-    storage
-        .backing
-        .write_region(
-            first_region.region_index,
-            first_record.body_start,
-            &[first_chunk.flags & !OBJECT_CHUNK_FLAG_NEXT_VALID],
-        )
-        .unwrap();
-    refresh_record_crc(&mut log, &mut storage, first_region, first_record);
-    let mut one_byte = [0u8; 1];
-    assert!(matches!(
-        log.copy_large_object_range(
-            &mut storage,
-            object_end,
-            first_chunk.chunk_len as u64,
-            1,
-            &mut one_byte,
-        ),
-        Err(ObjectLogError::InvalidFrame)
-    ));
-    storage
-        .backing
-        .write_region(first_region.region_index, 0, &original_region[..])
-        .unwrap();
-
-    storage
-        .backing
-        .write_region(
-            first_region.region_index,
-            first_record.body_start + 1 + size_of::<u64>(),
-            &(first_chunk.chunk_len as u32 + 1).to_le_bytes(),
-        )
-        .unwrap();
-    assert!(matches!(
-        log.get(&mut storage, handle, &mut scratch, |_| ()),
-        Err(ObjectLogError::InvalidFrame)
-    ));
-    storage
-        .backing
-        .write_region(first_region.region_index, 0, &original_region[..])
-        .unwrap();
-
-    let zero_handle = ObjectLogHandle::new(0, 0, 0);
-    let mut encoded_zero = [0u8; HANDLE_ENCODED_LEN];
-    write_handle(&mut encoded_zero, 0, zero_handle).unwrap();
-    storage
-        .backing
-        .write_region(
-            first_region.region_index,
-            first_record.body_start + 1 + size_of::<u64>() + size_of::<u32>() + HANDLE_ENCODED_LEN,
-            &encoded_zero,
-        )
-        .unwrap();
-    assert!(matches!(
-        log.get(&mut storage, handle, &mut scratch, |_| ()),
-        Err(ObjectLogError::InvalidFrame | ObjectLogError::InvalidHandle)
-    ));
-    storage
-        .backing
-        .write_region(first_region.region_index, 0, &original_region[..])
-        .unwrap();
-
-    let (second_region, second_record, second_chunk) = log
-        .read_chunk_info(&mut storage, first_chunk.next, true)
-        .unwrap();
-    let second_original = *storage
-        .backing
-        .region_bytes(second_region.region_index)
-        .unwrap();
-    let saved_frontier = write_region_or_frontier(
-        &mut log,
-        &mut storage,
-        second_region,
-        u32::try_from(second_record.body_start).unwrap(),
-        &[second_chunk.flags & !OBJECT_CHUNK_FLAG_PREV_VALID],
-    );
-    refresh_record_crc(&mut log, &mut storage, second_region, second_record);
-    let mut one_byte = [0u8; 1];
-    assert!(matches!(
-        log.copy_large_object_range(&mut storage, object_end, first_len as u64, 1, &mut one_byte,),
-        Err(ObjectLogError::InvalidFrame)
-    ));
-    restore_region_or_frontier(
-        &mut log,
-        &mut storage,
-        second_region,
-        saved_frontier,
-        &second_original,
-    );
-
-    let mut encoded_zero = [0u8; HANDLE_ENCODED_LEN];
-    write_handle(&mut encoded_zero, 0, ObjectLogHandle::new(0, 0, 0)).unwrap();
-    let saved_frontier = write_region_or_frontier(
-        &mut log,
-        &mut storage,
-        second_region,
-        u32::try_from(second_record.body_start + 1 + size_of::<u64>() + size_of::<u32>()).unwrap(),
-        &encoded_zero,
-    );
-    refresh_record_crc(&mut log, &mut storage, second_region, second_record);
-    let mut one_byte = [0u8; 1];
-    assert!(matches!(
-        log.copy_large_object_range(&mut storage, object_end, first_len as u64, 1, &mut one_byte,),
-        Err(ObjectLogError::InvalidFrame)
-    ));
-    restore_region_or_frontier(
-        &mut log,
-        &mut storage,
-        second_region,
-        saved_frontier,
-        &second_original,
-    );
-
-    let (last_region, last_record, last_chunk) = log
-        .read_chunk_info(&mut storage, object_end.last, true)
-        .unwrap();
-    let last_original = *storage
-        .backing
-        .region_bytes(last_region.region_index)
-        .unwrap();
-    let saved_frontier = write_region_or_frontier(
-        &mut log,
-        &mut storage,
-        last_region,
-        u32::try_from(last_record.body_start).unwrap(),
-        &[last_chunk.flags | OBJECT_CHUNK_FLAG_NEXT_VALID],
-    );
-    refresh_record_crc(&mut log, &mut storage, last_region, last_record);
-    let mut one_byte = [0u8; 1];
-    assert!(matches!(
-        log.copy_large_object_range(
-            &mut storage,
-            object_end,
-            object.len() as u64 - 1,
-            1,
-            &mut one_byte,
-        ),
-        Err(ObjectLogError::InvalidFrame)
-    ));
-    restore_region_or_frontier(
-        &mut log,
-        &mut storage,
-        last_region,
-        saved_frontier,
-        &last_original,
-    );
-
-    let mut wrong_last = object_end;
-    wrong_last.last = object_end.first;
-    let mut one_byte = [0u8; 1];
-    assert!(matches!(
-        log.copy_large_object_range(
-            &mut storage,
-            wrong_last,
-            object.len() as u64 - 1,
-            1,
-            &mut one_byte,
-        ),
-        Err(ObjectLogError::InvalidFrame)
-    ));
-}
-
-//= spec/object-log.md#large-objects
-//= type=todo
-//# `RING-OBJECT-021` Auxiliary regions MUST use the `OLAX` auxiliary prologue
-//# with version `1`, exact fixed chunk slots that divide the auxiliary chunk
-//# area, chunk slots whose physical length is a multiple of `wal_write_granule`,
-//# and a reserved next-link slot that is either erased/all-empty or a
-//# CRC-protected `AuxRegionPointer`.
-#[test]
-fn todo_object_log_auxiliary_region_layout_and_link_slot() {}
-
-//= spec/object-log.md#large-objects
-//= type=todo
-//# `RING-OBJECT-022` Large-object append placement MUST use one
-//# region-capacity scratch buffer, materialize only complete auxiliary-region
-//# images before object completion, write each prior auxiliary next-link slot at
-//# most once when another auxiliary region follows, and publish any final
-//# partial scratch contents as contiguous private tail chunks immediately after
-//# the public `LargeRecordEntry`.
-#[test]
-fn todo_object_log_large_append_uses_auxiliary_scratch_buffer() {}
-
-//= spec/object-log.md#large-objects
-//= type=todo
-//# `RING-OBJECT-023` Every auxiliary region written for a large object MUST be
-//# transaction-reserved before write, transaction-owned and recoverable before
-//# commit, reachable from exactly one committed `LargeRecordEntry` after commit,
-//# and reclaimed if the transaction aborts before commit.
-#[test]
-fn todo_object_log_auxiliary_regions_are_transaction_owned() {}
-
-//= spec/ring/09-implementation-coverage.md#objectlog-current-implementation-regression-requirements
-//= type=test
-//# `RING-IMPL-REGRESSION-138` Current ObjectLog large-object runs MUST use
-//# linked `ObjectChunk` records with previous and next links or start and end
-//# markers rather than a map-style manifest.
-#[test]
-fn requirement_object_log_large_object_runs_use_linked_chunks() {
-    const REGION_SIZE: usize = 256;
-    const REGION_COUNT: usize = 20;
-
-    let mut object = [0u8; 560];
-    fill_pattern(&mut object);
-    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 8192>::new(0xff);
-    let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT>::format(
-        &mut flash,
-        StorageFormatConfig::new(2, 8, 0xa5),
-        crate::test_storage_memory(),
-    )
-    .unwrap();
-    let mut memory = ObjectLogMemory::<REGION_SIZE, 16, 16>::new();
-    let mut log = ObjectLog::new(&mut storage, &mut memory, LOG_METADATA).unwrap();
-    let handle = log.append(&mut storage, &object).unwrap();
-    let object_end = object_end_for(&log, &mut storage, handle);
-
-    let mut current = object_end.first;
-    let mut previous = None;
-    let mut total = 0usize;
-    let mut chunk_count = 0usize;
-    loop {
-        let (_, _, chunk) = log.read_chunk_info(&mut storage, current, true).unwrap();
-        if let Some(previous) = previous {
-            assert_eq!(chunk.prev, previous);
-        } else {
-            assert_eq!(chunk.flags & OBJECT_CHUNK_FLAG_PREV_VALID, 0);
-        }
-        total += chunk.chunk_len;
-        chunk_count += 1;
-        if chunk.flags & OBJECT_CHUNK_FLAG_NEXT_VALID == 0 {
-            assert_eq!(current, object_end.last);
-            break;
-        }
-        previous = Some(current);
-        current = chunk.next;
-    }
-    assert!(chunk_count > 1);
-    assert_eq!(total, object.len());
-}
-
-//= spec/ring/09-implementation-coverage.md#objectlog-current-implementation-regression-requirements
-//= type=test
-//# `RING-IMPL-REGRESSION-139` Current ObjectLog large-object append placement
-//# MUST fill the current frontier first, directly materialize full frontier
-//# images, and keep the trailing partial chunk plus `ObjectEnd` record
-//# WAL-backed.
-#[test]
-fn requirement_object_log_large_object_append_placement_uses_frontier_first() {
-    const REGION_SIZE: usize = 256;
-    const REGION_COUNT: usize = 24;
-
-    let mut object = [0u8; 420];
-    fill_pattern(&mut object);
-    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 8192>::new(0xff);
-    let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT>::format(
-        &mut flash,
-        StorageFormatConfig::new(2, 8, 0xa5),
-        crate::test_storage_memory(),
-    )
-    .unwrap();
-    let mut memory = ObjectLogMemory::<REGION_SIZE, 16, 16>::new();
-    let mut log = ObjectLog::new(&mut storage, &mut memory, LOG_METADATA).unwrap();
-    let seed = log.append(&mut storage, b"seed").unwrap();
-    let handle = log.append(&mut storage, &object).unwrap();
-    let object_end = object_end_for(&log, &mut storage, handle);
-
-    assert_eq!(object_end.first.region_index, seed.region_index);
-    assert!(object_end.first.offset > seed.offset);
-    assert!(log.region_for_handle(object_end.first).unwrap().flushed);
-    assert!(!log.region_for_handle(handle).unwrap().flushed);
-
-    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 8192>::new(0xff);
-    let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT>::format(
-        &mut flash,
-        StorageFormatConfig::new(2, 8, 0xa5),
-        crate::test_storage_memory(),
-    )
-    .unwrap();
-    let mut memory = ObjectLogMemory::<REGION_SIZE, 16, 16>::new();
-    let mut log = ObjectLog::new(&mut storage, &mut memory, LOG_METADATA).unwrap();
-    let payload_capacity = committed_payload_capacity::<REGION_SIZE>(storage.metadata()).unwrap();
-    let max_region_end = Header::ENCODED_LEN + payload_capacity;
-    let object_start = Header::ENCODED_LEN + data_prologue_len(LOG_METADATA.len()).unwrap();
-    let exact_chunk_len = chunk_payload_capacity_at(object_start, max_region_end, false).unwrap();
-    let mut exact = std::vec![0u8; exact_chunk_len * 2];
-    fill_pattern(&mut exact);
-    let exact_handle = log.append(&mut storage, &exact).unwrap();
-    let exact_end = object_end_for(&log, &mut storage, exact_handle);
-    assert_ne!(exact_end.last.region_index, exact_handle.region_index);
-    assert!(log.region_for_handle(exact_end.last).unwrap().flushed);
-    assert!(!log.region_for_handle(exact_handle).unwrap().flushed);
-}
-
-//= spec/ring/09-implementation-coverage.md#objectlog-current-implementation-regression-requirements
-//= type=test
-//# `RING-IMPL-REGRESSION-140` Current ObjectLog large-object regions MUST be
-//# transaction-reserved before write and recoverable if the transaction does not
-//# commit.
-#[test]
-fn requirement_object_log_large_object_regions_are_transaction_reserved() {
-    const REGION_SIZE: usize = 256;
-    const REGION_COUNT: usize = 24;
-
-    let mut object = [0u8; 420];
-    fill_pattern(&mut object);
-    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 8192>::new(0xff);
-    let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT>::format(
-        &mut flash,
-        StorageFormatConfig::new(2, 8, 0xa5),
-        crate::test_storage_memory(),
-    )
-    .unwrap();
-    let mut memory = ObjectLogMemory::<REGION_SIZE, 16, 16>::new();
-    let mut log = ObjectLog::new(&mut storage, &mut memory, LOG_METADATA).unwrap();
-    let mut planned = None;
-    let result: Result<(), ObjectLogError> = log.transaction(&mut storage, |tx| {
-        let handle = tx.append(&object)?;
-        planned = Some(handle);
-        Err(ObjectLogError::InvalidHandle)
-    });
-    assert!(result.is_err());
-    let planned = planned.unwrap();
-    assert_eq!(log.first_handle(), None);
-    assert!(!log
-        .memory
-        .regions
-        .iter()
-        .any(|region| region.region_index == planned.region_index));
-    let mut scratch = [0u8; 420];
-    assert!(matches!(
-        log.get(&mut storage, planned, &mut scratch, |_| ()),
-        Err(ObjectLogError::InvalidHandle)
-    ));
 }
