@@ -454,15 +454,11 @@ fn requirement_object_log_durable_state_is_canonical_and_self_delimiting() {
     check_object_log_update_payloads_validate_truncate_and_materialized_region_records();
 }
 
-//= spec/object-log.md#durability
+//= spec/ring/09-implementation-coverage.md#objectlog-current-implementation-regression-requirements
 //= type=test
-//# `RING-OBJECT-026` Object-log append placement MUST preserve stable handles
-//# and forward progress at region boundaries: exact-fit inline objects MUST use
-//# the current reserved frontier, objects too large for inline representation
-//# MUST use large-object records, empty or already-materialized frontiers MUST
-//# not be materialized twice, impossible no-progress large-object geometry MUST
-//# fail, and nonempty full frontiers MUST be materialized before continuing in a
-//# newly reserved frontier.
+//# `RING-IMPL-REGRESSION-142` Current ObjectLog append placement MUST preserve
+//# stable handles and forward progress across exact-fit inline, oversized
+//# large-object, no-progress geometry, and full-frontier materialization cases.
 #[test]
 fn requirement_object_log_append_placement_preserves_handles_and_progress() {
     check_object_log_exact_fit_capacity_boundaries_are_stable();
@@ -498,13 +494,11 @@ fn requirement_object_log_reads_treat_scratch_as_minimum_capacity() {
     check_object_log_reads_accept_exact_scratch_lengths();
 }
 
-//= spec/object-log.md#durability
+//= spec/ring/09-implementation-coverage.md#objectlog-current-implementation-regression-requirements
 //= type=test
-//# `RING-OBJECT-028` Before returning object bytes, Object-log reads MUST
-//# validate that flushed data-region headers and prologues still identify the
-//# live collection and that large-object chunk runs expose only public
-//# `ObjectEnd` handles with valid private chunk body lengths, flags, links,
-//# logical positions, and CRCs.
+//# `RING-IMPL-REGRESSION-137` Current ObjectLog large-object reads MUST reject
+//# private chunk handles and malformed linked chunk runs before returning object
+//# bytes.
 #[test]
 fn requirement_object_log_reads_validate_identity_and_large_chunk_runs() {
     check_object_log_flushed_region_prologue_is_validated_on_read();
@@ -1985,11 +1979,20 @@ fn requirement_object_log_truncate_before_handle_retains_boundary_handle() {
 }
 
 //= spec/object-log.md#truncation
+//= type=todo
+//# `RING-OBJECT-029` Large-object truncation MUST retain the auxiliary chain
+//# and private tail chunks for a retained boundary `LargeRecordEntry`, free the
+//# entire auxiliary chain for any truncated-away `LargeRecordEntry`, and retain
+//# no unrelated object data beyond ordinary object-log regions that still
+//# contain the live head.
+#[test]
+fn todo_object_log_large_truncation_frees_auxiliary_chains() {}
+
+//= spec/ring/09-implementation-coverage.md#objectlog-current-implementation-regression-requirements
 //= type=test
-//# `RING-OBJECT-029` When truncating before a large-object handle, the object
-//# log MUST retain every chunk region reachable from that large object's
-//# `ObjectEnd` record and free only regions wholly before the retained first
-//# chunk.
+//# `RING-IMPL-REGRESSION-141` Current ObjectLog truncation before a large-object
+//# handle MUST retain the chunk run reachable from that handle's `ObjectEnd`
+//# record and free only regions wholly before the retained first chunk.
 #[test]
 fn requirement_object_log_truncate_before_large_object_retains_reachable_run() {
     check_object_log_truncate_before_large_object_retains_object_run();
@@ -3088,7 +3091,8 @@ fn requirement_object_log_v1_data_regions_use_typed_record_headers() {
 
 //= spec/object-log.md#durability
 //= type=test
-//# `RING-OBJECT-018` Inline objects MUST be encoded as record type `0x01`
+//# `RING-OBJECT-018` Small objects with length less than or equal to one
+//# chunk's logical capacity MUST be encoded as public record type `0x01`
 //# `InlineObject` whose body is the raw object bytes and whose public handle
 //# names that record.
 #[test]
@@ -3116,10 +3120,68 @@ fn requirement_object_log_inline_objects_use_inline_object_records() {
 }
 
 //= spec/object-log.md#durability
+//= type=todo
+//# `RING-OBJECT-019` Large-object handles MUST point to public record type
+//# `0x03` `LargeRecordEntry` records encoded as `[total_object_len:u64
+//# little-endian][tail_logical_len:u32 little-endian][first_aux:AuxRegionPointer]`,
+//# where `tail_logical_len` names the contiguous ordinary-log tail byte count and
+//# `first_aux` is zero only when the whole large object is stored in tail chunks.
+#[test]
+fn todo_object_log_large_record_entry_layout() {}
+
+//= spec/object-log.md#durability
+//= type=todo
+//# `RING-OBJECT-020` Object chunks MUST be private record type `0x02`
+//# `ObjectChunk` records encoded as `[logical_start:u64 little-endian]
+//# [chunk_len:u32 little-endian][chunk_crc32c:u32 little-endian][chunk_bytes]`
+//# in ordinary object-log regions and fixed auxiliary chunk slots, and MUST
+//# validate `chunk_crc32c` over exactly the logical `chunk_bytes`.
+#[test]
+fn todo_object_log_private_chunk_layout_and_crc() {}
+
+//= spec/object-log.md#durability
+//= type=todo
+//# `RING-OBJECT-026` Object-log append placement MUST preserve stable handles
+//# at ordinary frontier boundaries: a small inline record that exactly fits the
+//# current reserved frontier MUST be written there, and insufficient remaining
+//# frontier space MUST materialize the frontier and continue in the next reserved
+//# ordinary region without changing already returned handles.
+#[test]
+fn todo_object_log_auxiliary_append_placement_preserves_handles() {}
+
+//= spec/object-log.md#durability
+//= type=todo
+//# `RING-OBJECT-030` Object-log append routing MUST classify objects by chunk
+//# count rather than current frontier free space: objects with length less than
+//# or equal to one chunk's logical capacity use `InlineObject`, and objects
+//# requiring more than one chunk use one public `LargeRecordEntry` plus private
+//# chunks.
+#[test]
+fn todo_object_log_append_routing_classifies_by_chunk_count() {}
+
+//= spec/object-log.md#durability
+//= type=todo
+//# `RING-OBJECT-031` Large-object append placement MUST fail impossible
+//# no-progress geometries and MUST keep each private auxiliary or tail chunk
+//# span associated with exactly one public `LargeRecordEntry`.
+#[test]
+fn todo_object_log_large_append_rejects_no_progress_geometry() {}
+
+//= spec/object-log.md#durability
+//= type=todo
+//# `RING-OBJECT-028` Before returning object bytes, Object-log reads MUST
+//# validate that flushed data-region headers and prologues still identify the
+//# live collection and that large objects expose only public `LargeRecordEntry`
+//# handles with valid auxiliary-region identity, auxiliary links, fixed-slot
+//# chunk bounds, tail chunk ordering, logical positions, and CRCs.
+#[test]
+fn todo_object_log_reads_validate_auxiliary_large_objects() {}
+
+//= spec/ring/09-implementation-coverage.md#objectlog-current-implementation-regression-requirements
 //= type=test
-//# `RING-OBJECT-019` Large-object handles MUST point to record type `0x03`
-//# `ObjectEnd` records encoded as `[total_object_len:u64
-//# little-endian][first:ObjectLogPointer][last:ObjectLogPointer]`.
+//# `RING-IMPL-REGRESSION-135` Current ObjectLog large-object handles MUST point
+//# to `ObjectEnd` records that carry total length plus first and last linked
+//# chunk pointers.
 #[test]
 fn requirement_object_log_large_object_handles_point_to_end_records() {
     const REGION_SIZE: usize = 512;
@@ -3181,13 +3243,11 @@ fn requirement_object_log_large_object_handles_point_to_end_records() {
     );
 }
 
-//= spec/object-log.md#durability
+//= spec/ring/09-implementation-coverage.md#objectlog-current-implementation-regression-requirements
 //= type=test
-//# `RING-OBJECT-020` Object chunks MUST be encoded as record type `0x02`
-//# `ObjectChunk` bodies `[flags:u8][logical_start:u64
-//# little-endian][chunk_len:u32
-//# little-endian][prev:ObjectLogPointer][next:ObjectLogPointer][chunk_bytes]`, MUST reject nonzero
-//# reserved flags, and MUST validate each chunk through its record CRC32C.
+//# `RING-IMPL-REGRESSION-136` Current ObjectLog chunks MUST encode previous and
+//# next link flags, logical start, chunk length, linked chunk pointers, and
+//# chunk bytes, and validate corrupted chunk records through CRCs and bounds.
 #[test]
 fn requirement_object_log_chunks_encode_links_and_validate_crc() {
     const REGION_SIZE: usize = 256;
@@ -3510,10 +3570,40 @@ fn check_object_log_large_object_reads_reject_private_or_malformed_chunks() {
 }
 
 //= spec/object-log.md#large-objects
+//= type=todo
+//# `RING-OBJECT-021` Auxiliary regions MUST use the `OLAX` auxiliary prologue
+//# with version `1`, exact fixed chunk slots that divide the auxiliary chunk
+//# area, chunk slots whose physical length is a multiple of `wal_write_granule`,
+//# and a reserved next-link slot that is either erased/all-empty or a
+//# CRC-protected `AuxRegionPointer`.
+#[test]
+fn todo_object_log_auxiliary_region_layout_and_link_slot() {}
+
+//= spec/object-log.md#large-objects
+//= type=todo
+//# `RING-OBJECT-022` Large-object append placement MUST use one
+//# region-capacity scratch buffer, materialize only complete auxiliary-region
+//# images before object completion, write each prior auxiliary next-link slot at
+//# most once when another auxiliary region follows, and publish any final
+//# partial scratch contents as contiguous private tail chunks immediately after
+//# the public `LargeRecordEntry`.
+#[test]
+fn todo_object_log_large_append_uses_auxiliary_scratch_buffer() {}
+
+//= spec/object-log.md#large-objects
+//= type=todo
+//# `RING-OBJECT-023` Every auxiliary region written for a large object MUST be
+//# transaction-reserved before write, transaction-owned and recoverable before
+//# commit, reachable from exactly one committed `LargeRecordEntry` after commit,
+//# and reclaimed if the transaction aborts before commit.
+#[test]
+fn todo_object_log_auxiliary_regions_are_transaction_owned() {}
+
+//= spec/ring/09-implementation-coverage.md#objectlog-current-implementation-regression-requirements
 //= type=test
-//# `RING-OBJECT-021` Large-object runs MUST use linked `ObjectChunk`
-//# records with previous and next links or start and end markers rather than a
-//# map-style manifest.
+//# `RING-IMPL-REGRESSION-138` Current ObjectLog large-object runs MUST use
+//# linked `ObjectChunk` records with previous and next links or start and end
+//# markers rather than a map-style manifest.
 #[test]
 fn requirement_object_log_large_object_runs_use_linked_chunks() {
     const REGION_SIZE: usize = 256;
@@ -3557,11 +3647,12 @@ fn requirement_object_log_large_object_runs_use_linked_chunks() {
     assert_eq!(total, object.len());
 }
 
-//= spec/object-log.md#large-objects
+//= spec/ring/09-implementation-coverage.md#objectlog-current-implementation-regression-requirements
 //= type=test
-//# `RING-OBJECT-022` Large-object append placement MUST fill the current
-//# frontier first, directly materialize full frontier images, and keep the
-//# trailing partial chunk plus `ObjectEnd` record WAL-backed.
+//# `RING-IMPL-REGRESSION-139` Current ObjectLog large-object append placement
+//# MUST fill the current frontier first, directly materialize full frontier
+//# images, and keep the trailing partial chunk plus `ObjectEnd` record
+//# WAL-backed.
 #[test]
 fn requirement_object_log_large_object_append_placement_uses_frontier_first() {
     const REGION_SIZE: usize = 256;
@@ -3609,11 +3700,11 @@ fn requirement_object_log_large_object_append_placement_uses_frontier_first() {
     assert!(!log.region_for_handle(exact_handle).unwrap().flushed);
 }
 
-//= spec/object-log.md#large-objects
+//= spec/ring/09-implementation-coverage.md#objectlog-current-implementation-regression-requirements
 //= type=test
-//# `RING-OBJECT-023` Every physical region written for a large-object run
-//# MUST be transaction-reserved before write and recoverable if the transaction
-//# does not commit.
+//# `RING-IMPL-REGRESSION-140` Current ObjectLog large-object regions MUST be
+//# transaction-reserved before write and recoverable if the transaction does not
+//# commit.
 #[test]
 fn requirement_object_log_large_object_regions_are_transaction_reserved() {
     const REGION_SIZE: usize = 256;

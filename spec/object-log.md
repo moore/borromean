@@ -15,13 +15,14 @@ respect region/page programming boundaries and waste space for small objects.
 Reusing the same log region in place would reduce allocation churn, but it
 would work against wear leveling and make stale handles harder to detect.
 
-The design resolves those tensions by separating address reservation from
+The design resolves those tensions by separating public object records from
 physical materialization. An append first reserves object-log record addresses
-inside a frontier. Small objects can be represented by one inline object record;
-large objects can be represented by linked chunk records plus a final
-object-end record. The bytes needed to recover unflushed frontier state are
-persisted through WAL updates. Later, flush materializes the frontier into the
-same reserved region, so handles remain valid before and after flush.
+inside a frontier. Small objects can be represented by one inline object record.
+Large objects can be represented by a public large record entry, optional full
+auxiliary regions, and private tail chunks in ordinary object-log order. The
+bytes needed to recover unflushed frontier state are persisted through WAL
+updates. Later, flush materializes the frontier into the same reserved region,
+so handles remain valid before and after flush.
 
 ## API And Handles
 
@@ -131,6 +132,12 @@ serial that prevents stale-region aliasing, and `offset` is the region-local
 record offset. Region-local persisted offsets are `u32`; object-relative offsets
 and object lengths exposed by the read API are `u64`.
 
+`AuxRegionPointer` is the persisted pointer type used to name a private
+large-object auxiliary region. It is exactly 4 bytes:
+`[region_index:u32 little-endian]`. The pointed-to region MUST validate as an
+object-log auxiliary region for the same collection before any auxiliary chunk
+bytes are read.
+
 Object-log V1 data regions contain typed object records. Each record has the
 common header `[record_type:u8][body_len:u32 little-endian][body_crc32c:u32
 little-endian][body]`. `body_len` is the exact byte length of `body`, and
@@ -140,19 +147,59 @@ elsewhere in Borromean disk structures.
 Record type `0x01` is `InlineObject`. Its body is the raw object bytes, and the
 public object handle points directly at the `InlineObject` record.
 
-Record type `0x02` is `ObjectChunk`. Its body is
-`[flags:u8][logical_start:u64 little-endian][chunk_len:u32
-little-endian][prev:ObjectLogPointer][next:ObjectLogPointer][chunk_bytes]`.
-`logical_start` is the object-relative offset of the first byte in
-`chunk_bytes`. `chunk_len` is the exact byte length of `chunk_bytes`. Flag bit 0
-means `prev` is valid; when clear, the chunk is the first chunk in the object
-run. Flag bit 1 means `next` is valid; when clear, the chunk is the last chunk
-in the object run. All other flag bits are reserved and must be zero.
+Record type `0x02` is `ObjectChunk`. In ordinary object-log data regions,
+`ObjectChunk` is a private tail-chunk record used only after a large record
+entry. Its body is `[logical_start:u64 little-endian][chunk_len:u32
+little-endian][chunk_crc32c:u32 little-endian][chunk_bytes]`. `logical_start`
+is the object-relative offset of the first byte in `chunk_bytes`. `chunk_len`
+is the logical byte length of `chunk_bytes`. `chunk_crc32c` is CRC32C over
+exactly `chunk_bytes`. The common record-header `body_len` MUST equal
+`16 + chunk_len`.
 
-Record type `0x03` is `ObjectEnd`. Its body is `[total_object_len:u64
-little-endian][first:ObjectLogPointer][last:ObjectLogPointer]`. Large-object
-public handles point at an `ObjectEnd` record. `first` and `last` name the first
-and last `ObjectChunk` records in the linked object run.
+Record type `0x03` is `LargeRecordEntry`. Its body is
+`[total_object_len:u64 little-endian][tail_logical_len:u32
+little-endian][first_aux:AuxRegionPointer]`. Large-object public handles point
+at `LargeRecordEntry` records. `total_object_len` is the full object length.
+`tail_logical_len` is the number of logical object bytes stored in the private
+tail chunks that immediately follow this record through the ordinary object-log
+path. The auxiliary logical length is
+`total_object_len - tail_logical_len`. If `total_object_len ==
+tail_logical_len`, there is no auxiliary chain and the `first_aux` pointer bytes
+MUST be zero. If `total_object_len > tail_logical_len`, `first_aux` names the
+first auxiliary region. `tail_logical_len` MUST NOT exceed `total_object_len`
+and MUST be less than one complete auxiliary-region image's logical chunk
+capacity.
+
+Large-object auxiliary regions use the ordinary Borromean region header, then
+an object-log auxiliary prologue with its own version. The auxiliary prologue is:
+
+- `aux_magic: [u8; 4]`: the literal bytes `OLAX`.
+- `aux_version: u16`: the auxiliary-region format version, currently `1`.
+- `chunk_slot_len: u32`: the exact physical byte length of each chunk slot.
+- `chunk_slot_count: u32`: the number of chunk slots in the auxiliary chunk
+  area.
+- `log_metadata_len: u32`: the byte length of the immutable log metadata copy
+  that follows.
+- `log_metadata: [u8; log_metadata_len]`: a verbatim copy of the collection's
+  immutable log metadata.
+- `prologue_crc32c: u32`: CRC32C over all preceding auxiliary prologue fields,
+  including `log_metadata`.
+- zero padding to the next `wal_write_granule` boundary.
+
+After the aligned auxiliary prologue, the auxiliary chunk area contains
+`chunk_slot_count` fixed-size chunk slots. Each chunk slot has exact physical
+length `chunk_slot_len`; `chunk_slot_len` MUST divide the auxiliary chunk area
+exactly and MUST be a multiple of `wal_write_granule`. Each auxiliary chunk slot
+is `[record_type:u8 = 0x02][logical_start:u64 little-endian][chunk_len:u32
+little-endian][chunk_crc32c:u32 little-endian][chunk_bytes][zero_fill]`.
+`chunk_len` is the logical byte length only. `chunk_crc32c` covers only the
+logical `chunk_bytes`. `zero_fill` extends the encoded slot to `chunk_slot_len`.
+
+Each auxiliary region ends with a reserved next-link slot. An erased or
+all-empty next-link slot means the auxiliary region has no successor. A present
+next-link slot is `[present:u8 = 1][next:AuxRegionPointer][link_crc32c:u32
+little-endian]`, padded to `wal_write_granule`. `link_crc32c` covers `present`
+and `next`. Other `present` values are invalid.
 
 Durable object-log state has to be canonical and self-delimiting. The reader is
 often deciding whether bytes came from the intended object-log collection, from
@@ -169,8 +216,9 @@ publish, roll back, create, or drop target object-log state.
 Append placement is also a durability concern. Handles are reserved before
 their bytes are written to a data region, so an off-by-one capacity decision can
 change a handle, waste a region, or leave a large-object append unable to make
-progress. Exact-fit and no-progress cases are specified to keep inline objects,
-chunked objects, flush, and replay using the same address boundaries.
+progress. Exact-fit and no-progress cases are specified to keep small records,
+large record entries, private chunks, flush, and replay using the same address
+boundaries.
 
 1. `RING-OBJECT-006` Flushing an object-log frontier MUST write the
 frontier bytes into the previously reserved physical data region, persist
@@ -193,18 +241,20 @@ with the common typed-record header
 `[record_type:u8][body_len:u32 little-endian][body_crc32c:u32
 little-endian][body]`, MUST compute `body_crc32c` as CRC32C over `body`, and
 MUST reject unknown record types.
-6. `RING-OBJECT-018` Inline objects MUST be encoded as record type `0x01`
+6. `RING-OBJECT-018` Small objects with length less than or equal to one
+chunk's logical capacity MUST be encoded as public record type `0x01`
 `InlineObject` whose body is the raw object bytes and whose public handle names
 that record.
-7. `RING-OBJECT-019` Large-object handles MUST point to record type `0x03`
-`ObjectEnd` records encoded as `[total_object_len:u64
-little-endian][first:ObjectLogPointer][last:ObjectLogPointer]`.
-8. `RING-OBJECT-020` Object chunks MUST be encoded as record type `0x02`
-`ObjectChunk` bodies `[flags:u8][logical_start:u64
-little-endian][chunk_len:u32
-little-endian][prev:ObjectLogPointer][next:ObjectLogPointer][chunk_bytes]`, MUST
-reject nonzero reserved flags, and MUST validate each chunk through its record
-CRC32C.
+7. `RING-OBJECT-019` Large-object handles MUST point to public record type
+`0x03` `LargeRecordEntry` records encoded as `[total_object_len:u64
+little-endian][tail_logical_len:u32 little-endian][first_aux:AuxRegionPointer]`,
+where `tail_logical_len` names the contiguous ordinary-log tail byte count and
+`first_aux` is zero only when the whole large object is stored in tail chunks.
+8. `RING-OBJECT-020` Object chunks MUST be private record type `0x02`
+`ObjectChunk` records encoded as `[logical_start:u64 little-endian]
+[chunk_len:u32 little-endian][chunk_crc32c:u32 little-endian][chunk_bytes]`
+in ordinary object-log regions and fixed auxiliary chunk slots, and MUST
+validate `chunk_crc32c` over exactly the logical `chunk_bytes`.
 9. `RING-OBJECT-025` Object-log durable state MUST be canonical and
 self-delimiting: persisted handles, data-region prologues, object records,
 snapshots, and WAL update payloads MUST accept exact valid boundaries and
@@ -212,69 +262,93 @@ reject padding, trailing bytes, malformed bounds, unknown tags, metadata
 changes, and record-body requests that cannot be valid for the encoded
 object kind.
 10. `RING-OBJECT-026` Object-log append placement MUST preserve stable handles
-and forward progress at region boundaries: exact-fit inline objects MUST use
-the current reserved frontier, objects too large for inline representation
-MUST use large-object records, empty or already-materialized frontiers MUST
-not be materialized twice, impossible no-progress large-object geometry MUST
-fail, and nonempty full frontiers MUST be materialized before continuing in a
-newly reserved frontier.
-11. `RING-OBJECT-027` Object-log WAL replay MUST rebuild only the target
+at ordinary frontier boundaries: a small inline record that exactly fits the
+current reserved frontier MUST be written there, and insufficient remaining
+frontier space MUST materialize the frontier and continue in the next reserved
+ordinary region without changing already returned handles.
+11. `RING-OBJECT-030` Object-log append routing MUST classify objects by chunk
+count rather than current frontier free space: objects with length less than or
+equal to one chunk's logical capacity use `InlineObject`, and objects requiring
+more than one chunk use one public `LargeRecordEntry` plus private chunks.
+12. `RING-OBJECT-031` Large-object append placement MUST fail impossible
+no-progress geometries and MUST keep each private auxiliary or tail chunk span
+associated with exactly one public `LargeRecordEntry`.
+13. `RING-OBJECT-027` Object-log WAL replay MUST rebuild only the target
 object-log collection: records for other collection ids or collection types
 MUST NOT alter target state, and lifecycle or transaction markers MUST affect
 target updates only when the marker belongs to the target collection.
-12. `RING-OBJECT-028` Before returning object bytes, Object-log reads MUST
-validate that flushed data-region headers and prologues still identify the
-live collection and that large-object chunk runs expose only public
-`ObjectEnd` handles with valid private chunk body lengths, flags, links,
-logical positions, and CRCs.
+14. `RING-OBJECT-028` Before returning object bytes, Object-log reads MUST
+validate that flushed data-region headers and prologues still identify the live
+collection and that large objects expose only public `LargeRecordEntry` handles
+with valid auxiliary-region identity, auxiliary links, fixed-slot chunk bounds,
+tail chunk ordering, logical positions, and CRCs.
 
 ## Large Objects
 
-Large objects are represented as linked runs of `ObjectChunk` records completed
-by one `ObjectEnd` record. The object log does not use a map-style manifest for
-these runs because a single logical object may consume an unbounded number of
-regions. The chunk links are the object-run structure: `prev` supports backward
-discovery from the end record and future streaming writes, while `next` supports
-normal start-to-end reads and validation. Skip-list-style links may be added in
-a later format if offset traversal needs to avoid walking every chunk.
+Small and large object classification is based on chunk count, not on the
+current amount of free space in the ordinary frontier. An object whose logical
+length is less than or equal to one chunk's logical capacity is a small object
+and is stored as an inline public record. An object that requires more than one
+chunk is a large object and is published through one public `LargeRecordEntry`
+plus private chunks.
 
-A large append first consumes available space in the current frontier. When a
-frontier image becomes full before the object-end record can be written, the
-object log may directly materialize that full image into a transaction-reserved
-data region without writing the full object bytes to the WAL. The final partial
-chunk and `ObjectEnd` record remain in the live frontier and are persisted
-through the ordinary WAL path. If the final object byte exactly fills a frontier
-image, that image is directly materialized and the `ObjectEnd` record is written
-at the start of the next frontier.
+Auxiliary regions exist only to materialize large-object data when the
+large-object scratch buffer is full before the whole object has been written.
+They are not ordinary object-log chain regions, and they do not contain records
+from multiple objects. Each auxiliary region belongs to exactly one large object
+and is reachable from that object's committed `LargeRecordEntry`.
+
+A large write requires a region-capacity scratch buffer. The writer fills
+scratch with private chunks until scratch contains one complete auxiliary-region
+image: aligned auxiliary prologue, a whole number of fixed chunk slots, and the
+reserved next-link slot. If the object continues, that complete image is
+materialized as a transaction-reserved auxiliary region. If another auxiliary
+region follows, the previous auxiliary region's reserved next-link slot is
+written once to point to it.
+
+If the object ends exactly when scratch contains a complete auxiliary-region
+image, that image becomes the final auxiliary region. If the object ends with a
+partial scratch image, the writer publishes the object through the ordinary
+object-log path by appending a `LargeRecordEntry` followed immediately by the
+remaining private tail chunks. There may be zero or more tail chunks, up to one
+fewer chunk than fits in an auxiliary region. The large record entry and its tail
+chunks are contiguous in ordinary object-log order, although that span may cross
+ordinary object-log region boundaries. Public traversal skips tail chunks.
 
 Crossing a chunk, span, or region boundary does not create logical object
-padding. Bytes outside declared object records are unused frontier capacity for
-later appends. Any physical write-alignment padding required by the committed
-region writer is part of the storage write path rather than the object-log
-object format.
+padding. `chunk_len` records only logical bytes. Auxiliary chunk zero fill and
+ordinary storage write-alignment padding are outside the logical object bytes.
 
-Every physical region that becomes part of a large-object run is reserved by the
-transaction before it is written. If reset happens before commit, recovery
-returns the transaction-reserved regions to free storage. If reset happens after
-commit but before `transaction_finished`, recovery keeps the published object
-run and finishes the transaction.
+Every auxiliary region is allocated and written inside the large-object
+transaction. Before commit, those regions are transaction-owned and recoverable.
+The commit publishes the `LargeRecordEntry` that makes the auxiliary chain
+reachable from exactly one object. If the transaction aborts before commit, all
+reserved auxiliary regions are reclaimed. If it commits, the auxiliary data and
+auxiliary links are durable before the large record entry becomes visible.
 
-Large-object append has to distinguish an impossible geometry from an ordinary
-full frontier. If headers and metadata leave no space for any chunk payload, the
-object cannot be represented in that geometry. If the current frontier is merely
-full after prior object-log records, those bytes are already part of a reserved
-address range, so the frontier is materialized and the append continues in the
-next reserved region.
+Large-object append has to distinguish impossible geometry from ordinary
+frontier pressure. If the auxiliary prologue, next-link slot, storage geometry,
+or `wal_write_granule` leave no valid fixed chunk slot, the object cannot be
+represented in that geometry. If the ordinary frontier is merely full after
+prior object-log records, those bytes are already part of a reserved address
+range, so the frontier is materialized and the publish span continues in the
+next reserved ordinary region.
 
-1. `RING-OBJECT-021` Large-object runs MUST use linked `ObjectChunk`
-records with previous and next links or start and end markers rather than a
-map-style manifest.
-2. `RING-OBJECT-022` Large-object append placement MUST fill the current
-frontier first, directly materialize full frontier images, and keep the trailing
-partial chunk plus `ObjectEnd` record WAL-backed.
-3. `RING-OBJECT-023` Every physical region written for a large-object run
-MUST be transaction-reserved before write and recoverable if the transaction
-does not commit.
+1. `RING-OBJECT-021` Auxiliary regions MUST use the `OLAX` auxiliary prologue
+with version `1`, exact fixed chunk slots that divide the auxiliary chunk area,
+chunk slots whose physical length is a multiple of `wal_write_granule`, and a
+reserved next-link slot that is either erased/all-empty or a CRC-protected
+`AuxRegionPointer`.
+2. `RING-OBJECT-022` Large-object append placement MUST use one
+region-capacity scratch buffer, materialize only complete auxiliary-region
+images before object completion, write each prior auxiliary next-link slot at
+most once when another auxiliary region follows, and publish any final partial
+scratch contents as contiguous private tail chunks immediately after the public
+`LargeRecordEntry`.
+3. `RING-OBJECT-023` Every auxiliary region written for a large object MUST be
+transaction-reserved before write, transaction-owned and recoverable before
+commit, reachable from exactly one committed `LargeRecordEntry` after commit,
+and reclaimed if the transaction aborts before commit.
 
 ## Committed Visibility
 
@@ -311,19 +385,23 @@ the storage engine's wear-leveling behavior. If the same physical region is
 allocated again later, the object log assigns a new sequence, so stale handles
 do not alias new data.
 
-Large-object truncation uses the public `ObjectEnd` handle as the boundary, but
-the retained bytes start at that object's first private chunk. The object log
-therefore has to retain the chunk run reachable from the boundary handle even
-when earlier regions are freed.
+Large-object truncation uses the public `LargeRecordEntry` handle as the
+boundary. Retaining that boundary retains its auxiliary chain and any private
+tail chunks that follow it in ordinary object-log order. Truncating away a
+large record entry frees its whole auxiliary chain. Auxiliary regions contain
+data for only one object, so truncation never has to retain unrelated auxiliary
+data; the only unavoidable retention is an ordinary object-log region that
+still contains the live head.
 
 1. `RING-OBJECT-010` Truncating an object log MUST accept a live
 `ObjectLogHandle` as an exclusive boundary, invalidate handles before that
 boundary while retaining the boundary handle, and return fully obsolete data
 regions to Borromean storage.
-2. `RING-OBJECT-029` When truncating before a large-object handle, the object
-log MUST retain every chunk region reachable from that large object's
-`ObjectEnd` record and free only regions wholly before the retained first
-chunk.
+2. `RING-OBJECT-029` Large-object truncation MUST retain the auxiliary chain
+and private tail chunks for a retained boundary `LargeRecordEntry`, free the
+entire auxiliary chain for any truncated-away `LargeRecordEntry`, and retain no
+unrelated object data beyond ordinary object-log regions that still contain the
+live head.
 
 ## Live Traversal
 

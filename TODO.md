@@ -25,6 +25,8 @@ Design history and exploratory ideas live in [journal.md](journal.md).
   effects, runtime effects, replay effects, and crash-cut outcomes.
 - Continue reducing low-level public map APIs that require caller-provided frontier buffers in
   normal use.
+- Rename `wal_write_granule` to `flash_write_size` across code, specs, and tests so the term
+  describes the hardware-alignment constraint instead of the WAL subsystem.
 - Promote exact `MAP_MANIFEST_V1_FORMAT` and `MAP_RUN_V1_FORMAT` byte layouts into normative
   `MAP-` requirements when those layouts are stable enough for format review.
 
