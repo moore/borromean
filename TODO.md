@@ -25,6 +25,9 @@ Design history and exploratory ideas live in [journal.md](journal.md).
   effects, runtime effects, replay effects, and crash-cut outcomes.
 - Continue reducing low-level public map APIs that require caller-provided frontier buffers in
   normal use.
+- Add an auxiliary-region pointer index to ordinary object-log regions: object records grow from
+  the top down while the auxiliary index grows from the bottom up, allowing region-freeing logic
+  to scan only the index to find auxiliary regions that must also be freed.
 - Rename `wal_write_granule` to `flash_write_size` across code, specs, and tests so the term
   describes the hardware-alignment constraint instead of the WAL subsystem.
 - Promote exact `MAP_MANIFEST_V1_FORMAT` and `MAP_RUN_V1_FORMAT` byte layouts into normative
