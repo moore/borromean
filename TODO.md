@@ -28,6 +28,15 @@ Design history and exploratory ideas live in [journal.md](journal.md).
 - Add an auxiliary-region pointer index to ordinary object-log regions: object records grow from
   the top down while the auxiliary index grows from the bottom up, allowing region-freeing logic
   to scan only the index to find auxiliary regions that must also be freed.
+- Add pre-erased regions. The current durable free list stores its own links inside the free
+  regions, so those regions cannot be erased ahead of allocation. One possible replacement is a
+  dedicated allocator journal whose entries point to already-erased regions, with explicit
+  caller-driven cleanup erasing detached regions when the database user has no other I/O to
+  perform.
+- Move collection frontier buffers into values passed to typed collection open/load commands. The
+  opened collection handle would own those buffers while resident and return them through an
+  explicit `close()` operation, making checkpoint, close, and cleanup I/O visible to callers
+  instead of hidden behind opening or reading another collection.
 - Rename `wal_write_granule` to `flash_write_size` across code, specs, and tests so the term
   describes the hardware-alignment constraint instead of the WAL subsystem.
 - Promote exact `MAP_MANIFEST_V1_FORMAT` and `MAP_RUN_V1_FORMAT` byte layouts into normative

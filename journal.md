@@ -3,6 +3,133 @@
 This journal captures design ideas, motivation, and decision history before they
 are ready to become normative specification text.
 
+## 2026-06-09: Transaction Logs For Read-Committed WAL Transactions
+
+The current WAL transaction design is useful for internal multi-record recovery,
+especially allocation and freeing, but it is not a good general transaction
+model. It practically supports only one open transaction at a time because the
+transaction interval lives inline in the ordinary WAL. It also lets foreground
+execution expose collection updates before `commit_transaction`: recovery is
+all-or-nothing, but the in-memory logical state is not read-committed. That is a
+poor fit for the common ACID expectation that transaction effects become visible
+only at commit.
+
+One possible replacement is to give storage a fixed number of transaction logs.
+Each transaction log is its own WAL chain for one active transaction stream. The
+ordinary WAL still serializes transaction control decisions, but its start,
+commit, rollback, and finish records point to positions in a transaction log
+instead of containing the full transaction interval inline.
+
+Beginning a transaction should be separate from adding a collection to that
+transaction. `begin_transaction` creates an empty transaction context and
+selects the transaction log that will receive transaction-scoped records. A
+collection joins the transaction through a separate add-collection step. That
+step requires one frontier buffer for that collection, copies the collection's
+current frontier into the transaction-owned buffer, and records the collection
+state that commit will later validate for conflicts.
+
+A transaction writes its enrolled collection updates, allocation records, and
+other transaction-scoped records into the selected transaction log. The
+collections' ordinary mutable frontiers are not updated directly. Instead, the
+transaction applies those records immediately to the private frontier buffers
+for the enrolled collections. Those private-buffer changes are not visible to
+ordinary reads until commit. On commit, the ordinary WAL records a commit
+decision that freezes the covered transaction-log range. During recovery, that
+frozen range is replayed at the position of the ordinary-WAL commit record. In
+foreground execution, each private frontier buffer is swapped in as its
+collection's mutable frontier. At that point the commit is logically complete
+and transaction data becomes visible.
+
+If the transaction rolls back, the covered transaction-log range is scanned for
+transaction-owned regions or other storage effects that must be freed or
+invalidated. The private frontier buffers are discarded instead of becoming
+collection frontiers. This keeps rollback as an internal storage operation, but
+the visibility boundary becomes explicit and read-committed.
+
+Multiple transaction logs allow the database to support as many concurrent
+transactions as there are logs. A single transaction log may contain a sequence
+of transactions, but only one transaction may be open in that log at a time.
+Transaction-log regions can be reclaimed once no ordinary-WAL commit record and
+no open transaction still points into them.
+
+Current decisions:
+
+- Public storage, collection, and transaction operations are non-reentrant.
+  Every call into a `Storage` method must be serialized, normally by requiring
+  `&mut Storage`. Collection and transaction objects should follow the same
+  rule, with transaction closures providing the natural scoped exclusive access
+  pattern for transaction-local operations.
+- If a collection frontier no longer matches the state observed when that
+  collection was added to the transaction, commit fails with a transaction
+  conflict. The base storage model does not replay transaction commands on top
+  of a newer frontier. This is the safest rule for the current embedded use case
+  and keeps commit behavior deterministic. Future collection implementations may
+  define explicit merge/rebase semantics for selected command types, but that
+  would be collection-specific behavior layered above the base transaction-log
+  protocol.
+- A transaction commit must durably record the ordinary-WAL commit decision
+  before any private frontier buffer is installed as visible collection state or
+  before the commit is acknowledged to the caller. If a transaction enrolls
+  multiple collections, installing the private frontiers must be atomic with
+  respect to other public operations: no read or mutation may observe only part
+  of the committed set.
+- Collection-specific transaction buffers may remain bounded by spilling large
+  transaction state into newly allocated regions. Those regions are private to
+  the transaction until commit. Commit promotes them into the collection's
+  visible state; rollback scans the transaction log and frees or invalidates
+  them.
+- Transaction-scoped allocation records may update the global allocator before
+  the ordinary-WAL commit decision. The allocated regions are transaction-owned
+  and private until commit. If the transaction rolls back, those regions must be
+  returned through the same allocation recovery rules used by the current
+  transaction model.
+- Allocation records should carry a global `u64` allocation sequence assigned
+  while storage has exclusive allocator access. Allocator access is globally
+  serialized from selecting the current free-list head through durably recording
+  the allocation decision in the ordinary WAL or a reachable transaction log.
+  Recovery needs to order the allocation decisions, not the allocated regions
+  themselves: after replaying the ordinary WAL and all reachable transaction-log
+  ranges, the reachable allocation record with the largest sequence identifies
+  the newest allocator head decision. Allocated regions younger than that
+  decision are either reachable from live committed state, already returned, or
+  transaction-owned regions that rollback/recovery must return.
+- Every WAL-compatible log segment should checkpoint the allocator cursor in its
+  segment prologue: the free-list head and the global allocation sequence that
+  were current when the segment was initialized. This gives replay a durable
+  baseline if an allocation/reservation record at the end of a log segment is
+  torn or if an older log prefix containing prior allocation records has been
+  reclaimed. Replay starts from the segment checkpoint and then applies only
+  complete allocation records after that point; a truncated allocation record is
+  ignored and does not advance the recovered free-list head.
+- Transaction-log regions are reclaimed like ordinary WAL regions: only a
+  reclaimable prefix may be freed, and only after no retained ordinary-WAL
+  commit record, open transaction descriptor, or pending recovery descriptor
+  points into that prefix. Storage must reconstruct and maintain transaction-log
+  metadata from ordinary WAL replay and active runtime usage so it can identify
+  each transaction log's live prefix boundary.
+- Transaction logs should reuse the existing WAL region and record framing where
+  possible. The main WAL and transaction logs are both private storage
+  structures, so transaction-log pointers do not need a public generation or
+  epoch field just to reject stale external references. Stale internal
+  references should be rejected through ordinary WAL replay, transaction-log
+  membership, and live-prefix reachability.
+- Transaction-log head, tail, and append-position facts belong in the ordinary
+  WAL records that point to transaction-log positions or ranges. `Storage`
+  should track the corresponding per-log cursors, live-prefix boundaries, and
+  active usage as ephemeral runtime state recovered from ordinary WAL replay and
+  updated by active operations.
+- Each collection should carry an in-memory `u64` committed state generation
+  counter derived from ordinary WAL order. The generation changes only when an
+  ordinary-WAL record makes a collection state, frontier, or basis change
+  visible; for a transaction, the ordinary-WAL commit record advances the
+  generation for every enrolled collection and covers the transaction-log
+  changes. Appending or applying transaction-log records to private transaction
+  buffers does not change the collection generation. When a collection is added
+  to a transaction, the transaction object records that collection's current
+  generation in a per-collection slot. Before commit succeeds, storage checks
+  every enrolled collection slot against the current collection generation; any
+  mismatch fails the transaction with a conflict.
+
 ## 2026-06-05: Large Objects v2
 
 The current object-log design handles small objects well: each public handle
