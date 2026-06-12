@@ -238,9 +238,10 @@ mismatch as corruption.
 9. `RING-FORMAT-009` When a user collection implementation loads a committed region
 basis, it validates that region's `collection_format` according to its
 own rules.
-10. `RING-FORMAT-010` Borromean core reserves exactly one canonical
-`collection_format`, `wal_v1`, for WAL regions. Every WAL region uses
-`wal_v1`, and that identifier is not user-definable.
+10. `RING-FORMAT-010` Borromean core reserves two canonical private
+`collection_format` values under `collection_id = 0`:
+`main_wal_v2` for the main WAL and `transaction_log_v2` for transaction
+logs. These identifiers are not user-definable.
 11. `RING-FORMAT-011` Per-region format evolution remains allowed because region headers
 carry `collection_format` independently of the collection's stable
 type.

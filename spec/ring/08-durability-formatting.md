@@ -49,22 +49,25 @@ Required write and sync ordering:
 `W(drop_collection(collection_id)) -> S(drop_collection)`.
 4. `RING-ORDER-004` `CommitCollectionRegion` transition:
 if the target is not already reserved by an earlier stable operation,
-`W(alloc_begin(collection_id, region_index, free_list_head_after)) -> S(alloc_begin) ->`;
+`W(alloc_begin(collection_id, region_index, allocation_sequence, free_list_head_after)) -> S(alloc_begin) ->`;
 in all cases,
 `erase/init reserved region if needed -> W(region header+data) -> S(region) ->`
 `W(head(collection_id, collection_type, ref=region_index)) -> S(head)`.
 5. `RING-ORDER-005` `RotateWalTail` transition:
-`W(alloc_begin(collection_id = 0, next_region_index, free_list_head_after)) -> S(alloc_begin) ->`
+`W(alloc_begin(collection_id = 0, next_region_index, allocation_sequence, free_list_head_after)) -> S(alloc_begin) ->`
 `W(link(next_region_index, expected_sequence)) -> S(link) ->`
-`W(new_wal_region_init(sequence=expected_sequence, wal_head_region_index=current_wal_head)) ->`
-`S(new_wal_region_init)`.
+`W(new_log_region_init(sequence=expected_sequence, log_head_region_index=current_wal_head, allocator cursor)) ->`
+`S(new_log_region_init)`.
 6. `RING-ORDER-006` transaction transition for stable-head replacement, drop cleanup, or
 `ReclaimWalHead`:
-`W(begin_transaction(collection_id)) -> S(begin_transaction) ->`
-`W(replacement_live_state_and_new_links) -> S(replacement_state) ->`
-`W(commit_transaction(collection_id)) -> S(commit_transaction) ->`
-`append old regions to free list with free_region records ->`
-`W(transaction_finished(collection_id)) -> S(transaction_finished)`.
+`W(main_wal begin_transaction(transaction_log_id, start)) -> S(begin_transaction) ->`
+`W(transaction_log add_transaction_collection and private mutation/allocation records) ->`
+`S(transaction_log records) ->`
+`check enrolled collection generations ->`
+`W(main_wal commit_transaction(transaction_log_id, range)) -> S(commit_transaction) ->`
+`atomically install private frontiers as visible collection state ->`
+`append cleanup frees ->`
+`W(main_wal transaction_finished(transaction_log_id, range)) -> S(transaction_finished)`.
 7. `RING-ORDER-007` `CommitWalRecovery` transition:
 `W(wal_recovery()) -> S(wal_recovery) -> W(next_normal_wal_record) -> S(next_normal_wal_record)`.
 
@@ -83,8 +86,8 @@ CommitDropCollection`"]
 ReserveRegion -> WriteCommittedRegion -> CommitRegionHead`"]
     Rotation["`RotateWalTail
 StartWalRotation -> RotateWalLink -> InitializeRotatedWalRegion`"]
-    Reclaim["`Collection transaction
-BeginTransaction -> replacement edges -> CommitTransaction -> cleanup frees -> FinishTransaction`"]
+    Reclaim["`Transaction log
+BeginTransaction -> private records -> CommitTransaction -> install -> cleanup frees -> FinishTransaction`"]
     Recovery["`CommitWalRecovery
 CommitWalRecoveryBoundary -> next AppendRawWalRecord`"]
     Durable([Durable boundary reached])
@@ -102,7 +105,7 @@ CommitWalRecoveryBoundary -> next AppendRawWalRecord`"]
 General region-allocation rule:
 
 1. `RING-ALLOC-001` Any operation that writes a newly allocated region MUST first make
-`alloc_begin(collection_id, region_index, free_list_head_after)` durable.
+`alloc_begin(collection_id, region_index, allocation_sequence, free_list_head_after)` durable.
 2. `RING-ALLOC-002` Erasing or initializing the reserved region is allowed only after
 `S(alloc_begin)`.
 3. `RING-ALLOC-003` If crash occurs after
@@ -141,7 +144,7 @@ region head transition is durable if the enclosing transaction reaches
 its commit phase; otherwise transaction recovery treats it as part of the
 uncommitted interval.
 8. `RING-CRASH-008` Crash after
-`S(alloc_begin(collection_id = 0, next_region_index, free_list_head_after))`
+`S(alloc_begin(collection_id = 0, next_region_index, allocation_sequence, free_list_head_after))`
 for WAL rotation but before any durable matching `link`:
 if that `alloc_begin` occupies the reserve window that only a
 rotation-start record may occupy, startup treats it as an incomplete
@@ -153,10 +156,10 @@ After that recovery completes, the target becomes the active WAL tail.
 9. `RING-CRASH-009` Crash after `W(link)` but before `S(link)`:
 link may be torn/missing and old tail remains active, but the reserved
 region remains tracked by `alloc_begin`.
-10. `RING-CRASH-010` Crash after `S(link)` but before `S(new_wal_region_init)`:
+10. `RING-CRASH-010` Crash after `S(link)` but before `S(new_log_region_init)`:
 startup validates the link target header sequence and
-`WalRegionPrologue`; if the header is missing/corrupt/wrong sequence,
-or the `WalRegionPrologue` is missing/corrupt, rotation is incomplete
+`LogRegionPrologue`; if the header is missing/corrupt/wrong sequence,
+or the `LogRegionPrologue` is missing/corrupt, rotation is incomplete
 and startup finishes initialization using `expected_sequence`.
 11. `RING-CRASH-011` Crash during tail-record write:
 replay detects the torn/invalid tail record; earlier complete
@@ -170,18 +173,40 @@ append point, the first durable later record must be `wal_recovery()`.
 An aligned tail slot whose first byte is still `erased_byte` is not a
 torn record; it is an unwritten slot that marks end of the written
 portion of the tail region.
-12. `RING-CRASH-012` Crash after `S(begin_transaction(collection_id))`
-but before `S(commit_transaction(collection_id))`:
-startup runs data recovery for the transaction, preserves the
-pre-transaction collection state, and appends
-`rollback_transaction(collection_id)`.
-13. `RING-CRASH-013` Crash after `S(commit_transaction(collection_id))`
-but before `S(transaction_finished(collection_id))`:
-startup preserves the committed collection state, completes cleanup
-frees idempotently, and appends `transaction_finished(collection_id)`.
+12. `RING-CRASH-012` Crash after
+`S(begin_transaction(transaction_log_id, start))` but before
+`S(commit_transaction(transaction_log_id, range))`:
+startup runs rollback recovery for the transaction-log range, preserves
+the pre-transaction visible collection state, returns transaction-owned
+allocations, and appends
+`rollback_transaction(transaction_log_id, range)`.
+13. `RING-CRASH-013` Crash after transaction-log private records are
+durable but before `S(commit_transaction(transaction_log_id, range))`:
+startup treats the private records as non-visible, runs rollback
+recovery for their transaction-owned storage effects, and appends
+`rollback_transaction(transaction_log_id, range)`.
 14. `RING-CRASH-014` Crash after
-`S(transaction_finished(collection_id))`:
-startup replays the full transaction interval in original order.
+`S(commit_transaction(transaction_log_id, range))` but before private
+frontiers are installed in memory:
+startup imports the frozen transaction-log range at the main-WAL commit
+position, reconstructs the committed collection state, completes cleanup
+idempotently, and appends
+`transaction_finished(transaction_log_id, range)` if needed.
+15. `RING-CRASH-015` Crash after private frontiers are installed but
+before `S(transaction_finished(transaction_log_id, range))`:
+startup ignores the lost volatile install, imports the committed range
+from durable media, completes cleanup idempotently, and appends
+`transaction_finished(transaction_log_id, range)`.
+16. `RING-CRASH-016` Crash after
+`S(transaction_finished(transaction_log_id, range))`:
+startup replays the main WAL commit record, imports the frozen
+transaction-log range, and observes no remaining transaction cleanup
+work for that range.
+17. `RING-CRASH-017` Crash during transaction-log segment rotation:
+startup uses the transaction log's `LogRegionPrologue`, link record,
+and allocator checkpoint rules to recover either the old transaction-log
+tail or the initialized linked tail without making private transaction
+records visible unless a retained main-WAL commit imports them.
 
 ## Operations
 
@@ -201,18 +226,21 @@ Preconditions:
 1. `RING-FORMAT-STORAGE-PRE-001` Backing storage MUST be writable and erasable at region
    granularity.
 2. `RING-FORMAT-STORAGE-PRE-002` `region_count >= 1`.
-3. `RING-FORMAT-STORAGE-PRE-003` Region `0` MUST be reserved as the initial WAL region.
+3. `RING-FORMAT-STORAGE-PRE-003` Region `0` MUST be reserved as the initial main WAL region.
 4. `RING-FORMAT-STORAGE-PRE-004` `wal_write_granule >= 1`.
 5. `RING-FORMAT-STORAGE-PRE-005` `wal_record_magic != erased_byte`.
-6. `RING-FORMAT-STORAGE-PRE-006` `region_count >= 2 + min_free_regions`.
-This guarantees that after reserving region `0` for the WAL and
-preserving the configured `min_free_regions` reserve, a freshly
-formatted store still has at least one non-reserved free region
-available for ordinary allocations.
+6. `RING-FORMAT-STORAGE-PRE-006` `transaction_log_count >= 1`.
+7. `RING-FORMAT-STORAGE-PRE-007`
+`region_count >= transaction_log_count + 2 + min_free_regions`.
+This guarantees that after reserving region `0` for the main WAL,
+reserving one initial region for each transaction log, and preserving
+the configured `min_free_regions` reserve, a freshly formatted store
+still has at least one non-reserved free region available for ordinary
+allocations.
 There is intentionally no normative minimum usable `region_size`
 enforced by Borromean. Geometries that are formally formattable but too
-small to leave useful payload after `Header`, free-pointer footer, WAL
-prologue, and WAL-reserve overhead are treated as deployment mistakes
+small to leave useful payload after `Header`, free-pointer footer,
+`LogRegionPrologue`, and log-reserve overhead are treated as deployment mistakes
 rather than format errors. As deployment guidance, choose
 `region_size` so the fixed header plus footer consume less than 10% of
 the region, and leave enough remaining room for the intended WAL and
@@ -223,33 +251,47 @@ Procedure:
 1. `RING-FORMAT-STORAGE-001` Erase metadata area and all data regions.
 2. `RING-FORMAT-STORAGE-002` Write `StorageMetadata` (`storage_version`,
 `region_size`, `region_count`, `min_free_regions`,
+`transaction_log_count`,
 `wal_write_granule`, `erased_byte`, `wal_record_magic`,
 `metadata_checksum`) and sync metadata.
-3. `RING-FORMAT-STORAGE-003` Initialize region `0` as WAL:
+3. `RING-FORMAT-STORAGE-003` Initialize region `0` as main WAL:
 write valid `Header` with `collection_id = 0`,
-`collection_format = wal_v1`, and `sequence = 0`,
-write a valid `WalRegionPrologue` with `wal_head_region_index = 0`,
+`collection_format = main_wal_v2`, and `sequence = 0`,
+write a valid `LogRegionPrologue` with `log_head_region_index = 0`,
+`allocator_free_list_head = Some(transaction_log_count + 1)`, and
+`allocation_sequence = 0`,
 then sync region `0`.
-4. `RING-FORMAT-STORAGE-004` For each region `r` in `[1, region_count - 1]`:
+4. `RING-FORMAT-STORAGE-004` For each transaction log id `t` in
+`[0, transaction_log_count - 1]`, initialize region `1 + t` as that
+transaction log's initial segment: write a valid `Header` with
+`collection_id = 0`, `collection_format = transaction_log_v2`, and
+`sequence = 1 + t`; write a valid `LogRegionPrologue` with
+`log_head_region_index = 1 + t`,
+`allocator_free_list_head = Some(transaction_log_count + 1)`, and
+`allocation_sequence = 0`; then sync the region.
+5. `RING-FORMAT-STORAGE-004A` For each region `r` in
+`[transaction_log_count + 1, region_count - 1]`:
 leave the erased header and payload bytes otherwise uninterpreted, write
 valid `FreePointerFooter { next_tail = r + 1, footer_checksum }` bytes
 for every region except the last, leave the last region's free-pointer
 footer uninitialized, and
 sync `r`.
-5. `RING-FORMAT-STORAGE-005` Formatting is complete only after metadata and all initialized
+6. `RING-FORMAT-STORAGE-005` Formatting is complete only after metadata and all initialized
 regions are durable.
 
 Postconditions:
 
-1. `RING-FORMAT-STORAGE-POST-001` WAL head and WAL tail MUST both be region `0`.
+1. `RING-FORMAT-STORAGE-POST-001` Main WAL head and tail MUST both be region `0`, and each
+transaction log's head and tail MUST be its initial region
+`1 + transaction_log_id`.
 2. `RING-FORMAT-STORAGE-POST-002` A user collection durable head MUST
 NOT exist after formatting.
-3. `RING-FORMAT-STORAGE-POST-003` The free list MUST contain every non-WAL region in ascending
-   region-index
+3. `RING-FORMAT-STORAGE-POST-003` The free list MUST contain every region not reserved for the
+main WAL or an initial transaction log in ascending region-index
 order.
-4. `RING-FORMAT-STORAGE-POST-004` Because region `0` is reserved as the WAL, the initial durable
-free-list head is region `1` iff `region_count >= 2`; otherwise the
-durable free list is empty.
+4. `RING-FORMAT-STORAGE-POST-004` Because region `0` is reserved as the main WAL and regions
+`1..=transaction_log_count` are reserved as initial transaction logs,
+the initial durable free-list head is region `transaction_log_count + 1`.
 
 ```mermaid
 %%{init: {"flowchart": {"wrappingWidth": 180}} }%%
@@ -257,11 +299,12 @@ flowchart LR
     Start([Format storage])
     Erase["`Erase metadata area and all regions`"]
     WriteMeta["`Write and sync storage metadata`"]
-    InitWal["`Initialize and sync WAL region zero`"]
+    InitWal["`Initialize and sync main WAL region zero`"]
+    InitTx["`Initialize and sync transaction log regions`"]
     InitFree["`Initialize free list chain in remaining regions`"]
     Fresh([Fresh formatted store])
 
-    Start --> Erase --> WriteMeta --> InitWal --> InitFree --> Fresh
+    Start --> Erase --> WriteMeta --> InitWal --> InitTx --> InitFree --> Fresh
 ```
 
 ### First Open After Fresh Format
@@ -271,37 +314,38 @@ algorithm as any other open.
 
 Expected replay outcome on first open:
 
-1. Region scan finds WAL tail at region `0` (`sequence = 0`).
-2. WAL chain walk yields a single-region chain (`head = tail = 0`).
-3. No WAL records are replayed.
+1. Region scan finds main WAL tail at region `0` (`sequence = 0`) and
+one initial transaction-log segment for each configured transaction log.
+2. Main WAL chain walk yields a single-region chain (`head = tail = 0`);
+each transaction log also starts as a single-region chain.
+3. No main WAL records or transaction-log records are replayed.
 4. Replay therefore yields:
 no tracked user collections,
 `pending_updates = empty`,
 no transaction recovery work,
-and durable `last_free_list_head = Some(1)` iff `region_count >= 2`,
-otherwise `None`, inherited from the formatted initial free-list root.
+and durable `last_free_list_head = Some(transaction_log_count + 1)`,
+inherited from the formatted initial free-list root.
 5. Normal replay reconstruction then yields
 `free_list.ready_region = None`,
-`free_list.free_list_tail = Some(region_count - 1)` iff
-`region_count >= 2`, otherwise `None`,
+`free_list.free_list_tail = Some(region_count - 1)`,
 `collections = empty`,
 `pending_updates = empty`,
 and no transaction recovery work.
 
-This is not a special-case bootstrap. Replay always starts with the
-formatted initial durable free-list head and then applies later
-`alloc_begin` / `free_region` decisions in WAL order. `free_list_tail`
-is always reconstructed by walking the free-pointer chain from the
-recovered durable free-list head; it is not found by scanning WAL
-regions.
+This is not a special-case bootstrap. Replay starts with the allocator
+cursor checkpoint in the effective main WAL head segment's
+`LogRegionPrologue` and then applies later complete `alloc_begin` /
+`free_region` decisions. `free_list_tail` is always reconstructed by
+walking the free-pointer chain from the recovered durable free-list
+head; it is not found by scanning WAL regions.
 
 ```mermaid
 %%{init: {"flowchart": {"wrappingWidth": 180}} }%%
 flowchart LR
     Fresh([Fresh formatted store])
-    FindTail["`Replay finds WAL head and tail at region zero`"]
-    NoWal["`Replay sees no WAL records`"]
-    DurableHead["`Durable free list head starts at region one when present`"]
+    FindTail["`Replay finds main WAL head and tail at region zero`"]
+    NoWal["`Replay sees no main WAL or transaction-log records`"]
+    DurableHead["`Durable free list head starts after initial transaction logs`"]
     Runtime["`Runtime state has no collections no ready region and no pending work`"]
     OpenReady([First open complete])
 

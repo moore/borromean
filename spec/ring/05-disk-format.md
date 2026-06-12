@@ -2,14 +2,15 @@
 
 This chapter defines the physical storage layout after the logical model
 is established: static metadata, region headers, committed payload
-areas, free-pointer footers, and WAL-region prologues.
+areas, free-pointer footers, and private log-region prologues.
 
 Mechanism review:
 
 - **Purpose**: define the bytes that survive reset and make independent
   implementations agree on the same media image.
 - **State**: storage metadata, region header sequence and ownership,
-  user payload area, free-pointer footer, and WAL-region prologue.
+  user payload area, free-pointer footer, and private log-region
+  prologue.
 - **Named operations**: `FormatStorage`, `CommitCollectionRegion`,
   `RotateWalTail`, `FreeRegion`, and `OpenStorage` all depend on these
   physical layouts.
@@ -40,20 +41,21 @@ recovered from WAL `head(...)` records rather than by choosing the
 newest region for a collection. During startup region scanning,
 Borromean records `max_seen_sequence`, the largest `sequence` value
 found in any valid region header. Each newly allocated region, whether
-for a user collection or for a newly initialized WAL region, must use
+for a user collection or for a newly initialized private log region, must use
 `sequence = max_seen_sequence + 1`, after which that new value becomes
 the new `max_seen_sequence` in memory. Crashes or abandoned allocations
 may leave gaps in the observed sequence values, but the values used by
 successful later region writes must remain strictly monotonic.
 
 The collection format defines how user data is encoded in the user
-data section. For user collections, the meaning of non-WAL
+data section. For user collections, the meaning of non-log
 `collection_format` values is owned by the corresponding
 `collection_type` implementation rather than by Borromean core. This
-spec reserves exactly one canonical core-defined format identifier,
-`wal_v1`, for WAL regions; no user collection may use that identifier.
-Storing the format in each region still allows per-collection format
-evolution over time.
+spec reserves two canonical core-defined format identifiers for private
+storage logs: `main_wal_v2` for the ordinary WAL and
+`transaction_log_v2` for transaction-log chains. No user collection may
+use either identifier. Storing the format in each region still allows
+per-collection format evolution over time.
 
 The free pointer stores the location of the next free region for
 regions that have been freed, so the region in question is in the free
@@ -78,12 +80,14 @@ the free-pointer chain is stored inside the free regions themselves.
 
 Deployment sizing guideline: choose `region_size` so the fixed
 per-region header plus free-pointer footer consume less than 10% of the
-region. WAL regions also carry `WalRegionPrologue`, so practical WAL
+region. Private log regions also carry `LogRegionPrologue`, so practical
 deployments normally need additional slack beyond that rule of thumb.
 This is guidance only, not a validity rule.
 
-A WAL region is a region whose valid header has `collection_id = 0`
-and `collection_format = wal_v1`.
+A main WAL region is a region whose valid header has
+`collection_id = 0` and `collection_format = main_wal_v2`. A
+transaction-log region is a region whose valid header has
+`collection_id = 0` and `collection_format = transaction_log_v2`.
 
 ## Storage Requirements
 
@@ -94,15 +98,16 @@ after initialization.
 `sequence`, `collection_id`, `collection_format`, and a checksum over
 the header itself.
 3. `RING-STORAGE-003` Each newly allocated region, whether for a user
-collection or a newly initialized WAL region, MUST use
+collection or a newly initialized private log region, MUST use
 `sequence = max_seen_sequence + 1`, after which that value becomes the
 new in-memory `max_seen_sequence`.
 4. `RING-STORAGE-004` Successful later region writes MUST preserve a
 strictly monotonic `sequence` ordering even if crashes or abandoned
 allocations leave gaps.
 5. `RING-STORAGE-005` Borromean core MUST reserve the canonical
-`collection_format` value `wal_v1` for WAL regions, and user
-collections MUST NOT use that identifier.
+`collection_format` values `main_wal_v2` and `transaction_log_v2` for
+private storage log regions, and user collections MUST NOT use either
+identifier.
 6. `RING-STORAGE-006` A free region MUST be defined by membership in
 the durable free-list chain rather than by a distinct on-disk header
 encoding.
@@ -111,8 +116,10 @@ written while that region is allocated for live use.
 8. `RING-STORAGE-008` After a region is durably reachable from the
 free-list chain, that region MUST NOT be erased until it is allocated
 for reuse.
-9. `RING-STORAGE-009` A WAL region MUST have `collection_id = 0` and
-`collection_format = wal_v1`.
+9. `RING-STORAGE-009` A main WAL region MUST have `collection_id = 0`
+and `collection_format = main_wal_v2`; a transaction-log region MUST
+have `collection_id = 0` and
+`collection_format = transaction_log_v2`.
 10. `RING-STORAGE-010` The metadata region MUST occupy exactly one
 `region_size` span at storage offset `0`, MUST NOT be counted in
 `region_count`, and data region `0` MUST begin immediately after that
@@ -124,14 +131,17 @@ Borromean defines one canonical byte-level encoding so independently
 written implementations can interoperate on the same media image.
 
 1. `RING-DISK-001` All fixed-width integer fields in `StorageMetadata`,
-`Header`, `WalRegionPrologue`, free-pointer footers, and logical WAL
+`Header`, `LogRegionPrologue`, free-pointer footers, and logical WAL
 records MUST be encoded little-endian.
 2. `RING-DISK-002` The canonical scalar widths are:
 `region_index: u32`, `region_size: u32`, `region_count: u32`,
-`min_free_regions: u32`, `wal_write_granule: u32`,
-`collection_id: u64`, `sequence: u64`, `payload_len: u32`,
-`collection_type: u16`, `collection_format: u16`,
-`erased_byte: u8`, and `wal_record_magic: u8`.
+`min_free_regions: u32`, `transaction_log_count: u32`,
+`transaction_log_id: u32`, `offset: u32`,
+`wal_write_granule: u32`, `collection_id: u64`, `sequence: u64`,
+`allocation_sequence: u64`, `observed_collection_generation: u64`,
+`payload_len: u32`, `collection_type: u16`,
+`collection_format: u16`, `erased_byte: u8`, and
+`wal_record_magic: u8`.
 3. `RING-DISK-003` `collection_type` is a stable global `u16`
 namespace recorded durably in WAL records. Borromean core reserves
 `0x0000` for `wal`, `0x0001` for `channel`, `0x0002` for `map`,
@@ -142,11 +152,13 @@ not required to interoperate across deployments.
 4. `RING-DISK-004` `collection_format` is a stable per-region `u16`
 namespace recorded durably in region headers. The pair
 `(collection_type, collection_format)` identifies a concrete committed
-region payload encoding. Borromean core reserves `collection_format =
-0x0000` globally for `wal_v1`; every non-WAL collection format MUST be
-nonzero. For any non-WAL collection type, `0x0001..0x7fff` are stable
-public format identifiers and `0x8000..0xffff` are private
-deployment-local format identifiers.
+region payload encoding for user collections. Borromean core reserves
+`collection_format = 0x0000` globally for `main_wal_v2` and
+`collection_format = 0x0001` globally for `transaction_log_v2`; every
+non-log collection format MUST be neither of those values. For any
+non-log collection type, `0x0002..0x7fff` are stable public format
+identifiers and `0x8000..0xffff` are private deployment-local format
+identifiers.
 5. `RING-DISK-005` Optional region indexes carried inside logical WAL
 records MUST be encoded as `OptRegionIndex`, a one-byte tag followed,
 when the tag is `1`, by a `u32 region_index`. Tag `0` means `none`;
@@ -164,12 +176,13 @@ checksum field itself and any later padding.
 byte sequences with no implicit padding; the field order shown is the
 on-disk order.
 
-For WAL regions, the user-data area begins with a fixed
-`WalRegionPrologue`. That prologue records the WAL head that was
-current when the WAL region was initialized. WAL records do not begin
+For main WAL and transaction-log regions, the user-data area begins
+with a fixed `LogRegionPrologue`. That prologue records the head of
+the corresponding log chain and the allocator cursor that was current
+when the log segment was initialized. WAL records do not begin
 immediately after the region `Header`; they begin at the first
 `wal_write_granule`-aligned byte after the end of the
-`WalRegionPrologue`.
+`LogRegionPrologue`.
 
 ```mermaid
 block-beta
@@ -204,6 +217,7 @@ struct StorageMetadata {
   region_size: u32,
   region_count: u32,
   min_free_regions: u32,
+  transaction_log_count: u32,
   wal_write_granule: u32,
   erased_byte: u8,
   wal_record_magic: u8,
@@ -213,13 +227,13 @@ struct StorageMetadata {
 
 The `StorageMetadata` struct describes the version of the storage as
 well as the size of each region in bytes, the number of regions in the
-database, the configured `min_free_regions` reserve, the erased-flash
-byte value, the minimum writable granule used to align WAL records, and
-the WAL record magic byte. The stored `wal_record_magic` must differ
-from `erased_byte`.
+database, the configured `min_free_regions` reserve, the configured
+number of transaction logs, the erased-flash byte value, the minimum
+writable granule used to align WAL records, and the WAL record magic
+byte. The stored `wal_record_magic` must differ from `erased_byte`.
 
 1. `RING-META-001` The canonical on-disk `storage_version` defined by
-this specification MUST be `1`.
+this specification MUST be `2`.
 2. `RING-META-002` `StorageMetadata` MUST be encoded as the exact byte
 sequence of the fields shown above, in that order, with no implicit
 padding.
@@ -230,6 +244,7 @@ earlier `StorageMetadata` field in on-disk order.
 5. `RING-META-005` Any bytes in the metadata region after the encoded
 `StorageMetadata` are reserved, MUST be left erased by formatting, and
 MUST be ignored on read.
+6. `RING-META-006` `transaction_log_count` MUST be at least `1`.
 
 ## Header
 
@@ -254,8 +269,9 @@ and read semantics. For user collections, non-WAL
 `collection_format` values are defined by the corresponding
 `collection_type` implementation rather than by Borromean core, and may
 evolve across regions over time without changing the collection's
-stable `collection_type`. Borromean core reserves one canonical format
-identifier, `wal_v1`, for WAL regions.
+stable `collection_type`. Borromean core reserves canonical format
+identifiers `main_wal_v2` and `transaction_log_v2` for private storage
+logs.
 
 The `header_checksum` validates header integrity.
 
@@ -296,41 +312,58 @@ malformed.
 in its free-pointer footer are uninterpreted stale data and MUST NOT be
 used to infer free-list membership.
 
-## WAL Region Prologue
+## Log Region Prologue
 
 ```rust
-struct WalRegionPrologue {
-  wal_head_region_index: u32,
+struct LogRegionPrologue {
+  log_head_region_index: u32,
+  allocator_free_list_head: OptRegionIndex,
+  allocation_sequence: u64,
   prologue_checksum: u32,
 }
 ```
 
-`WalRegionPrologue` is present only in WAL regions (regions whose valid
-header has `collection_id = 0` and `collection_format = wal_v1`) and
-occupies the first bytes of the region user-data area immediately after
-the region `Header`.
+`LogRegionPrologue` is present only in private storage log regions:
+main WAL regions whose valid header has `collection_id = 0` and
+`collection_format = main_wal_v2`, and transaction-log regions whose
+valid header has `collection_id = 0` and
+`collection_format = transaction_log_v2`. It occupies the first bytes
+of the region user-data area immediately after the region `Header`.
 
-`wal_head_region_index` is the durable WAL head that was current when
-that WAL region was initialized. It must name a region index strictly
-less than `region_count`. If startup finishes an incomplete WAL
-rotation by initializing a missing/corrupt target region, it must write
-the same already-determined WAL head into this field rather than
-choosing a new value during recovery.
+`log_head_region_index` is the durable head of the log chain that was
+current when that log segment was initialized. For a main WAL region it
+names the main WAL head; for a transaction-log region it names that
+transaction log's head. It must name a region index strictly less than
+`region_count`. If startup finishes an incomplete log rotation by
+initializing a missing/corrupt target region, it must write the same
+already-determined log head into this field rather than choosing a new
+value during recovery.
+
+`allocator_free_list_head` and `allocation_sequence` checkpoint the
+global allocator cursor that was current when the log segment was
+initialized. Replay uses this checkpoint as the baseline for allocator
+state at the start of the segment, then applies complete later
+`alloc_begin` records. A torn or truncated allocation record after the
+checkpoint does not advance the recovered free-list head.
 
 `prologue_checksum` validates the logical prologue contents. It covers
-`wal_head_region_index` in the same byte order used on disk.
+`log_head_region_index`, `allocator_free_list_head`, and
+`allocation_sequence` in the same byte order used on disk.
 
-1. `RING-PROLOGUE-001` `WalRegionPrologue` MUST be encoded as the exact
+1. `RING-PROLOGUE-001` `LogRegionPrologue` MUST be encoded as the exact
 byte sequence of the fields shown above, in that order, with no
 implicit padding.
 2. `RING-PROLOGUE-002` `prologue_checksum` MUST be CRC-32C over
-`wal_head_region_index`.
-3. `RING-PROLOGUE-003` `wal_head_region_index` MUST be strictly less
+`log_head_region_index`, `allocator_free_list_head`, and
+`allocation_sequence`.
+3. `RING-PROLOGUE-003` `log_head_region_index` MUST be strictly less
 than `region_count`.
+4. `RING-PROLOGUE-004` If `allocator_free_list_head` is present, it
+MUST name a region index strictly less than `region_count`.
 
-Let `wal_record_area_offset` be the first offset within a WAL region
+Let `wal_record_area_offset` be the first offset within a private log region
 that is both greater than or equal to the end of `Header` plus
-`WalRegionPrologue`, and aligned to `wal_write_granule`.
+`LogRegionPrologue`, and aligned to `wal_write_granule`.
 Replay scans candidate WAL record starts only at aligned offsets
 greater than or equal to `wal_record_area_offset`, and new WAL appends
 must begin at such offsets as well.

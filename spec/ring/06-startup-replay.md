@@ -37,7 +37,7 @@ Startup recovery reconstructs eight things:
 
 1. `RING-STARTUP-RESULT-001` Durable collection states (live heads plus dropped tombstones)
 2. `RING-STARTUP-RESULT-002` In-memory working state for collections with uncommitted updates
-3. `RING-STARTUP-RESULT-003` Durable free-list head
+3. `RING-STARTUP-RESULT-003` Durable free-list head and global allocation sequence
 4. `RING-STARTUP-RESULT-004` Reserved `ready_region`, if WAL rotation allocation was started but
 not yet committed by `link`
 5. `RING-STARTUP-RESULT-005` Runtime `free_list_tail`, reconstructed from the free-pointer chain
@@ -45,10 +45,10 @@ after the durable free-list head is known
 6. `RING-STARTUP-RESULT-006` Runtime `max_seen_sequence`, initially the largest `sequence`
 observed in any valid region header during region scan, then advanced
 further if startup recovery initializes an incomplete WAL rotation
-7. `RING-STARTUP-RESULT-007` Incomplete transaction recovery work, if the reachable WAL ends
-inside a collection transaction interval
+7. `RING-STARTUP-RESULT-007` Transaction-log cursors, live-prefix boundaries, active transaction
+descriptors, and incomplete transaction recovery work
 8. `RING-STARTUP-RESULT-008` Transaction terminal records written during recovery, if recovery
-needed to close an incomplete interval
+needed to close an incomplete transaction-log range
 
 Algorithm:
 
@@ -56,18 +56,23 @@ Algorithm:
 `metadata_checksum`, and validate static geometry (`region_size`,
 `region_count`, `min_free_regions`, `erased_byte`,
 `wal_write_granule`, `wal_record_magic`, and storage version support).
-2. `RING-STARTUP-002` Scan all regions, collect candidate WAL regions
-(`collection_id == 0` plus `collection_format = wal_v1`) with valid
-headers, and track
+2. `RING-STARTUP-002` Scan all regions, collect candidate main WAL
+regions (`collection_id == 0` plus `collection_format = main_wal_v2`)
+and candidate transaction-log regions (`collection_id == 0` plus
+`collection_format = transaction_log_v2`) with valid headers, and track
 `max_seen_sequence` as the largest `sequence` value seen in any valid
 region header.
-3. `RING-STARTUP-003` Select WAL tail as the unique candidate WAL region with the largest
-valid sequence. If no candidate WAL region exists, or if multiple
-candidate WAL regions share that largest valid sequence, return an
-error.
-4. `RING-STARTUP-004` Read and validate the `WalRegionPrologue` stored at the start of the
-tail region's user-data area, and use its `wal_head_region_index` as
-the initial WAL-head candidate. Then scan that tail region using the
+3. `RING-STARTUP-003` Select main WAL tail as the unique candidate main
+WAL region with the largest valid sequence. If no candidate main WAL
+region exists, or if multiple candidate main WAL regions share that
+largest valid sequence, return an error. For each configured
+transaction log, select its tail from main-WAL transaction-control
+records and retained transaction-log metadata; startup MUST reject a
+transaction-log id with no recoverable cursor when a retained main-WAL
+record references it.
+4. `RING-STARTUP-004` Read and validate the `LogRegionPrologue` stored at the start of the
+main WAL tail region's user-data area, and use its
+`log_head_region_index` as the initial WAL-head candidate. Then scan that tail region using the
 same aligned candidate-start and record-validation rules defined in
 step 6, and let the last valid
 `head(collection_id = 0, collection_type = wal, region_index)`
@@ -81,7 +86,7 @@ missing/corrupt or has the wrong sequence, treat this as an incomplete
 rotation after `link`. Use the known tail as replay tail until that
 recovery finishes.
 If instead the known tail's last valid record is an
-`alloc_begin(collection_id = 0, next_region_index, free_list_head_after)` whose aligned
+`alloc_begin(collection_id = 0, next_region_index, allocation_sequence, free_list_head_after)` whose aligned
 end offset leaves at least `wal_link_reserve` and fewer than
 `wal_rotation_reserve` unwritten bytes in that region, treat this as
 an incomplete rotation before `link`. That reserve-window placement is
@@ -96,14 +101,21 @@ sync the missing `link(next_region_index, expected_sequence)` into the
 reserved tail space, and treat any failure of that recovery append as a
 startup error.
 Then finish initializing the target WAL region:
-erase target region if needed, write a valid WAL header with
-`collection_id = 0` and `sequence = expected_sequence`, then write a
-valid `WalRegionPrologue` whose `wal_head_region_index` equals the WAL
-head already determined for this WAL chain before the incomplete
-rotation target is considered. Sync the initialized target region, set
+erase target region if needed, write a valid main WAL header with
+`collection_id = 0`, `collection_format = main_wal_v2`, and
+`sequence = expected_sequence`, then write a valid `LogRegionPrologue`
+whose `log_head_region_index` equals the WAL head already determined
+for this WAL chain before the incomplete rotation target is considered
+and whose allocator cursor equals the current recovered allocator
+cursor for the segment. Sync the initialized target region, set
 in-memory `max_seen_sequence = expected_sequence`, and use the target
 region as the active append tail. If this recovery init fails, startup
 fails with error.
+Transaction-log chain traversal uses the same `link`,
+`LogRegionPrologue`, and incomplete-rotation recovery rules for each
+referenced transaction log, except that initialized target regions use
+`collection_format = transaction_log_v2` and the transaction log's
+already-determined head in `log_head_region_index`.
 6. `RING-STARTUP-006` Parse records in WAL order (region order, then offset order).
 Record parsing begins only at offsets aligned to `wal_write_granule`
 and greater than or equal to `wal_record_area_offset` within each WAL
@@ -132,13 +144,19 @@ aligned slot whose first byte is `erased_byte` after the last valid
 replayed tail record. If no such slot exists, the tail region is full.
 7. `RING-STARTUP-007` Maintain replay state:
 per collection optional live `collection_type`, explicit collection
-state, `basis_pos`, and `pending_updates`, plus global
-`last_free_list_head`, optional reserved WAL-rotation `ready_region`, transaction
-scan state, and the replay-local `pending_wal_recovery_boundary`.
-Initialize `last_free_list_head` to `Some(1)` iff `region_count >= 2`,
-otherwise `None`, because format establishes that as the initial
-durable free-list head. Later `alloc_begin` and `free_region` records
-override this baseline in replay order.
+state, `basis_pos`, `pending_updates`, and committed state generation;
+global `last_free_list_head`, global `allocation_sequence`, optional
+reserved WAL-rotation `ready_region`, transaction-log cursors and
+live-prefix boundaries, active/recovery transaction descriptors, and
+the replay-local `pending_wal_recovery_boundary`. Initialize
+`last_free_list_head` and `allocation_sequence` from the effective main
+WAL head segment's `LogRegionPrologue`. Replay may discover later
+complete `alloc_begin` records from the main WAL and from referenced
+transaction-log ranges in a different physical order than the allocator
+used at runtime, so startup MUST validate and apply allocator-head
+decisions in ascending `allocation_sequence` order. `free_region`
+records still extend the free-list tail at their replay-visible
+main-WAL position or imported committed-range position.
 8. `RING-STARTUP-008` On `new_collection(collection_id, collection_type)`:
 if `collection_id` is already tracked, return an error.
 otherwise create replay state for that collection with durable basis
@@ -159,21 +177,32 @@ if this record's `collection_type` does not match the tracked
 set collection state to `WALSnapshotClean`, set `basis_pos` to this
 record's WAL position, and clear older pending updates for that
 collection at WAL positions up to and including this snapshot.
-11. `RING-STARTUP-011` On `alloc_begin(collection_id, region_index, free_list_head_after)`:
+11. `RING-STARTUP-011` On
+`alloc_begin(collection_id, region_index, allocation_sequence, free_list_head_after)`:
 if `last_free_list_head = none`, return an error because allocation
 cannot consume an empty durable free list.
 if `last_free_list_head != region_index`, return an error because
 `alloc_begin` did not consume the current durable free-list head.
-set durable `last_free_list_head` to `free_list_head_after`.
+if `allocation_sequence` is not greater than the current replayed
+allocator sequence once lower-sequence retained allocation decisions
+have been applied, return an error because allocator decisions are not
+globally ordered. Set durable `last_free_list_head` to
+`free_list_head_after` and set the replayed allocator sequence to
+`allocation_sequence`.
 If `collection_id = 0`, also require `ready_region` to be clear and set
 `ready_region = region_index` for WAL rotation recovery. If
 `collection_id != 0`, do not set `ready_region`; the allocation belongs
-to the open collection transaction.
-12. `RING-STARTUP-011A` On transaction interval scan:
-if replay reaches `begin_transaction(collection_id)`, it MUST scan to
-`transaction_finished(collection_id)`, `rollback_transaction(collection_id)`,
-or WAL end before applying ordinary records for that collection in the
-interval.
+to the open transaction-log transaction until commit or rollback
+recovery classifies it.
+12. `RING-STARTUP-011A` Transaction-log records are not applied by
+ordinary log-chain traversal. Startup scans a transaction-log range only
+when a retained main-WAL `commit_transaction(transaction_log_id, range)`,
+`rollback_transaction(transaction_log_id, range)`,
+`transaction_finished(transaction_log_id, range)`, or active recovery
+descriptor references that range. Records inside an imported committed
+range are applied at the main-WAL commit record's replay position;
+records inside an uncommitted rollback range are scanned only for
+cleanup/recovery effects and do not become visible collection state.
 13. `RING-STARTUP-012` On `head(collection_id, collection_type, region_index)`:
 if `collection_id = 0`, this is a WAL-head control record. Its replay
 effect was already consumed in step 4 while determining the WAL-head
@@ -222,41 +251,58 @@ validate that the previous free-list tail footer durably points to
 `region_index`; if it was empty, set `last_free_list_head =
 Some(region_index)`. In all cases update runtime free-list tail state
 so `region_index` is the tail.
-17. `RING-STARTUP-016` On `begin_transaction(collection_id)`:
-record the transaction start WAL position and scan forward to
-`transaction_finished(collection_id)`, `rollback_transaction(collection_id)`,
-or WAL end before applying ordinary records in that interval.
-18. `RING-STARTUP-017` On `commit_transaction(collection_id)` during
-transaction interval scan:
-remember that the transaction update phase committed, but do not jump
-back or apply the interval yet.
-19. `RING-STARTUP-018` On `transaction_finished(collection_id)`:
-jump back to the matching `begin_transaction(collection_id)`, apply the
-full transaction interval in original order, and then continue replay
-after `transaction_finished`.
-20. `RING-STARTUP-019` On `rollback_transaction(collection_id)`:
-jump back to the matching `begin_transaction(collection_id)`, replay
-only commands outside that collection's transaction scope, and then
-continue replay after `rollback_transaction`.
+17. `RING-STARTUP-016` On `begin_transaction(transaction_log_id, start)`:
+create an active transaction descriptor for `transaction_log_id` at
+`start`. If that transaction log already has an open descriptor, return
+an error because each transaction log supports only one open
+transaction at a time.
+18. `RING-STARTUP-017` On
+`commit_transaction(transaction_log_id, range)`:
+verify that `transaction_log_id` and `range` match an active
+transaction descriptor or a recoverable committed range. Scan the
+transaction-log range from `range.start` to `range.end`; if any record
+inside the range is torn, malformed, or invalid, return an error. Apply
+the range's enrolled collection mutations, allocation decisions, and
+free decisions at this main-WAL commit position, advance the committed
+generation for every enrolled collection, and record that committed
+cleanup may still be required until a matching
+`transaction_finished(transaction_log_id, range)` is retained.
+19. `RING-STARTUP-018` On
+`add_transaction_collection(collection_id, observed_generation)` while
+importing a committed range:
+record the collection as enrolled in the imported transaction range.
+The stored `observed_generation` is not rechecked during recovery
+because the retained main-WAL commit record is the durable evidence that
+the foreground conflict check already succeeded before commit.
+20. `RING-STARTUP-019` On
+`rollback_transaction(transaction_log_id, range)`:
+scan the referenced transaction-log range for transaction-owned
+allocation and cleanup effects, confirm rollback recovery has made those
+effects non-visible and reclaimable, and do not apply collection
+mutations from the range.
 21. `RING-STARTUP-020` On `wal_recovery()`:
 if `pending_wal_recovery_boundary` is clear, return an error.
 otherwise clear `pending_wal_recovery_boundary`.
-22. `RING-STARTUP-021` If WAL end is reached inside a transaction
-without a matching terminal marker:
-if `commit_transaction(collection_id)` was not seen, run idempotent data
-recovery for that collection and append
-`rollback_transaction(collection_id)`; if commit was seen, preserve the
-committed collection state, run idempotent cleanup recovery, and append
-`transaction_finished(collection_id)`.
+22. `RING-STARTUP-021` If replay reaches WAL end with an active
+transaction descriptor that has no committed range, run idempotent
+rollback recovery by scanning that transaction-log range for
+transaction-owned allocations, returning them through allocator
+recovery, and appending
+`rollback_transaction(transaction_log_id, range)`. If replay reaches
+WAL end after `commit_transaction(transaction_log_id, range)` but
+before `transaction_finished(transaction_log_id, range)`, preserve the
+imported collection state, finish cleanup frees derived from the
+committed range, and append
+`transaction_finished(transaction_log_id, range)`.
 
-    Data recovery for an uncommitted transaction may erase
-    transaction-owned allocations before returning them to the free-list
-    tail because those regions never became committed collection state.
-    Cleanup recovery after commit follows normal `free_region`
-    semantics: it requires the detached region footer to be unwritten
-    and does not erase the detached region.
-23. `RING-STARTUP-021A` Startup replay MUST NOT silently apply a transaction interval that reaches
-WAL end before a terminal marker.
+    Rollback recovery may erase transaction-owned allocations before
+    returning them because those regions never became committed
+    collection state. Cleanup recovery after commit follows normal
+    `free_region` semantics: it requires detached region footers to be
+    unwritten and does not erase detached regions.
+23. `RING-STARTUP-021A` Startup replay MUST NOT silently apply an
+uncommitted transaction-log range that lacks a retained main-WAL commit
+record.
 24. `RING-STARTUP-022` After replay and transaction recovery, for each collection:
 reconstruct its durable basis from the collection state. If the state
 is `EmptyClean` or `EmptyDirty`, the basis is the empty collection
@@ -273,7 +319,8 @@ may remain dormant until the next mutation, but it must be loaded into
 RAM before accepting that mutation. If the state is `Dropped`, do not
 reconstruct mutable state for that collection and do not accept
 further mutations for that collection id.
-25. `RING-STARTUP-023` Initialize allocator state from `last_free_list_head`.
+25. `RING-STARTUP-023` Initialize allocator state from
+`last_free_list_head` and the recovered global `allocation_sequence`.
 26. `RING-STARTUP-024` Reconstruct runtime `free_list_tail` by following free-pointer
 links starting at `last_free_list_head` until reaching a free region
 whose free-pointer slot is uninitialized.
@@ -315,7 +362,7 @@ not by itself require startup failure.
 These requirements cover implemented startup replay edge cases and validation helpers.
 
 1. `RING-IMPL-REGRESSION-046` Startup tail selection MUST ignore regions with nonzero collection_id
-   even when their format is wal_v1 while still tracking max seen sequence.
+   even when their format is a private log format while still tracking max seen sequence.
 2. `RING-IMPL-REGRESSION-047` Startup replay MUST preserve transaction recovery state when a WAL
    head-control record is replayed.
 3. `RING-IMPL-REGRESSION-048` Startup replay MUST preserve transaction recovery state when
@@ -329,10 +376,10 @@ These requirements cover implemented startup replay edge cases and validation he
    basis and preserve their count.
 8. `RING-IMPL-REGRESSION-053` Startup replay MUST reject update records that appear after a
    collection drop tombstone for the same collection.
-9. `RING-IMPL-REGRESSION-054` Strict WAL-region reads MUST reject regions whose collection_id is
-   nonzero even if collection_format is wal_v1.
-10. `RING-IMPL-REGRESSION-055` WAL target validation MUST require both collection_id 0 and
-    collection_format wal_v1.
+9. `RING-IMPL-REGRESSION-054` Strict private-log region reads MUST reject regions whose
+   collection_id is nonzero even if collection_format is a private log format.
+10. `RING-IMPL-REGRESSION-055` WAL target validation MUST require collection_id 0 and
+    the expected private log collection_format.
 11. `RING-IMPL-REGRESSION-056` Live committed-region basis validation MUST reject a region whose
     header belongs to a different collection.
 12. `RING-IMPL-REGRESSION-057` Region index validation MUST reject a region_index equal to
@@ -357,7 +404,7 @@ flowchart TD
     ScanRegions["`Scan regions and track max seen sequence`"]
     TailOk{"`Unique valid WAL tail?`"}
     Fail([Open fails])
-    ReadHead["`Read WAL prologue and derive WAL head candidate`"]
+    ReadHead["`Read LogRegionPrologue and derive main WAL head candidate`"]
     ChainOk{"`WAL chain valid?`"}
     Rotate{"`Incomplete WAL rotation?`"}
     RecoverRotate["`Recover missing link or finish target WAL init`"]
@@ -394,7 +441,7 @@ durable sequence seen at startup.
 scan, but it cannot win WAL-tail selection unless the monotonic
 sequence rule has already been violated.
 5. `RING-BOOTSTRAP-005` Startup derives the WAL head only from the selected tail's
-`WalRegionPrologue` plus any later `head(collection_id = 0, ...)`
+`LogRegionPrologue` plus any later `head(collection_id = 0, ...)`
 records found in that same tail region. Stale headers in free-list
 regions therefore do not influence WAL-head recovery once they lose
 tail selection.

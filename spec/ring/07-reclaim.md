@@ -9,13 +9,13 @@ Mechanism review:
 
 - **Purpose**: reclaim obsolete WAL and data regions while preserving
   the exact replay result and FIFO free-list ordering.
-- **State**: per-record WAL liveness, WAL-rotation `ready_region`, transaction
-  recovery state, free-list head/tail, and live collection/WAL
-  reachability.
+- **State**: per-record WAL liveness, WAL-rotation `ready_region`,
+  transaction recovery state, transaction-log range references,
+  free-list head/tail, and live collection/WAL reachability.
 - **Named operations**: `ReclaimWalHead`, `FreeRegion`,
   `ReserveRegionForUse`, and retained-basis replay operations.
-- **Durable edge sequence**: multi-step reclaim work uses collection
-  transactions. Cleanup writes free-list links and
+- **Durable edge sequence**: multi-step reclaim work uses
+  transaction-log-backed transactions. Cleanup writes free-list links and
   `free_region(collection_id, region_index)` records.
 - **Replay effect**: replay either sees the same live state as before
   reclaim, a completed transaction, or an incomplete transaction that
@@ -30,9 +30,9 @@ WAL-head reclaim is the `ReclaimingWalHead(WalHeadReclaimMode)`
 operation. It operates on WAL regions, but correctness is defined per
 record. A record is reclaimable only when replay no longer needs it to
 rebuild the same collection submachine state, pending updates,
-`last_free_list_head`, reserved WAL-rotation `ready_region`, transaction
-recovery state, and reconstructed `free_list_tail` produced by
-`ApplyWalRecord`.
+`last_free_list_head`, reserved WAL-rotation `ready_region`,
+transaction recovery state, transaction-log live-prefix boundaries, and
+reconstructed `free_list_tail` produced by `ApplyWalRecord`.
 
 Per-collection cutoff:
 
@@ -60,7 +60,7 @@ live only if startup step 4 would currently use it as the effective
 WAL-head override for the current tail region. Any earlier such control
 record, or any such record in a non-tail WAL region, is reclaimable
 once the same effective WAL head is preserved by a later tail-local
-control record or by the current tail region's `WalRegionPrologue`.
+control record or by the current tail region's `LogRegionPrologue`.
 3. `RING-WAL-RECLAIM-003` `head(collection_id, collection_type, region_index)` record for a
 user collection:
 live only if it is the decision record at `D(c)` for a collection whose
@@ -79,17 +79,21 @@ before `B(c)` are reclaimable.
 7. `RING-WAL-RECLAIM-007` `link` record:
 live only while required to maintain a valid WAL chain from current
 WAL head to current WAL tail.
-8. `RING-WAL-RECLAIM-008` `alloc_begin(collection_id, region_index, free_list_head_after)` record:
-live if either it is the last valid free-list-head decision in replay
-order, or its WAL-rotation reservation is still needed to recover an
-unmatched `ready_region`. The reservation role exists only for
-`collection_id = 0` until `link` durably consumes the allocated WAL
-region; after that point, retaining the record is no longer required for
-region-consumption validity.
-9. `RING-WAL-RECLAIM-009` Transaction marker records are live while
-startup replay still needs them to classify a transaction interval as
-finished, rolled back, pre-commit incomplete, or post-commit
-incomplete.
+8. `RING-WAL-RECLAIM-008` `alloc_begin(collection_id, region_index,
+allocation_sequence, free_list_head_after)` record:
+live if either it is needed after the retained log segment prologue
+checkpoint to reconstruct the newest allocator-head decision, or its
+WAL-rotation reservation is still needed to recover an unmatched
+`ready_region`. The reservation role exists only for `collection_id = 0`
+until `link` durably consumes the allocated WAL region; after that
+point, retaining the record is no longer required for
+region-consumption validity if the allocator cursor is represented by a
+later segment prologue or retained allocation record.
+9. `RING-WAL-RECLAIM-009` Main-WAL transaction-control records are live
+while startup replay still needs them to import a committed
+transaction-log range, prove rollback completed, finish committed
+cleanup, or keep a transaction-log range referenced for garbage
+collection.
 10. `RING-WAL-RECLAIM-010` `free_region(collection_id, region_index)` record:
 live only while replay still needs it to reconstruct the durable
 allocator head/tail state or prove that cleanup for the owning
@@ -97,11 +101,11 @@ collection's transaction completed.
 11. `RING-WAL-RECLAIM-011` `wal_recovery` record:
 live only if replay still needs it to justify later valid WAL records
 that appear after an ignored corrupt/torn span in that WAL region.
-12. `RING-WAL-RECLAIM-013` Transaction-scoped records are live while
-replay needs them to preserve or recover an unfinished transaction
-interval. They become reclaimable only after a later retained terminal
-marker or equivalent durable transaction state makes the same recovery
-outcome available outside the candidate WAL region.
+12. `RING-WAL-RECLAIM-013` Transaction-log records are live while any
+retained main-WAL commit, rollback, finish record, open transaction
+descriptor, or pending recovery descriptor points to a range containing
+them. They become reclaimable only when the transaction log's live
+prefix advances past them.
 
 WAL-region reclaim preconditions:
 
@@ -122,15 +126,16 @@ pre-reclaim allocator state.
 pre-reclaim crash-recovery state.
 5. `RING-WAL-RECLAIM-POST-005` Startup step 4 MUST recover the same effective WAL head after
 reclaim as before reclaim, using the current tail region's
-`WalRegionPrologue` plus the last valid tail-local
+`LogRegionPrologue` plus the last valid tail-local
 `head(collection_id = 0, collection_type = wal, region_index = ...)`
 override, if any.
 6. `RING-WAL-RECLAIM-POST-006` WAL chain integrity MUST remain valid with no broken `link` path.
 7. `RING-WAL-RECLAIM-POST-007` The reclaimed region MUST be erased before reuse.
 8. `RING-WAL-RECLAIM-POST-008` If reclaim allocates any replacement WAL regions, replay-visible
-`alloc_begin` records for those allocations carry collection id and
-`free_list_head_after` so replay reconstructs the same allocator
-position.
+`alloc_begin` records for those allocations carry collection id,
+`allocation_sequence`, and `free_list_head_after`, and any new
+`LogRegionPrologue` carries the allocator cursor checkpoint so replay
+reconstructs the same allocator position.
 
 Safety invariant:
 
@@ -139,6 +144,32 @@ submachine state and pending updates for every collection, the recovered
 `last_free_list_head`, reserved WAL-rotation `ready_region`,
 transaction recovery state, and reconstructed `free_list_tail`, after
 reclaim must match the pre-reclaim logical state.
+
+## Transaction-Log Reclaim Eligibility
+
+Transaction-log reclaim is prefix-only for each transaction log. A
+transaction-log region or record may be reclaimed only when no retained
+main-WAL `commit_transaction(transaction_log_id, range)`,
+`rollback_transaction(transaction_log_id, range)`, or
+`transaction_finished(transaction_log_id, range)` record, no open
+transaction descriptor, and no pending recovery descriptor points into
+that prefix. The reclaim result must preserve the same imported
+committed ranges, rollback ranges, cleanup obligations,
+transaction-log append cursors, and allocator cursor recovery result as
+before reclaim.
+
+1. `RING-TXLOG-RECLAIM-001` Transaction-log reclaim MUST advance only a
+contiguous prefix of one transaction log.
+2. `RING-TXLOG-RECLAIM-002` A transaction-log prefix MUST NOT be
+reclaimed while any retained main-WAL transaction-control record
+references a range overlapping that prefix.
+3. `RING-TXLOG-RECLAIM-003` A transaction-log prefix MUST NOT be
+reclaimed while an open transaction or pending recovery descriptor
+references a range overlapping that prefix.
+4. `RING-TXLOG-RECLAIM-004` After transaction-log reclaim, startup MUST
+recover the same transaction-log cursors, live-prefix boundaries,
+imported committed collection state, rollback state, and allocator
+state as before reclaim.
 
 ## Free Region
 
@@ -204,17 +235,20 @@ steps above.
 
 ## Transaction Cleanup Recovery
 
-1. `RING-TX-RECOVERY-001` If startup reaches WAL end before
-`commit_transaction(collection_id)`, it MUST run data recovery for that
-transaction and append `rollback_transaction(collection_id)`.
-2. `RING-TX-RECOVERY-002` If startup reaches WAL end after
-`commit_transaction(collection_id)` but before
-`transaction_finished(collection_id)`, it MUST preserve the committed
-collection state, finish cleanup frees derived from durable
-collection-specific state, and append
-`transaction_finished(collection_id)`.
-3. `RING-TX-RECOVERY-003` Both data recovery and cleanup recovery MUST
-be idempotent if startup crashes before the terminal marker is durable.
+1. `RING-TX-RECOVERY-001` If startup reaches main WAL end with an open
+transaction descriptor and no durable
+`commit_transaction(transaction_log_id, range)`, it MUST run rollback
+recovery for that transaction-log range and append
+`rollback_transaction(transaction_log_id, range)`.
+2. `RING-TX-RECOVERY-002` If startup reaches main WAL end after
+`commit_transaction(transaction_log_id, range)` but before
+`transaction_finished(transaction_log_id, range)`, it MUST preserve the
+committed collection state imported from that transaction-log range,
+finish cleanup frees derived from the committed range, and append
+`transaction_finished(transaction_log_id, range)`.
+3. `RING-TX-RECOVERY-003` Both rollback recovery and cleanup recovery
+MUST be idempotent if startup crashes before the terminal marker is
+durable.
 4. `RING-TX-RECOVERY-004` The configured minimum free-region reserve MUST leave enough WAL
 capacity for startup recovery to append a required terminal transaction
 record.
@@ -223,7 +257,7 @@ record.
 
 These requirements preserve existing trace identifiers while the
 implementation moves from the previous cleanup mechanism to the
-collection-scoped transaction model.
+transaction-log-backed transaction model.
 
 1. `RING-REGION-RECLAIM-PRE-001` Transaction cleanup MUST make the
 transaction begin marker durable before durable collection metadata

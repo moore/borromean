@@ -153,15 +153,20 @@ WAL-only head-record type; it uses the same `head` record as every
 other collection.
 
 Multi-step collection operations that replace durable state use
-collection-scoped WAL transactions. A transaction begins with
-`begin_transaction(collection_id)`. Before
-`commit_transaction(collection_id)`, replay can abandon the collection
-state update and recover transaction-private allocation effects. After
-`commit_transaction(collection_id)`, replay must keep the new collection
-state and finish any allocator cleanup. The transaction is complete only
-after `transaction_finished(collection_id)` is durable; if pre-commit
-recovery has already cleaned up an abandoned transaction, replay records
-that fact with `rollback_transaction(collection_id)`.
+transaction-log-backed transactions. A transaction begins with a main
+WAL `begin_transaction(transaction_log_id, start)` record, then writes
+private collection and allocator records into that transaction log.
+Before `commit_transaction(transaction_log_id, range)`, replay can
+abandon the private collection state update and recover
+transaction-owned allocation effects. After
+`commit_transaction(transaction_log_id, range)`, replay imports the
+frozen transaction-log range at the main WAL commit position, keeps the
+new collection state, and finishes any allocator cleanup. The
+transaction is complete only after
+`transaction_finished(transaction_log_id, range)` is durable; if
+pre-commit recovery has already cleaned up an abandoned transaction,
+replay records that fact with
+`rollback_transaction(transaction_log_id, range)`.
 
 The storage system also keeps a free list of regions that are
 available to satisfy new allocations. This list is FIFO (first in,
@@ -169,11 +174,12 @@ first out), to support wear leveling. The durable free-list head
 is tracked in WAL replay order so every durable allocator-head change
 is replayed exactly once. Allocations advance the durable free-list
 head through `alloc_begin(collection_id, region_index,
-free_list_head_after)`. Any operation that writes a newly allocated
-region must first durably reserve that region with the owning
-collection id; WAL rotation uses `collection_id = 0`. The later `head`
-or `link` record that uses that region consumes the single ready-region
-reservation. Freeing a region appends
+allocation_sequence, free_list_head_after)`. Any operation that writes a
+newly allocated region must first durably reserve that region with the
+owning collection id and the next global allocation sequence; WAL
+rotation uses `collection_id = 0`. The later `head` or `link` record
+that uses that region consumes the single ready-region reservation.
+Freeing a region appends
 `free_region(collection_id, region_index)`, where the collection id is
 the collection that is losing that region. The free record mutates
 global allocator state, but it remains collection-scoped because it
@@ -260,13 +266,13 @@ once they are no longer physically reachable from live state.
 records rather than a WAL-specific head record type.
 9. `RING-CORE-009` Any multi-step collection operation that commits a
 new durable basis and frees old regions MUST be tracked as a
-collection-scoped WAL transaction with durable begin, commit, cleanup,
-and terminal markers.
+transaction-log-backed transaction with durable main-WAL begin, commit,
+cleanup, and terminal markers.
 10. `RING-CORE-010` The durable free list MUST be FIFO so allocations
 consume the oldest free regions first.
 11. `RING-CORE-011` Any operation that writes a newly allocated region
 MUST first durably reserve that region with
-`alloc_begin(collection_id, region_index, free_list_head_after)`.
+`alloc_begin(collection_id, region_index, allocation_sequence, free_list_head_after)`.
 12. `RING-CORE-012` The implementation MUST maintain
 `min_free_regions >= max_in_memory_dirty_collections + 1` so every
 storage-managed dirty frontier can be preserved using one committed

@@ -86,11 +86,10 @@ Glossary:
   those updates loaded into an in-memory frontier.
 - **Ready region**: a region removed from the free-list head by
   `alloc_begin` but not yet consumed by `head` or `link`.
-- **Collection transaction**: a WAL interval started by
-  `begin_transaction(collection_id)` for one collection. The interval
-  may commit collection-state updates, perform allocator cleanup, and
-  finish with `transaction_finished(collection_id)` or
-  `rollback_transaction(collection_id)`.
+- **Transaction log**: a private log chain used by one active
+  transaction at a time. Main WAL transaction-control records name the
+  transaction-log range that should be rolled back, imported at commit,
+  or released after cleanup.
 - **Crash cut**: a point in a multi-step operation where reset may leave
   only the durable prefix of that operation visible to replay.
 
