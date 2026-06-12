@@ -33,7 +33,9 @@ fn requirement_corrupt_storage_inputs_return_errors_instead_of_panicking() {
     ));
 
     let prologue = WalRegionPrologue {
-        wal_head_region_index: 0,
+        log_head_region_index: 0,
+        allocator_free_list_head: Some(1),
+        allocation_sequence: 0,
     };
     let mut prologue_bytes = [0u8; WalRegionPrologue::ENCODED_LEN];
     prologue

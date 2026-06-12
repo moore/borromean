@@ -112,8 +112,8 @@ fn requirement_explicit_collection_and_reclaim_capacities_fail_when_exhausted() 
 //# borrowed by the `Storage` context or supplied to the collection handle.
 #[test]
 fn requirement_scratch_space_is_owned_by_storage_context() {
-    let mut flash = MockFlash::<256, 6, 1024>::new(0xff);
-    let mut storage = Storage::<_, 256, 6, 8>::format(
+    let mut flash = MockFlash::<512, 6, 1024>::new(0xff);
+    let mut storage = Storage::<_, 512, 6, 8>::format(
         &mut flash,
         StorageFormatConfig::new(1, 8, 0xa5),
         crate::test_storage_memory(),
@@ -191,13 +191,16 @@ fn requirement_map_round_trips_large_snapshots_using_only_borrowed_buffers() {
 fn requirement_disk_format_buffer_sizes_are_exposed_by_constants_or_workspace_contracts() {
     assert_eq!(
         StorageMetadata::ENCODED_LEN,
-        size_of::<u32>() * 6 + size_of::<u8>() * 2
+        size_of::<u32>() * 7 + size_of::<u8>() * 2
     );
     assert_eq!(
         Header::ENCODED_LEN,
         size_of::<u64>() + size_of::<u64>() + size_of::<u16>() + size_of::<u32>()
     );
-    assert_eq!(WalRegionPrologue::ENCODED_LEN, size_of::<u32>() * 2);
+    assert_eq!(
+        WalRegionPrologue::ENCODED_LEN,
+        size_of::<u32>() + size_of::<u8>() + size_of::<u32>() + size_of::<u64>() + size_of::<u32>()
+    );
     assert_eq!(FreePointerFooter::ENCODED_LEN, size_of::<u32>() * 2);
 
     let mut workspace = StorageWorkspace::<128>::new();

@@ -8,8 +8,8 @@ use super::*;
 //# argument.
 #[test]
 fn requirement_storage_operations_use_bound_backing() {
-    let mut flash = MockFlash::<256, 5, 512>::new(0xff);
-    let mut storage = Storage::<_, 256, 5, 8>::format(
+    let mut flash = MockFlash::<1024, 10, 512>::new(0xff);
+    let mut storage = Storage::<_, 1024, 10, 8>::format(
         &mut flash,
         StorageFormatConfig::new(1, 8, 0xa5),
         crate::test_storage_memory(),
@@ -23,7 +23,7 @@ fn requirement_storage_operations_use_bound_backing() {
     assert_eq!(storage.mode(), StorageMode::Idle);
 
     let backing = storage.into_backing();
-    let reopened = Storage::<_, 256, 5, 8>::open(backing, crate::test_storage_memory()).unwrap();
+    let reopened = Storage::<_, 1024, 10, 8>::open(backing, crate::test_storage_memory()).unwrap();
     assert_eq!(reopened.collections()[0].collection_id(), CollectionId(11));
 }
 
@@ -154,8 +154,8 @@ fn requirement_core_api_remains_usable_without_executor_or_framework_helpers() {
 //# by normal storage and collection operations.
 #[test]
 fn requirement_storage_context_owns_operation_scratch() {
-    let mut flash = MockFlash::<256, 5, 512>::new(0xff);
-    let mut storage = Storage::<_, 256, 5, 8>::format(
+    let mut flash = MockFlash::<1024, 10, 512>::new(0xff);
+    let mut storage = Storage::<_, 1024, 10, 8>::format(
         &mut flash,
         StorageFormatConfig::new(1, 8, 0xa5),
         crate::test_storage_memory(),
@@ -204,8 +204,8 @@ fn requirement_storage_owns_backing_access() {
 //# through `Storage` rather than requiring a separate backing argument on each operation.
 #[test]
 fn requirement_operations_use_storage_backing() {
-    let mut flash = MockFlash::<256, 5, 512>::new(0xff);
-    let mut storage = Storage::<_, 256, 5, 8>::format(
+    let mut flash = MockFlash::<1024, 10, 512>::new(0xff);
+    let mut storage = Storage::<_, 1024, 10, 8>::format(
         &mut flash,
         StorageFormatConfig::new(1, 8, 0xa5),
         crate::test_storage_memory(),

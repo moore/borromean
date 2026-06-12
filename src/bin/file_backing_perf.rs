@@ -10,10 +10,10 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use borromean::{
-    AllocationPolicy, CollectionId, FileBacking, FileBackingFileSyncKind, FileBackingOptions,
-    FileBackingScratch, FlashIo, FreePointerFooter, Header, LsmMap, LsmMapMemory, MadvisePolicy,
-    MockError, MockFormatError, Storage, StorageFormatConfig, StorageFormatError, StorageIoError,
-    StorageMemory, StorageMetadata, StoragePerfMetrics, WalRegionPrologue, WAL_V1_FORMAT,
+    encode_wal_region_prefix, AllocationPolicy, FileBacking, FileBackingFileSyncKind,
+    FileBackingOptions, FileBackingScratch, FlashIo, FreePointerFooter, LsmMap, LsmMapMemory,
+    MadvisePolicy, MockError, MockFormatError, Storage, StorageFormatConfig, StorageFormatError,
+    StorageIoError, StorageMemory, StorageMetadata, StoragePerfMetrics,
 };
 use fjall::{Database as FjallDatabase, Keyspace as FjallKeyspace, KeyspaceCreateOptions};
 use heapless::Vec as HeaplessVec;
@@ -1140,33 +1140,10 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize> FlashIo
                 })?;
         }
 
-        let header = Header {
-            sequence: 0,
-            collection_id: CollectionId::new(0),
-            collection_format: WAL_V1_FORMAT,
-        };
-        let mut header_bytes = [0u8; Header::ENCODED_LEN];
-        header
-            .encode_into(&mut header_bytes)
+        let mut prefix = [self.erased_byte; REGION_SIZE];
+        let prefix_len = encode_wal_region_prefix(&mut prefix, metadata, 0, 0)
             .map_err(|error| StorageFormatError::from(MockFormatError::from(error)))?;
-        self.write_region(0, 0, &header_bytes)
-            .map_err(|error| match error {
-                StorageIoError::Mock(error) => {
-                    StorageFormatError::from(MockFormatError::from(error))
-                }
-                #[cfg(feature = "embedded-storage")]
-                StorageIoError::EmbeddedStorage(_) => unreachable_storage_format_error(),
-                StorageIoError::FileBacking(_) => unreachable_storage_format_error(),
-            })?;
-
-        let prologue = WalRegionPrologue {
-            wal_head_region_index: 0,
-        };
-        let mut prologue_bytes = [0u8; WalRegionPrologue::ENCODED_LEN];
-        prologue
-            .encode_into(&mut prologue_bytes, region_count)
-            .map_err(|error| StorageFormatError::from(MockFormatError::from(error)))?;
-        self.write_region(0, Header::ENCODED_LEN, &prologue_bytes)
+        self.write_region(0, 0, &prefix[..prefix_len])
             .map_err(|error| match error {
                 StorageIoError::Mock(error) => {
                     StorageFormatError::from(MockFormatError::from(error))

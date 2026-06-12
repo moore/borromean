@@ -49,14 +49,17 @@ Required write and sync ordering:
 `W(drop_collection(collection_id)) -> S(drop_collection)`.
 4. `RING-ORDER-004` `CommitCollectionRegion` transition:
 if the target is not already reserved by an earlier stable operation,
-`W(alloc_begin(collection_id, region_index, allocation_sequence, free_list_head_after)) -> S(alloc_begin) ->`;
+`W(alloc_begin(collection_id, region_index, allocation_sequence,
+free_list_head_after)) -> S(alloc_begin) ->`;
 in all cases,
 `erase/init reserved region if needed -> W(region header+data) -> S(region) ->`
 `W(head(collection_id, collection_type, ref=region_index)) -> S(head)`.
 5. `RING-ORDER-005` `RotateWalTail` transition:
-`W(alloc_begin(collection_id = 0, next_region_index, allocation_sequence, free_list_head_after)) -> S(alloc_begin) ->`
+`W(alloc_begin(collection_id = 0, next_region_index, allocation_sequence,
+free_list_head_after)) -> S(alloc_begin) ->`
 `W(link(next_region_index, expected_sequence)) -> S(link) ->`
-`W(new_log_region_init(sequence=expected_sequence, log_head_region_index=current_wal_head, allocator cursor)) ->`
+`W(new_log_region_init(sequence=expected_sequence,
+log_head_region_index=current_wal_head, allocator cursor)) ->`
 `S(new_log_region_init)`.
 6. `RING-ORDER-006` transaction transition for stable-head replacement, drop cleanup, or
 `ReclaimWalHead`:
@@ -231,12 +234,11 @@ Preconditions:
 5. `RING-FORMAT-STORAGE-PRE-005` `wal_record_magic != erased_byte`.
 6. `RING-FORMAT-STORAGE-PRE-006` `transaction_log_count >= 1`.
 7. `RING-FORMAT-STORAGE-PRE-007`
-`region_count >= transaction_log_count + 2 + min_free_regions`.
-This guarantees that after reserving region `0` for the main WAL,
-reserving one initial region for each transaction log, and preserving
-the configured `min_free_regions` reserve, a freshly formatted store
-still has at least one non-reserved free region available for ordinary
-allocations.
+`region_count >= 2 + min_free_regions`.
+This guarantees that after reserving region `0` for the main WAL and
+preserving the configured `min_free_regions` reserve, a freshly formatted
+store still has at least one non-reserved free region available for
+ordinary allocations or lazy transaction-log initialization.
 There is intentionally no normative minimum usable `region_size`
 enforced by Borromean. Geometries that are formally formattable but too
 small to leave useful payload after `Header`, free-pointer footer,
@@ -258,19 +260,15 @@ Procedure:
 write valid `Header` with `collection_id = 0`,
 `collection_format = main_wal_v2`, and `sequence = 0`,
 write a valid `LogRegionPrologue` with `log_head_region_index = 0`,
-`allocator_free_list_head = Some(transaction_log_count + 1)`, and
+`allocator_free_list_head = Some(1)`, and
 `allocation_sequence = 0`,
 then sync region `0`.
-4. `RING-FORMAT-STORAGE-004` For each transaction log id `t` in
-`[0, transaction_log_count - 1]`, initialize region `1 + t` as that
-transaction log's initial segment: write a valid `Header` with
-`collection_id = 0`, `collection_format = transaction_log_v2`, and
-`sequence = 1 + t`; write a valid `LogRegionPrologue` with
-`log_head_region_index = 1 + t`,
-`allocator_free_list_head = Some(transaction_log_count + 1)`, and
-`allocation_sequence = 0`; then sync the region.
+4. `RING-FORMAT-STORAGE-004` Formatting MUST NOT initialize or reserve
+transaction-log regions. `transaction_log_count` is a concurrency ceiling;
+transaction-log regions are allocated lazily through normal allocator
+records when a transaction log is first used.
 5. `RING-FORMAT-STORAGE-004A` For each region `r` in
-`[transaction_log_count + 1, region_count - 1]`:
+`[1, region_count - 1]`:
 leave the erased header and payload bytes otherwise uninterpreted, write
 valid `FreePointerFooter { next_tail = r + 1, footer_checksum }` bytes
 for every region except the last, leave the last region's free-pointer
@@ -281,17 +279,15 @@ regions are durable.
 
 Postconditions:
 
-1. `RING-FORMAT-STORAGE-POST-001` Main WAL head and tail MUST both be region `0`, and each
-transaction log's head and tail MUST be its initial region
-`1 + transaction_log_id`.
+1. `RING-FORMAT-STORAGE-POST-001` Main WAL head and tail MUST both be
+region `0`, and every transaction-log slot MUST start uninitialized.
 2. `RING-FORMAT-STORAGE-POST-002` A user collection durable head MUST
 NOT exist after formatting.
-3. `RING-FORMAT-STORAGE-POST-003` The free list MUST contain every region not reserved for the
-main WAL or an initial transaction log in ascending region-index
-order.
-4. `RING-FORMAT-STORAGE-POST-004` Because region `0` is reserved as the main WAL and regions
-`1..=transaction_log_count` are reserved as initial transaction logs,
-the initial durable free-list head is region `transaction_log_count + 1`.
+3. `RING-FORMAT-STORAGE-POST-003` The free list MUST contain every
+non-main-WAL region in ascending region-index order.
+4. `RING-FORMAT-STORAGE-POST-004` Because region `0` is reserved as the
+main WAL and transaction logs are initialized lazily, the initial durable
+free-list head is region `1`.
 
 ```mermaid
 %%{init: {"flowchart": {"wrappingWidth": 180}} }%%

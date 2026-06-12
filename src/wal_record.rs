@@ -129,6 +129,8 @@ pub enum WalRecordType {
     TransactionFinished,
     /// Marks transaction pre-commit recovery complete.
     RollbackTransaction,
+    /// Enrolls a collection into the active transaction-log state.
+    AddTransactionCollection,
 }
 
 impl WalRecordType {
@@ -148,6 +150,7 @@ impl WalRecordType {
             Self::CommitTransaction => 0x0e,
             Self::TransactionFinished => 0x0f,
             Self::RollbackTransaction => 0x10,
+            Self::AddTransactionCollection => 0x11,
         }
     }
 
@@ -167,6 +170,7 @@ impl WalRecordType {
             0x0e => Ok(Self::CommitTransaction),
             0x0f => Ok(Self::TransactionFinished),
             0x10 => Ok(Self::RollbackTransaction),
+            0x11 => Ok(Self::AddTransactionCollection),
             _ => Err(WalRecordError::InvalidRecordType(code)),
         }
     }
@@ -181,16 +185,31 @@ impl WalRecordType {
                 | Self::Head
                 | Self::DropCollection
                 | Self::FreeRegion
-                | Self::BeginTransaction
-                | Self::CommitTransaction
-                | Self::TransactionFinished
-                | Self::RollbackTransaction
+                | Self::AddTransactionCollection
         )
     }
 
     fn has_collection_type(self) -> bool {
         matches!(self, Self::NewCollection | Self::Snapshot | Self::Head)
     }
+}
+
+/// Position inside a main WAL or transaction-log chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LogPosition {
+    /// Region containing the position.
+    pub region_index: u32,
+    /// Byte offset within the region.
+    pub offset: u32,
+}
+
+/// Frozen range inside one transaction log.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransactionLogRange {
+    /// Inclusive start position.
+    pub start: LogPosition,
+    /// Exclusive end position.
+    pub end: LogPosition,
 }
 
 /// Borrowed logical WAL record.
@@ -225,6 +244,8 @@ pub enum WalRecord<'a> {
         collection_id: CollectionId,
         /// Free-list region being reserved.
         region_index: u32,
+        /// Globally ordered allocator decision sequence.
+        allocation_sequence: u64,
         /// Successor free-list head after reserving the region.
         free_list_head_after: Option<u32>,
     },
@@ -256,25 +277,40 @@ pub enum WalRecord<'a> {
         /// Region being appended to the free-list tail.
         region_index: u32,
     },
-    /// `begin_transaction(collection_id)`.
+    /// `begin_transaction(transaction_log_id, start)`.
     BeginTransaction {
-        /// Collection whose transaction is starting.
-        collection_id: CollectionId,
+        /// Transaction log slot selected for this transaction.
+        transaction_log_id: u32,
+        /// Transaction-log start position.
+        start: LogPosition,
     },
-    /// `commit_transaction(collection_id)`.
+    /// `commit_transaction(transaction_log_id, range)`.
     CommitTransaction {
-        /// Collection whose transaction update phase is committed.
-        collection_id: CollectionId,
+        /// Transaction log slot selected for this transaction.
+        transaction_log_id: u32,
+        /// Frozen transaction-log range being imported.
+        range: TransactionLogRange,
     },
-    /// `transaction_finished(collection_id)`.
+    /// `transaction_finished(transaction_log_id, range)`.
     TransactionFinished {
-        /// Collection whose transaction cleanup is complete.
-        collection_id: CollectionId,
+        /// Transaction log slot selected for this transaction.
+        transaction_log_id: u32,
+        /// Transaction-log range whose cleanup is complete.
+        range: TransactionLogRange,
     },
-    /// `rollback_transaction(collection_id)`.
+    /// `rollback_transaction(transaction_log_id, range)`.
     RollbackTransaction {
-        /// Collection whose pre-commit transaction recovery is complete.
+        /// Transaction log slot selected for this transaction.
+        transaction_log_id: u32,
+        /// Transaction-log range that remained non-visible.
+        range: TransactionLogRange,
+    },
+    /// `add_transaction_collection(collection_id, observed_collection_generation)`.
+    AddTransactionCollection {
+        /// Collection being enrolled into the transaction.
         collection_id: CollectionId,
+        /// Committed generation observed when the collection was enrolled.
+        observed_collection_generation: u64,
     },
     /// `wal_recovery()`.
     WalRecovery,
@@ -297,6 +333,7 @@ impl<'a> WalRecord<'a> {
             Self::CommitTransaction { .. } => WalRecordType::CommitTransaction,
             Self::TransactionFinished { .. } => WalRecordType::TransactionFinished,
             Self::RollbackTransaction { .. } => WalRecordType::RollbackTransaction,
+            Self::AddTransactionCollection { .. } => WalRecordType::AddTransactionCollection,
         }
     }
 }
@@ -535,11 +572,13 @@ fn encode_logical_record(
         WalRecord::AllocBegin {
             collection_id,
             region_index,
+            allocation_sequence,
             free_list_head_after,
         } => {
             offset = write_u64(buffer, offset, collection_id.0)?;
-            offset = write_u32(buffer, offset, size_of::<u32>() as u32)?;
+            offset = write_u32(buffer, offset, (size_of::<u32>() + size_of::<u64>()) as u32)?;
             offset = write_u32(buffer, offset, region_index)?;
+            offset = write_u64(buffer, offset, allocation_sequence)?;
             offset = write_opt_region_index(buffer, offset, free_list_head_after)?;
         }
         WalRecord::Head {
@@ -572,12 +611,45 @@ fn encode_logical_record(
             offset = write_u32(buffer, offset, size_of::<u32>() as u32)?;
             offset = write_u32(buffer, offset, region_index)?;
         }
-        WalRecord::BeginTransaction { collection_id }
-        | WalRecord::CommitTransaction { collection_id }
-        | WalRecord::TransactionFinished { collection_id }
-        | WalRecord::RollbackTransaction { collection_id } => {
+        WalRecord::BeginTransaction {
+            transaction_log_id,
+            start,
+        } => {
+            offset = write_u32(
+                buffer,
+                offset,
+                (size_of::<u32>() + log_position_len()) as u32,
+            )?;
+            offset = write_u32(buffer, offset, transaction_log_id)?;
+            offset = write_log_position(buffer, offset, start)?;
+        }
+        WalRecord::CommitTransaction {
+            transaction_log_id,
+            range,
+        }
+        | WalRecord::TransactionFinished {
+            transaction_log_id,
+            range,
+        }
+        | WalRecord::RollbackTransaction {
+            transaction_log_id,
+            range,
+        } => {
+            offset = write_u32(
+                buffer,
+                offset,
+                (size_of::<u32>() + transaction_range_len()) as u32,
+            )?;
+            offset = write_u32(buffer, offset, transaction_log_id)?;
+            offset = write_transaction_log_range(buffer, offset, range)?;
+        }
+        WalRecord::AddTransactionCollection {
+            collection_id,
+            observed_collection_generation,
+        } => {
             offset = write_u64(buffer, offset, collection_id.0)?;
-            offset = write_u32(buffer, offset, 0)?;
+            offset = write_u32(buffer, offset, size_of::<u64>() as u32)?;
+            offset = write_u64(buffer, offset, observed_collection_generation)?;
         }
         WalRecord::WalRecovery => {
             offset = write_u32(buffer, offset, 0)?;
@@ -630,17 +702,19 @@ fn parse_logical_record(logical: &[u8]) -> Result<WalRecord<'_>, WalRecordError>
         WalRecordType::AllocBegin => {
             let collection_id = CollectionId(read_u64(logical, &mut offset)?);
             let payload_len = read_u32(logical, &mut offset)?;
-            if payload_len != size_of::<u32>() as u32 {
+            if payload_len != (size_of::<u32>() + size_of::<u64>()) as u32 {
                 return Err(WalRecordError::PayloadLengthMismatch {
                     record_type,
                     payload_len,
                 });
             }
             let region_index = read_u32(logical, &mut offset)?;
+            let allocation_sequence = read_u64(logical, &mut offset)?;
             let free_list_head_after = read_opt_region_index(logical, &mut offset)?;
             Ok(WalRecord::AllocBegin {
                 collection_id,
                 region_index,
+                allocation_sequence,
                 free_list_head_after,
             })
         }
@@ -713,38 +787,77 @@ fn parse_logical_record(logical: &[u8]) -> Result<WalRecord<'_>, WalRecordError>
             Ok(WalRecord::WalRecovery)
         }
         WalRecordType::BeginTransaction => {
-            let collection_id = read_empty_transaction_marker(logical, &mut offset, record_type)?;
-            Ok(WalRecord::BeginTransaction { collection_id })
+            let payload_len = read_u32(logical, &mut offset)?;
+            if payload_len != (size_of::<u32>() + log_position_len()) as u32 {
+                return Err(WalRecordError::PayloadLengthMismatch {
+                    record_type,
+                    payload_len,
+                });
+            }
+            let transaction_log_id = read_u32(logical, &mut offset)?;
+            let start = read_log_position(logical, &mut offset)?;
+            Ok(WalRecord::BeginTransaction {
+                transaction_log_id,
+                start,
+            })
         }
         WalRecordType::CommitTransaction => {
-            let collection_id = read_empty_transaction_marker(logical, &mut offset, record_type)?;
-            Ok(WalRecord::CommitTransaction { collection_id })
+            let (transaction_log_id, range) =
+                read_transaction_log_control_payload(logical, &mut offset, record_type)?;
+            Ok(WalRecord::CommitTransaction {
+                transaction_log_id,
+                range,
+            })
         }
         WalRecordType::TransactionFinished => {
-            let collection_id = read_empty_transaction_marker(logical, &mut offset, record_type)?;
-            Ok(WalRecord::TransactionFinished { collection_id })
+            let (transaction_log_id, range) =
+                read_transaction_log_control_payload(logical, &mut offset, record_type)?;
+            Ok(WalRecord::TransactionFinished {
+                transaction_log_id,
+                range,
+            })
         }
         WalRecordType::RollbackTransaction => {
-            let collection_id = read_empty_transaction_marker(logical, &mut offset, record_type)?;
-            Ok(WalRecord::RollbackTransaction { collection_id })
+            let (transaction_log_id, range) =
+                read_transaction_log_control_payload(logical, &mut offset, record_type)?;
+            Ok(WalRecord::RollbackTransaction {
+                transaction_log_id,
+                range,
+            })
+        }
+        WalRecordType::AddTransactionCollection => {
+            let collection_id = CollectionId(read_u64(logical, &mut offset)?);
+            let payload_len = read_u32(logical, &mut offset)?;
+            if payload_len != size_of::<u64>() as u32 {
+                return Err(WalRecordError::PayloadLengthMismatch {
+                    record_type,
+                    payload_len,
+                });
+            }
+            let observed_collection_generation = read_u64(logical, &mut offset)?;
+            Ok(WalRecord::AddTransactionCollection {
+                collection_id,
+                observed_collection_generation,
+            })
         }
     }
 }
 
-fn read_empty_transaction_marker(
+fn read_transaction_log_control_payload(
     logical: &[u8],
     offset: &mut usize,
     record_type: WalRecordType,
-) -> Result<CollectionId, WalRecordError> {
-    let collection_id = CollectionId(read_u64(logical, offset)?);
+) -> Result<(u32, TransactionLogRange), WalRecordError> {
     let payload_len = read_u32(logical, offset)?;
-    if payload_len != 0 {
+    if payload_len != (size_of::<u32>() + transaction_range_len()) as u32 {
         return Err(WalRecordError::PayloadLengthMismatch {
             record_type,
             payload_len,
         });
     }
-    Ok(collection_id)
+    let transaction_log_id = read_u32(logical, offset)?;
+    let range = read_transaction_log_range(logical, offset)?;
+    Ok((transaction_log_id, range))
 }
 
 fn encode_logical_byte(
@@ -812,12 +925,56 @@ fn write_opt_region_index(
     }
 }
 
+fn log_position_len() -> usize {
+    size_of::<u32>() * 2
+}
+
+fn transaction_range_len() -> usize {
+    log_position_len() * 2
+}
+
+fn write_log_position(
+    buffer: &mut [u8],
+    offset: usize,
+    position: LogPosition,
+) -> Result<usize, WalRecordError> {
+    let offset = write_u32(buffer, offset, position.region_index)?;
+    write_u32(buffer, offset, position.offset)
+}
+
+fn write_transaction_log_range(
+    buffer: &mut [u8],
+    offset: usize,
+    range: TransactionLogRange,
+) -> Result<usize, WalRecordError> {
+    let offset = write_log_position(buffer, offset, range.start)?;
+    write_log_position(buffer, offset, range.end)
+}
+
 fn read_opt_region_index(buffer: &[u8], offset: &mut usize) -> Result<Option<u32>, WalRecordError> {
     match read_u8(buffer, offset)? {
         0 => Ok(None),
         1 => Ok(Some(read_u32(buffer, offset)?)),
         tag => Err(WalRecordError::InvalidOptRegionTag(tag)),
     }
+}
+
+fn read_log_position(buffer: &[u8], offset: &mut usize) -> Result<LogPosition, WalRecordError> {
+    let region_index = read_u32(buffer, offset)?;
+    let offset_in_region = read_u32(buffer, offset)?;
+    Ok(LogPosition {
+        region_index,
+        offset: offset_in_region,
+    })
+}
+
+fn read_transaction_log_range(
+    buffer: &[u8],
+    offset: &mut usize,
+) -> Result<TransactionLogRange, WalRecordError> {
+    let start = read_log_position(buffer, offset)?;
+    let end = read_log_position(buffer, offset)?;
+    Ok(TransactionLogRange { start, end })
 }
 
 fn read_payload<'a>(buffer: &'a [u8], offset: &mut usize) -> Result<&'a [u8], WalRecordError> {

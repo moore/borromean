@@ -245,7 +245,8 @@ fn committed_region_sequence_progress() -> CommittedRegionSequenceProgress {
 //= type=test
 //# `RING-FORMAT-STORAGE-002` Write `StorageMetadata`
 //# (`storage_version`, `region_size`, `region_count`,
-//# `min_free_regions`, `wal_write_granule`, `erased_byte`,
+//# `min_free_regions`, `transaction_log_count`,
+//# `wal_write_granule`, `erased_byte`,
 //# `wal_record_magic`, `metadata_checksum`) and sync metadata.
 #[test]
 fn requirement_format_writes_metadata_before_reopening_the_fresh_store() {
@@ -268,8 +269,8 @@ fn requirement_format_writes_metadata_before_reopening_the_fresh_store() {
 
 //= spec/ring/08-durability-formatting.md#format-storage-on-disk-initialization
 //= type=test
-//# `RING-FORMAT-STORAGE-POST-001` WAL head and WAL tail MUST both be
-//# region `0`.
+//# `RING-FORMAT-STORAGE-POST-001` Main WAL head and tail MUST both be
+//# region `0`, and every transaction-log slot MUST start uninitialized.
 #[test]
 fn requirement_format_starts_with_region_zero_as_wal_head_and_tail() {
     let mut flash = MockFlash::<128, 4, 64>::new(0xff);
@@ -295,7 +296,7 @@ fn requirement_reserve_next_region_consumes_the_oldest_free_regions_first() {
 //= type=test
 //# `RING-CORE-011` Any operation that writes a newly allocated region
 //# MUST first durably reserve that region with
-//# `alloc_begin(collection_id, region_index, free_list_head_after)`.
+//# `alloc_begin(collection_id, region_index, allocation_sequence, free_list_head_after)`.
 #[test]
 fn requirement_committed_region_write_uses_a_region_previously_reserved_by_alloc_begin() {
     let mut flash = MockFlash::<512, 5, 256>::new(0xff);
@@ -328,6 +329,7 @@ fn requirement_committed_region_write_uses_a_region_previously_reserved_by_alloc
                 collection_id: CollectionId(0),
                 region_index: alloc_region,
                 free_list_head_after,
+                ..
             } = record
             {
                 if alloc_region == region_index {
@@ -419,7 +421,7 @@ fn requirement_write_committed_region_accepts_payload_that_exactly_fills_committ
 //= type=test
 //# `RING-ALLOC-001` Any operation that writes a newly allocated region
 //# MUST first make
-//# `alloc_begin(collection_id, region_index, free_list_head_after)`
+//# `alloc_begin(collection_id, region_index, allocation_sequence, free_list_head_after)`
 //# durable.
 #[test]
 fn requirement_committed_region_write_waits_for_alloc_begin_sync() {
@@ -486,7 +488,9 @@ fn requirement_committed_region_write_waits_for_alloc_begin_sync() {
 //= type=test
 //# `RING-REPLAY-ASSUME-004` Any operation that consumes a free-list
 //# head MUST first make the allocator advance durable with
-//# `alloc_begin(collection_id, region_index, free_list_head_after)`.
+//# `alloc_begin(collection_id, region_index, allocation_sequence,
+//# free_list_head_after)` in the main WAL or in a reachable
+//# transaction-log range.
 #[test]
 fn requirement_reopen_after_alloc_begin_recovers_the_advanced_allocator_state() {
     let mut flash = MockFlash::<512, 5, 256>::new(0xff);
@@ -636,12 +640,12 @@ fn requirement_wal_collection_type_is_reserved_for_collection_id_zero() {
 //# new collection in durable WAL order.
 #[test]
 fn requirement_visit_wal_records_reports_snapshot_and_update_records() {
-    let mut flash = MockFlash::<256, 4, 512>::new(0xff);
-    let mut workspace = StorageWorkspace::<256>::new();
-    let mut state = format::<256, 4, _>(&mut flash, 1, 8, 0xa5).unwrap();
+    let mut flash = MockFlash::<512, 4, 512>::new(0xff);
+    let mut workspace = StorageWorkspace::<512>::new();
+    let mut state = format::<512, 4, _>(&mut flash, 1, 8, 0xa5).unwrap();
 
     state
-        .append_new_collection::<256, 4, _>(
+        .append_new_collection::<512, 4, _>(
             &mut flash,
             &mut workspace,
             CollectionId(7),
@@ -649,7 +653,7 @@ fn requirement_visit_wal_records_reports_snapshot_and_update_records() {
         )
         .unwrap();
     state
-        .append_snapshot::<256, 4, _>(
+        .append_snapshot::<512, 4, _>(
             &mut flash,
             &mut workspace,
             CollectionId(7),
@@ -658,13 +662,13 @@ fn requirement_visit_wal_records_reports_snapshot_and_update_records() {
         )
         .unwrap();
     state
-        .append_update::<256, 4, _>(&mut flash, &mut workspace, CollectionId(7), &[9])
+        .append_update::<512, 4, _>(&mut flash, &mut workspace, CollectionId(7), &[9])
         .unwrap();
 
     let mut seen = [crate::WalRecordType::WalRecovery; 3];
     let mut count = 0usize;
     state
-        .visit_wal_records::<256, _, (), _>(&mut flash, &mut workspace, |_flash, record| {
+        .visit_wal_records::<512, _, (), _>(&mut flash, &mut workspace, |_flash, record| {
             if count < seen.len() {
                 seen[count] = record.record_type();
             }
@@ -761,6 +765,7 @@ fn requirement_open_completes_reclaims_already_on_the_free_list() {
         WalRecord::AllocBegin {
             collection_id: CollectionId(0),
             region_index: 1,
+            allocation_sequence: 0,
             free_list_head_after: Some(2),
         },
     );
@@ -878,12 +883,12 @@ fn requirement_append_update_requires_a_prior_new_collection_record() {
 //# and clear prior pending updates.
 #[test]
 fn requirement_append_snapshot_resets_pending_updates() {
-    let mut flash = MockFlash::<256, 4, 512>::new(0xff);
-    let mut workspace = StorageWorkspace::<256>::new();
-    let mut state = format::<256, 4, _>(&mut flash, 1, 8, 0xa5).unwrap();
+    let mut flash = MockFlash::<512, 4, 512>::new(0xff);
+    let mut workspace = StorageWorkspace::<512>::new();
+    let mut state = format::<512, 4, _>(&mut flash, 1, 8, 0xa5).unwrap();
 
     state
-        .append_new_collection::<256, 4, _>(
+        .append_new_collection::<512, 4, _>(
             &mut flash,
             &mut workspace,
             CollectionId(7),
@@ -891,10 +896,10 @@ fn requirement_append_snapshot_resets_pending_updates() {
         )
         .unwrap();
     state
-        .append_update::<256, 4, _>(&mut flash, &mut workspace, CollectionId(7), &[1])
+        .append_update::<512, 4, _>(&mut flash, &mut workspace, CollectionId(7), &[1])
         .unwrap();
     state
-        .append_snapshot::<256, 4, _>(
+        .append_snapshot::<512, 4, _>(
             &mut flash,
             &mut workspace,
             CollectionId(7),
@@ -916,12 +921,12 @@ fn requirement_append_snapshot_resets_pending_updates() {
 //# committed region and then dropped tombstone while reducing tracked live collection count.
 #[test]
 fn requirement_append_head_and_drop_refresh_runtime_state() {
-    let mut flash = MockFlash::<256, 4, 128>::new(0xff);
-    let mut workspace = StorageWorkspace::<256>::new();
-    let mut state = format::<256, 4, _>(&mut flash, 1, 8, 0xa5).unwrap();
+    let mut flash = MockFlash::<512, 4, 128>::new(0xff);
+    let mut workspace = StorageWorkspace::<512>::new();
+    let mut state = format::<512, 4, _>(&mut flash, 1, 8, 0xa5).unwrap();
 
     state
-        .append_new_collection::<256, 4, _>(
+        .append_new_collection::<512, 4, _>(
             &mut flash,
             &mut workspace,
             CollectionId(7),
@@ -930,7 +935,7 @@ fn requirement_append_head_and_drop_refresh_runtime_state() {
         .unwrap();
     init_user_region_header(&mut flash, 2, 4, CollectionId(7), 1);
     state
-        .append_head::<256, 4, _>(
+        .append_head::<512, 4, _>(
             &mut flash,
             &mut workspace,
             CollectionId(7),
@@ -944,7 +949,7 @@ fn requirement_append_head_and_drop_refresh_runtime_state() {
     );
 
     state
-        .append_drop_collection::<256, 4, _>(&mut flash, &mut workspace, CollectionId(7))
+        .append_drop_collection::<512, 4, _>(&mut flash, &mut workspace, CollectionId(7))
         .unwrap();
     assert_eq!(
         state.collections()[0].basis(),
@@ -1059,12 +1064,12 @@ fn requirement_free_region_rejects_written_footer_before_linking_tail() {
 //# advance allocator state, then move WAL tail to the new region and clear ready allocation state.
 #[test]
 fn requirement_append_rotation_start_and_finish_move_to_new_tail() {
-    let mut flash = MockFlash::<128, 4, 128>::new(0xff);
-    let mut workspace = StorageWorkspace::<128>::new();
-    let mut state = format::<128, 4, _>(&mut flash, 1, 8, 0xa5).unwrap();
+    let mut flash = MockFlash::<192, 4, 128>::new(0xff);
+    let mut workspace = StorageWorkspace::<192>::new();
+    let mut state = format::<192, 4, _>(&mut flash, 1, 8, 0xa5).unwrap();
 
     let next_region = state
-        .append_wal_rotation_start::<128, 4, _>(&mut flash, &mut workspace)
+        .append_wal_rotation_start::<192, 4, _>(&mut flash, &mut workspace)
         .unwrap();
     assert_eq!(next_region, 1);
     assert_eq!(state.ready_region(), Some(1));
@@ -1072,7 +1077,7 @@ fn requirement_append_rotation_start_and_finish_move_to_new_tail() {
     assert_eq!(state.wal_tail(), 0);
 
     state
-        .append_wal_rotation_finish::<128, 4, _>(&mut flash, &mut workspace, next_region)
+        .append_wal_rotation_finish::<192, 4, _>(&mut flash, &mut workspace, next_region)
         .unwrap();
     assert_eq!(state.wal_head(), 0);
     assert_eq!(state.wal_tail(), 1);
@@ -1080,7 +1085,7 @@ fn requirement_append_rotation_start_and_finish_move_to_new_tail() {
     assert_eq!(state.last_free_list_head(), Some(2));
     assert_eq!(state.max_seen_sequence(), 1);
 
-    let reopened = open::<128, 4, 128>(&mut flash).unwrap();
+    let reopened = open::<192, 4, 128>(&mut flash).unwrap();
     assert_eq!(reopened.wal_head(), state.wal_head());
     assert_eq!(reopened.wal_tail(), state.wal_tail());
     assert_eq!(reopened.wal_append_offset(), state.wal_append_offset());
@@ -1093,7 +1098,7 @@ fn requirement_append_rotation_start_and_finish_move_to_new_tail() {
 //= spec/ring/05-disk-format.md#storage-requirements
 //= type=test
 //# `RING-STORAGE-003` Each newly allocated region, whether for a user
-//# collection or a newly initialized WAL region, MUST use
+//# collection or a newly initialized private log region, MUST use
 //# `sequence = max_seen_sequence + 1`, after which that value becomes the
 //# new in-memory `max_seen_sequence`.
 #[test]
@@ -1115,18 +1120,18 @@ fn requirement_committed_region_allocations_advance_sequence_from_max_seen_seque
 //# `max_seen_sequence + 1` and update runtime max_seen_sequence.
 #[test]
 fn requirement_wal_rotation_initializes_the_next_wal_region_at_max_seen_sequence_plus_one() {
-    let mut flash = MockFlash::<128, 4, 128>::new(0xff);
-    let mut workspace = StorageWorkspace::<128>::new();
-    let mut state = format::<128, 4, _>(&mut flash, 1, 8, 0xa5).unwrap();
+    let mut flash = MockFlash::<192, 4, 128>::new(0xff);
+    let mut workspace = StorageWorkspace::<192>::new();
+    let mut state = format::<192, 4, _>(&mut flash, 1, 8, 0xa5).unwrap();
 
     let next_region = state
-        .append_wal_rotation_start::<128, 4, _>(&mut flash, &mut workspace)
+        .append_wal_rotation_start::<192, 4, _>(&mut flash, &mut workspace)
         .unwrap();
     state
-        .append_wal_rotation_finish::<128, 4, _>(&mut flash, &mut workspace, next_region)
+        .append_wal_rotation_finish::<192, 4, _>(&mut flash, &mut workspace, next_region)
         .unwrap();
 
-    let header = read_header_from_flash::<128, 4, _>(&mut flash, next_region).unwrap();
+    let header = read_header_from_flash::<192, 4, _>(&mut flash, next_region).unwrap();
     assert_eq!(header.sequence, 1);
     assert_eq!(state.max_seen_sequence(), header.sequence);
 }
@@ -1370,8 +1375,10 @@ fn requirement_free_regions_are_erased_only_when_reused() {
 
 //= spec/ring/05-disk-format.md#storage-requirements
 //= type=test
-//# `RING-STORAGE-009` A WAL region MUST have `collection_id = 0` and
-//# `collection_format = wal_v1`.
+//# `RING-STORAGE-009` A main WAL region MUST have `collection_id = 0`
+//# and `collection_format = main_wal_v2`; a transaction-log region MUST
+//# have `collection_id = 0` and
+//# `collection_format = transaction_log_v2`.
 #[test]
 fn requirement_initialized_wal_regions_use_reserved_wal_header_fields() {
     let mut flash = MockFlash::<128, 4, 32>::new(0xff);
@@ -1392,7 +1399,7 @@ fn requirement_initialized_wal_regions_use_reserved_wal_header_fields() {
         })
         .unwrap();
     let prologue = WalRegionPrologue::decode(&prologue_bytes, metadata.region_count).unwrap();
-    assert_eq!(prologue.wal_head_region_index, 0);
+    assert_eq!(prologue.log_head_region_index, 0);
 }
 
 //= spec/ring/07-reclaim.md#wal-reclaim-eligibility
@@ -1424,7 +1431,7 @@ fn requirement_initialized_wal_region_erases_the_reclaimed_region_before_reuse()
 
 //= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
-//# `RING-REPLAY-ASSUME-001` A WAL region MUST be erased before reuse.
+//# `RING-REPLAY-ASSUME-001` A private log region MUST be erased before reuse.
 #[test]
 fn requirement_initialized_wal_region_erases_the_wal_region_before_reuse() {
     let mut flash = MockFlash::<128, 4, 32>::new(0xff);
@@ -1459,7 +1466,8 @@ fn requirement_normal_append_rejects_when_it_would_consume_rotation_reserve() {
         )
         .unwrap();
 
-    for _ in 0..64 {
+    let mut saw_rotation_required = false;
+    for _ in 0..256 {
         match state.append_update::<256, 4, _>(
             &mut flash,
             &mut workspace,
@@ -1467,15 +1475,15 @@ fn requirement_normal_append_rejects_when_it_would_consume_rotation_reserve() {
             &[1, 2, 3, 4, 5, 6, 7, 8],
         ) {
             Ok(()) => continue,
-            Err(StorageRuntimeError::WalRotationRequired) => break,
+            Err(StorageRuntimeError::WalRotationRequired) => {
+                saw_rotation_required = true;
+                break;
+            }
             Err(other) => panic!("unexpected error: {other:?}"),
         }
     }
 
-    assert!(matches!(
-        state.append_update::<256, 4, _>(&mut flash, &mut workspace, CollectionId(7), &[1]),
-        Err(StorageRuntimeError::WalRotationRequired)
-    ));
+    assert!(saw_rotation_required);
 
     let next_region = state
         .append_wal_rotation_start::<256, 4, _>(&mut flash, &mut workspace)
@@ -1656,7 +1664,8 @@ fn requirement_ensure_encoded_append_reserve_accepts_alloc_begin_at_exact_rotati
         .rotation_reserves::<256, 4>(&mut workspace, next_region, free_list_head_after)
         .unwrap();
     let encoded_len = 1;
-    state.wal_append_offset = 256 - reserves.rotation_reserve - encoded_len;
+    let append_limit = wal_record_append_limit(state.metadata()).unwrap();
+    state.wal_append_offset = append_limit - reserves.rotation_reserve - encoded_len;
 
     assert_eq!(
         state.ensure_encoded_append_reserve::<256, 4, _>(

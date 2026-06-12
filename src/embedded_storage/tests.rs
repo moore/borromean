@@ -337,7 +337,7 @@ fn requirement_embedded_storage_format_writes_wal_prefix_contiguously() {
         metadata.region_count,
     )
     .unwrap();
-    assert_eq!(prologue.wal_head_region_index, 0);
+    assert_eq!(prologue.log_head_region_index, 0);
     assert!(
         region[Header::ENCODED_LEN + WalRegionPrologue::ENCODED_LEN..prefix_len]
             .iter()

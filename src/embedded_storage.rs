@@ -623,8 +623,8 @@ where
     ) -> Result<(), EmbeddedStorageError> {
         let prefix_len = metadata.wal_record_area_offset()?;
         let absolute = self.region_absolute_offset(region_index, 0, prefix_len)?;
-        self.strict_write_absolute_with(absolute, prefix_len, |target, erased_byte| {
-            encode_wal_region_prefix(target, metadata, sequence, wal_head, erased_byte)?;
+        self.strict_write_absolute_with(absolute, prefix_len, |target, _erased_byte| {
+            encode_wal_region_prefix(target, metadata, sequence, wal_head)?;
             Ok(())
         })
     }

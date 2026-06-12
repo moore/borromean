@@ -195,7 +195,8 @@ fn requirement_erase_restores_erased_bytes() {
 
 //= spec/ring/08-durability-formatting.md#format-storage-on-disk-initialization
 //= type=test
-//# RING-FORMAT-STORAGE-PRE-006 `region_count >= 2 + min_free_regions`.
+//# `RING-FORMAT-STORAGE-PRE-007`
+//# `region_count >= 2 + min_free_regions`.
 #[test]
 fn requirement_format_empty_store_rejects_too_few_regions() {
     let mut flash = MockFlash::<64, 2, 16>::new(0xff);
@@ -213,7 +214,7 @@ fn requirement_format_empty_store_rejects_too_few_regions() {
         tiny.format_empty_store(1, 8, 0xa5),
         Err(MockFormatError::RegionSizeTooSmall {
             region_size: 7,
-            min_region_size: 32,
+            min_region_size: 48,
         })
     );
 }
@@ -230,16 +231,16 @@ fn requirement_format_empty_store_accepts_exact_minimum_region_count() {
     assert_eq!(metadata.region_count, 3);
     assert_eq!(flash.metadata(), Some(&metadata));
 
-    let mut exact_size = MockFlash::<32, 3, 16>::new(0xff);
+    let mut exact_size = MockFlash::<48, 3, 16>::new(0xff);
     let exact_size_metadata = exact_size.format_empty_store(1, 8, 0xa5).unwrap();
 
-    assert_eq!(exact_size_metadata.region_size, 32);
+    assert_eq!(exact_size_metadata.region_size, 48);
     assert_eq!(exact_size.metadata(), Some(&exact_size_metadata));
 }
 
 //= spec/ring/08-durability-formatting.md#format-storage-on-disk-initialization
 //= type=test
-//# `RING-FORMAT-STORAGE-PRE-003` Region `0` MUST be reserved as the initial WAL region.
+//# `RING-FORMAT-STORAGE-PRE-003` Region `0` MUST be reserved as the initial main WAL region.
 #[test]
 fn requirement_format_empty_store_reserves_region_zero_as_initial_wal_region() {
     let mut flash = MockFlash::<64, 4, 32>::new(0xff);
@@ -252,10 +253,12 @@ fn requirement_format_empty_store_reserves_region_zero_as_initial_wal_region() {
 
 //= spec/ring/08-durability-formatting.md#format-storage-on-disk-initialization
 //= type=test
-//# `RING-FORMAT-STORAGE-003` Initialize region `0` as WAL:
+//# `RING-FORMAT-STORAGE-003` Initialize region `0` as main WAL:
 //# write valid `Header` with `collection_id = 0`,
-//# `collection_format = wal_v1`, and `sequence = 0`,
-//# write a valid `WalRegionPrologue` with `wal_head_region_index = 0`,
+//# `collection_format = main_wal_v2`, and `sequence = 0`,
+//# write a valid `LogRegionPrologue` with `log_head_region_index = 0`,
+//# `allocator_free_list_head = Some(1)`, and
+//# `allocation_sequence = 0`,
 //# then sync region `0`.
 #[test]
 fn requirement_format_empty_store_initializes_region_zero_with_wal_header_and_prologue() {
@@ -274,25 +277,20 @@ fn requirement_format_empty_store_initializes_region_zero_with_wal_header_and_pr
         metadata.region_count,
     )
     .unwrap();
-    assert_eq!(prologue.wal_head_region_index, 0);
+    assert_eq!(prologue.log_head_region_index, 0);
 
     assert!(flash.operations().contains(&MockOperation::WriteRegion {
         region_index: 0,
         offset: 0,
-        len: Header::ENCODED_LEN,
-    }));
-    assert!(flash.operations().contains(&MockOperation::WriteRegion {
-        region_index: 0,
-        offset: Header::ENCODED_LEN,
-        len: WalRegionPrologue::ENCODED_LEN,
+        len: metadata.wal_record_area_offset().unwrap(),
     }));
     assert_eq!(flash.operations().last(), Some(&MockOperation::Sync));
 }
 
 //= spec/ring/08-durability-formatting.md#format-storage-on-disk-initialization
 //= type=test
-//# `RING-FORMAT-STORAGE-POST-003` The free list MUST contain every non-WAL region in ascending
-//# region-index order.
+//# `RING-FORMAT-STORAGE-POST-003` The free list MUST contain every
+//# non-main-WAL region in ascending region-index order.
 #[test]
 fn requirement_format_empty_store_populates_free_list_in_ascending_order() {
     let mut flash = MockFlash::<64, 4, 32>::new(0xff);

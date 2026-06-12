@@ -22,9 +22,9 @@ fn requirement_wal_storage_and_map_logic_are_exercised_through_separate_interfac
     let decoded = decode_record(&physical[..encoded_len], metadata, &mut decode_scratch).unwrap();
     assert_eq!(decoded.record, record);
 
-    let mut flash = MockFlash::<256, 4, 512>::new(0xff);
+    let mut flash = MockFlash::<256, 6, 512>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
-    let mut storage = Storage::<_, 256, 4, 8>::format(
+    let mut storage = Storage::<_, 256, 6, 8>::format(
         &mut flash,
         StorageFormatConfig::new(1, 8, 0xa5),
         crate::test_storage_memory(),
@@ -44,7 +44,7 @@ fn requirement_wal_storage_and_map_logic_are_exercised_through_separate_interfac
 
     drop(storage);
     let mut reopened =
-        Storage::<_, 256, 4, 8>::open(&mut flash, crate::test_storage_memory()).unwrap();
+        Storage::<_, 256, 6, 8>::open(&mut flash, crate::test_storage_memory()).unwrap();
     assert_eq!(
         reopened.collections()[0].basis(),
         StartupCollectionBasis::Region(region_index)
@@ -88,7 +88,9 @@ fn requirement_encoding_and_decoding_round_trip_from_plain_byte_buffers() {
     assert_eq!(Header::decode(&header_bytes).unwrap(), header);
 
     let prologue = WalRegionPrologue {
-        wal_head_region_index: 2,
+        log_head_region_index: 2,
+        allocator_free_list_head: Some(1),
+        allocation_sequence: 0,
     };
     let mut prologue_bytes = [0u8; WalRegionPrologue::ENCODED_LEN];
     prologue

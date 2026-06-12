@@ -1002,7 +1002,7 @@ fn check_object_log_exact_fit_capacity_boundaries_are_stable() {
 }
 
 fn check_object_log_direct_inline_append_routing_does_not_start_transactions() {
-    const REGION_SIZE: usize = 512;
+    const REGION_SIZE: usize = 1024;
     const REGION_COUNT: usize = 16;
 
     let log_metadata = [0x42u8; 300];
@@ -1349,9 +1349,7 @@ fn check_object_log_replay_ignores_unrelated_begin_and_commit_markers() {
     .unwrap();
     append_raw_log_metadata_update(&mut storage, target_id, metadata);
     storage
-        .append_raw_wal_record_for_test(WalRecord::BeginTransaction {
-            collection_id: other_id,
-        })
+        .append_raw_wal_record_for_test(crate::test_begin_transaction_record(other_id))
         .unwrap();
     append_raw_inline_update(&mut storage, target_id, handle, b"alpha");
     let mut memory = ObjectLogMemory::<REGION_SIZE, 4, 16>::new();
@@ -1367,25 +1365,17 @@ fn check_object_log_replay_ignores_unrelated_begin_and_commit_markers() {
     .unwrap();
     append_raw_log_metadata_update(&mut storage, target_id, metadata);
     storage
-        .append_raw_wal_record_for_test(WalRecord::BeginTransaction {
-            collection_id: target_id,
-        })
+        .append_raw_wal_record_for_test(crate::test_begin_transaction_record(target_id))
         .unwrap();
     append_raw_inline_update(&mut storage, target_id, handle, b"beta");
     storage
-        .append_raw_wal_record_for_test(WalRecord::CommitTransaction {
-            collection_id: other_id,
-        })
+        .append_raw_wal_record_for_test(crate::test_commit_transaction_record(other_id))
         .unwrap();
     storage
-        .append_raw_wal_record_for_test(WalRecord::TransactionFinished {
-            collection_id: target_id,
-        })
+        .append_raw_wal_record_for_test(crate::test_transaction_finished_record(target_id))
         .unwrap();
     storage
-        .append_raw_wal_record_for_test(WalRecord::RollbackTransaction {
-            collection_id: target_id,
-        })
+        .append_raw_wal_record_for_test(crate::test_rollback_transaction_record(target_id))
         .unwrap();
     let mut memory = ObjectLogMemory::<REGION_SIZE, 4, 16>::new();
     replay_into_memory(&mut storage, target_id, &mut memory).unwrap();
@@ -1410,25 +1400,17 @@ fn check_object_log_replay_filters_transaction_finished_markers() {
     .unwrap();
     append_raw_log_metadata_update(&mut storage, target_id, metadata);
     storage
-        .append_raw_wal_record_for_test(WalRecord::BeginTransaction {
-            collection_id: target_id,
-        })
+        .append_raw_wal_record_for_test(crate::test_begin_transaction_record(target_id))
         .unwrap();
     append_raw_inline_update(&mut storage, target_id, handle, b"gamma");
     storage
-        .append_raw_wal_record_for_test(WalRecord::CommitTransaction {
-            collection_id: target_id,
-        })
+        .append_raw_wal_record_for_test(crate::test_commit_transaction_record(target_id))
         .unwrap();
     storage
-        .append_raw_wal_record_for_test(WalRecord::TransactionFinished {
-            collection_id: target_id,
-        })
+        .append_raw_wal_record_for_test(crate::test_transaction_finished_record(target_id))
         .unwrap();
     storage
-        .append_raw_wal_record_for_test(WalRecord::RollbackTransaction {
-            collection_id: target_id,
-        })
+        .append_raw_wal_record_for_test(crate::test_rollback_transaction_record(target_id))
         .unwrap();
     let mut memory = ObjectLogMemory::<REGION_SIZE, 4, 16>::new();
     replay_into_memory(&mut storage, target_id, &mut memory).unwrap();
@@ -1443,25 +1425,17 @@ fn check_object_log_replay_filters_transaction_finished_markers() {
     .unwrap();
     append_raw_log_metadata_update(&mut storage, target_id, metadata);
     storage
-        .append_raw_wal_record_for_test(WalRecord::BeginTransaction {
-            collection_id: target_id,
-        })
+        .append_raw_wal_record_for_test(crate::test_begin_transaction_record(target_id))
         .unwrap();
     append_raw_inline_update(&mut storage, target_id, handle, b"delta");
     storage
-        .append_raw_wal_record_for_test(WalRecord::CommitTransaction {
-            collection_id: target_id,
-        })
+        .append_raw_wal_record_for_test(crate::test_commit_transaction_record(target_id))
         .unwrap();
     storage
-        .append_raw_wal_record_for_test(WalRecord::TransactionFinished {
-            collection_id: other_id,
-        })
+        .append_raw_wal_record_for_test(crate::test_transaction_finished_record(other_id))
         .unwrap();
     storage
-        .append_raw_wal_record_for_test(WalRecord::RollbackTransaction {
-            collection_id: target_id,
-        })
+        .append_raw_wal_record_for_test(crate::test_rollback_transaction_record(target_id))
         .unwrap();
     let mut memory = ObjectLogMemory::<REGION_SIZE, 4, 16>::new();
     replay_into_memory(&mut storage, target_id, &mut memory).unwrap();
@@ -1486,25 +1460,17 @@ fn check_object_log_replay_filters_rollback_markers() {
     .unwrap();
     append_raw_log_metadata_update(&mut storage, target_id, metadata);
     storage
-        .append_raw_wal_record_for_test(WalRecord::BeginTransaction {
-            collection_id: target_id,
-        })
+        .append_raw_wal_record_for_test(crate::test_begin_transaction_record(target_id))
         .unwrap();
     append_raw_inline_update(&mut storage, target_id, handle, b"epsilon");
     storage
-        .append_raw_wal_record_for_test(WalRecord::RollbackTransaction {
-            collection_id: other_id,
-        })
+        .append_raw_wal_record_for_test(crate::test_rollback_transaction_record(other_id))
         .unwrap();
     storage
-        .append_raw_wal_record_for_test(WalRecord::CommitTransaction {
-            collection_id: target_id,
-        })
+        .append_raw_wal_record_for_test(crate::test_commit_transaction_record(target_id))
         .unwrap();
     storage
-        .append_raw_wal_record_for_test(WalRecord::TransactionFinished {
-            collection_id: target_id,
-        })
+        .append_raw_wal_record_for_test(crate::test_transaction_finished_record(target_id))
         .unwrap();
     let mut memory = ObjectLogMemory::<REGION_SIZE, 4, 16>::new();
     replay_into_memory(&mut storage, target_id, &mut memory).unwrap();
@@ -1519,25 +1485,17 @@ fn check_object_log_replay_filters_rollback_markers() {
     .unwrap();
     append_raw_log_metadata_update(&mut storage, target_id, metadata);
     storage
-        .append_raw_wal_record_for_test(WalRecord::BeginTransaction {
-            collection_id: target_id,
-        })
+        .append_raw_wal_record_for_test(crate::test_begin_transaction_record(target_id))
         .unwrap();
     append_raw_inline_update(&mut storage, target_id, handle, b"zeta");
     storage
-        .append_raw_wal_record_for_test(WalRecord::RollbackTransaction {
-            collection_id: target_id,
-        })
+        .append_raw_wal_record_for_test(crate::test_rollback_transaction_record(target_id))
         .unwrap();
     storage
-        .append_raw_wal_record_for_test(WalRecord::CommitTransaction {
-            collection_id: target_id,
-        })
+        .append_raw_wal_record_for_test(crate::test_commit_transaction_record(target_id))
         .unwrap();
     storage
-        .append_raw_wal_record_for_test(WalRecord::TransactionFinished {
-            collection_id: target_id,
-        })
+        .append_raw_wal_record_for_test(crate::test_transaction_finished_record(target_id))
         .unwrap();
     let mut memory = ObjectLogMemory::<REGION_SIZE, 4, 16>::new();
     replay_into_memory(&mut storage, target_id, &mut memory).unwrap();
@@ -1706,7 +1664,7 @@ fn requirement_object_log_reports_object_len_and_full_read_buffer_size() {
 }
 
 fn check_object_log_reads_accept_exact_scratch_lengths() {
-    const REGION_SIZE: usize = 256;
+    const REGION_SIZE: usize = 512;
     const REGION_COUNT: usize = 96;
     const INLINE: &[u8] = b"exact";
 

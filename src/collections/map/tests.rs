@@ -3842,7 +3842,7 @@ fn requirement_region_loading_matches_embedded_snapshot_loading() {
 #[test]
 fn requirement_map_updates_append_new_head_records_and_replacement_reclaims_the_old_tail_region() {
     const REGION_SIZE: usize = 512;
-    const REGION_COUNT: usize = 6;
+    const REGION_COUNT: usize = 7;
 
     let mut buffer = [0u8; REGION_SIZE];
     let mut map = MapFrontier::<i32, i32>::new(

@@ -6,9 +6,13 @@ use crc::{Crc, CRC_32_ISCSI};
 const CRC32C: Crc<u32> = Crc::<u32>::new(&CRC_32_ISCSI);
 
 /// Stable storage metadata version for the current on-disk format.
-pub const STORAGE_VERSION: u32 = 1;
-/// Stable `collection_format` reserved for WAL regions.
-pub const WAL_V1_FORMAT: u16 = 0;
+pub const STORAGE_VERSION: u32 = 2;
+/// Stable `collection_format` reserved for main WAL regions.
+pub const MAIN_WAL_V2_FORMAT: u16 = 0;
+/// Stable `collection_format` reserved for transaction-log regions.
+pub const TRANSACTION_LOG_V2_FORMAT: u16 = 1;
+/// Backwards-compatible name for the current main-WAL format.
+pub const WAL_V1_FORMAT: u16 = MAIN_WAL_V2_FORMAT;
 
 /// Errors returned while encoding or decoding fixed on-disk structures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,6 +30,15 @@ pub enum DiskError {
     InvalidWalRecordMagic,
     /// Metadata used an invalid WAL write granule.
     InvalidWalWriteGranule,
+    /// Metadata used an invalid transaction-log count.
+    InvalidTransactionLogCount {
+        /// Configured transaction-log count.
+        transaction_log_count: u32,
+        /// Total formatted region count.
+        region_count: u32,
+    },
+    /// An optional region index tag had an invalid discriminant.
+    InvalidOptRegionTag(u8),
     /// A referenced region index was outside the formatted region range.
     InvalidRegionIndex {
         /// The offending region index.
@@ -55,6 +68,8 @@ pub struct StorageMetadata {
     pub region_count: u32,
     /// Minimum number of free regions the engine tries to preserve.
     pub min_free_regions: u32,
+    /// Maximum number of concurrently initialized transaction-log slots.
+    pub transaction_log_count: u32,
     /// WAL write alignment in bytes.
     pub wal_write_granule: u32,
     /// Erased flash byte value.
@@ -65,7 +80,7 @@ pub struct StorageMetadata {
 
 impl StorageMetadata {
     /// Encoded byte length of [`StorageMetadata`].
-    pub const ENCODED_LEN: usize = size_of::<u32>() * 6 + size_of::<u8>() * 2;
+    pub const ENCODED_LEN: usize = size_of::<u32>() * 7 + size_of::<u8>() * 2;
 
     /// Constructs validated storage metadata for a formatted store.
     pub fn new(
@@ -76,11 +91,33 @@ impl StorageMetadata {
         erased_byte: u8,
         wal_record_magic: u8,
     ) -> Result<Self, DiskError> {
+        Self::new_with_transaction_logs(
+            region_size,
+            region_count,
+            min_free_regions,
+            1,
+            wal_write_granule,
+            erased_byte,
+            wal_record_magic,
+        )
+    }
+
+    /// Constructs validated storage metadata with an explicit transaction-log count.
+    pub fn new_with_transaction_logs(
+        region_size: u32,
+        region_count: u32,
+        min_free_regions: u32,
+        transaction_log_count: u32,
+        wal_write_granule: u32,
+        erased_byte: u8,
+        wal_record_magic: u8,
+    ) -> Result<Self, DiskError> {
         let metadata = Self {
             storage_version: STORAGE_VERSION,
             region_size,
             region_count,
             min_free_regions,
+            transaction_log_count,
             wal_write_granule,
             erased_byte,
             wal_record_magic,
@@ -97,6 +134,13 @@ impl StorageMetadata {
 
         if self.wal_write_granule == 0 {
             return Err(DiskError::InvalidWalWriteGranule);
+        }
+
+        if self.transaction_log_count == 0 || self.transaction_log_count >= self.region_count {
+            return Err(DiskError::InvalidTransactionLogCount {
+                transaction_log_count: self.transaction_log_count,
+                region_count: self.region_count,
+            });
         }
 
         if self.wal_record_magic == self.erased_byte {
@@ -122,6 +166,7 @@ impl StorageMetadata {
         offset = write_u32(buffer, offset, self.region_size)?;
         offset = write_u32(buffer, offset, self.region_count)?;
         offset = write_u32(buffer, offset, self.min_free_regions)?;
+        offset = write_u32(buffer, offset, self.transaction_log_count)?;
         offset = write_u32(buffer, offset, self.wal_write_granule)?;
         offset = write_u8(buffer, offset, self.erased_byte)?;
         offset = write_u8(buffer, offset, self.wal_record_magic)?;
@@ -140,6 +185,7 @@ impl StorageMetadata {
         let region_size = read_u32(buffer, &mut offset)?;
         let region_count = read_u32(buffer, &mut offset)?;
         let min_free_regions = read_u32(buffer, &mut offset)?;
+        let transaction_log_count = read_u32(buffer, &mut offset)?;
         let wal_write_granule = read_u32(buffer, &mut offset)?;
         let erased_byte = read_u8(buffer, &mut offset)?;
         let wal_record_magic = read_u8(buffer, &mut offset)?;
@@ -155,6 +201,7 @@ impl StorageMetadata {
             region_size,
             region_count,
             min_free_regions,
+            transaction_log_count,
             wal_write_granule,
             erased_byte,
             wal_record_magic,
@@ -171,38 +218,59 @@ impl StorageMetadata {
             return Err(DiskError::InvalidWalWriteGranule);
         }
 
-        let end = Header::ENCODED_LEN + WalRegionPrologue::ENCODED_LEN;
+        let end = Header::ENCODED_LEN + LogRegionPrologue::ENCODED_LEN;
         let aligned = end.div_ceil(granule) * granule;
         Ok(aligned)
     }
 }
 
-pub(crate) fn encode_wal_region_prefix(
+pub(crate) fn encode_log_region_prefix(
     buffer: &mut [u8],
     metadata: StorageMetadata,
     sequence: u64,
-    wal_head: u32,
-    erased_byte: u8,
+    collection_format: u16,
+    log_head: u32,
+    allocator_free_list_head: Option<u32>,
+    allocation_sequence: u64,
 ) -> Result<usize, DiskError> {
     let prefix_len = metadata.wal_record_area_offset()?;
     ensure_len(buffer, prefix_len)?;
-    buffer[..prefix_len].fill(erased_byte);
+    buffer[..prefix_len].fill(metadata.erased_byte);
 
     let header = Header {
         sequence,
         collection_id: CollectionId(0),
-        collection_format: WAL_V1_FORMAT,
+        collection_format,
     };
     header.encode_into(buffer)?;
 
-    let prologue = WalRegionPrologue {
-        wal_head_region_index: wal_head,
+    let prologue = LogRegionPrologue {
+        log_head_region_index: log_head,
+        allocator_free_list_head,
+        allocation_sequence,
     };
     prologue.encode_into(
-        &mut buffer[Header::ENCODED_LEN..Header::ENCODED_LEN + WalRegionPrologue::ENCODED_LEN],
+        &mut buffer[Header::ENCODED_LEN..Header::ENCODED_LEN + LogRegionPrologue::ENCODED_LEN],
         metadata.region_count,
     )?;
     Ok(prefix_len)
+}
+
+pub fn encode_wal_region_prefix(
+    buffer: &mut [u8],
+    metadata: StorageMetadata,
+    sequence: u64,
+    wal_head: u32,
+) -> Result<usize, DiskError> {
+    encode_log_region_prefix(
+        buffer,
+        metadata,
+        sequence,
+        MAIN_WAL_V2_FORMAT,
+        wal_head,
+        None,
+        0,
+    )
 }
 
 /// Per-region header shared by WAL and committed collection regions.
@@ -258,41 +326,58 @@ impl Header {
     }
 }
 
-/// WAL-specific prologue written after the region header.
+/// Log-specific prologue written after a main-WAL or transaction-log region header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WalRegionPrologue {
-    /// Region index that replay should treat as the logical WAL head.
-    pub wal_head_region_index: u32,
+pub struct LogRegionPrologue {
+    /// Region index that replay should treat as the logical log head.
+    pub log_head_region_index: u32,
+    /// Allocator free-list head current when this log segment was initialized.
+    pub allocator_free_list_head: Option<u32>,
+    /// Global allocation sequence current when this log segment was initialized.
+    pub allocation_sequence: u64,
 }
 
-impl WalRegionPrologue {
-    /// Encoded byte length of [`WalRegionPrologue`].
-    pub const ENCODED_LEN: usize = size_of::<u32>() * 2;
+impl LogRegionPrologue {
+    /// Encoded byte length of [`LogRegionPrologue`].
+    pub const ENCODED_LEN: usize =
+        size_of::<u32>() + size_of::<u8>() + size_of::<u32>() + size_of::<u64>() + size_of::<u32>();
 
-    /// Encodes the WAL prologue and validates its region reference.
+    /// Encodes the log prologue and validates its region references.
     pub fn encode_into(&self, buffer: &mut [u8], region_count: u32) -> Result<usize, DiskError> {
-        if self.wal_head_region_index >= region_count {
+        if self.log_head_region_index >= region_count {
             return Err(DiskError::InvalidWalHeadRegionIndex {
-                region_index: self.wal_head_region_index,
+                region_index: self.log_head_region_index,
                 region_count,
             });
+        }
+        if let Some(free_list_head) = self.allocator_free_list_head {
+            if free_list_head >= region_count {
+                return Err(DiskError::InvalidRegionIndex {
+                    region_index: free_list_head,
+                    region_count,
+                });
+            }
         }
 
         ensure_len(buffer, Self::ENCODED_LEN)?;
 
         let mut offset = 0;
-        offset = write_u32(buffer, offset, self.wal_head_region_index)?;
+        offset = write_u32(buffer, offset, self.log_head_region_index)?;
+        offset = write_opt_region_index(buffer, offset, self.allocator_free_list_head)?;
+        offset = write_u64(buffer, offset, self.allocation_sequence)?;
         let checksum = crc32(&buffer[..offset]);
         let offset = write_u32(buffer, offset, checksum)?;
         Ok(offset)
     }
 
-    /// Decodes a WAL prologue and validates its region reference.
+    /// Decodes a log prologue and validates its region references.
     pub fn decode(buffer: &[u8], region_count: u32) -> Result<Self, DiskError> {
         ensure_len(buffer, Self::ENCODED_LEN)?;
 
         let mut offset = 0;
-        let wal_head_region_index = read_u32(buffer, &mut offset)?;
+        let log_head_region_index = read_u32(buffer, &mut offset)?;
+        let allocator_free_list_head = read_opt_region_index(buffer, &mut offset)?;
+        let allocation_sequence = read_u64(buffer, &mut offset)?;
         let checksum = read_u32(buffer, &mut offset)?;
 
         let expected = crc32(&buffer[..offset - size_of::<u32>()]);
@@ -300,18 +385,31 @@ impl WalRegionPrologue {
             return Err(DiskError::InvalidChecksum);
         }
 
-        if wal_head_region_index >= region_count {
+        if log_head_region_index >= region_count {
             return Err(DiskError::InvalidWalHeadRegionIndex {
-                region_index: wal_head_region_index,
+                region_index: log_head_region_index,
                 region_count,
             });
         }
+        if let Some(free_list_head) = allocator_free_list_head {
+            if free_list_head >= region_count {
+                return Err(DiskError::InvalidRegionIndex {
+                    region_index: free_list_head,
+                    region_count,
+                });
+            }
+        }
 
         Ok(Self {
-            wal_head_region_index,
+            log_head_region_index,
+            allocator_free_list_head,
+            allocation_sequence,
         })
     }
 }
+
+/// Backwards-compatible alias for code that still names the current log prologue as WAL-only.
+pub type WalRegionPrologue = LogRegionPrologue;
 
 /// Footer stored in free-list regions to chain unused regions together.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -418,6 +516,23 @@ fn write_u64(buffer: &mut [u8], offset: usize, value: u64) -> Result<usize, Disk
     write_bytes(buffer, offset, &value.to_le_bytes())
 }
 
+fn write_opt_region_index(
+    buffer: &mut [u8],
+    offset: usize,
+    region_index: Option<u32>,
+) -> Result<usize, DiskError> {
+    match region_index {
+        Some(region_index) => {
+            let offset = write_u8(buffer, offset, 1)?;
+            write_u32(buffer, offset, region_index)
+        }
+        None => {
+            let offset = write_u8(buffer, offset, 0)?;
+            write_u32(buffer, offset, 0)
+        }
+    }
+}
+
 fn write_bytes(buffer: &mut [u8], offset: usize, bytes: &[u8]) -> Result<usize, DiskError> {
     ensure_len(buffer, offset + bytes.len())?;
     buffer[offset..offset + bytes.len()].copy_from_slice(bytes);
@@ -444,6 +559,16 @@ fn read_u32(buffer: &[u8], offset: &mut usize) -> Result<u32, DiskError> {
 fn read_u64(buffer: &[u8], offset: &mut usize) -> Result<u64, DiskError> {
     let bytes = read_array::<8>(buffer, offset)?;
     Ok(u64::from_le_bytes(bytes))
+}
+
+fn read_opt_region_index(buffer: &[u8], offset: &mut usize) -> Result<Option<u32>, DiskError> {
+    let tag = read_u8(buffer, offset)?;
+    let value = read_u32(buffer, offset)?;
+    match tag {
+        0 => Ok(None),
+        1 => Ok(Some(value)),
+        tag => Err(DiskError::InvalidOptRegionTag(tag)),
+    }
 }
 
 fn read_array<const N: usize>(buffer: &[u8], offset: &mut usize) -> Result<[u8; N], DiskError> {

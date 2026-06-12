@@ -1,9 +1,9 @@
 use heapless::Vec;
 
-use crate::disk::{
-    DiskError, FreePointerFooter, Header, StorageMetadata, WalRegionPrologue, WAL_V1_FORMAT,
-};
-use crate::CollectionId;
+use crate::disk::{encode_wal_region_prefix, DiskError, FreePointerFooter, StorageMetadata};
+
+#[cfg(test)]
+use crate::{CollectionId, Header, WalRegionPrologue, WAL_V1_FORMAT};
 
 /// Errors returned by [`MockFlash`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -301,21 +301,9 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize>
             self.erase_region(region_index)?;
         }
 
-        let header = Header {
-            sequence: 0,
-            collection_id: CollectionId(0),
-            collection_format: WAL_V1_FORMAT,
-        };
-        let mut header_bytes = [0u8; Header::ENCODED_LEN];
-        header.encode_into(&mut header_bytes)?;
-        self.write_region(0, 0, &header_bytes)?;
-
-        let prologue = WalRegionPrologue {
-            wal_head_region_index: 0,
-        };
-        let mut prologue_bytes = [0u8; WalRegionPrologue::ENCODED_LEN];
-        prologue.encode_into(&mut prologue_bytes, region_count)?;
-        self.write_region(0, Header::ENCODED_LEN, &prologue_bytes)?;
+        let mut prefix = [self.erased_byte; REGION_SIZE];
+        let prefix_len = encode_wal_region_prefix(&mut prefix, metadata, 0, 0)?;
+        self.write_region(0, 0, &prefix[..prefix_len])?;
 
         let footer_offset = REGION_SIZE - FreePointerFooter::ENCODED_LEN;
         for region_index in 1..region_count {

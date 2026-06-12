@@ -205,10 +205,13 @@ fn requirement_decode_record_rejects_empty_logical_scratch_before_writing_first_
 //= type=test
 //# `RING-DISK-002` The canonical scalar widths are:
 //# `region_index: u32`, `region_size: u32`, `region_count: u32`,
-//# `min_free_regions: u32`, `wal_write_granule: u32`,
-//# `collection_id: u64`, `sequence: u64`, `payload_len: u32`,
-//# `collection_type: u16`, `collection_format: u16`,
-//# `erased_byte: u8`, and `wal_record_magic: u8`.
+//# `min_free_regions: u32`, `transaction_log_count: u32`,
+//# `transaction_log_id: u32`, `offset: u32`,
+//# `wal_write_granule: u32`, `collection_id: u64`, `sequence: u64`,
+//# `allocation_sequence: u64`, `observed_collection_generation: u64`,
+//# `payload_len: u32`, `collection_type: u16`,
+//# `collection_format: u16`, `erased_byte: u8`, and
+//# `wal_record_magic: u8`.
 #[test]
 fn requirement_canonical_scalar_widths_match_storage_header_and_wal_field_sizes() {
     let metadata = metadata(16);
@@ -347,22 +350,24 @@ fn requirement_optional_region_indexes_use_a_tag_then_little_endian_region_index
     let (alloc_begin_none, alloc_begin_none_len) = encode_logical(WalRecord::AllocBegin {
         collection_id: CollectionId(7),
         region_index: 3,
+        allocation_sequence: 0,
         free_list_head_after: None,
     });
-    let opt_offset = 1 + size_of::<u64>() + 2 * size_of::<u32>();
+    let opt_offset = 1 + size_of::<u64>() + 2 * size_of::<u32>() + size_of::<u64>();
     assert_eq!(
         &alloc_begin_none[1 + size_of::<u64>()..1 + size_of::<u64>() + size_of::<u32>()],
-        &(size_of::<u32>() as u32).to_le_bytes()
+        &((size_of::<u32>() + size_of::<u64>()) as u32).to_le_bytes()
     );
     assert_eq!(alloc_begin_none[opt_offset], 0);
     assert_eq!(
         alloc_begin_none_len,
-        1 + size_of::<u64>() + 3 * size_of::<u32>() + size_of::<u8>()
+        1 + 2 * size_of::<u64>() + 3 * size_of::<u32>() + size_of::<u8>()
     );
 
     let (alloc_begin_some, alloc_begin_some_len) = encode_logical(WalRecord::AllocBegin {
         collection_id: CollectionId(7),
         region_index: 3,
+        allocation_sequence: 0,
         free_list_head_after: Some(0x1122_3344),
     });
     assert_eq!(alloc_begin_some[opt_offset], 1);
@@ -373,7 +378,7 @@ fn requirement_optional_region_indexes_use_a_tag_then_little_endian_region_index
     );
     assert_eq!(
         alloc_begin_some_len,
-        1 + size_of::<u64>() + 4 * size_of::<u32>() + size_of::<u8>()
+        1 + 2 * size_of::<u64>() + 4 * size_of::<u32>() + size_of::<u8>()
     );
 }
 
@@ -544,9 +549,9 @@ fn requirement_encoded_record_len_is_rounded_to_wal_write_granule() {
 
 //= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
-//# `RING-WAL-ENC-007` Every WAL record start offset within a WAL region
-//# MUST be aligned to `wal_write_granule`, the smallest writable unit
-//# of the backing flash.
+//# `RING-WAL-ENC-007` Every WAL record start offset within a private
+//# log region MUST be aligned to
+//# `wal_write_granule`, the smallest writable unit of the backing flash.
 #[test]
 fn requirement_consecutive_wal_record_start_offsets_stay_aligned_to_wal_write_granule() {
     let metadata = metadata(16);
@@ -585,8 +590,8 @@ fn requirement_update_record_round_trips_with_escaping_and_padding() {
 //= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
 //# `RING-WAL-LAYOUT-005` Record types whose payload is empty
-//# (`new_collection`, `drop_collection`, `wal_recovery`, and transaction
-//# marker records) MUST still encode `payload_len = 0`.
+//# (`new_collection`, `drop_collection`, and `wal_recovery`) MUST still encode
+//# `payload_len = 0`.
 #[test]
 fn requirement_empty_payload_record_types_encode_zero_payload_len() {
     let (new_collection_logical, new_collection_len) = encode_logical(WalRecord::NewCollection {
@@ -598,18 +603,14 @@ fn requirement_empty_payload_record_types_encode_zero_payload_len() {
             collection_id: CollectionId(7),
         });
     let (wal_recovery_logical, wal_recovery_len) = encode_logical(WalRecord::WalRecovery);
-    let (begin_logical, begin_len) = encode_logical(WalRecord::BeginTransaction {
-        collection_id: CollectionId(7),
-    });
-    let (commit_logical, commit_len) = encode_logical(WalRecord::CommitTransaction {
-        collection_id: CollectionId(7),
-    });
-    let (finished_logical, finished_len) = encode_logical(WalRecord::TransactionFinished {
-        collection_id: CollectionId(7),
-    });
-    let (rollback_logical, rollback_len) = encode_logical(WalRecord::RollbackTransaction {
-        collection_id: CollectionId(7),
-    });
+    let (begin_logical, begin_len) =
+        encode_logical(crate::test_begin_transaction_record(CollectionId(7)));
+    let (commit_logical, commit_len) =
+        encode_logical(crate::test_commit_transaction_record(CollectionId(7)));
+    let (finished_logical, finished_len) =
+        encode_logical(crate::test_transaction_finished_record(CollectionId(7)));
+    let (rollback_logical, rollback_len) =
+        encode_logical(crate::test_rollback_transaction_record(CollectionId(7)));
 
     assert_eq!(&new_collection_logical[11..15], &0u32.to_le_bytes());
     assert_eq!(new_collection_len, 19);
@@ -617,36 +618,40 @@ fn requirement_empty_payload_record_types_encode_zero_payload_len() {
     assert_eq!(drop_collection_len, 17);
     assert_eq!(&wal_recovery_logical[1..5], &0u32.to_le_bytes());
     assert_eq!(wal_recovery_len, 9);
-    assert_eq!(&begin_logical[9..13], &0u32.to_le_bytes());
-    assert_eq!(begin_len, 17);
-    assert_eq!(&commit_logical[9..13], &0u32.to_le_bytes());
-    assert_eq!(commit_len, 17);
-    assert_eq!(&finished_logical[9..13], &0u32.to_le_bytes());
-    assert_eq!(finished_len, 17);
-    assert_eq!(&rollback_logical[9..13], &0u32.to_le_bytes());
-    assert_eq!(rollback_len, 17);
+    assert_eq!(
+        &begin_logical[1..5],
+        &((size_of::<u32>() + 2 * size_of::<u32>()) as u32).to_le_bytes()
+    );
+    assert_eq!(begin_len, 21);
+    assert_eq!(
+        &commit_logical[1..5],
+        &((size_of::<u32>() + 4 * size_of::<u32>()) as u32).to_le_bytes()
+    );
+    assert_eq!(commit_len, 29);
+    assert_eq!(
+        &finished_logical[1..5],
+        &((size_of::<u32>() + 4 * size_of::<u32>()) as u32).to_le_bytes()
+    );
+    assert_eq!(finished_len, 29);
+    assert_eq!(
+        &rollback_logical[1..5],
+        &((size_of::<u32>() + 4 * size_of::<u32>()) as u32).to_le_bytes()
+    );
+    assert_eq!(rollback_len, 29);
 }
 
 //= spec/ring/04-wal-records.md#encoding-helper-requirements
 //= type=test
-//# `RING-IMPL-REGRESSION-131` Transaction marker WAL records with no payload MUST round-trip
-//# through physical encoding and decoding.
+//# `RING-IMPL-REGRESSION-131` Transaction-control WAL records MUST round-trip their
+//# transaction-log positions and ranges through physical encoding and decoding.
 #[test]
 fn requirement_transaction_markers_round_trip() {
     let metadata = metadata(4);
     for record in [
-        WalRecord::BeginTransaction {
-            collection_id: CollectionId(7),
-        },
-        WalRecord::CommitTransaction {
-            collection_id: CollectionId(7),
-        },
-        WalRecord::TransactionFinished {
-            collection_id: CollectionId(7),
-        },
-        WalRecord::RollbackTransaction {
-            collection_id: CollectionId(7),
-        },
+        crate::test_begin_transaction_record(CollectionId(7)),
+        crate::test_commit_transaction_record(CollectionId(7)),
+        crate::test_transaction_finished_record(CollectionId(7)),
+        crate::test_rollback_transaction_record(CollectionId(7)),
     ] {
         let (physical, encoded_len) = encode_physical(record, metadata);
         let mut decode_scratch = [0u8; 128];
@@ -769,12 +774,13 @@ fn requirement_payload_len_counts_only_logical_payload_bytes() {
     let (alloc_begin_logical, _alloc_begin_len) = encode_logical(WalRecord::AllocBegin {
         collection_id: CollectionId(7),
         region_index: 3,
+        allocation_sequence: 0,
         free_list_head_after: Some(4),
     });
 
     assert_eq!(
         &alloc_begin_logical[1 + size_of::<u64>()..1 + size_of::<u64>() + size_of::<u32>()],
-        &(size_of::<u32>() as u32).to_le_bytes()
+        &((size_of::<u32>() + size_of::<u64>()) as u32).to_le_bytes()
     );
 }
 
@@ -818,14 +824,15 @@ fn requirement_record_checksum_covers_logical_prefix_bytes() {
 
 //= spec/ring/04-wal-records.md#encoding-helper-requirements
 //= type=test
-//# `RING-IMPL-REGRESSION-132` Alloc-begin WAL records MUST round-trip free_list_head_after through
-//# physical encoding and decoding.
+//# `RING-IMPL-REGRESSION-132` Alloc-begin WAL records MUST round-trip allocation_sequence and
+//# free_list_head_after through physical encoding and decoding.
 #[test]
 fn requirement_alloc_begin_round_trips_free_list_head_after() {
     let metadata = metadata(4);
     let record = WalRecord::AllocBegin {
         collection_id: CollectionId(7),
         region_index: 3,
+        allocation_sequence: 0,
         free_list_head_after: Some(4),
     };
     let (physical, encoded_len) = encode_physical(record, metadata);

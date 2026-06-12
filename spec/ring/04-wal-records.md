@@ -129,12 +129,14 @@ rotation.
 encoded size needed
 in the current private log tail region to append the two WAL records
 required to start and complete rotation to a new tail region:
-`alloc_begin(collection_id = 0, next_region_index, allocation_sequence, free_list_head_after)` followed by
+`alloc_begin(collection_id = 0, next_region_index, allocation_sequence,
+free_list_head_after)` followed by
 `link(next_region_index, expected_sequence)`.
 13. `RING-WAL-ENC-013` Appending any WAL record to the current private
 log tail region, other than the
 specific `alloc_begin(collection_id = 0, next_region_index,
-allocation_sequence, free_list_head_after)` that starts WAL rotation or the trailing `link`,
+allocation_sequence, free_list_head_after)` that starts WAL rotation or the
+trailing `link`,
 is invalid if doing so would leave fewer than `wal_rotation_reserve`
 unwritten bytes in that private log region.
 14. `RING-WAL-ENC-014` Appending the

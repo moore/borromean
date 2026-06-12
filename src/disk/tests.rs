@@ -3,7 +3,7 @@ use super::*;
 //= spec/ring/05-disk-format.md#canonical-on-disk-encoding
 //= type=test
 //# `RING-DISK-001` All fixed-width integer fields in `StorageMetadata`,
-//# `Header`, `WalRegionPrologue`, free-pointer footers, and logical WAL
+//# `Header`, `LogRegionPrologue`, free-pointer footers, and logical WAL
 //# records MUST be encoded little-endian.
 #[test]
 fn requirement_disk_structures_encode_fixed_width_fields_little_endian() {
@@ -19,10 +19,11 @@ fn requirement_disk_structures_encode_fixed_width_fields_little_endian() {
     let mut metadata_bytes = [0u8; StorageMetadata::ENCODED_LEN];
     metadata.encode_into(&mut metadata_bytes).unwrap();
     let expected_metadata_prefix = [
-        1u32.to_le_bytes().as_slice(),
+        2u32.to_le_bytes().as_slice(),
         0x1122_3344u32.to_le_bytes().as_slice(),
         0x5566_7788u32.to_le_bytes().as_slice(),
         0x0102_0304u32.to_le_bytes().as_slice(),
+        1u32.to_le_bytes().as_slice(),
         0x0506_0708u32.to_le_bytes().as_slice(),
         &[0xaa],
         &[0xbb],
@@ -52,7 +53,9 @@ fn requirement_disk_structures_encode_fixed_width_fields_little_endian() {
     );
 
     let prologue = WalRegionPrologue {
-        wal_head_region_index: 0x0b0c_0d0e,
+        log_head_region_index: 0x0b0c_0d0e,
+        allocator_free_list_head: Some(0x0102_0304),
+        allocation_sequence: 0x1112_1314_1516_1718,
     };
     let mut prologue_bytes = [0u8; WalRegionPrologue::ENCODED_LEN];
     prologue
@@ -112,7 +115,9 @@ fn requirement_disk_structure_checksums_use_crc32c_and_store_little_endian_bytes
     );
 
     let prologue = WalRegionPrologue {
-        wal_head_region_index: 3,
+        log_head_region_index: 3,
+        allocator_free_list_head: Some(4),
+        allocation_sequence: 5,
     };
     let mut prologue_bytes = [0u8; WalRegionPrologue::ENCODED_LEN];
     prologue.encode_into(&mut prologue_bytes, 8).unwrap();
@@ -141,9 +146,9 @@ fn requirement_disk_structure_checksums_use_crc32c_and_store_little_endian_bytes
 //= spec/ring/05-disk-format.md#storage-metadata
 //= type=test
 //# `RING-META-001` The canonical on-disk `storage_version` defined by
-//# this specification MUST be `1`.
+//# this specification MUST be `2`.
 #[test]
-fn requirement_storage_metadata_uses_storage_version_1() {
+fn requirement_storage_metadata_uses_storage_version_2() {
     let metadata = StorageMetadata::new(4096, 32, 3, 8, 0xff, 0xa5).unwrap();
     assert_eq!(metadata.storage_version, STORAGE_VERSION);
 }
@@ -161,10 +166,11 @@ fn requirement_storage_metadata_encodes_fields_in_canonical_order() {
     assert_eq!(used, StorageMetadata::ENCODED_LEN);
 
     let expected_prefix = [
-        1u32.to_le_bytes().as_slice(),
+        2u32.to_le_bytes().as_slice(),
         4096u32.to_le_bytes().as_slice(),
         32u32.to_le_bytes().as_slice(),
         3u32.to_le_bytes().as_slice(),
+        1u32.to_le_bytes().as_slice(),
         8u32.to_le_bytes().as_slice(),
         &[0xff],
         &[0xa5],
@@ -314,15 +320,17 @@ fn requirement_header_round_trips_sequence_collection_id_collection_format_and_c
     assert_eq!(Header::decode(&buffer).unwrap(), header);
 }
 
-//= spec/ring/05-disk-format.md#wal-region-prologue
+//= spec/ring/05-disk-format.md#log-region-prologue
 //= type=test
-//# `RING-PROLOGUE-001` `WalRegionPrologue` MUST be encoded as the exact
+//# `RING-PROLOGUE-001` `LogRegionPrologue` MUST be encoded as the exact
 //# byte sequence of the fields shown above, in that order, with no
 //# implicit padding.
 #[test]
 fn requirement_wal_prologue_encodes_fields_in_canonical_order() {
     let prologue = WalRegionPrologue {
-        wal_head_region_index: 3,
+        log_head_region_index: 3,
+        allocator_free_list_head: Some(4),
+        allocation_sequence: 5,
     };
     let mut buffer = [0u8; WalRegionPrologue::ENCODED_LEN];
     prologue.encode_into(&mut buffer, 8).unwrap();
@@ -330,14 +338,17 @@ fn requirement_wal_prologue_encodes_fields_in_canonical_order() {
     assert_eq!(&buffer[..size_of::<u32>()], 3u32.to_le_bytes().as_slice());
 }
 
-//= spec/ring/05-disk-format.md#wal-region-prologue
+//= spec/ring/05-disk-format.md#log-region-prologue
 //= type=test
 //# `RING-PROLOGUE-002` `prologue_checksum` MUST be CRC-32C over
-//# `wal_head_region_index`.
+//# `log_head_region_index`, `allocator_free_list_head`, and
+//# `allocation_sequence`.
 #[test]
 fn requirement_wal_prologue_checksum_covers_head_region_index() {
     let prologue = WalRegionPrologue {
-        wal_head_region_index: 3,
+        log_head_region_index: 3,
+        allocator_free_list_head: Some(4),
+        allocation_sequence: 5,
     };
     let mut buffer = [0u8; WalRegionPrologue::ENCODED_LEN];
     prologue.encode_into(&mut buffer, 8).unwrap();
@@ -349,14 +360,16 @@ fn requirement_wal_prologue_checksum_covers_head_region_index() {
     assert_eq!(u32::from_le_bytes(checksum_bytes), expected);
 }
 
-//= spec/ring/05-disk-format.md#wal-region-prologue
+//= spec/ring/05-disk-format.md#log-region-prologue
 //= type=test
-//# `RING-PROLOGUE-003` `wal_head_region_index` MUST be strictly less
+//# `RING-PROLOGUE-003` `log_head_region_index` MUST be strictly less
 //# than `region_count`.
 #[test]
 fn requirement_wal_prologue_rejects_out_of_range_head() {
     let prologue = WalRegionPrologue {
-        wal_head_region_index: 4,
+        log_head_region_index: 4,
+        allocator_free_list_head: None,
+        allocation_sequence: 0,
     };
     let mut buffer = [0u8; WalRegionPrologue::ENCODED_LEN];
 

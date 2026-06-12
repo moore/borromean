@@ -626,9 +626,10 @@ fn wal_and_map_region_formats() -> (Header, Header) {
 //# `RING-DISK-004` `collection_format` is a stable per-region `u16`
 //# namespace recorded durably in region headers. The pair
 //# `(collection_type, collection_format)` identifies a concrete
-//# committed region payload encoding. Borromean core reserves
-//# `collection_format = 0x0000` globally for `wal_v1`; every non-WAL
-//# collection format MUST be nonzero.
+//# committed region payload encoding for user collections. Borromean core reserves
+//# `collection_format = 0x0000` globally for `main_wal_v2` and
+//# `collection_format = 0x0001` globally for `transaction_log_v2`; every
+//# non-log collection format MUST be neither of those values.
 #[test]
 fn requirement_wal_and_map_regions_use_distinct_collection_format_namespace_values() {
     let (wal_header, map_header) = wal_and_map_region_formats();
@@ -645,8 +646,9 @@ fn requirement_wal_and_map_regions_use_distinct_collection_format_namespace_valu
 //= spec/ring/05-disk-format.md#storage-requirements
 //= type=test
 //# `RING-STORAGE-005` Borromean core MUST reserve the canonical
-//# `collection_format` value `wal_v1` for WAL regions, and user
-//# collections MUST NOT use that identifier.
+//# `collection_format` values `main_wal_v2` and `transaction_log_v2` for
+//# private storage log regions, and user collections MUST NOT use either
+//# identifier.
 #[test]
 fn requirement_wal_v1_collection_format_is_reserved_to_wal_regions() {
     let (wal_header, map_header) = wal_and_map_region_formats();
@@ -1582,7 +1584,7 @@ fn requirement_storage_reclaim_wal_head_reopen_preserves_replay_result() {
 //= type=test
 //# `RING-WAL-RECLAIM-POST-005` Startup step 4 MUST recover the same effective WAL head after
 //# reclaim as before reclaim, using the current tail region's
-//# `WalRegionPrologue` plus the last valid tail-local
+//# `LogRegionPrologue` plus the last valid tail-local
 //# `head(collection_id = 0, collection_type = wal, region_index = ...)`
 //# override, if any.
 #[test]
@@ -2698,9 +2700,11 @@ fn requirement_storage_reopen_after_replacement_reconstructs_free_list_tail() {
 //= type=test
 //# RING-STARTUP-007 Maintain replay state:
 //# per collection optional live `collection_type`, explicit collection
-//# state, `basis_pos`, and `pending_updates`, plus global
-//# `last_free_list_head`, optional reserved WAL-rotation `ready_region`, transaction
-//# scan state, and the replay-local `pending_wal_recovery_boundary`.
+//# state, `basis_pos`, `pending_updates`, and committed state generation;
+//# global `last_free_list_head`, global `allocation_sequence`, optional
+//# reserved WAL-rotation `ready_region`, transaction-log cursors and
+//# live-prefix boundaries, active/recovery transaction descriptors, and
+//# the replay-local `pending_wal_recovery_boundary`.
 #[test]
 fn requirement_storage_reopen_after_replacement_recovers_collection_and_reclaim_state() {
     let mut flash = MockFlash::<512, 6, 2048>::new(0xff);
@@ -3251,7 +3255,8 @@ fn requirement_storage_drop_map_records_free_region_after_drop_commit() {
                         drop_seen_at = Some(record_index);
                     }
                     crate::WalRecord::CommitTransaction {
-                        collection_id: CollectionId(19),
+                        transaction_log_id: 0,
+                        ..
                     } => {
                         commit_seen_at = Some(record_index);
                     }

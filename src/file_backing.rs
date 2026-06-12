@@ -7,11 +7,8 @@ use std::os::fd::AsRawFd;
 use std::path::Path;
 use std::time::Instant;
 
-use crate::disk::{
-    DiskError, FreePointerFooter, Header, StorageMetadata, WalRegionPrologue, WAL_V1_FORMAT,
-};
+use crate::disk::{encode_wal_region_prefix, DiskError, FreePointerFooter, StorageMetadata};
 use crate::flash_io::{FlashIo, StorageFormatError, StorageIoError};
-use crate::CollectionId;
 
 /// Linux allocation behavior used when creating a [`FileBacking`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -650,21 +647,9 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize> FileBacking<REGION_SIZ
             self.erase_region(region_index)?;
         }
 
-        let header = Header {
-            sequence: 0,
-            collection_id: CollectionId(0),
-            collection_format: WAL_V1_FORMAT,
-        };
-        let mut header_bytes = [0u8; Header::ENCODED_LEN];
-        header.encode_into(&mut header_bytes)?;
-        self.write_region(0, 0, &header_bytes)?;
-
-        let prologue = WalRegionPrologue {
-            wal_head_region_index: 0,
-        };
-        let mut prologue_bytes = [0u8; WalRegionPrologue::ENCODED_LEN];
-        prologue.encode_into(&mut prologue_bytes, region_count)?;
-        self.write_region(0, Header::ENCODED_LEN, &prologue_bytes)?;
+        let mut prefix = [self.options.erased_byte; REGION_SIZE];
+        let prefix_len = encode_wal_region_prefix(&mut prefix, metadata, 0, 0)?;
+        self.write_region(0, 0, &prefix[..prefix_len])?;
 
         let footer_offset = REGION_SIZE
             .checked_sub(FreePointerFooter::ENCODED_LEN)

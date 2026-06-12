@@ -116,6 +116,60 @@ pub(crate) fn test_map_frontier_memory<K, const MAX_RUNS: usize>(
     std::boxed::Box::leak(std::boxed::Box::new(MapFrontierMemory::new()))
 }
 
+#[cfg(test)]
+pub(crate) fn test_transaction_log_id(collection_id: CollectionId) -> u32 {
+    u32::try_from(collection_id.0).unwrap_or(u32::MAX)
+}
+
+#[cfg(test)]
+pub(crate) fn test_log_position(collection_id: CollectionId) -> LogPosition {
+    LogPosition {
+        region_index: test_transaction_log_id(collection_id),
+        offset: 0,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_transaction_log_range(collection_id: CollectionId) -> TransactionLogRange {
+    let position = test_log_position(collection_id);
+    TransactionLogRange {
+        start: position,
+        end: position,
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_begin_transaction_record(collection_id: CollectionId) -> WalRecord<'static> {
+    WalRecord::BeginTransaction {
+        transaction_log_id: test_transaction_log_id(collection_id),
+        start: test_log_position(collection_id),
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_commit_transaction_record(collection_id: CollectionId) -> WalRecord<'static> {
+    WalRecord::CommitTransaction {
+        transaction_log_id: test_transaction_log_id(collection_id),
+        range: test_transaction_log_range(collection_id),
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_transaction_finished_record(collection_id: CollectionId) -> WalRecord<'static> {
+    WalRecord::TransactionFinished {
+        transaction_log_id: test_transaction_log_id(collection_id),
+        range: test_transaction_log_range(collection_id),
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn test_rollback_transaction_record(collection_id: CollectionId) -> WalRecord<'static> {
+    WalRecord::RollbackTransaction {
+        transaction_log_id: test_transaction_log_id(collection_id),
+        range: test_transaction_log_range(collection_id),
+    }
+}
+
 #[cfg(all(test, feature = "file-backing", target_os = "linux"))]
 pub(crate) fn test_file_backing_scratch() -> &'static mut FileBackingScratch {
     std::boxed::Box::leak(std::boxed::Box::new(FileBackingScratch::new()))

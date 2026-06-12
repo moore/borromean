@@ -186,8 +186,11 @@ enum AppendVisibility {
     Committed,
 }
 
+#[derive(Clone, Copy)]
 struct ObjectLogReplayTransaction {
+    transaction_log_id: u32,
     committed: bool,
+    checkpointed: bool,
 }
 
 /// Caller-owned memory for an [`ObjectLog`].
@@ -2985,14 +2988,32 @@ fn replay_object_log<
                         memory.clear();
                     }
                     WalRecord::BeginTransaction {
+                        transaction_log_id, ..
+                    } => {
+                        transaction = Some(ObjectLogReplayTransaction {
+                            transaction_log_id,
+                            committed: false,
+                            checkpointed: false,
+                        });
+                        if transaction_log_id == 0
+                            || u64::from(transaction_log_id) == collection_id.0
+                        {
+                            checkpoint_object_log_replay(memory)?;
+                            if let Some(open) = transaction.as_mut() {
+                                open.checkpointed = true;
+                            }
+                        }
+                    }
+                    WalRecord::AddTransactionCollection {
                         collection_id: seen,
+                        ..
                     } if seen == collection_id => {
-                        let mut log = ObjectLog {
-                            collection_id: CollectionId::new(0),
-                            memory,
-                        };
-                        log.checkpoint_append_state().map_err(|_| ())?;
-                        transaction = Some(ObjectLogReplayTransaction { committed: false });
+                        if let Some(open) = transaction.as_mut() {
+                            if !open.checkpointed {
+                                checkpoint_object_log_replay(memory)?;
+                                open.checkpointed = true;
+                            }
+                        }
                     }
                     WalRecord::Snapshot {
                         collection_id: seen,
@@ -3007,43 +3028,55 @@ fn replay_object_log<
                         collection_id: seen,
                         payload,
                     } if seen == collection_id => {
-                        let visibility = if transaction.is_some() {
-                            AppendVisibility::Planned
-                        } else {
-                            AppendVisibility::Committed
-                        };
+                        let visibility =
+                            if transaction.as_ref().is_some_and(|open| open.checkpointed) {
+                                AppendVisibility::Planned
+                            } else {
+                                AppendVisibility::Committed
+                            };
                         apply_update_payload(payload, memory, visibility).map_err(|_| ())?;
                     }
                     WalRecord::CommitTransaction {
-                        collection_id: seen,
-                    } if seen == collection_id => {
+                        transaction_log_id, ..
+                    } => {
                         if let Some(open) = transaction.as_mut() {
-                            let mut log = ObjectLog {
-                                collection_id: CollectionId::new(0),
-                                memory,
-                            };
-                            log.commit_staged_appends();
-                            log.clear_append_checkpoint();
-                            open.committed = true;
+                            if open.transaction_log_id == transaction_log_id && open.checkpointed {
+                                let mut log = ObjectLog {
+                                    collection_id: CollectionId::new(0),
+                                    memory,
+                                };
+                                log.commit_staged_appends();
+                                log.clear_append_checkpoint();
+                                open.committed = true;
+                            }
                         }
                     }
                     WalRecord::TransactionFinished {
-                        collection_id: seen,
-                    } if seen == collection_id => {
-                        if transaction.as_ref().is_some_and(|open| open.committed) {
+                        transaction_log_id, ..
+                    } => {
+                        if transaction.as_ref().is_some_and(|open| {
+                            open.transaction_log_id == transaction_log_id && open.committed
+                        }) {
                             transaction = None;
                         }
                     }
                     WalRecord::RollbackTransaction {
-                        collection_id: seen,
-                    } if seen == collection_id => {
-                        if transaction.take().is_some() {
-                            let mut log = ObjectLog {
-                                collection_id: CollectionId::new(0),
-                                memory,
-                            };
-                            log.restore_append_checkpoint();
-                            log.clear_append_checkpoint();
+                        transaction_log_id, ..
+                    } => {
+                        if transaction
+                            .as_ref()
+                            .is_some_and(|open| open.transaction_log_id == transaction_log_id)
+                        {
+                            let checkpointed =
+                                transaction.take().is_some_and(|open| open.checkpointed);
+                            if checkpointed {
+                                let mut log = ObjectLog {
+                                    collection_id: CollectionId::new(0),
+                                    memory,
+                                };
+                                log.restore_append_checkpoint();
+                                log.clear_append_checkpoint();
+                            }
                         }
                     }
                     WalRecord::DropCollection {
@@ -3061,6 +3094,20 @@ fn replay_object_log<
         Err(StorageVisitError::Storage(error)) => Err(ObjectLogError::Storage(error)),
         Err(StorageVisitError::Visitor(())) => Err(ObjectLogError::InvalidEncoding),
     }
+}
+
+fn checkpoint_object_log_replay<
+    const REGION_SIZE: usize,
+    const MAX_REGIONS: usize,
+    const LOG_METADATA_MAX: usize,
+>(
+    memory: &mut ObjectLogMemory<REGION_SIZE, MAX_REGIONS, LOG_METADATA_MAX>,
+) -> Result<(), ()> {
+    let mut log = ObjectLog {
+        collection_id: CollectionId::new(0),
+        memory,
+    };
+    log.checkpoint_append_state().map_err(|_| ())
 }
 
 fn apply_update_payload<

@@ -8,7 +8,8 @@ use crate::mock::{MockError, MockFormatError};
 use crate::mode::StorageMode;
 use crate::startup::{apply_wal_record, StartupCollection, StartupError, StartupOpenPlan};
 use crate::wal_record::{
-    decode_record, encode_record_into, WalRecord, WalRecordError, WalRecordType,
+    decode_record, encode_record_into, LogPosition, TransactionLogRange, WalRecord, WalRecordError,
+    WalRecordType,
 };
 use crate::workspace::StorageWorkspace;
 use crate::StorageMetadata;
@@ -270,6 +271,7 @@ pub struct StorageRuntime<const MAX_COLLECTIONS: usize = 8> {
     free_list_tail: Option<u32>,
     ready_region: Option<u32>,
     max_seen_sequence: u64,
+    allocation_sequence: u64,
     collections: Vec<StartupCollection, MAX_COLLECTIONS>,
     pending_wal_recovery_boundary: bool,
     open_transaction: Option<OpenTransaction>,
@@ -278,6 +280,7 @@ pub struct StorageRuntime<const MAX_COLLECTIONS: usize = 8> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct OpenTransaction {
     collection_id: CollectionId,
+    start: LogPosition,
     committed: bool,
 }
 
@@ -289,6 +292,7 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
                 region_size: 0,
                 region_count: 0,
                 min_free_regions: 0,
+                transaction_log_count: 0,
                 wal_write_granule: 0,
                 erased_byte: 0,
                 wal_record_magic: 0,
@@ -300,6 +304,7 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
             free_list_tail: None,
             ready_region: None,
             max_seen_sequence: 0,
+            allocation_sequence: 0,
             collections: Vec::new(),
             pending_wal_recovery_boundary: false,
             open_transaction: None,
@@ -335,6 +340,7 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
         self.free_list_tail = free_list_tail;
         self.ready_region = ready_region;
         self.max_seen_sequence = max_seen_sequence;
+        self.allocation_sequence = 0;
         self.pending_wal_recovery_boundary = pending_wal_recovery_boundary;
         self.open_transaction = None;
         Ok(())
@@ -1099,15 +1105,22 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
         }
         self.validate_allocation_successor(region_index, free_list_head_after)?;
 
+        let allocation_sequence = self
+            .allocation_sequence
+            .checked_add(1)
+            .ok_or(StorageRuntimeError::WalRotationRequired)?;
         self.append_record::<REGION_SIZE, REGION_COUNT, IO>(
             flash,
             workspace,
             WalRecord::AllocBegin {
                 collection_id,
                 region_index,
+                allocation_sequence,
                 free_list_head_after,
             },
-        )
+        )?;
+        self.allocation_sequence = allocation_sequence;
+        Ok(())
     }
 
     /// Reclaims the current WAL prefix and returns the new head region.
@@ -1395,13 +1408,19 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
         if collection_id == CollectionId(0) {
             return Err(StorageRuntimeError::ReservedCollectionId(collection_id));
         }
+        let begin_position = self.current_log_position()?;
         self.append_record_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
             flash,
             workspace,
-            WalRecord::BeginTransaction { collection_id },
+            WalRecord::BeginTransaction {
+                transaction_log_id: 0,
+                start: begin_position,
+            },
         )?;
+        let start = self.current_log_position()?;
         self.open_transaction = Some(OpenTransaction {
             collection_id,
+            start,
             committed: false,
         });
         Ok(())
@@ -1410,6 +1429,24 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
     pub(crate) fn transaction_open_for(&self, collection_id: CollectionId) -> bool {
         self.open_transaction
             .is_some_and(|open| open.collection_id == collection_id)
+    }
+
+    fn current_log_position(&self) -> Result<LogPosition, StorageRuntimeError> {
+        Ok(LogPosition {
+            region_index: self.wal_tail,
+            offset: u32::try_from(self.wal_append_offset)
+                .map_err(|_| StorageRuntimeError::WalRotationRequired)?,
+        })
+    }
+
+    fn transaction_range(
+        &self,
+        start: LogPosition,
+    ) -> Result<TransactionLogRange, StorageRuntimeError> {
+        Ok(TransactionLogRange {
+            start,
+            end: self.current_log_position()?,
+        })
     }
 
     /// Appends the transaction commit marker.
@@ -1435,10 +1472,14 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
         self.append_record_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
             flash,
             workspace,
-            WalRecord::CommitTransaction { collection_id },
+            WalRecord::CommitTransaction {
+                transaction_log_id: 0,
+                range: self.transaction_range(open.start)?,
+            },
         )?;
         self.open_transaction = Some(OpenTransaction {
             collection_id,
+            start: open.start,
             committed: true,
         });
         Ok(())
@@ -1470,7 +1511,10 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
         self.append_record_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
             flash,
             workspace,
-            WalRecord::TransactionFinished { collection_id },
+            WalRecord::TransactionFinished {
+                transaction_log_id: 0,
+                range: self.transaction_range(open.start)?,
+            },
         )?;
         self.open_transaction = None;
         Ok(())
@@ -1499,7 +1543,10 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
         self.append_record_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
             flash,
             workspace,
-            WalRecord::RollbackTransaction { collection_id },
+            WalRecord::RollbackTransaction {
+                transaction_log_id: 0,
+                range: self.transaction_range(open.start)?,
+            },
         )?;
         self.open_transaction = None;
         Ok(())
@@ -1537,7 +1584,9 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
             next_region_index,
             free_list_head_after,
         )?;
-        let remaining_after = REGION_SIZE
+        let append_limit = wal_record_append_limit(self.metadata)
+            .map_err(|error| StorageRuntimeError::Startup(error.into()))?;
+        let remaining_after = append_limit
             .checked_sub(
                 self.wal_append_offset
                     .checked_add(reserves.alloc_begin_len)
@@ -1552,15 +1601,21 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
             });
         }
 
+        let allocation_sequence = self
+            .allocation_sequence
+            .checked_add(1)
+            .ok_or(StorageRuntimeError::WalRotationRequired)?;
         self.write_record_raw::<REGION_SIZE, REGION_COUNT, IO>(
             flash,
             workspace,
             WalRecord::AllocBegin {
                 collection_id: CollectionId(0),
                 region_index: next_region_index,
+                allocation_sequence,
                 free_list_head_after,
             },
         )?;
+        self.allocation_sequence = allocation_sequence;
         self.wal_append_offset = self
             .wal_append_offset
             .checked_add(reserves.alloc_begin_len)
@@ -1970,10 +2025,12 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
     ) -> Result<usize, StorageRuntimeError> {
         let (physical, logical) = workspace.encode_buffers();
         let encoded_len = encode_record_into(record, self.metadata, physical, logical)?;
+        let append_limit = wal_record_append_limit(self.metadata)
+            .map_err(|error| StorageRuntimeError::Startup(error.into()))?;
         if self
             .wal_append_offset
             .checked_add(encoded_len)
-            .is_none_or(|end| end > REGION_SIZE)
+            .is_none_or(|end| end > append_limit)
         {
             return Err(StorageRuntimeError::WalRotationRequired);
         }
@@ -2010,10 +2067,12 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
                 return Err(error.into());
             }
         };
+        let append_limit = wal_record_append_limit(self.metadata)
+            .map_err(|error| StorageRuntimeError::Startup(error.into()))?;
         if self
             .wal_append_offset
             .checked_add(encoded_len)
-            .is_none_or(|end| end > REGION_SIZE)
+            .is_none_or(|end| end > append_limit)
         {
             metrics.increment(StoragePerfCounter::WalRotationRequired);
             return Err(StorageRuntimeError::WalRotationRequired);
@@ -2165,6 +2224,7 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
             WalRecord::AllocBegin {
                 collection_id: CollectionId(0),
                 region_index: allocation_region,
+                allocation_sequence: 0,
                 free_list_head_after,
             },
             self.metadata,
@@ -2178,7 +2238,9 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
             .checked_add(alloc_begin_len)
             .and_then(|offset| offset.checked_add(post_record_len))
             .ok_or(StorageRuntimeError::WalRotationRequired)?;
-        let remaining_after = REGION_SIZE
+        let append_limit = wal_record_append_limit(self.metadata)
+            .map_err(|error| StorageRuntimeError::Startup(error.into()))?;
+        let remaining_after = append_limit
             .checked_sub(end)
             .ok_or(StorageRuntimeError::WalRotationRequired)?;
 
@@ -2240,7 +2302,9 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
             .wal_append_offset
             .checked_add(encoded_len)
             .ok_or(StorageRuntimeError::WalRotationRequired)?;
-        let remaining_after = REGION_SIZE
+        let append_limit = wal_record_append_limit(self.metadata)
+            .map_err(|error| StorageRuntimeError::Startup(error.into()))?;
+        let remaining_after = append_limit
             .checked_sub(end)
             .ok_or(StorageRuntimeError::WalRotationRequired)?;
         let Some(next_region_index) = self.last_free_list_head else {
@@ -2357,7 +2421,9 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
             .checked_add(granule)
             .and_then(|offset| offset.checked_add(recovery_len))
             .ok_or(StorageRuntimeError::WalRotationRequired)?;
-        if granule == 0 || granule > physical.len() || end > REGION_SIZE {
+        let append_limit = wal_record_append_limit(self.metadata)
+            .map_err(|error| StorageRuntimeError::Startup(error.into()))?;
+        if granule == 0 || granule > physical.len() || end > append_limit {
             return Err(StorageRuntimeError::WalRotationRequired);
         }
 
@@ -2396,6 +2462,7 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
             WalRecord::AllocBegin {
                 collection_id: CollectionId(0),
                 region_index: next_region_index,
+                allocation_sequence: 0,
                 free_list_head_after,
             },
             self.metadata,
@@ -2515,7 +2582,8 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
             | WalRecord::BeginTransaction { .. }
             | WalRecord::CommitTransaction { .. }
             | WalRecord::TransactionFinished { .. }
-            | WalRecord::RollbackTransaction { .. } => Ok(WalHeadReclaimAction::Skip),
+            | WalRecord::RollbackTransaction { .. }
+            | WalRecord::AddTransactionCollection { .. } => Ok(WalHeadReclaimAction::Skip),
         }
     }
 
@@ -3435,9 +3503,8 @@ fn initialize_wal_region<const REGION_SIZE: usize, const REGION_COUNT: usize, IO
 ) -> Result<(), StorageRuntimeError> {
     flash.erase_region(region_index)?;
     let target = workspace.committed_write_buffer();
-    let prefix_len =
-        encode_wal_region_prefix(target, metadata, sequence, wal_head, metadata.erased_byte)
-            .map_err(|error| StorageRuntimeError::Startup(error.into()))?;
+    let prefix_len = encode_wal_region_prefix(target, metadata, sequence, wal_head)
+        .map_err(|error| StorageRuntimeError::Startup(error.into()))?;
     flash.write_region(region_index, 0, &target[..prefix_len])?;
     flash.sync()?;
     Ok(())
@@ -3505,6 +3572,27 @@ fn committed_payload_capacity<const REGION_SIZE: usize>(
             payload_len: 0,
             capacity: 0,
         })
+}
+
+fn wal_record_append_limit(metadata: StorageMetadata) -> Result<usize, crate::DiskError> {
+    let region_size = usize::try_from(metadata.region_size).map_err(|_| {
+        crate::DiskError::InvalidRegionIndex {
+            region_index: metadata.region_size,
+            region_count: metadata.region_count,
+        }
+    })?;
+    let granule = usize::try_from(metadata.wal_write_granule)
+        .map_err(|_| crate::DiskError::InvalidWalWriteGranule)?;
+    if granule == 0 {
+        return Err(crate::DiskError::InvalidWalWriteGranule);
+    }
+    let footer_offset = region_size
+        .checked_sub(FreePointerFooter::ENCODED_LEN)
+        .ok_or(crate::DiskError::BufferTooSmall {
+            needed: FreePointerFooter::ENCODED_LEN,
+            available: region_size,
+        })?;
+    Ok(footer_offset - footer_offset % granule)
 }
 
 fn committed_write_len(

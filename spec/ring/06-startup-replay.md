@@ -86,7 +86,8 @@ missing/corrupt or has the wrong sequence, treat this as an incomplete
 rotation after `link`. Use the known tail as replay tail until that
 recovery finishes.
 If instead the known tail's last valid record is an
-`alloc_begin(collection_id = 0, next_region_index, allocation_sequence, free_list_head_after)` whose aligned
+`alloc_begin(collection_id = 0, next_region_index, allocation_sequence,
+free_list_head_after)` whose aligned
 end offset leaves at least `wal_link_reserve` and fewer than
 `wal_rotation_reserve` unwritten bytes in that region, treat this as
 an incomplete rotation before `link`. That reserve-window placement is

@@ -81,9 +81,9 @@ fn requirement_each_public_operation_future_completes_when_polled_directly() {
 #[test]
 fn requirement_flush_future_keeps_collection_basis_on_previous_state_until_head_commit() {
     for pending_polls in 1..=2 {
-        let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
+        let mut flash = MockFlash::<512, 7, 2048>::new(0xff);
         let mut workspace = StorageWorkspace::<512>::new();
-        let mut storage = Storage::<_, 512, 5, 8>::format(
+        let mut storage = Storage::<_, 512, 7, 8>::format(
             &mut flash,
             StorageFormatConfig::new(1, 8, 0xa5),
             crate::test_storage_memory(),
@@ -132,9 +132,9 @@ fn requirement_flush_future_keeps_collection_basis_on_previous_state_until_head_
         );
     }
 
-    let mut flash = MockFlash::<512, 6, 2048>::new(0xff);
+    let mut flash = MockFlash::<512, 8, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
-    let mut storage = Storage::<_, 512, 6, 8>::format(
+    let mut storage = Storage::<_, 512, 8, 8>::format(
         &mut flash,
         StorageFormatConfig::new(1, 8, 0xa5),
         crate::test_storage_memory(),
