@@ -280,40 +280,120 @@ usage() {
     cat <<'USAGE'
 Usage: ./tasks.sh [task...]
 
-Tasks:
-  all      Run the full repository verification lane
-  verify   Run the full repository verification lane
-  fmt      Run Rust and markdown formatting
-  test     Run cargo test
-  clippy   Run cargo clippy
-  md       Run markdown formatting
-  duvet    Validate traceability annotations and generate the Duvet report
-  review   Run the fresh per-test semantic review loop with Codex reviewers
+Runs one or more repository maintenance tasks from the repository root.
+With no task, runs `all`.
+
+Examples:
+  ./tasks.sh
+  ./tasks.sh --help
+  ./tasks.sh fmt test
+  ./tasks.sh duvet
+  BORROMEAN_PERF_CONFIG=perf/file_backing_4k.toml ./tasks.sh perf
+  BORROMEAN_TRACE_REVIEW_LIMIT=10 ./tasks.sh review
+
+General tasks:
+  all, verify
+      Run ./scripts/verify.sh. This is the full verification lane:
+      fmt check, markdown lint, tests, no_std build, clippy, traceability,
+      dependency tree policy, and Duvet report generation.
+
+  fmt
+      Format Rust with `cargo fmt --all` and markdown with `rumdl fmt .`.
+
+  md
+      Format markdown only with `rumdl fmt . --respect-gitignore`.
+
+  test
+      Run `cargo test`.
+
+  clippy
+      Run clippy for all targets/features, then the stricter library-only
+      clippy pass that denies unwrap/expect/panic/todo/unimplemented.
+
+  duvet
+      Run the traceability audit and generate the Duvet report.
+
+  mutants
+      Run the traceability audit, then run `cargo mutants`.
+
+Trace review tasks:
   trace-review
-           Generate fresh per-test semantic review packets under target/trace-review without running reviewers
+      Generate fresh per-test semantic review packets under
+      target/trace-review without running reviewers.
+
+  review
+      Run the semantic review loop with Codex reviewers.
+      Optional environment:
+        BORROMEAN_TRACE_REVIEW_LIMIT
+        BORROMEAN_TRACE_REVIEW_MODEL
+        BORROMEAN_TRACE_REVIEW_EFFORT
+        BORROMEAN_TRACE_REVIEW_SANDBOX
+        BORROMEAN_TRACE_REVIEW_CODEX_BIN
+        BORROMEAN_TRACE_REVIEW_SKIP_PREFLIGHT=1
+        BORROMEAN_TRACE_REVIEW_DRY_RUN=1
+
   trace-review-summary
-           Validate reviewer result JSON files and summarize semantic review findings
-  mutants  Manually run cargo-mutants after validating annotations
-  perf     Run the FileBacking perf runner (override config with BORROMEAN_PERF_CONFIG)
-  perf-test
-           Alias for perf
+      Validate reviewer result JSON files and summarize findings.
+
+Performance tasks:
+  perf, perf-test, perf-tests
+      Run one release FileBacking perf configuration.
+      Optional environment:
+        BORROMEAN_PERF_CONFIG=perf/file_backing.toml
+
   perf-matrix
-           Run 1 MiB and 4 KiB insert, update, read-hit, read-miss, and mixed comparison configs, then summarize them
+      Run the configured 1 MiB and 4 KiB insert, update, read-hit,
+      read-miss, and mixed-update perf configs, then summarize them.
+
   perf-matrix-summary
-           Summarize generated perf matrix JSON reports as Markdown
+      Summarize existing perf matrix JSON reports into
+      target/perf/perf_matrix_summary.md.
+
   perf-calibrate
-           Run repeated perf configs at increasing operation counts and recommend stable run sizes
+      Run repeated perf configs at increasing operation counts and recommend
+      stable run sizes.
+      Optional environment:
+        BORROMEAN_PERF_CALIBRATION_CONFIGS
+        BORROMEAN_PERF_CALIBRATION_REPEATS=3
+        BORROMEAN_PERF_CALIBRATION_READ_COUNTS=3000,10000,30000,100000,300000
+        BORROMEAN_PERF_CALIBRATION_WRITE_COUNTS=3000,10000
+        BORROMEAN_PERF_CALIBRATION_MIXED_COUNTS=3000,10000
+
   perf-calibrate-summary
-           Summarize existing calibration JSON reports
+      Summarize existing calibration JSON reports.
+
+Profiling tasks:
   perf-profile
-           Profile a release perf run with frame pointers (override config with BORROMEAN_PERF_PROFILE_CONFIG)
+      Build the release perf binary with frame pointers and collect perf
+      stat, perf.data, and perf report artifacts.
+      Optional environment:
+        BORROMEAN_PERF_PROFILE_CONFIG=perf/file_backing_smoke.toml
+        BORROMEAN_PERF_PROFILE_DIR=target/perf/profiles
+        BORROMEAN_PERF_PROFILE_FREQ=997
+
   perf-profile-memory
-           Profile a memory-backed Borromean perf run (override config with BORROMEAN_PERF_MEMORY_PROFILE_CONFIG)
+      Profile one memory-backed perf configuration.
+      Optional environment:
+        BORROMEAN_PERF_MEMORY_PROFILE_CONFIG=perf/profile_memory_update_hot.toml
+        BORROMEAN_PERF_PROFILE_DIR=target/perf/profiles
+        BORROMEAN_PERF_PROFILE_FREQ=997
+
   perf-profile-memory-matrix
-           Profile insert, update, read-hit, read-miss, and mixed memory-backed configs
+      Profile insert, update-hot, read-hit, read-miss, and mixed-update
+      memory-backed configs, then summarize the generated JSON reports.
+
   perf-profile-memory-summary
-           Summarize generated memory profile JSON reports
-  bench    Run Criterion benchmarks for the FileBacking mmap backend
+      Summarize existing memory profile JSON reports.
+
+Benchmark task:
+  bench
+      Run Criterion benchmarks for the FileBacking mmap backend.
+
+Notes:
+  - Tasks run in the order supplied: `./tasks.sh fmt test duvet`.
+  - `perf-profile*` tasks require Linux `perf` on PATH.
+  - `mutants` requires `cargo-mutants`.
+  - `duvet` and `verify` require the Duvet CLI and rumdl.
 USAGE
 }
 
@@ -384,6 +464,7 @@ run_task() {
             ;;
         *)
             echo "unknown task: $1" >&2
+            echo "run './tasks.sh --help' for the task list" >&2
             usage >&2
             return 2
             ;;
