@@ -171,6 +171,31 @@ performs whole-run compaction for that map using caller-owned scratch
 buffers; if no compaction is needed, it returns successfully without
 changing the logical map.
 
+Map observability and adapter design requirements:
+
+1. `RING-IMPL-REGRESSION-141` When performance counters are enabled, public
+map reads MUST expose frontier-cache observability: the first absent-key read
+records one map read, one frontier cache miss, one frontier reload, no
+frontier cache hit, and nonzero lookup timing.
+2. `RING-IMPL-REGRESSION-142` When performance counters are enabled, public
+hot reads from an already cached frontier MUST record cache hits, avoid
+frontier misses and reloads, count encoded key comparisons, and decode
+exactly one value per read.
+3. `RING-IMPL-REGRESSION-143` When performance counters are enabled, public
+map lookup through the default encoded-key comparison path MUST record
+encoded key comparisons, decoded-key comparisons, and value decodes for
+custom keys.
+4. `RING-IMPL-REGRESSION-144` The map error model MUST classify postcard
+`SerializeBufferFull` as `BufferTooSmall` at the map, key, and value adapter
+boundaries.
+5. `RING-IMPL-REGRESSION-145` Storage performance metrics MUST have explicit
+reset/take lifecycle semantics: reset clears current metrics, and take
+returns accumulated metrics before clearing them.
+6. `RING-IMPL-REGRESSION-146` Hot in-memory map inserts that do not require
+compaction MUST use the WAL update path: with performance counters enabled,
+each mutation appends and syncs one WAL update record without flushing or
+compacting the frontier.
+
 `MAP_CODE` is the stable shared-storage `collection_type` code reserved
 for durable map collections; in the current implementation it is
 `CollectionType::MAP_CODE`, whose on-disk value is `2`. It identifies the

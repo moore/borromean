@@ -2540,19 +2540,30 @@ fn requirement_storage_map_replacement_flush_records_reclaim_after_new_head() {
     map.set_in_memory(2, 20).unwrap();
     let second_region = storage.flush_map::<_, _, 4>(&mut map).unwrap();
 
+    let mut saw_first_head = false;
+    let mut saw_replacement_begin = false;
     let mut saw_free_region = false;
-    let mut saw_alloc_begin = false;
     let mut saw_replacement_head = false;
     storage
         .with_runtime_io_workspace(|runtime, flash, workspace| {
             runtime.visit_wal_records::<512, _, (), _>(flash, workspace, |_flash, record| {
                 match record {
-                    crate::WalRecord::AllocBegin { .. } => {
-                        saw_alloc_begin = true;
+                    crate::WalRecord::Head {
+                        collection_id,
+                        region_index,
+                        ..
+                    } if collection_id == CollectionId(18) && region_index == first_region => {
+                        saw_first_head = true;
+                    }
+                    crate::WalRecord::BeginTransaction { .. }
+                        if saw_first_head && !saw_replacement_head =>
+                    {
+                        saw_replacement_begin = true;
                     }
                     crate::WalRecord::FreeRegion { region_index, .. }
                         if region_index == first_region =>
                     {
+                        assert!(saw_replacement_begin);
                         assert!(saw_replacement_head);
                         saw_free_region = true;
                     }
@@ -2561,6 +2572,7 @@ fn requirement_storage_map_replacement_flush_records_reclaim_after_new_head() {
                         region_index,
                         ..
                     } if collection_id == CollectionId(18) && region_index == second_region => {
+                        assert!(saw_replacement_begin);
                         assert!(!saw_free_region);
                         saw_replacement_head = true;
                     }
@@ -2571,7 +2583,8 @@ fn requirement_storage_map_replacement_flush_records_reclaim_after_new_head() {
         })
         .unwrap();
 
-    assert!(saw_alloc_begin);
+    assert!(saw_first_head);
+    assert!(saw_replacement_begin);
     assert!(saw_free_region);
     assert!(saw_replacement_head);
 }
@@ -2777,11 +2790,11 @@ fn requirement_storage_replacement_flush_detaches_reclaimed_region_from_live_sta
     assert_eq!(storage.free_list_tail(), Some(first_region));
 }
 
-//= spec/ring/07-reclaim.md#region-reclaim
+//= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
 //= type=test
-//# `RING-REGION-RECLAIM-PRE-003` A cleanup target MUST NOT already be
-//# reachable from the free-list chain unless startup is re-entering
-//# idempotent recovery.
+//# `RING-IMPL-REGRESSION-153` Map replacement-flush cleanup MUST make the
+//# replaced committed map region part of the recovered free-list chain after
+//# cleanup completes.
 #[test]
 fn requirement_storage_replacement_flush_keeps_detached_region_out_of_free_list_chain() {
     let mut flash = MockFlash::<512, 6, 2048>::new(0xff);

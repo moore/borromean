@@ -181,11 +181,39 @@ fn requirement_lsm_map_new_assigns_stable_ids_and_returns_empty_map() {
     .unwrap();
 
     let mut map = LsmMap::<u16, u16, 8>::new(&mut storage, crate::test_lsm_map_memory()).unwrap();
-    assert_eq!(map.collection_id(), CollectionId(1));
-    assert_eq!(map.get(&mut storage, &7, |_, value| *value).unwrap(), None);
+    let first_collection_id = map.collection_id();
+    assert_eq!(first_collection_id, CollectionId(1));
+    for absent_key in [0, 7, u16::MAX] {
+        assert_eq!(
+            map.get(&mut storage, &absent_key, |_, value| *value)
+                .unwrap(),
+            None
+        );
+    }
 
     let second = LsmMap::<u16, u16, 8>::new(&mut storage, crate::test_lsm_map_memory()).unwrap();
     assert_eq!(second.collection_id(), CollectionId(2));
+
+    drop(map);
+    drop(second);
+    drop(storage);
+    let mut reopened =
+        Storage::<_, 512, 8>::open(&mut flash, crate::test_storage_memory()).unwrap();
+    let mut opened = LsmMap::<u16, u16, 8>::open(
+        first_collection_id,
+        &mut reopened,
+        crate::test_lsm_map_memory(),
+    )
+    .unwrap();
+    assert_eq!(opened.collection_id(), first_collection_id);
+    for absent_key in [0, 7, u16::MAX] {
+        assert_eq!(
+            opened
+                .get(&mut reopened, &absent_key, |_, value| *value)
+                .unwrap(),
+            None
+        );
+    }
 }
 
 //= spec/map.md#map-api-model
@@ -203,13 +231,27 @@ fn requirement_lsm_map_new_records_map_collection_type() {
         crate::test_storage_memory(),
     )
     .unwrap();
+    assert_eq!(crate::CollectionType::MAP_CODE, 2);
 
-    let first = LsmMap::<u16, u16, 8>::new(&mut storage, crate::test_lsm_map_memory()).unwrap();
+    let mut first = LsmMap::<u16, u16, 8>::new(&mut storage, crate::test_lsm_map_memory()).unwrap();
     let second = LsmMap::<u16, u16, 8>::new(&mut storage, crate::test_lsm_map_memory()).unwrap();
+    first.set(&mut storage, 7, 70).unwrap();
+    let committed_region = {
+        let mut buffer = [0u8; 512];
+        let mut frontier = storage
+            .open_map::<u16, u16, 8>(
+                first.collection_id(),
+                &mut buffer,
+                crate::test_map_frontier_memory(),
+            )
+            .unwrap();
+        storage.flush_map(&mut frontier).unwrap()
+    };
     assert_wal_records_created_map_collections(
         &mut storage,
         first.collection_id(),
         second.collection_id(),
+        committed_region,
     );
 }
 
@@ -229,9 +271,11 @@ fn assert_wal_records_created_map_collections<
     >,
     first_collection_id: CollectionId,
     second_collection_id: CollectionId,
+    committed_region: u32,
 ) {
     let mut saw_first_new_collection = false;
     let mut saw_second_new_collection = false;
+    let mut saw_first_head = false;
     storage
         .with_runtime_io_workspace(|runtime, flash, workspace| {
             runtime.visit_wal_records::<REGION_SIZE, _, (), _>(
@@ -253,6 +297,15 @@ fn assert_wal_records_created_map_collections<
                             assert_eq!(collection_type, crate::CollectionType::MAP_CODE);
                             saw_second_new_collection = true;
                         }
+                        crate::WalRecord::Head {
+                            collection_id,
+                            collection_type,
+                            region_index,
+                        } if collection_id == first_collection_id => {
+                            assert_eq!(collection_type, crate::CollectionType::MAP_CODE);
+                            assert_eq!(region_index, committed_region);
+                            saw_first_head = true;
+                        }
                         _ => {}
                     }
                     Ok(())
@@ -262,6 +315,7 @@ fn assert_wal_records_created_map_collections<
         .unwrap();
     assert!(saw_first_new_collection);
     assert!(saw_second_new_collection);
+    assert!(saw_first_head);
 }
 
 //= spec/map.md#map-api-model
@@ -294,31 +348,89 @@ fn requirement_lsm_map_get_set_delete_and_open_use_storage_owned_scratch() {
     let mut map = LsmMap::<u16, u16, 8>::new(&mut storage, crate::test_lsm_map_memory()).unwrap();
 
     assert!(!map.set(&mut storage, 7, 70).unwrap());
+    let collection_id = map.collection_id();
 
     let mut callback_calls = 0usize;
+    let lookup_key = 7u16;
     let got = map
-        .get(&mut storage, &7, |lookup_key, value| {
+        .get(&mut storage, &lookup_key, |callback_key, value| {
             callback_calls += 1;
-            assert_eq!(*lookup_key, 7);
+            assert!(std::ptr::eq(callback_key, &lookup_key));
             *value + 1
         })
         .unwrap();
     assert_eq!(got, Some(71));
     assert_eq!(callback_calls, 1);
 
-    assert!(!map.delete(&mut storage, 7).unwrap());
+    drop(map);
+    {
+        let mut buffer = [0u8; 512];
+        let mut frontier = storage
+            .open_map::<u16, u16, 8>(
+                collection_id,
+                &mut buffer,
+                crate::test_map_frontier_memory(),
+            )
+            .unwrap();
+        storage.flush_map(&mut frontier).unwrap();
+    }
+
+    drop(storage);
+    let mut reopened =
+        Storage::<_, 512, 8>::open(&mut flash, crate::test_storage_memory()).unwrap();
+    let mut reopened_map =
+        LsmMap::<u16, u16, 8>::open(collection_id, &mut reopened, crate::test_lsm_map_memory())
+            .unwrap();
+    assert_eq!(
+        reopened_map
+            .get(&mut reopened, &7, |_, value| *value)
+            .unwrap(),
+        Some(70)
+    );
+
+    assert!(!reopened_map.set(&mut reopened, 7, 71).unwrap());
+    assert!(!reopened_map.set(&mut reopened, 8, 80).unwrap());
+    assert_eq!(
+        reopened_map
+            .get(&mut reopened, &7, |_, value| *value)
+            .unwrap(),
+        Some(71)
+    );
+    drop(reopened_map);
+    drop(reopened);
+
+    let mut reopened =
+        Storage::<_, 512, 8>::open(&mut flash, crate::test_storage_memory()).unwrap();
+    let mut reopened_map =
+        LsmMap::<u16, u16, 8>::open(collection_id, &mut reopened, crate::test_lsm_map_memory())
+            .unwrap();
+    assert_eq!(
+        reopened_map
+            .get(&mut reopened, &7, |_, value| *value)
+            .unwrap(),
+        Some(71)
+    );
+    assert_eq!(
+        reopened_map
+            .get(&mut reopened, &8, |_, value| *value)
+            .unwrap(),
+        Some(80)
+    );
+
+    assert!(!reopened_map.delete(&mut reopened, 7).unwrap());
     callback_calls = 0;
     assert_eq!(
-        map.get(&mut storage, &7, |_, _| {
-            callback_calls += 1;
-        })
-        .unwrap(),
+        reopened_map
+            .get(&mut reopened, &7, |_, _| {
+                callback_calls += 1;
+            })
+            .unwrap(),
         None
     );
     assert_eq!(callback_calls, 0);
 
-    let collection_id = map.collection_id();
-    drop(storage);
+    drop(reopened_map);
+    drop(reopened);
     let mut reopened =
         Storage::<_, 512, 8>::open(&mut flash, crate::test_storage_memory()).unwrap();
     let mut reopened_map =
@@ -340,35 +452,135 @@ fn requirement_lsm_map_get_set_delete_and_open_use_storage_owned_scratch() {
 //# `append_map_update`, `snapshot_map`, `flush_map`, `compact_map`, and `drop_map`.
 #[test]
 fn requirement_lower_level_map_storage_bindings_support_frontier_mutations() {
-    let mut direct_flash = MockFlash::<512, 8, 4096>::new(0xff);
-    let mut direct_storage = Storage::<_, 512, 8>::format(
+    const REGION_SIZE: usize = 1024;
+    const REGION_COUNT: usize = 12;
+    const MAX_LOG: usize = 8192;
+
+    let mut direct_flash = MockFlash::<REGION_SIZE, REGION_COUNT, MAX_LOG>::new(0xff);
+    let mut direct_storage = Storage::<_, REGION_SIZE, REGION_COUNT>::format(
         &mut direct_flash,
         StorageFormatConfig::new(2, 8, 0xa5),
         crate::test_storage_memory(),
     )
     .unwrap();
     let direct_collection_id = CollectionId(3);
+    let durable_collection_id = CollectionId(4);
+    let flushed_collection_id = CollectionId(5);
     direct_storage.create_map(direct_collection_id).unwrap();
-    let mut direct_buffer = [0u8; 128];
-    let mut direct_map = MapFrontier::<u16, u16, 8>::new(
-        direct_collection_id,
-        &mut direct_buffer,
-        crate::test_map_frontier_memory(),
+    direct_storage.create_map(durable_collection_id).unwrap();
+    direct_storage.create_map(flushed_collection_id).unwrap();
+    {
+        let mut direct_buffer = [0u8; REGION_SIZE];
+        let mut direct_map = direct_storage
+            .open_map::<u16, u16, 8>(
+                direct_collection_id,
+                &mut direct_buffer,
+                crate::test_map_frontier_memory(),
+            )
+            .unwrap();
+
+        direct_map.set(&mut direct_storage, 9, 90).unwrap();
+        assert_eq!(direct_map.get_frontier(&9).unwrap(), Some(90));
+        direct_map.delete(&mut direct_storage, 9).unwrap();
+        assert_eq!(direct_map.get_frontier(&9).unwrap(), None);
+        direct_map
+            .apply_update(
+                &mut direct_storage,
+                &MapUpdate::Set {
+                    key: 12,
+                    value: 120,
+                },
+            )
+            .unwrap();
+        assert_eq!(direct_map.get_frontier(&12).unwrap(), Some(120));
+        direct_map.delete(&mut direct_storage, 12).unwrap();
+        assert_eq!(direct_map.get_frontier(&12).unwrap(), None);
+    }
+
+    {
+        let mut source_buffer = [0u8; REGION_SIZE];
+        let mut source = MapFrontier::<u16, u16, 8>::new(
+            durable_collection_id,
+            &mut source_buffer,
+            crate::test_map_frontier_memory(),
+        )
+        .unwrap();
+        source.set_in_memory(10, 100).unwrap();
+
+        direct_storage.snapshot_map(&source).unwrap();
+    }
+
+    direct_storage
+        .append_map_update::<u16, u16>(
+            durable_collection_id,
+            &MapUpdate::Set {
+                key: 11,
+                value: 110,
+            },
+        )
+        .unwrap();
+
+    let committed_region = {
+        let mut source_buffer = [0u8; REGION_SIZE];
+        let mut source = MapFrontier::<u16, u16, 8>::new(
+            flushed_collection_id,
+            &mut source_buffer,
+            crate::test_map_frontier_memory(),
+        )
+        .unwrap();
+        source.set_in_memory(20, 200).unwrap();
+        direct_storage.flush_map(&mut source).unwrap()
+    };
+
+    drop(direct_storage);
+    let mut reopened = Storage::<_, REGION_SIZE, REGION_COUNT>::open(
+        &mut direct_flash,
+        crate::test_storage_memory(),
     )
     .unwrap();
+    {
+        let mut direct_buffer = [0u8; REGION_SIZE];
+        let direct_map = reopened
+            .open_map::<u16, u16, 8>(
+                durable_collection_id,
+                &mut direct_buffer,
+                crate::test_map_frontier_memory(),
+            )
+            .unwrap();
+        assert_eq!(direct_map.get_frontier(&9).unwrap(), None);
+        assert_eq!(direct_map.get_frontier(&10).unwrap(), Some(100));
+        assert_eq!(direct_map.get_frontier(&11).unwrap(), Some(110));
+    }
+    let lsm_memory = crate::test_lsm_map_memory();
+    assert_eq!(
+        reopened
+            .compact_map::<u16, u16, 8, 1>(flushed_collection_id, lsm_memory)
+            .unwrap(),
+        None
+    );
 
-    direct_map.set(&mut direct_storage, 9, 90).unwrap();
-    assert_eq!(direct_map.get_frontier(&9).unwrap(), Some(90));
-    direct_map.delete(&mut direct_storage, 9).unwrap();
-    assert_eq!(direct_map.get_frontier(&9).unwrap(), None);
+    assert_eq!(
+        reopened.drop_map(flushed_collection_id).unwrap(),
+        Some(committed_region)
+    );
+    let mut direct_buffer = [0u8; REGION_SIZE];
+    assert!(matches!(
+        reopened.open_map::<u16, u16, 8>(
+            flushed_collection_id,
+            &mut direct_buffer,
+            crate::test_map_frontier_memory(),
+        ),
+        Err(MapStorageError::DroppedCollection(id)) if id == flushed_collection_id
+    ));
 }
 
 #[cfg(feature = "perf-counters")]
 //= spec/map.md#map-api-model
 //= type=test
-//# `open` reconstructs the logical map from the retained durable basis
-//# and later retained updates using buffers borrowed through
-//# `StorageMemory`.
+//# `RING-IMPL-REGRESSION-141` When performance counters are enabled,
+//# public map reads MUST expose frontier-cache observability: the first
+//# absent-key read records one map read, one frontier cache miss, one
+//# frontier reload, no frontier cache hit, and nonzero lookup timing.
 #[test]
 fn requirement_perf_metrics_first_read_records_frontier_miss_and_reload() {
     let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
@@ -394,10 +606,10 @@ fn requirement_perf_metrics_first_read_records_frontier_miss_and_reload() {
 #[cfg(feature = "perf-counters")]
 //= spec/map.md#map-api-model
 //= type=test
-//# This keeps each `LsmMap` handle small enough that many collections
-//# can be open at once; the handle primarily tracks the collection id and
-//# borrows `LsmMapMemory` for cached frontier state and compaction
-//# scratch.
+//# `RING-IMPL-REGRESSION-142` When performance counters are enabled,
+//# public hot reads from an already cached frontier MUST record cache hits,
+//# avoid frontier misses and reloads, count encoded key comparisons, and
+//# decode exactly one value per read.
 #[test]
 fn requirement_perf_metrics_hot_reads_record_frontier_cache_hits() {
     let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
@@ -449,12 +661,12 @@ impl LsmKey for DecodingTestKey {
 }
 
 #[cfg(feature = "perf-counters")]
-//= spec/map.md#key-and-value-model
+//= spec/map.md#map-api-model
 //= type=test
-//# For keys whose natural ordering is not lexicographic over their raw
-//# bytes, `K: Ord` must define the stable map ordering and the encoded
-//# representation must remain compatible with that ordering wherever
-//# committed run metadata uses decoded key bounds.
+//# `RING-IMPL-REGRESSION-143` When performance counters are enabled,
+//# public map lookup through the default encoded-key comparison path MUST
+//# record encoded key comparisons, decoded-key comparisons, and value
+//# decodes for custom keys.
 #[test]
 fn requirement_perf_metrics_custom_key_fallback_records_key_decodes() {
     let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
@@ -552,11 +764,86 @@ fn requirement_v2_entry_layout_validates_headers_and_lengths() {
         encode_entry_into::<u16, u16>(&5, None, &mut too_small_for_key),
         Err(MapError::BufferTooSmall)
     ));
+
+    let mut frontier_buffer = [0u8; 512];
+    let mut frontier = MapFrontier::<i32, i32, 8>::new(
+        CollectionId(91),
+        &mut frontier_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
+    frontier.set_in_memory(3, 30).unwrap();
+    frontier.set_in_memory(1, 10).unwrap();
+    frontier.set_in_memory(2, 20).unwrap();
+    assert_eq!(
+        frontier.frontier_entry(0).unwrap(),
+        Entry {
+            key: 1,
+            value: Some(10)
+        }
+    );
+    assert_eq!(
+        frontier.frontier_entry(1).unwrap(),
+        Entry {
+            key: 2,
+            value: Some(20)
+        }
+    );
+    assert_eq!(
+        frontier.frontier_entry(2).unwrap(),
+        Entry {
+            key: 3,
+            value: Some(30)
+        }
+    );
+
+    let mut snapshot = [0u8; 512];
+    let snapshot_len = frontier.encode_snapshot_into(&mut snapshot).unwrap();
+    let snapshot = &snapshot[..snapshot_len];
+    assert_eq!(
+        lookup_snapshot::<i32, i32>(snapshot, &0).unwrap(),
+        LookupResult::NotFound
+    );
+    assert_eq!(
+        lookup_snapshot::<i32, i32>(snapshot, &1).unwrap(),
+        LookupResult::Set(10)
+    );
+    assert_eq!(
+        lookup_snapshot::<i32, i32>(snapshot, &2).unwrap(),
+        LookupResult::Set(20)
+    );
+    assert_eq!(
+        lookup_snapshot::<i32, i32>(snapshot, &3).unwrap(),
+        LookupResult::Set(30)
+    );
+    assert_eq!(
+        snapshot_entry::<i32, i32>(snapshot, 0).unwrap(),
+        Entry {
+            key: 1,
+            value: Some(10)
+        }
+    );
+    assert_eq!(
+        snapshot_entry::<i32, i32>(snapshot, 1).unwrap(),
+        Entry {
+            key: 2,
+            value: Some(20)
+        }
+    );
+    assert_eq!(
+        snapshot_entry::<i32, i32>(snapshot, 2).unwrap(),
+        Entry {
+            key: 3,
+            value: Some(30)
+        }
+    );
 }
 
-//= spec/map.md#key-and-value-model
+//= spec/map.md#map-api-model
 //= type=test
-//# The map is parameterized by `K: LsmKey` and `V: LsmValue`.
+//# `RING-IMPL-REGRESSION-144` The map error model MUST classify postcard
+//# `SerializeBufferFull` as `BufferTooSmall` at the map, key, and value
+//# adapter boundaries.
 #[test]
 fn requirement_key_and_entry_errors_preserve_buffer_full_classification() {
     assert!(matches!(
@@ -578,6 +865,34 @@ fn requirement_key_and_entry_errors_preserve_buffer_full_classification() {
 //# `encode_key` produces the canonical durable key bytes.
 #[test]
 fn requirement_primitive_encoded_key_bytes_sort_like_ord() {
+    fn assert_key_encoding<K>(value: K, expected: &[u8])
+    where
+        K: LsmKey + Copy,
+    {
+        let mut first = [0xffu8; 16];
+        let first_len = value.encode_key(&mut first).unwrap();
+        assert_eq!(first_len, expected.len());
+        assert_eq!(&first[..first_len], expected);
+
+        let mut second = [0u8; 16];
+        let second_len = value.encode_key(&mut second).unwrap();
+        assert_eq!(&second[..second_len], expected);
+        assert_eq!(K::decode_key(expected).unwrap(), value);
+        assert_eq!(
+            value
+                .encode_key(&mut first[..expected.len() - 1])
+                .unwrap_err(),
+            LsmKeyError::BufferTooSmall
+        );
+
+        let mut malformed = expected.to_vec();
+        malformed.push(0);
+        assert_eq!(
+            K::decode_key(&malformed).unwrap_err(),
+            LsmKeyError::SerializationError
+        );
+    }
+
     fn assert_encoded_order<K>(values: &[K])
     where
         K: LsmKey + Copy + Ord,
@@ -595,6 +910,39 @@ fn requirement_primitive_encoded_key_bytes_sort_like_ord() {
         let by_bytes: Vec<K> = encoded.into_iter().map(|(_, value)| value).collect();
         assert_eq!(by_bytes, by_ord);
     }
+
+    assert_key_encoding(false, &[0]);
+    assert_key_encoding(true, &[1]);
+    assert_key_encoding(0u8, &[0]);
+    assert_key_encoding(u8::MAX, &[0xff]);
+    assert_key_encoding(0x0102u16, &[0x01, 0x02]);
+    assert_key_encoding(0x0102_0304u32, &[0x01, 0x02, 0x03, 0x04]);
+    assert_key_encoding(
+        0x0102_0304_0506_0708u64,
+        &[0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08],
+    );
+    assert_key_encoding(
+        0x0102_0304_0506_0708_090a_0b0c_0d0e_0f10u128,
+        &[
+            0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e,
+            0x0f, 0x10,
+        ],
+    );
+    assert_key_encoding(i8::MIN, &[0x00]);
+    assert_key_encoding(0i8, &[0x80]);
+    assert_key_encoding(i8::MAX, &[0xff]);
+    assert_key_encoding(i16::MIN, &[0x00, 0x00]);
+    assert_key_encoding(0i16, &[0x80, 0x00]);
+    assert_key_encoding(i16::MAX, &[0xff, 0xff]);
+    assert_key_encoding(i32::MIN, &[0x00, 0x00, 0x00, 0x00]);
+    assert_key_encoding(0i32, &[0x80, 0x00, 0x00, 0x00]);
+    assert_key_encoding(i32::MAX, &[0xff, 0xff, 0xff, 0xff]);
+    assert_key_encoding(i64::MIN, &[0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    assert_key_encoding(0i64, &[0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]);
+    assert_key_encoding(i64::MAX, &[0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]);
+    assert_key_encoding(i128::MIN, &[0x00; 16]);
+    assert_key_encoding(0i128, &[0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    assert_key_encoding(i128::MAX, &[0xff; 16]);
 
     assert_encoded_order(&[3u64, 0, u64::MAX, 7, 1]);
     assert_encoded_order(&[-3i64, 0, i64::MIN, i64::MAX, 7, 1]);
@@ -653,6 +1001,34 @@ fn requirement_bool_key_encoding_is_single_byte_and_ordered() {
         bool::compare_encoded_key(&[0, 1], &true).unwrap_err(),
         LsmKeyError::SerializationError
     );
+
+    #[derive(
+        Debug, Clone, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+    )]
+    struct OwnedKey(Vec<u8>);
+
+    impl LsmKey for OwnedKey {
+        fn encode_key(&self, out: &mut [u8]) -> Result<usize, LsmKeyError> {
+            if out.len() < self.0.len() {
+                return Err(LsmKeyError::BufferTooSmall);
+            }
+            out[..self.0.len()].copy_from_slice(&self.0);
+            Ok(self.0.len())
+        }
+
+        fn decode_key(bytes: &[u8]) -> Result<Self, LsmKeyError> {
+            Ok(Self(bytes.to_vec()))
+        }
+    }
+
+    let original_key = OwnedKey(vec![3, 1, 4]);
+    let mut encoded_entry = [0u8; 64];
+    let encoded_len = encode_entry_into(&original_key, Some(&159u16), &mut encoded_entry).unwrap();
+    let decoded_entry: Entry<OwnedKey, u16> =
+        encoded_entry_to_entry(&encoded_entry[..encoded_len]).unwrap();
+    assert_eq!(decoded_entry.key, original_key);
+    assert_eq!(decoded_entry.value, Some(159));
+    assert_ne!(decoded_entry.key.0.as_ptr(), original_key.0.as_ptr());
 }
 
 //= spec/map.md#key-and-value-model
@@ -679,6 +1055,82 @@ fn requirement_encoded_key_comparison_reports_equal_less_greater_and_invalid_byt
         compare_encoded_key_bytes::<u16>(&[5], &5),
         Err(MapError::SerializationError)
     ));
+    assert!(std::hint::black_box(
+        u16::COMPARES_ENCODED_KEY_WITHOUT_DECODE
+    ));
+
+    #[derive(
+        Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+    )]
+    struct ReverseEncodedKey(u8);
+
+    static DECODE_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    impl LsmKey for ReverseEncodedKey {
+        fn encode_key(&self, out: &mut [u8]) -> Result<usize, LsmKeyError> {
+            let Some(slot) = out.first_mut() else {
+                return Err(LsmKeyError::BufferTooSmall);
+            };
+            *slot = u8::MAX - self.0;
+            Ok(1)
+        }
+
+        fn decode_key(bytes: &[u8]) -> Result<Self, LsmKeyError> {
+            match bytes {
+                [byte] => {
+                    DECODE_COUNT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Ok(Self(u8::MAX - *byte))
+                }
+                _ => Err(LsmKeyError::SerializationError),
+            }
+        }
+    }
+
+    DECODE_COUNT.store(0, std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(
+        compare_encoded_key_bytes(&[u8::MAX - 4], &ReverseEncodedKey(5)).unwrap(),
+        core::cmp::Ordering::Less
+    );
+    assert_eq!(DECODE_COUNT.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    #[derive(
+        Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+    )]
+    struct EncodedOnlyKey(u8);
+
+    impl LsmKey for EncodedOnlyKey {
+        fn encode_key(&self, out: &mut [u8]) -> Result<usize, LsmKeyError> {
+            let Some(slot) = out.first_mut() else {
+                return Err(LsmKeyError::BufferTooSmall);
+            };
+            *slot = self.0;
+            Ok(1)
+        }
+
+        fn decode_key(_bytes: &[u8]) -> Result<Self, LsmKeyError> {
+            Err(LsmKeyError::SerializationError)
+        }
+
+        fn compare_encoded_key(
+            encoded: &[u8],
+            key: &Self,
+        ) -> Result<core::cmp::Ordering, LsmKeyError> {
+            match encoded {
+                [byte] => Ok(byte.cmp(&key.0)),
+                _ => Err(LsmKeyError::SerializationError),
+            }
+        }
+
+        const COMPARES_ENCODED_KEY_WITHOUT_DECODE: bool = true;
+    }
+
+    assert!(std::hint::black_box(
+        EncodedOnlyKey::COMPARES_ENCODED_KEY_WITHOUT_DECODE
+    ));
+    assert_eq!(
+        compare_encoded_key_bytes(&[7], &EncodedOnlyKey(7)).unwrap(),
+        core::cmp::Ordering::Equal
+    );
 }
 
 #[cfg(feature = "perf-counters")]
@@ -754,10 +1206,16 @@ fn requirement_perf_metrics_set_delete_record_write_path() {
     )
     .unwrap();
     let mut map = LsmMap::<u16, u16, 8>::new(&mut storage, crate::test_lsm_map_memory()).unwrap();
+    let collection_id = map.collection_id();
 
     storage.reset_perf_metrics();
     assert!(!map.set(&mut storage, 7, 70).unwrap());
+    assert_eq!(
+        map.get(&mut storage, &7, |_, value| *value).unwrap(),
+        Some(70)
+    );
     assert!(!map.delete(&mut storage, 7).unwrap());
+    assert_eq!(map.get(&mut storage, &7, |_, value| *value).unwrap(), None);
 
     let metrics = storage.perf_metrics();
     assert_eq!(metrics.map_sets, 1);
@@ -779,15 +1237,28 @@ fn requirement_perf_metrics_set_delete_record_write_path() {
     assert!(metrics.wal_encode_nanos > 0);
     assert!(metrics.wal_write_nanos > 0);
     assert!(metrics.wal_sync_nanos > 0);
+
+    drop(map);
+    drop(storage);
+    let mut reopened =
+        Storage::<_, 512, 8>::open(&mut flash, crate::test_storage_memory()).unwrap();
+    let mut reopened_map =
+        LsmMap::<u16, u16, 8>::open(collection_id, &mut reopened, crate::test_lsm_map_memory())
+            .unwrap();
+    assert_eq!(
+        reopened_map
+            .get(&mut reopened, &7, |_, value| *value)
+            .unwrap(),
+        None
+    );
 }
 
 #[cfg(feature = "perf-counters")]
-//= spec/ring/02-state-machines.md#storage-api-requirements
+//= spec/map.md#map-api-model
 //= type=test
-//# `Storage` MUST be the public database context that owns logical
-//# runtime state, replay state, configuration, dirty-frontier tracking,
-//# and bounded reusable scratch memory needed by normal storage and
-//# collection operations.
+//# `RING-IMPL-REGRESSION-145` Storage performance metrics MUST have
+//# explicit reset/take lifecycle semantics: reset clears current metrics,
+//# and take returns accumulated metrics before clearing them.
 #[test]
 fn requirement_perf_metrics_reset_and_take_clear_metrics() {
     let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
@@ -826,9 +1297,10 @@ fn count_mock_operations(
 #[cfg(feature = "perf-counters")]
 //= spec/map.md#map-api-model
 //= type=test
-//# On success, `set` and `delete` return `true` when the map's
-//# configured compaction policy says compaction is needed after that
-//# mutation and any required frontier flush.
+//# `RING-IMPL-REGRESSION-146` Hot in-memory map inserts that do not
+//# require compaction MUST use the WAL update path: with performance
+//# counters enabled, each mutation appends and syncs one WAL update record
+//# without flushing or compacting the frontier.
 #[test]
 fn requirement_sync_audit_hot_inserts_write_one_wal_record_and_sync_once() {
     const COUNT: u16 = 10;
@@ -881,6 +1353,9 @@ fn requirement_sync_audit_hot_inserts_write_one_wal_record_and_sync_once() {
         )),
         0
     );
+
+    assert!(!map.delete(&mut storage, 0).unwrap());
+    assert_eq!(map.get(&mut storage, &0, |_, value| *value).unwrap(), None);
 }
 
 #[cfg(feature = "perf-counters")]
@@ -3615,7 +4090,47 @@ fn assert_empty_map_open_matches_new_map_state() {
 //# state used by an empty durable map basis.
 #[test]
 fn requirement_empty_map_new_matches_empty_durable_basis_state() {
-    assert_empty_map_open_matches_new_map_state();
+    let mut flash = MockFlash::<512, 4, 1024>::new(0xff);
+    let mut storage = Storage::<_, 512, 4>::format(
+        &mut flash,
+        StorageFormatConfig::new(1, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
+    let mut map = LsmMap::<i32, i32, 4>::new(&mut storage, crate::test_lsm_map_memory()).unwrap();
+    let collection_id = map.collection_id();
+
+    assert_eq!(map.get(&mut storage, &-1, |_, value| *value).unwrap(), None);
+    assert_eq!(map.get(&mut storage, &0, |_, value| *value).unwrap(), None);
+    assert_eq!(map.get(&mut storage, &1, |_, value| *value).unwrap(), None);
+
+    drop(map);
+    drop(storage);
+
+    let mut reopened =
+        Storage::<_, 512, 4>::open(&mut flash, crate::test_storage_memory()).unwrap();
+    let mut reopened_map =
+        LsmMap::<i32, i32, 4>::open(collection_id, &mut reopened, crate::test_lsm_map_memory())
+            .unwrap();
+
+    assert_eq!(
+        reopened_map
+            .get(&mut reopened, &-1, |_, value| *value)
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        reopened_map
+            .get(&mut reopened, &0, |_, value| *value)
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        reopened_map
+            .get(&mut reopened, &1, |_, value| *value)
+            .unwrap(),
+        None
+    );
 }
 
 //= spec/map.md#snapshot-payload-format
@@ -4097,7 +4612,44 @@ fn assert_open_from_storage_rejects_live_collections_with_a_non_map_collection_t
 //# must treat the mismatch as corruption.
 #[test]
 fn requirement_replay_rejects_retained_type_bearing_record_type_mismatch() {
-    assert_open_from_storage_rejects_live_collections_with_a_non_map_collection_type();
+    let mut flash = MockFlash::<256, 4, 96>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    init_user_region_header(&mut flash, 2, 4, CollectionId(61), MAP_REGION_V2_FORMAT);
+
+    let wal_offset = metadata.wal_record_area_offset().unwrap();
+    let after_snapshot = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        wal_offset,
+        crate::WalRecord::Snapshot {
+            collection_id: CollectionId(61),
+            collection_type: crate::CollectionType::MAP_CODE,
+            payload: &[1, 2, 3],
+        },
+    );
+    append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        after_snapshot,
+        crate::WalRecord::Head {
+            collection_id: CollectionId(61),
+            collection_type: crate::CollectionType::CHANNEL_CODE,
+            region_index: 2,
+        },
+    );
+
+    let mut workspace = StorageWorkspace::<256>::new();
+    let error = crate::storage::open::<256, 4, _, 8>(&mut flash, &mut workspace).unwrap_err();
+    assert_eq!(
+        error,
+        crate::StorageRuntimeError::Startup(crate::StartupError::CollectionTypeMismatch {
+            collection_id: CollectionId(61),
+            expected: crate::CollectionType::MAP_CODE,
+            actual: crate::CollectionType::CHANNEL_CODE,
+        })
+    );
 }
 
 //= spec/map.md#validation-and-open-rules

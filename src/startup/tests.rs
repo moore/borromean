@@ -884,12 +884,12 @@ fn requirement_open_formatted_store_keeps_replayed_ready_region_reserved_in_memo
     assert_eq!(state.last_free_list_head(), Some(2));
 }
 
-//= spec/ring/06-startup-replay.md#startup-replay-algorithm
+//= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
 //= type=test
-//# `RING-STARTUP-017` On
-//# `commit_transaction(transaction_log_id, range)`:
-//# verify that `transaction_log_id` and `range` match an active
-//# transaction descriptor or a recoverable committed range.
+//# `RING-IMPL-REGRESSION-151` Startup replay MUST publish committed
+//# transaction intervals atomically: after `transaction_finished`,
+//# transaction collection mutations from the committed range are imported
+//# and visible in replayed collection state.
 #[test]
 fn requirement_open_formatted_store_replays_finished_transaction_interval() {
     let mut flash = MockFlash::<512, 4, 128>::new(0xff);
@@ -1117,14 +1117,11 @@ fn requirement_open_formatted_store_recovers_unfinished_transaction_before_commi
     assert_eq!(reopened.free_list_tail(), Some(1));
 }
 
-//= spec/ring/06-startup-replay.md#startup-replay-algorithm
+//= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
 //= type=test
-//# `RING-STARTUP-021` If replay reaches WAL end with an active
-//# transaction descriptor that has no committed range, run idempotent
-//# rollback recovery by scanning that transaction-log range for
-//# transaction-owned allocations, returning them through allocator
-//# recovery, and appending
-//# `rollback_transaction(transaction_log_id, range)`.
+//# `RING-IMPL-REGRESSION-152` Post-commit transaction cleanup recovery
+//# MUST preserve committed collection state, recover the cleanup free
+//# without erasing the detached region, and remain stable across reopen.
 #[test]
 fn requirement_open_formatted_store_finishes_post_commit_transaction_cleanup() {
     let mut flash = MockFlash::<512, 6, 256>::new(0xff);
@@ -2538,12 +2535,11 @@ fn requirement_classify_replay_record_opens_transaction_descriptor() {
     assert_eq!(plan.transaction_original_collections.len(), 1);
 }
 
-//= spec/ring/04-wal-records.md#wal-record-types
+//= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
 //= type=test
-//# `RING-WAL-VALID-028` A transaction log may contain records for any
-//# collection explicitly enrolled by `add_transaction_collection` in the
-//# same open transaction range. Collection mutation records for an
-//# unenrolled collection are invalid in that range.
+//# `RING-IMPL-REGRESSION-150` Transaction recovery bookkeeping MUST scope
+//# allocator observations to the open transaction collection and ignore
+//# allocator records for other collections.
 #[test]
 fn requirement_transaction_recovery_observes_only_the_transaction_collection_allocator_records() {
     let mut plan = StartupOpenPlan::<4, 8>::empty();
@@ -2705,17 +2701,12 @@ fn requirement_recovery_record_room_checks_the_next_free_footer_at_exact_tail_en
     .is_err());
 }
 
-//= spec/ring/04-wal-records.md#wal-record-types
+//= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
 //= type=test
-//# `RING-WAL-ENC-009` At an aligned candidate record start in a
-//# reachable private log region:
-//# if the first byte is `erased_byte`, that slot is currently unwritten and
-//# marks the end of the written portion of that private log region;
-//# if the first byte is `wal_record_magic`, that slot is a candidate WAL
-//# record and must parse and validate normally;
-//# if the first byte is neither, that slot lies inside a torn/corrupt WAL
-//# record, so replay keeps scanning forward by aligned
-//# `wal_write_granule` steps and ignores the corrupt bytes.
+//# `RING-IMPL-REGRESSION-147` Startup recovery record writing MUST treat
+//# the private-log region boundary as an exact valid end: a recovery record
+//# whose aligned encoded end equals the boundary advances the apply path to
+//# that boundary and reports the raw encoded length.
 #[test]
 fn requirement_recovery_record_writers_accept_records_that_end_at_region_boundary() {
     let mut flash = MockFlash::<128, 4, 128>::new(0xff);
@@ -2963,10 +2954,12 @@ fn requirement_recovery_gap_bridge_writes_invalid_boundary_then_wal_recovery() {
     );
 }
 
-//= spec/ring/04-wal-records.md#wal-record-types
+//= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
 //= type=test
-//# `RING-WAL-ENC-007` Every WAL record start offset within a private
-//# log region MUST be aligned to `wal_write_granule`.
+//# `RING-IMPL-REGRESSION-148` Startup WAL-gap bridging during recovery
+//# MUST reject invalid geometry before writing: zero `wal_write_granule`
+//# metadata and gap placements that overflow the private log tail are
+//# errors.
 #[test]
 fn requirement_recovery_gap_bridge_rejects_zero_granule_and_tail_overflow() {
     let mut flash = MockFlash::<128, 4, 128>::new(0xff);
@@ -3000,10 +2993,11 @@ fn requirement_recovery_gap_bridge_rejects_zero_granule_and_tail_overflow() {
     );
 }
 
-//= spec/ring/04-wal-records.md#wal-record-types
+//= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
 //= type=test
-//# `RING-WAL-ENC-002` `record_magic` MUST equal the storage's configured
-//# `wal_record_magic`.
+//# `RING-IMPL-REGRESSION-149` Startup corrupt-boundary marking MUST choose
+//# a sentinel byte distinct from both the configured erased byte and the
+//# configured WAL record magic byte.
 #[test]
 fn requirement_first_invalid_wal_boundary_byte_avoids_erased_and_magic_values() {
     assert_eq!(first_invalid_wal_boundary_byte(0, 1), 2);
@@ -3135,14 +3129,13 @@ fn requirement_free_list_head_discovery_ignores_footers_in_non_free_regions() {
     );
 }
 
-//= spec/ring/06-startup-replay.md#startup-replay-algorithm
+//= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
 //= type=test
-//# `RING-STARTUP-029` If replay yields a live collection with unsupported or invalid retained
-//# collection data under that collection's normative specification, startup MUST fail before open
-//# succeeds and before transaction cleanup frees any region based on collection reachability.
+//# `RING-IMPL-REGRESSION-154` Typed map opening after storage replay MUST
+//# validate retained map committed-region payloads, snapshot payloads, and
+//# update payloads and reject any that fail map-specific validation.
 #[test]
-fn requirement_storage_open_path_rejects_invalid_retained_map_region_snapshot_and_update_payloads()
-{
+fn requirement_open_map_rejects_invalid_retained_map_region_snapshot_and_update_payloads() {
     assert_startup_rejects_invalid_retained_map_region_payload();
     assert_startup_rejects_invalid_retained_map_snapshot_payload();
     assert_startup_rejects_invalid_retained_map_update_payload();

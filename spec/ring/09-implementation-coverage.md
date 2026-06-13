@@ -88,19 +88,40 @@ rotation, reclaim, and WAL/state facade helpers.
     no recovery boundary is pending.
 36. `RING-IMPL-REGRESSION-096` Storage facade recovery status MUST report pending WAL recovery
     boundaries and clear them after appending wal_recovery.
-37. `RING-IMPL-REGRESSION-104` Storage append operations MUST persist new collection and update
+37. `RING-IMPL-REGRESSION-147` Startup recovery record writing MUST treat the private-log region
+    boundary as an exact valid end: a recovery record whose aligned encoded end equals the boundary
+    advances the apply path to that boundary and reports the raw encoded length.
+38. `RING-IMPL-REGRESSION-148` Startup WAL-gap bridging during recovery MUST reject invalid
+    geometry before writing: zero `wal_write_granule` metadata and gap placements that overflow the
+    private log tail are errors.
+39. `RING-IMPL-REGRESSION-149` Startup corrupt-boundary marking MUST choose a sentinel byte distinct
+    from both the configured erased byte and the configured WAL record magic byte.
+40. `RING-IMPL-REGRESSION-150` Transaction recovery bookkeeping MUST scope allocator observations to
+    the open transaction collection and ignore allocator records for other collections.
+41. `RING-IMPL-REGRESSION-151` Startup replay MUST publish committed transaction intervals
+    atomically: after `transaction_finished`, transaction collection mutations from the committed
+    range are imported and visible in replayed collection state.
+42. `RING-IMPL-REGRESSION-152` Post-commit transaction cleanup recovery MUST preserve committed
+    collection state, recover the cleanup free without erasing the detached region, and remain
+    stable across reopen.
+43. `RING-IMPL-REGRESSION-153` Map replacement-flush cleanup MUST make the replaced committed map
+    region part of the recovered free-list chain after cleanup completes.
+44. `RING-IMPL-REGRESSION-154` Typed map opening after storage replay MUST validate retained map
+    committed-region payloads, snapshot payloads, and update payloads and reject any that fail
+    map-specific validation.
+45. `RING-IMPL-REGRESSION-104` Storage append operations MUST persist new collection and update
     records so reopening through flash restores the collection and pending update state.
-38. `RING-IMPL-REGRESSION-105` WAL-head reclaim MUST update runtime WAL head and tail to a fresh
+46. `RING-IMPL-REGRESSION-105` WAL-head reclaim MUST update runtime WAL head and tail to a fresh
     continuation region.
-39. `RING-IMPL-REGRESSION-106` WAL-head reclaim MUST rewrite a live `EmptyClean` map as a WAL
+47. `RING-IMPL-REGRESSION-106` WAL-head reclaim MUST rewrite a live `EmptyClean` map as a WAL
     snapshot basis while preserving pending updates.
-40. `RING-IMPL-REGRESSION-107` Internal WAL rotation with a large pending record MUST bridge an
+48. `RING-IMPL-REGRESSION-107` Internal WAL rotation with a large pending record MUST bridge an
     early rotation-window gap without surfacing InvalidRotationWindow to the caller.
-41. `RING-IMPL-REGRESSION-108` A long mixed map workload MUST preserve collection identity across
+49. `RING-IMPL-REGRESSION-108` A long mixed map workload MUST preserve collection identity across
     writes, deletes, compactions, and storage reclamation.
-42. `RING-IMPL-REGRESSION-109` WAL lifecycle stress MUST rotate through every data region, reclaim
+50. `RING-IMPL-REGRESSION-109` WAL lifecycle stress MUST rotate through every data region, reclaim
     WAL prefixes, reuse reclaimed regions, and reopen with live collection state intact.
-43. `RING-IMPL-REGRESSION-110` Map lifecycle stress MUST preserve modeled key/value state across
+51. `RING-IMPL-REGRESSION-110` Map lifecycle stress MUST preserve modeled key/value state across
     writes, deletes, compactions, committed-region reclaims, WAL rollovers, and WAL-head reclaims.
-44. `RING-IMPL-REGRESSION-111` WAL-head reclaim capacity stress MUST reclaim a bounded WAL prefix
+52. `RING-IMPL-REGRESSION-111` WAL-head reclaim capacity stress MUST reclaim a bounded WAL prefix
     when the full chain is longer than the cleanup batch capacity.

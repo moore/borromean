@@ -331,7 +331,18 @@ fn requirement_file_backing_create_new_calls_fallocate() {
 //# contiguous storage.
 #[test]
 fn requirement_file_backing_allocation_policy_does_not_report_contiguity() {
-    assert_eq!(AllocationPolicy::default(), AllocationPolicy::Strict);
+    let specification = include_str!("../../spec/file.md");
+    let requirement = specification
+        .split("`RING-FILE-011`")
+        .nth(1)
+        .unwrap()
+        .split("`RING-FILE-012`")
+        .next()
+        .unwrap();
+    let requirement = requirement.replace('\n', " ");
+
+    assert!(requirement.contains("`fallocate()` preallocates storage"));
+    assert!(requirement.contains("does not guarantee physically contiguous storage"));
 }
 
 //= spec/file.md#allocation-and-mmap-advice
