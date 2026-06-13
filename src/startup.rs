@@ -998,17 +998,10 @@ fn remember_transaction_collection(
     transaction: &mut OpenTransactionReplay,
     collection_id: CollectionId,
 ) -> Result<(), StartupError> {
-    if collection_id == CollectionId(0) {
-        return Ok(());
+    if collection_id != CollectionId(0) && transaction.collection_id.is_none() {
+        transaction.collection_id = Some(collection_id);
     }
-    match transaction.collection_id {
-        Some(expected) if expected != collection_id => Ok(()),
-        Some(_) => Ok(()),
-        None => {
-            transaction.collection_id = Some(collection_id);
-            Ok(())
-        }
-    }
+    Ok(())
 }
 
 fn transaction_collection_id(
@@ -1606,6 +1599,9 @@ fn bridge_recovery_wal_rotation_gap<
     let granule = usize::try_from(plan.metadata.wal_write_granule)
         .map_err(|_| StartupError::LengthOverflow)?;
     let (physical, logical) = workspace.encode_buffers();
+    if granule == 0 || granule > physical.len() {
+        return Err(StartupError::LengthOverflow);
+    }
     let recovery_len =
         encode_record_into(WalRecord::WalRecovery, plan.metadata, physical, logical)?;
     let end = plan
@@ -1613,7 +1609,7 @@ fn bridge_recovery_wal_rotation_gap<
         .checked_add(granule)
         .and_then(|offset| offset.checked_add(recovery_len))
         .ok_or(StartupError::LengthOverflow)?;
-    if granule == 0 || granule > physical.len() || end > REGION_SIZE {
+    if end > REGION_SIZE {
         return Err(StartupError::LengthOverflow);
     }
 
@@ -1953,10 +1949,6 @@ fn apply_transaction_replay_record<const REGION_COUNT: usize, const MAX_COLLECTI
             WalRecord::AllocBegin { .. } | WalRecord::FreeRegion { .. } => {
                 apply_open_replay_allocator_record(plan, record)
             }
-            WalRecord::BeginTransaction { .. }
-            | WalRecord::CommitTransaction { .. }
-            | WalRecord::TransactionFinished { .. }
-            | WalRecord::RollbackTransaction { .. } => Ok(()),
             _ if wal_record_collection_id(record) == Some(collection_id) => Ok(()),
             _ => apply_open_replay_record(plan, record),
         },

@@ -1227,9 +1227,6 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const LOG_METADAT
                 previous_aux = Some(current_aux);
                 scratch_chunk_count = 0;
                 scratch_logical_len = 0;
-                if cursor < bytes.len() {
-                    self.initialize_aux_scratch(storage.metadata(), geometry, large_scratch)?;
-                }
             }
         }
 

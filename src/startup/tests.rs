@@ -43,6 +43,48 @@ fn append_wal_record<const REGION_SIZE: usize, const REGION_COUNT: usize, const 
     offset + used
 }
 
+fn encoded_len_for_record<const REGION_SIZE: usize>(
+    metadata: StorageMetadata,
+    record: WalRecord<'_>,
+) -> usize {
+    let mut physical = [0u8; REGION_SIZE];
+    let mut logical = [0u8; REGION_SIZE];
+    encoded_record_len(record, metadata, &mut physical, &mut logical).unwrap()
+}
+
+fn startup_plan_with_append_offset<const REGION_COUNT: usize>(
+    metadata: StorageMetadata,
+    wal_head_candidate: u32,
+    wal_tail: u32,
+    wal_append_offset: usize,
+) -> StartupOpenPlan<REGION_COUNT, 8> {
+    let mut plan = StartupOpenPlan::<REGION_COUNT, 8>::empty();
+    plan.reset(
+        metadata,
+        wal_head_candidate,
+        wal_tail,
+        RegionScanResult {
+            append_offset: wal_append_offset,
+            last_valid_record: None,
+            wal_head_override: None,
+            pending_boundary_open: false,
+        },
+        0,
+    )
+    .unwrap();
+    plan.wal_append_offset = wal_append_offset;
+    plan
+}
+
+fn startup_test_collection(collection_id: CollectionId) -> StartupCollection {
+    StartupCollection {
+        collection_id,
+        collection_type: Some(CollectionType::MAP_CODE),
+        basis: StartupCollectionBasis::Empty,
+        pending_update_count: 0,
+    }
+}
+
 fn init_wal_region<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize>(
     flash: &mut MockFlash<REGION_SIZE, REGION_COUNT, MAX_LOG>,
     region_index: u32,
@@ -2321,6 +2363,711 @@ fn requirement_open_formatted_store_initializes_allocator_state_for_a_fresh_stor
 fn requirement_open_formatted_store_keeps_max_seen_sequence_for_the_next_region_header() {
     let (_metadata, state) = open_formatted_store_from_fresh_format();
     assert_eq!(state.max_seen_sequence(), 0);
+}
+
+//= spec/ring/06-startup-replay.md#why-reclaimed-wal-regions-cannot-confuse-startup
+//= type=test
+//# `RING-BOOTSTRAP-005` Startup derives the WAL head only from the selected tail's
+#[test]
+fn requirement_open_formatted_store_reports_recovered_nonzero_wal_head() {
+    let mut flash = MockFlash::<128, 4, 128>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    let wal_offset = metadata.wal_record_area_offset().unwrap();
+
+    init_wal_region(&mut flash, 0, 2, 1, metadata.region_count);
+    init_wal_region(&mut flash, 1, 1, 1, metadata.region_count);
+    append_wal_record(
+        &mut flash,
+        metadata,
+        1,
+        wal_offset,
+        WalRecord::Link {
+            next_region_index: 0,
+            expected_sequence: 2,
+        },
+    );
+
+    let state = open_formatted_store::<128, 4, _>(&mut flash).unwrap();
+    assert_eq!(state.wal_head(), 1);
+    assert_eq!(state.wal_tail(), 0);
+    assert_eq!(state.last_free_list_head(), Some(2));
+}
+
+//= spec/ring/06-startup-replay.md#startup-replay-algorithm
+//= type=test
+//# `RING-STARTUP-027` If replay encountered a torn or checksum-invalid tail record,
+#[test]
+fn requirement_open_formatted_store_preserves_pending_tail_recovery_boundary() {
+    let mut flash = MockFlash::<128, 4, 64>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    let wal_offset = metadata.wal_record_area_offset().unwrap();
+
+    flash.write_region(0, wal_offset, &[0x10; 8]).unwrap();
+
+    let state = open_formatted_store::<128, 4, _>(&mut flash).unwrap();
+    assert!(state.pending_wal_recovery_boundary());
+    assert_eq!(state.wal_append_offset(), wal_offset + 8);
+}
+
+//= spec/ring/06-startup-replay.md#startup-replay-algorithm
+//= type=test
+//# `RING-STARTUP-RESULT-007` Transaction-log cursors, live-prefix boundaries, active transaction
+#[test]
+fn requirement_startup_open_plan_clears_transaction_recovery_scratch() {
+    let mut plan = StartupOpenPlan::<4, 8>::empty();
+    plan.wal_chain.push(0).unwrap();
+    plan.collections
+        .push(startup_test_collection(CollectionId(7)))
+        .unwrap();
+    plan.transaction_original_collections
+        .push(startup_test_collection(CollectionId(8)))
+        .unwrap();
+    plan.transaction_allocations.push(1).unwrap();
+    plan.transaction_frees.push(2).unwrap();
+    plan.transaction_cleanup_regions.push(3).unwrap();
+    plan.transaction_old_regions.push(1).unwrap();
+    plan.transaction_new_regions.push(2).unwrap();
+
+    plan.clear_transaction_recovery_scratch();
+
+    assert_eq!(plan.wal_chain.as_slice(), &[0]);
+    assert_eq!(plan.collections.len(), 1);
+    assert!(plan.transaction_original_collections.is_empty());
+    assert!(plan.transaction_allocations.is_empty());
+    assert!(plan.transaction_frees.is_empty());
+    assert!(plan.transaction_cleanup_regions.is_empty());
+    assert!(plan.transaction_old_regions.is_empty());
+    assert!(plan.transaction_new_regions.is_empty());
+
+    plan.transaction_allocations.push(1).unwrap();
+    plan.clear();
+    assert!(plan.wal_chain.is_empty());
+    assert!(plan.collections.is_empty());
+    assert!(plan.transaction_allocations.is_empty());
+}
+
+//= spec/ring/04-wal-records.md#wal-record-types
+//= type=test
+//# `RING-WAL-VALID-024` If replay reaches the end of a reachable
+#[test]
+fn requirement_non_tail_wal_replay_rejects_unrecovered_boundary() {
+    let mut flash = MockFlash::<128, 4, 64>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    let wal_offset = metadata.wal_record_area_offset().unwrap();
+    flash.write_region(0, wal_offset, &[0x10; 8]).unwrap();
+    let mut workspace = StorageWorkspace::<128>::new();
+    let mut plan = startup_plan_with_append_offset::<4>(metadata, 0, 0, wal_offset);
+
+    let scan_error =
+        scan_wal_region::<128, _, _>(&mut flash, &mut workspace, metadata, 0, false, |_, _, _| {
+            Ok(())
+        })
+        .unwrap_err();
+    assert_eq!(scan_error, StartupError::BrokenWalChain { region_index: 0 });
+
+    let replay_error = replay_open_wal_region::<128, 4, _, 8>(
+        &mut flash,
+        &mut workspace,
+        &mut plan,
+        0,
+        0,
+        false,
+        &mut None,
+    )
+    .unwrap_err();
+    assert_eq!(
+        replay_error,
+        StartupError::BrokenWalChain { region_index: 0 }
+    );
+}
+
+//= spec/ring/06-startup-replay.md#startup-replay-algorithm
+//= type=test
+//# `RING-STARTUP-016` On `begin_transaction(transaction_log_id, start)`:
+#[test]
+fn requirement_classify_replay_record_opens_transaction_descriptor() {
+    let mut flash = MockFlash::<128, 4, 64>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    let wal_offset = metadata.wal_record_area_offset().unwrap();
+    let mut plan = startup_plan_with_append_offset::<4>(metadata, 0, 0, wal_offset);
+    plan.collections
+        .push(startup_test_collection(CollectionId(7)))
+        .unwrap();
+    let mut open_transaction = None;
+    let aligned_end_offset = wal_offset + 8;
+
+    let step = classify_replay_record(
+        &mut plan,
+        &mut open_transaction,
+        WalReplayPosition {
+            chain_index: 0,
+            region_index: 0,
+            offset: wal_offset,
+        },
+        aligned_end_offset,
+        crate::test_begin_transaction_record(CollectionId(7)),
+    )
+    .unwrap();
+
+    assert_eq!(
+        step,
+        ReplayStep::Advance {
+            next_offset: aligned_end_offset,
+        }
+    );
+    let transaction = open_transaction.unwrap();
+    assert_eq!(
+        transaction.transaction_log_id,
+        crate::test_transaction_log_id(CollectionId(7))
+    );
+    assert_eq!(transaction.start.offset, aligned_end_offset);
+    assert_eq!(plan.transaction_original_collections.len(), 1);
+}
+
+//= spec/ring/04-wal-records.md#wal-record-types
+//= type=test
+//# `RING-WAL-VALID-028` A transaction log may contain records for any
+#[test]
+fn requirement_transaction_recovery_observes_only_the_transaction_collection_allocator_records() {
+    let mut plan = StartupOpenPlan::<4, 8>::empty();
+    let mut transaction = OpenTransactionReplay {
+        collection_id: Some(CollectionId(7)),
+        transaction_log_id: crate::test_transaction_log_id(CollectionId(7)),
+        start: WalReplayPosition {
+            chain_index: 0,
+            region_index: 0,
+            offset: 0,
+        },
+        commit_seen: false,
+    };
+
+    observe_transaction_recovery_record(
+        &mut plan,
+        &mut transaction,
+        WalRecord::AllocBegin {
+            collection_id: CollectionId(8),
+            region_index: 1,
+            allocation_sequence: 0,
+            free_list_head_after: Some(2),
+        },
+    )
+    .unwrap();
+    observe_transaction_recovery_record(
+        &mut plan,
+        &mut transaction,
+        WalRecord::FreeRegion {
+            collection_id: CollectionId(8),
+            region_index: 2,
+        },
+    )
+    .unwrap();
+    assert!(plan.transaction_allocations.is_empty());
+    assert!(plan.transaction_frees.is_empty());
+
+    observe_transaction_recovery_record(
+        &mut plan,
+        &mut transaction,
+        WalRecord::AllocBegin {
+            collection_id: CollectionId(7),
+            region_index: 1,
+            allocation_sequence: 0,
+            free_list_head_after: Some(2),
+        },
+    )
+    .unwrap();
+    observe_transaction_recovery_record(
+        &mut plan,
+        &mut transaction,
+        WalRecord::FreeRegion {
+            collection_id: CollectionId(7),
+            region_index: 2,
+        },
+    )
+    .unwrap();
+    assert_eq!(plan.transaction_allocations.as_slice(), &[1]);
+    assert_eq!(plan.transaction_frees.as_slice(), &[2]);
+}
+
+//= spec/ring/04-wal-records.md#wal-record-types
+//= type=test
+//# `RING-WAL-VALID-029`
+#[test]
+fn requirement_transaction_marker_ids_must_match_the_open_transaction() {
+    assert_eq!(
+        ensure_transaction_log_marker_matches(7, 8),
+        Err(StartupError::TransactionMismatch {
+            expected: CollectionId(7),
+            actual: CollectionId(8),
+        })
+    );
+}
+
+//= spec/ring/04-wal-records.md#wal-record-types
+//= type=test
+//# `RING-WAL-VALID-013` A WAL record in the current private log tail
+#[test]
+fn requirement_recovery_record_room_rejects_tail_overflow_and_alloc_without_free_head() {
+    let mut flash = MockFlash::<128, 4, 64>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    let mut workspace = StorageWorkspace::<128>::new();
+    let wal_recovery_len = encoded_len_for_record::<128>(metadata, WalRecord::WalRecovery);
+    let mut plan = startup_plan_with_append_offset::<4>(metadata, 0, 0, 128 - wal_recovery_len + 1);
+
+    assert_eq!(
+        recovery_record_has_append_room::<128, 4, _, 8>(
+            &mut flash,
+            &mut workspace,
+            &mut plan,
+            WalRecord::WalRecovery,
+        ),
+        Ok(false)
+    );
+
+    plan.last_free_list_head = None;
+    plan.wal_append_offset = metadata.wal_record_area_offset().unwrap();
+    assert_eq!(
+        recovery_record_has_append_room::<128, 4, _, 8>(
+            &mut flash,
+            &mut workspace,
+            &mut plan,
+            WalRecord::AllocBegin {
+                collection_id: CollectionId(0),
+                region_index: 1,
+                allocation_sequence: 0,
+                free_list_head_after: None,
+            },
+        ),
+        Ok(false)
+    );
+
+    plan.wal_append_offset = 128 - wal_recovery_len;
+    assert_eq!(
+        recovery_record_has_append_room::<128, 4, _, 8>(
+            &mut flash,
+            &mut workspace,
+            &mut plan,
+            WalRecord::WalRecovery,
+        ),
+        Ok(false)
+    );
+}
+
+//= spec/ring/04-wal-records.md#wal-record-types
+//= type=test
+//# `RING-WAL-ENC-013` Appending any WAL record to the current private
+#[test]
+fn requirement_recovery_record_room_checks_the_next_free_footer_at_exact_tail_end() {
+    let mut flash = MockFlash::<128, 4, 64>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    let footer_offset = 128 - FreePointerFooter::ENCODED_LEN;
+    flash
+        .write_region(1, footer_offset, &[0u8; FreePointerFooter::ENCODED_LEN])
+        .unwrap();
+    let mut workspace = StorageWorkspace::<128>::new();
+    let wal_recovery_len = encoded_len_for_record::<128>(metadata, WalRecord::WalRecovery);
+    let mut plan = startup_plan_with_append_offset::<4>(metadata, 0, 0, 128 - wal_recovery_len);
+
+    assert!(recovery_record_has_append_room::<128, 4, _, 8>(
+        &mut flash,
+        &mut workspace,
+        &mut plan,
+        WalRecord::WalRecovery,
+    )
+    .is_err());
+}
+
+//= spec/ring/04-wal-records.md#wal-record-types
+//= type=test
+//# `RING-WAL-ENC-009` At an aligned candidate record start in a
+#[test]
+fn requirement_recovery_record_writers_accept_records_that_end_at_region_boundary() {
+    let mut flash = MockFlash::<128, 4, 128>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    let mut workspace = StorageWorkspace::<128>::new();
+    let wal_recovery_len = encoded_len_for_record::<128>(metadata, WalRecord::WalRecovery);
+
+    let mut apply_plan =
+        startup_plan_with_append_offset::<4>(metadata, 0, 0, 128 - wal_recovery_len);
+    write_recovery_record_and_apply::<128, 4, _, 8>(
+        &mut flash,
+        &mut workspace,
+        &mut apply_plan,
+        WalRecord::WalRecovery,
+    )
+    .unwrap();
+    assert_eq!(apply_plan.wal_append_offset, 128);
+
+    let mut raw_plan = startup_plan_with_append_offset::<4>(metadata, 0, 0, 128 - wal_recovery_len);
+    let used = write_recovery_record_raw::<128, 4, _, 8>(
+        &mut flash,
+        &mut workspace,
+        &mut raw_plan,
+        WalRecord::WalRecovery,
+    )
+    .unwrap();
+    assert_eq!(used, wal_recovery_len);
+}
+
+//= spec/ring/04-wal-records.md#wal-record-types
+//= type=test
+//# `RING-WAL-ENC-014` Appending the
+#[test]
+fn requirement_recovery_rotation_start_accepts_only_the_link_reserve_window() {
+    let mut flash = MockFlash::<256, 4, 128>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    let mut workspace = StorageWorkspace::<256>::new();
+    let mut plan = startup_plan_with_append_offset::<4>(metadata, 0, 0, 0);
+    let reserves =
+        recovery_rotation_reserves::<256, 4, 8>(&mut workspace, &mut plan, 1, Some(2)).unwrap();
+
+    plan.wal_append_offset = 256 - reserves.alloc_begin_len - reserves.link_reserve;
+    let next_region =
+        append_recovery_wal_rotation_start::<256, 4, _, 8>(&mut flash, &mut workspace, &mut plan)
+            .unwrap();
+    assert_eq!(next_region, 1);
+    assert_eq!(plan.wal_append_offset, 256 - reserves.link_reserve);
+    assert_eq!(plan.ready_region, Some(1));
+
+    let mut too_much_room = startup_plan_with_append_offset::<4>(
+        metadata,
+        0,
+        0,
+        256 - reserves.alloc_begin_len - reserves.rotation_reserve,
+    );
+    assert!(matches!(
+        append_recovery_wal_rotation_start::<256, 4, _, 8>(
+            &mut flash,
+            &mut workspace,
+            &mut too_much_room,
+        ),
+        Err(StartupError::InvalidWalRotationWindow { .. })
+    ));
+
+    let mut too_little_room = startup_plan_with_append_offset::<4>(
+        metadata,
+        0,
+        0,
+        256 - reserves.alloc_begin_len - reserves.link_reserve + 1,
+    );
+    assert!(matches!(
+        append_recovery_wal_rotation_start::<256, 4, _, 8>(
+            &mut flash,
+            &mut workspace,
+            &mut too_little_room,
+        ),
+        Err(StartupError::InvalidWalRotationWindow { .. })
+    ));
+}
+
+//= spec/ring/04-wal-records.md#wal-record-types
+//= type=test
+//# `RING-WAL-ENC-011` Let `wal_link_reserve` be the aligned encoded
+#[test]
+fn requirement_recovery_rotation_bridges_large_windows_before_rotating() {
+    const REGION_SIZE: usize = 512;
+
+    let mut flash = MockFlash::<REGION_SIZE, 4, 256>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
+    let mut plan = startup_plan_with_append_offset::<4>(metadata, 0, 0, 0);
+    let reserves =
+        recovery_rotation_reserves::<REGION_SIZE, 4, 8>(&mut workspace, &mut plan, 1, Some(2))
+            .unwrap();
+    let recovery_len = encoded_len_for_record::<REGION_SIZE>(metadata, WalRecord::WalRecovery);
+    let bridge_len = usize::try_from(metadata.wal_write_granule).unwrap() + recovery_len;
+    let wal_offset = metadata.wal_record_area_offset().unwrap();
+    let bridge_offset = (wal_offset..REGION_SIZE)
+        .find(|candidate| {
+            let Some(after_alloc) = candidate.checked_add(reserves.alloc_begin_len) else {
+                return false;
+            };
+            let Some(after_bridge) = candidate.checked_add(bridge_len) else {
+                return false;
+            };
+            if after_alloc > REGION_SIZE || after_bridge > REGION_SIZE {
+                return false;
+            }
+            let remaining_after = REGION_SIZE - after_alloc;
+            remaining_after >= reserves.rotation_reserve
+                && remaining_after
+                    .checked_sub(bridge_len)
+                    .is_some_and(|after| {
+                        after >= reserves.link_reserve && after < reserves.rotation_reserve
+                    })
+        })
+        .expect("bridgeable WAL rotation window");
+    plan.wal_append_offset = bridge_offset;
+
+    rotate_recovery_wal_tail::<REGION_SIZE, 4, _, 8>(&mut flash, &mut workspace, &mut plan)
+        .unwrap();
+
+    assert_eq!(plan.wal_tail, 1);
+    assert_eq!(
+        plan.wal_append_offset,
+        metadata.wal_record_area_offset().unwrap()
+    );
+    assert_eq!(plan.max_seen_sequence, 1);
+    assert!(!plan.pending_wal_recovery_boundary);
+}
+
+//= spec/ring/04-wal-records.md#wal-record-types
+//= type=test
+//# `RING-WAL-VALID-014` The
+#[test]
+fn requirement_recovery_rotation_rejects_windows_too_small_for_the_link() {
+    let mut flash = MockFlash::<256, 4, 128>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    let mut workspace = StorageWorkspace::<256>::new();
+    let mut plan = startup_plan_with_append_offset::<4>(metadata, 0, 0, 0);
+    let reserves =
+        recovery_rotation_reserves::<256, 4, 8>(&mut workspace, &mut plan, 1, Some(2)).unwrap();
+    plan.wal_append_offset = 256 - reserves.alloc_begin_len - reserves.link_reserve + 1;
+
+    assert!(matches!(
+        rotate_recovery_wal_tail::<256, 4, _, 8>(&mut flash, &mut workspace, &mut plan),
+        Err(StartupError::InvalidWalRotationWindow { .. })
+    ));
+}
+
+//= spec/ring/04-wal-records.md#wal-record-types
+//= type=test
+//# `RING-WAL-ENC-012` Let `wal_rotation_reserve` be the total aligned
+#[test]
+fn requirement_append_recovery_record_room_rotates_when_tail_lacks_reserve() {
+    const REGION_SIZE: usize = 512;
+
+    let mut flash = MockFlash::<REGION_SIZE, 4, 256>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
+    let mut plan = startup_plan_with_append_offset::<4>(metadata, 0, 0, 0);
+    let reserves =
+        recovery_rotation_reserves::<REGION_SIZE, 4, 8>(&mut workspace, &mut plan, 1, Some(2))
+            .unwrap();
+    let record = crate::test_rollback_transaction_record(CollectionId(7));
+    let record_len = encoded_len_for_record::<REGION_SIZE>(metadata, record);
+    let wal_offset = metadata.wal_record_area_offset().unwrap();
+    let rotation_offset = (wal_offset..REGION_SIZE)
+        .find(|candidate| {
+            let Some(after_alloc) = candidate.checked_add(reserves.alloc_begin_len) else {
+                return false;
+            };
+            let Some(after_record) = candidate.checked_add(record_len) else {
+                return false;
+            };
+            if after_alloc > REGION_SIZE || after_record > REGION_SIZE {
+                return false;
+            }
+            let remaining_after_alloc = REGION_SIZE - after_alloc;
+            let remaining_after_record = REGION_SIZE - after_record;
+            remaining_after_alloc >= reserves.link_reserve
+                && remaining_after_alloc < reserves.rotation_reserve
+                && remaining_after_record < reserves.rotation_reserve
+        })
+        .expect("rotation window for recovery record");
+    plan.wal_append_offset = rotation_offset;
+
+    append_recovery_record_room_with_rotation::<REGION_SIZE, 4, _, 8>(
+        &mut flash,
+        &mut workspace,
+        &mut plan,
+        record,
+    )
+    .unwrap();
+
+    assert_eq!(plan.wal_tail, 1);
+    assert_eq!(
+        plan.wal_append_offset,
+        metadata.wal_record_area_offset().unwrap()
+    );
+}
+
+//= spec/ring/04-wal-records.md#wal-record-types
+//= type=test
+//# `RING-WAL-PAYLOAD-008` `wal_recovery`
+#[test]
+fn requirement_recovery_gap_bridge_writes_invalid_boundary_then_wal_recovery() {
+    let mut flash = MockFlash::<128, 4, 128>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    let mut workspace = StorageWorkspace::<128>::new();
+    let recovery_len = encoded_len_for_record::<128>(metadata, WalRecord::WalRecovery);
+    let granule = usize::try_from(metadata.wal_write_granule).unwrap();
+    let bridge_offset = 128 - granule - recovery_len;
+    let mut plan = startup_plan_with_append_offset::<4>(metadata, 0, 0, bridge_offset);
+
+    bridge_recovery_wal_rotation_gap::<128, 4, _, 8>(&mut flash, &mut workspace, &mut plan)
+        .unwrap();
+
+    let invalid_byte =
+        first_invalid_wal_boundary_byte(metadata.erased_byte, metadata.wal_record_magic);
+    assert_eq!(plan.wal_append_offset, 128);
+    assert!(plan.pending_wal_recovery_boundary);
+    assert_eq!(flash.region_bytes(0).unwrap()[bridge_offset], invalid_byte);
+    assert_eq!(
+        flash.region_bytes(0).unwrap()[bridge_offset + granule],
+        metadata.wal_record_magic
+    );
+}
+
+//= spec/ring/04-wal-records.md#wal-record-types
+//= type=test
+//# `RING-WAL-ENC-007` Every WAL record start offset within a private
+#[test]
+fn requirement_recovery_gap_bridge_rejects_zero_granule_and_tail_overflow() {
+    let mut flash = MockFlash::<128, 4, 128>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    let mut workspace = StorageWorkspace::<128>::new();
+    let recovery_len = encoded_len_for_record::<128>(metadata, WalRecord::WalRecovery);
+    let granule = usize::try_from(metadata.wal_write_granule).unwrap();
+    let mut overflow_plan =
+        startup_plan_with_append_offset::<4>(metadata, 0, 0, 128 - granule - recovery_len + 1);
+    assert_eq!(
+        bridge_recovery_wal_rotation_gap::<128, 4, _, 8>(
+            &mut flash,
+            &mut workspace,
+            &mut overflow_plan,
+        ),
+        Err(StartupError::LengthOverflow)
+    );
+
+    let mut zero_granule_metadata = metadata;
+    zero_granule_metadata.wal_write_granule = 0;
+    let wal_offset = metadata.wal_record_area_offset().unwrap();
+    let mut zero_granule_plan =
+        startup_plan_with_append_offset::<4>(zero_granule_metadata, 0, 0, wal_offset);
+    assert_eq!(
+        bridge_recovery_wal_rotation_gap::<128, 4, _, 8>(
+            &mut flash,
+            &mut workspace,
+            &mut zero_granule_plan,
+        ),
+        Err(StartupError::LengthOverflow)
+    );
+}
+
+//= spec/ring/04-wal-records.md#wal-record-types
+//= type=test
+//# `RING-WAL-ENC-002` `record_magic` MUST equal the storage's configured
+#[test]
+fn requirement_first_invalid_wal_boundary_byte_avoids_erased_and_magic_values() {
+    assert_eq!(first_invalid_wal_boundary_byte(0, 1), 2);
+    assert_ne!(first_invalid_wal_boundary_byte(0xff, 0xa5), 0xff);
+    assert_ne!(first_invalid_wal_boundary_byte(0xff, 0xa5), 0xa5);
+}
+
+//= spec/ring/07-reclaim.md#free-region
+//= type=test
+//# `RING-FREE-REGION-001` Establish `region_index` as a free-tail
+#[test]
+fn requirement_startup_free_pointer_footer_helpers_validate_written_and_decoded_state() {
+    let mut flash = MockFlash::<64, 4, 64>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+
+    assert_eq!(
+        ensure_free_pointer_footer_unwritten_startup::<64, _>(&mut flash, metadata, 1),
+        Err(StartupError::FreeRegionFooterNotUnwritten { region_index: 1 })
+    );
+    assert_eq!(
+        read_free_pointer_successor_startup::<64, 4, _>(&mut flash, metadata, 1),
+        Ok(Some(2))
+    );
+}
+
+//= spec/ring/04-wal-records.md#wal-record-types
+//= type=test
+//# `RING-WAL-VALID-033` Transaction-log records after a frozen
+#[test]
+fn requirement_empty_transaction_replay_interval_does_not_read_past_end_offset() {
+    let mut flash = MockFlash::<128, 4, 64>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    let mut workspace = StorageWorkspace::<128>::new();
+    let mut plan = startup_plan_with_append_offset::<4>(metadata, 0, 0, 128);
+
+    replay_transaction_region_interval::<128, _, 4, 8>(
+        &mut flash,
+        &mut workspace,
+        &mut plan,
+        0,
+        128,
+        128,
+        TransactionReplayMode::ApplyFullInterval,
+    )
+    .unwrap();
+}
+
+//= spec/ring/06-startup-replay.md#startup-replay-algorithm
+//= type=test
+//# `RING-STARTUP-015` On `free_region(collection_id, region_index)`:
+#[test]
+fn requirement_open_replay_allocator_record_applies_free_regions() {
+    let mut flash = MockFlash::<128, 4, 64>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    let wal_offset = metadata.wal_record_area_offset().unwrap();
+    let mut plan = startup_plan_with_append_offset::<4>(metadata, 0, 0, wal_offset);
+    plan.last_free_list_head = None;
+
+    apply_open_replay_allocator_record(
+        &mut plan,
+        WalRecord::FreeRegion {
+            collection_id: CollectionId(7),
+            region_index: 1,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(plan.last_free_list_head, Some(1));
+}
+
+//= spec/ring/06-startup-replay.md#startup-replay-algorithm
+//= type=test
+//# `RING-STARTUP-011` On
+#[test]
+fn requirement_user_alloc_begin_does_not_conflict_with_reserved_wal_ready_region() {
+    let mut collections = heapless::Vec::<StartupCollection, 8>::new();
+    let metadata = StorageMetadata {
+        storage_version: crate::STORAGE_VERSION,
+        region_size: 128,
+        region_count: 4,
+        min_free_regions: 1,
+        transaction_log_count: 0,
+        wal_write_granule: 8,
+        erased_byte: 0xff,
+        wal_record_magic: 0xa5,
+    };
+    let mut last_free_list_head = Some(2);
+    let mut ready_region = Some(1);
+
+    apply_wal_record(
+        metadata,
+        WalRecord::AllocBegin {
+            collection_id: CollectionId(7),
+            region_index: 2,
+            allocation_sequence: 0,
+            free_list_head_after: Some(3),
+        },
+        &mut collections,
+        &mut last_free_list_head,
+        &mut ready_region,
+    )
+    .unwrap();
+
+    assert_eq!(last_free_list_head, Some(3));
+    assert_eq!(ready_region, Some(1));
+}
+
+//= spec/ring/05-disk-format.md#free-pointer-footer
+//= type=test
+//# `RING-FREE-006` While a region is allocated for live use, the bytes
+#[test]
+fn requirement_free_list_head_discovery_ignores_footers_in_non_free_regions() {
+    let mut flash = MockFlash::<64, 4, 128>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    init_user_region_header(&mut flash, 2, 9, CollectionId(7), MAP_REGION_V2_FORMAT);
+    write_free_pointer_footer(&mut flash, 2, Some(1));
+
+    assert_eq!(
+        discover_free_list_head_from_footers(&mut flash, metadata).unwrap(),
+        Some(1)
+    );
 }
 
 //= spec/ring/06-startup-replay.md#startup-replay-algorithm

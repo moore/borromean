@@ -454,6 +454,47 @@ fn refresh_record_crc<
     }
 }
 
+fn free_list_chain<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize>(
+    flash: &MockFlash<REGION_SIZE, REGION_COUNT, MAX_LOG>,
+    erased_byte: u8,
+    head: Option<u32>,
+) -> std::vec::Vec<u32> {
+    let mut chain = std::vec::Vec::new();
+    let mut current = head;
+    let footer_offset = REGION_SIZE - FreePointerFooter::ENCODED_LEN;
+    while let Some(region_index) = current {
+        assert!(chain.len() <= REGION_COUNT);
+        chain.push(region_index);
+        let region = flash.region_bytes(region_index).unwrap();
+        let footer = FreePointerFooter::decode(&region[footer_offset..], erased_byte).unwrap();
+        current = footer.next_tail;
+    }
+    chain
+}
+
+fn write_aux_next_link_for_test<
+    IO: FlashIo,
+    const REGION_SIZE: usize,
+    const REGION_COUNT: usize,
+    const MAX_COLLECTIONS: usize,
+>(
+    storage: &mut Storage<'_, '_, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
+    geometry: AuxGeometry,
+    from: AuxRegionPointer,
+    to: AuxRegionPointer,
+) {
+    let mut link = std::vec![storage.metadata().erased_byte; geometry.next_link_len];
+    encode_aux_next_link(to, &mut link).unwrap();
+    storage
+        .backing
+        .write_region(
+            from.region_index,
+            Header::ENCODED_LEN + geometry.next_link_offset,
+            &link,
+        )
+        .unwrap();
+}
+
 //= spec/object-log.md#durability
 //= type=test
 //# `RING-OBJECT-025` Object-log durable state MUST be canonical and
@@ -485,6 +526,7 @@ fn requirement_object_log_durable_state_is_canonical_and_self_delimiting() {
 fn requirement_object_log_append_placement_preserves_handles_and_progress() {
     check_object_log_exact_fit_capacity_boundaries_are_stable();
     check_object_log_direct_inline_append_routing_does_not_start_transactions();
+    check_object_log_generated_record_accepts_exact_empty_region_capacity();
     check_object_log_large_append_rejects_zero_chunk_capacity_frontier();
     check_object_log_large_append_progresses_past_full_nonempty_frontier();
     check_object_log_empty_or_flushed_frontiers_are_not_materialized_again();
@@ -501,6 +543,7 @@ fn requirement_object_log_wal_replay_is_collection_scoped() {
     check_object_log_replay_filters_unrelated_collection_records();
     check_object_log_replay_new_collection_filters_collection_and_type();
     check_object_log_replay_ignores_unrelated_begin_and_commit_markers();
+    check_object_log_replay_uses_add_transaction_collection_markers();
     check_object_log_replay_filters_transaction_finished_markers();
     check_object_log_replay_filters_rollback_markers();
     check_object_log_replay_drop_clears_only_target_collection();
@@ -653,6 +696,11 @@ fn check_object_log_helper_boundaries_are_exact() {
     let mut chunk_record = [0u8; RECORD_HEADER_LEN + OBJECT_CHUNK_FIXED_BODY_LEN + 3];
     let chunk_record_len = encode_chunk_record(11, b"abc", &mut chunk_record).unwrap();
     assert_eq!(chunk_record_len, chunk_record.len());
+    let mut oversized_chunk_record = [0u8; RECORD_HEADER_LEN + OBJECT_CHUNK_FIXED_BODY_LEN + 4];
+    assert_eq!(
+        encode_chunk_record(11, b"abc", &mut oversized_chunk_record).unwrap(),
+        chunk_record.len()
+    );
     let chunk_body = &chunk_record[RECORD_HEADER_LEN..];
     validate_record_body_shape(RECORD_OBJECT_CHUNK, chunk_body).unwrap();
     let mut zero_chunk_record = [0u8; RECORD_HEADER_LEN + OBJECT_CHUNK_FIXED_BODY_LEN];
@@ -731,6 +779,243 @@ fn check_object_log_helper_boundaries_are_exact() {
     assert!(matches!(
         checked_object_read_range_u64(u64::MAX, u64::MAX, 1, 1),
         Err(ObjectLogError::LengthOverflow)
+    ));
+
+    let tail_metadata = StorageMetadata::new(512, 8, 1, 8, 0xff, 0xa5).unwrap();
+    let tail_payload_capacity = committed_payload_capacity::<512>(tail_metadata).unwrap();
+    assert_eq!(
+        tail_chunk_body_capacity(tail_payload_capacity, LOG_METADATA.len()).unwrap(),
+        empty_region_record_capacity(tail_payload_capacity, LOG_METADATA.len()).unwrap()
+            - RECORD_HEADER_LEN
+            - OBJECT_CHUNK_FIXED_BODY_LEN
+    );
+
+    let narrow_metadata = StorageMetadata::new(96, 8, 1, 1, 0xff, 0xa5).unwrap();
+    assert!(matches!(
+        aux_geometry::<96>(narrow_metadata, 1),
+        Err(ObjectLogError::ObjectTooLarge {
+            len,
+            capacity
+        }) if len == AUX_PROLOGUE_PREFIX_LEN + 1 + AUX_PROLOGUE_CRC_LEN + AUX_LINK_PRESENT_LEN
+            && capacity == committed_payload_capacity::<96>(narrow_metadata).unwrap()
+    ));
+
+    let geometry = aux_geometry::<512>(tail_metadata, LOG_METADATA.len()).unwrap();
+    let mut aux_payload = std::vec![0u8; geometry.payload_capacity];
+    let mut exact_prologue = std::vec![0u8; geometry.prologue_len];
+    encode_aux_prologue(geometry, LOG_METADATA, &mut exact_prologue).unwrap();
+    let mut short_prologue = std::vec![0u8; geometry.prologue_len - 1];
+    assert!(matches!(
+        encode_aux_prologue(geometry, LOG_METADATA, &mut short_prologue),
+        Err(ObjectLogError::BufferTooSmall { .. })
+    ));
+    aux_payload[..geometry.prologue_len].copy_from_slice(&exact_prologue);
+    decode_aux_prologue(
+        &aux_payload[..geometry.prologue_len],
+        geometry,
+        LOG_METADATA,
+    )
+    .unwrap();
+    decode_aux_prologue(&aux_payload, geometry, LOG_METADATA).unwrap();
+    assert!(matches!(
+        decode_aux_prologue(
+            &aux_payload[..geometry.prologue_len - 1],
+            geometry,
+            LOG_METADATA
+        ),
+        Err(ObjectLogError::InvalidFrame)
+    ));
+
+    let slot_geometry = AuxGeometry {
+        payload_capacity: 32,
+        prologue_len: 0,
+        chunk_slot_len: 32,
+        chunk_slot_count: 1,
+        chunk_logical_capacity: 8,
+        next_link_offset: 32,
+        next_link_len: 0,
+    };
+    let mut slot_payload = std::vec![0u8; slot_geometry.payload_capacity];
+    let chunk = std::vec![0x5au8; slot_geometry.chunk_logical_capacity];
+    encode_aux_chunk_slot(&mut slot_payload, slot_geometry, 0, 0, &chunk).unwrap();
+    assert!(matches!(
+        encode_aux_chunk_slot(
+            &mut slot_payload,
+            slot_geometry,
+            slot_geometry.chunk_slot_count,
+            0,
+            &chunk,
+        ),
+        Err(ObjectLogError::InvalidFrame)
+    ));
+    let oversized_chunk = std::vec![0x5bu8; slot_geometry.chunk_logical_capacity + 1];
+    assert!(matches!(
+        encode_aux_chunk_slot(&mut slot_payload, slot_geometry, 0, 0, &oversized_chunk),
+        Err(ObjectLogError::InvalidFrame)
+    ));
+
+    let slot_start = slot_geometry.prologue_len;
+    let slot_len_offset = slot_start + size_of::<u8>() + size_of::<u64>();
+    let slot_crc_offset = slot_len_offset + size_of::<u32>();
+    let slot_body_offset = slot_crc_offset + size_of::<u32>();
+    let mut zero_len_slot = slot_payload.clone();
+    write_u32_at(&mut zero_len_slot, slot_len_offset, 0);
+    write_u32_at(&mut zero_len_slot, slot_crc_offset, crc32(&[]));
+    zero_len_slot[slot_body_offset..slot_start + slot_geometry.chunk_slot_len].fill(0);
+    assert!(matches!(
+        decode_aux_chunk_slot(&zero_len_slot, slot_geometry, 0),
+        Err(ObjectLogError::InvalidFrame)
+    ));
+    let mut oversized_slot = slot_payload.clone();
+    write_u32_at(
+        &mut oversized_slot,
+        slot_len_offset,
+        u32::try_from(oversized_chunk.len()).unwrap(),
+    );
+    write_u32_at(
+        &mut oversized_slot,
+        slot_crc_offset,
+        crc32(&oversized_chunk),
+    );
+    oversized_slot[slot_body_offset..slot_body_offset + oversized_chunk.len()]
+        .copy_from_slice(&oversized_chunk);
+    oversized_slot
+        [slot_body_offset + oversized_chunk.len()..slot_start + slot_geometry.chunk_slot_len]
+        .fill(0);
+    assert!(matches!(
+        decode_aux_chunk_slot(&oversized_slot, slot_geometry, 0),
+        Err(ObjectLogError::InvalidFrame)
+    ));
+
+    let next = AuxRegionPointer { region_index: 7 };
+    let mut exact_link = [0u8; AUX_LINK_PRESENT_LEN];
+    assert_eq!(
+        encode_aux_next_link(next, &mut exact_link).unwrap(),
+        AUX_LINK_PRESENT_LEN
+    );
+    assert_eq!(
+        decode_aux_next_link(&exact_link, 0xff)
+            .unwrap()
+            .unwrap()
+            .region_index,
+        next.region_index
+    );
+    let mut short_link = [0u8; AUX_LINK_PRESENT_LEN - 1];
+    assert!(matches!(
+        encode_aux_next_link(next, &mut short_link),
+        Err(ObjectLogError::BufferTooSmall { .. })
+    ));
+    assert!(matches!(
+        decode_aux_next_link(&exact_link[..AUX_LINK_PRESENT_LEN - 1], 0xff),
+        Err(ObjectLogError::InvalidFrame)
+    ));
+
+    const LINK_REGION_SIZE: usize = 64;
+    const LINK_REGION_COUNT: usize = 4;
+    let mut link_flash = MockFlash::<LINK_REGION_SIZE, LINK_REGION_COUNT, 1024>::new(0xff);
+    let mut link_storage = Storage::<_, LINK_REGION_SIZE, LINK_REGION_COUNT>::format(
+        &mut link_flash,
+        StorageFormatConfig::new(1, 1, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
+    let mut link_memory = ObjectLogMemory::<LINK_REGION_SIZE, 1, 8>::new();
+    let mut link_log = ObjectLog {
+        collection_id: CollectionId::new(3),
+        memory: &mut link_memory,
+    };
+    let exact_scratch_geometry = AuxGeometry {
+        payload_capacity: 0,
+        prologue_len: 0,
+        chunk_slot_len: 0,
+        chunk_slot_count: 0,
+        chunk_logical_capacity: 0,
+        next_link_offset: 0,
+        next_link_len: LINK_REGION_SIZE,
+    };
+    assert!(matches!(
+        link_log.write_aux_next_link(
+            &mut link_storage,
+            exact_scratch_geometry,
+            AuxRegionPointer { region_index: 1 },
+            next,
+        ),
+        Err(ObjectLogError::Storage(_))
+    ));
+
+    let mut copied = 0usize;
+    let mut too_short = [0u8; 3];
+    assert!(matches!(
+        copy_chunk_intersection(0, b"abcd", 0, 4, &mut too_short, &mut copied),
+        Err(ObjectLogError::InvalidFrame)
+    ));
+
+    let mut tail_memory = ObjectLogMemory::<512, 1, 8>::new();
+    let tail_log = ObjectLog {
+        collection_id: CollectionId::new(9),
+        memory: &mut tail_memory,
+    };
+    let chunk_offset = Header::ENCODED_LEN as u32;
+    let mut oversized_tail_record = [0u8; RECORD_HEADER_LEN + OBJECT_CHUNK_FIXED_BODY_LEN + 4];
+    encode_chunk_record(0, b"abcd", &mut oversized_tail_record).unwrap();
+    tail_log.memory.frontier_payload[..oversized_tail_record.len()]
+        .copy_from_slice(&oversized_tail_record);
+    tail_log
+        .memory
+        .regions
+        .push(ObjectLogRegion {
+            region_index: 1,
+            sequence: 0,
+            start_offset: chunk_offset,
+            end_offset: chunk_offset + oversized_tail_record.len() as u32,
+            committed_end_offset: chunk_offset + oversized_tail_record.len() as u32,
+            first_committed_public_offset: None,
+            first_planned_public_offset: None,
+            flushed: false,
+        })
+        .unwrap();
+    let mut tail_flash = MockFlash::<512, 4, 1024>::new(0xff);
+    let mut tail_storage = Storage::<_, 512, 4>::format(
+        &mut tail_flash,
+        StorageFormatConfig::new(1, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
+    let mut tail_scratch = [0u8; 3];
+    let mut tail_copied = 0usize;
+    let mut copy = LargeCopyWindow {
+        object_offset: 0,
+        requested_end: 3,
+        scratch: &mut tail_scratch,
+        copied: &mut tail_copied,
+    };
+    assert!(matches!(
+        tail_log.copy_tail_chunk_range(
+            &mut tail_storage,
+            TailChunkReadPlan {
+                large_handle: ObjectLogHandle::new(1, 0, chunk_offset),
+                entry_record: ObjectLogRecordInfo {
+                    record_type: RECORD_LARGE_RECORD_ENTRY,
+                    body_len: LARGE_RECORD_ENTRY_BODY_LEN,
+                    body_crc32c: 0,
+                    body_start: 0,
+                    record_end: chunk_offset,
+                },
+                tail_start: 0,
+                total_object_len: 3,
+            },
+            &mut copy,
+        ),
+        Err(ObjectLogError::InvalidFrame)
+    ));
+
+    let mut regions = Vec::<u32, 1>::new();
+    push_unique_region_index(&mut regions, 7).unwrap();
+    push_unique_region_index(&mut regions, 7).unwrap();
+    assert_eq!(regions.as_slice(), &[7]);
+    assert!(matches!(
+        push_unique_region_index(&mut regions, 8),
+        Err(ObjectLogError::TooManyRegions)
     ));
 }
 
@@ -938,6 +1223,21 @@ fn check_object_log_state_application_validates_exact_edges() {
         truncate_log.apply_truncate_before(invalid_public, retained, &mut freed),
         Err(ObjectLogError::InvalidHandle)
     ));
+
+    let mut truncate_memory = ObjectLogMemory::<512, 4, 16>::new();
+    let mut truncate_log = ObjectLog {
+        collection_id: CollectionId::new(4),
+        memory: &mut truncate_memory,
+    };
+    truncate_log.apply_log_metadata(LOG_METADATA).unwrap();
+    truncate_log.memory.regions.push(retained_region).unwrap();
+    truncate_log.memory.regions.push(public_region).unwrap();
+    freed.clear();
+    assert!(matches!(
+        truncate_log.apply_truncate_before(retained, public, &mut freed),
+        Err(ObjectLogError::InvalidHandle)
+    ));
+    assert!(freed.is_empty());
 }
 
 fn check_object_log_exact_fit_capacity_boundaries_are_stable() {
@@ -1065,6 +1365,134 @@ fn check_object_log_direct_inline_append_routing_does_not_start_transactions() {
         count_wal_records(&mut storage, WalRecordType::BeginTransaction),
         begin_before
     );
+
+    const SMALL_REGION_SIZE: usize = 512;
+    const SMALL_REGION_COUNT: usize = 16;
+    let log_metadata = [0x42u8; 399];
+    let mut flash = MockFlash::<SMALL_REGION_SIZE, SMALL_REGION_COUNT, 8192>::new(0xff);
+    let mut storage = Storage::<_, SMALL_REGION_SIZE, SMALL_REGION_COUNT>::format(
+        &mut flash,
+        StorageFormatConfig::new(2, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
+    let payload_capacity =
+        committed_payload_capacity::<SMALL_REGION_SIZE>(storage.metadata()).unwrap();
+    assert!(aux_geometry::<SMALL_REGION_SIZE>(storage.metadata(), log_metadata.len()).is_err());
+    let exact_inline_len = empty_region_record_capacity(payload_capacity, log_metadata.len())
+        .unwrap()
+        - RECORD_HEADER_LEN;
+    let mut memory = ObjectLogMemory::<SMALL_REGION_SIZE, 4, 416>::new();
+    let collection_id = CollectionId::new(7);
+    storage
+        .append_new_collection(collection_id, CollectionType::OBJECT_LOG_CODE)
+        .unwrap();
+    let mut log = ObjectLog {
+        collection_id,
+        memory: &mut memory,
+    };
+    log.apply_log_metadata(&log_metadata).unwrap();
+    log.install_reserved_frontier(ReservedObjectLogRegion {
+        region_index: 3,
+        sequence: 0,
+    })
+    .unwrap();
+    let begin_before = count_wal_records(&mut storage, WalRecordType::BeginTransaction);
+    let exact = std::vec![0x6cu8; exact_inline_len];
+    let handle = log
+        .append_inner(&mut storage, &exact, &mut [0u8; SMALL_REGION_SIZE])
+        .unwrap();
+    let (_, record) = record_info_for(&log, &mut storage, handle);
+    assert_eq!(record.record_type, RECORD_INLINE_OBJECT);
+    assert_eq!(
+        usize::try_from(record.record_end - handle.offset).unwrap(),
+        empty_region_record_capacity(payload_capacity, log_metadata.len()).unwrap()
+    );
+    assert_eq!(
+        count_wal_records(&mut storage, WalRecordType::BeginTransaction),
+        begin_before
+    );
+}
+
+fn check_object_log_generated_record_accepts_exact_empty_region_capacity() {
+    const REGION_SIZE: usize = 512;
+    const REGION_COUNT: usize = 16;
+
+    let log_metadata = [0x42u8; 399];
+    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 8192>::new(0xff);
+    let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT>::format(
+        &mut flash,
+        StorageFormatConfig::new(2, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
+    let payload_capacity = committed_payload_capacity::<REGION_SIZE>(storage.metadata()).unwrap();
+    let record_capacity =
+        empty_region_record_capacity(payload_capacity, log_metadata.len()).unwrap();
+    let body = std::vec![0x2au8; record_capacity - RECORD_HEADER_LEN];
+    let mut memory = ObjectLogMemory::<REGION_SIZE, 4, 416>::new();
+    let collection_id = CollectionId::new(7);
+    storage
+        .append_new_collection(collection_id, CollectionType::OBJECT_LOG_CODE)
+        .unwrap();
+    let mut log = ObjectLog {
+        collection_id,
+        memory: &mut memory,
+    };
+    log.apply_log_metadata(&log_metadata).unwrap();
+    storage
+        .memory
+        .state
+        .begin_collection_transaction::<REGION_SIZE, REGION_COUNT, _>(
+            storage.backing,
+            &mut storage.memory.workspace,
+            log.collection_id,
+        )
+        .unwrap();
+    let mut allocated_regions = Vec::<u32, REGION_COUNT>::new();
+    let handle = log
+        .append_generated_record_transactional(
+            &mut storage,
+            record_capacity,
+            &mut allocated_regions,
+            |_handle, output| {
+                let used = encode_inline_record(&body, output)?;
+                Ok(EncodedRecordUpdate {
+                    used,
+                    record_start: 0,
+                })
+            },
+        )
+        .unwrap();
+
+    storage
+        .memory
+        .state
+        .commit_collection_transaction::<REGION_SIZE, REGION_COUNT, _>(
+            storage.backing,
+            &mut storage.memory.workspace,
+            log.collection_id,
+        )
+        .unwrap();
+    log.commit_staged_appends();
+    log.clear_append_checkpoint();
+    storage
+        .memory
+        .state
+        .finish_collection_transaction::<REGION_SIZE, REGION_COUNT, _>(
+            storage.backing,
+            &mut storage.memory.workspace,
+            log.collection_id,
+        )
+        .unwrap();
+    let (_, record) = record_info_for(&log, &mut storage, handle);
+    assert_eq!(record.record_type, RECORD_INLINE_OBJECT);
+    assert_eq!(
+        usize::try_from(record.record_end - handle.offset).unwrap(),
+        record_capacity
+    );
+    let mut scratch = std::vec![0u8; body.len()];
+    assert_get_bytes(&log, &mut storage, handle, &body, &mut scratch);
 }
 
 fn check_object_log_large_append_rejects_zero_chunk_capacity_frontier() {
@@ -1382,6 +1810,66 @@ fn check_object_log_replay_ignores_unrelated_begin_and_commit_markers() {
     assert_no_replayed_inline_object(&mut storage, &mut memory, target_id, handle);
 }
 
+fn check_object_log_replay_uses_add_transaction_collection_markers() {
+    const REGION_SIZE: usize = 512;
+    const REGION_COUNT: usize = 8;
+
+    let target_id = CollectionId::new(7);
+    let other_id = CollectionId::new(8);
+    let metadata = b"target";
+    let handle = raw_inline_handle(metadata);
+
+    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 4096>::new(0xff);
+    let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT>::format(
+        &mut flash,
+        StorageFormatConfig::new(2, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
+    append_raw_log_metadata_update(&mut storage, target_id, metadata);
+    storage
+        .append_raw_wal_record_for_test(crate::test_begin_transaction_record(other_id))
+        .unwrap();
+    storage
+        .append_raw_wal_record_for_test(WalRecord::AddTransactionCollection {
+            collection_id: target_id,
+            observed_collection_generation: 0,
+        })
+        .unwrap();
+    append_raw_inline_update(&mut storage, target_id, handle, b"eta");
+    storage
+        .append_raw_wal_record_for_test(crate::test_rollback_transaction_record(other_id))
+        .unwrap();
+    let mut memory = ObjectLogMemory::<REGION_SIZE, 4, 16>::new();
+    replay_into_memory(&mut storage, target_id, &mut memory).unwrap();
+    assert_no_replayed_inline_object(&mut storage, &mut memory, target_id, handle);
+
+    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 4096>::new(0xff);
+    let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT>::format(
+        &mut flash,
+        StorageFormatConfig::new(2, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
+    append_raw_log_metadata_update(&mut storage, target_id, metadata);
+    storage
+        .append_raw_wal_record_for_test(crate::test_begin_transaction_record(other_id))
+        .unwrap();
+    storage
+        .append_raw_wal_record_for_test(WalRecord::AddTransactionCollection {
+            collection_id: other_id,
+            observed_collection_generation: 0,
+        })
+        .unwrap();
+    append_raw_inline_update(&mut storage, target_id, handle, b"theta");
+    storage
+        .append_raw_wal_record_for_test(crate::test_rollback_transaction_record(other_id))
+        .unwrap();
+    let mut memory = ObjectLogMemory::<REGION_SIZE, 4, 16>::new();
+    replay_into_memory(&mut storage, target_id, &mut memory).unwrap();
+    assert_replayed_inline_object(&mut storage, &mut memory, target_id, handle, b"theta");
+}
+
 fn check_object_log_replay_filters_transaction_finished_markers() {
     const REGION_SIZE: usize = 512;
     const REGION_COUNT: usize = 8;
@@ -1620,7 +2108,7 @@ fn requirement_object_log_range_reads_return_requested_subrange() {
 #[test]
 fn requirement_object_log_reports_object_len_and_full_read_buffer_size() {
     const REGION_SIZE: usize = 512;
-    const REGION_COUNT: usize = 8;
+    const REGION_COUNT: usize = 32;
     const OBJECT: &[u8] = b"abcdefghijklmnopqrstuvwxyz";
 
     let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 4096>::new(0xff);
@@ -1661,6 +2149,14 @@ fn requirement_object_log_reports_object_len_and_full_read_buffer_size() {
             available: 8
         }) if needed == OBJECT.len()
     ));
+
+    let geometry = log.aux_geometry(storage.metadata()).unwrap();
+    let large = patterned_vec(geometry.chunk_logical_capacity * geometry.chunk_slot_count);
+    let large_handle = append_with_scratch!(log, &mut storage, &large).unwrap();
+    assert_eq!(
+        log.get_object_len(&mut storage, large_handle).unwrap(),
+        large.len() as u64
+    );
 }
 
 fn check_object_log_reads_accept_exact_scratch_lengths() {
@@ -1790,6 +2286,44 @@ fn check_object_log_read_helpers_validate_exact_storage_scratch_boundaries() {
         REGION_SIZE,
     )
     .unwrap();
+    log.read_record_body_prefix_into_storage_scratch(
+        &mut storage,
+        flushed_region,
+        handle,
+        exact_record,
+        4,
+    )
+    .unwrap();
+    assert_eq!(&storage.memory.payload_scratch[..4], &pattern[..4]);
+
+    let mut frontier_memory = ObjectLogMemory::<REGION_SIZE, 4, 16>::new();
+    let frontier_log = ObjectLog {
+        collection_id: CollectionId::new(45),
+        memory: &mut frontier_memory,
+    };
+    for (index, byte) in frontier_log.memory.frontier_payload.iter_mut().enumerate() {
+        *byte = index as u8;
+    }
+    let frontier_region = ObjectLogRegion {
+        flushed: false,
+        ..flushed_region
+    };
+    let frontier_record = ObjectLogRecordInfo {
+        body_len: 8,
+        body_start: Header::ENCODED_LEN + 20,
+        record_end: Header::ENCODED_LEN as u32 + 28,
+        ..exact_record
+    };
+    frontier_log
+        .read_record_body_prefix_into_storage_scratch(
+            &mut storage,
+            frontier_region,
+            handle,
+            frontier_record,
+            4,
+        )
+        .unwrap();
+    assert_eq!(&storage.memory.payload_scratch[..4], &[20, 21, 22, 23]);
 
     let short_record = ObjectLogRecordInfo {
         body_len: 1,
@@ -1973,8 +2507,6 @@ fn requirement_object_log_large_truncation_frees_auxiliary_chains() {
     const REGION_SIZE: usize = 512;
     const REGION_COUNT: usize = 64;
 
-    let mut object = [0u8; 270];
-    fill_pattern(&mut object);
     let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 32768>::new(0xff);
     let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT>::format(
         &mut flash,
@@ -1984,26 +2516,39 @@ fn requirement_object_log_large_truncation_frees_auxiliary_chains() {
     .unwrap();
     let mut memory = ObjectLogMemory::<REGION_SIZE, 16, 16>::new();
     let mut log = ObjectLog::new(&mut storage, &mut memory, LOG_METADATA).unwrap();
-    let first = append_with_scratch!(log, &mut storage, b"before").unwrap();
-    log.flush(&mut storage).unwrap();
-    let large = append_with_scratch!(log, &mut storage, &object).unwrap();
-    let retained_start = large;
-    let (_, large_record) = record_info_for(&log, &mut storage, large);
-    assert_eq!(large_record.record_type, RECORD_LARGE_RECORD_ENTRY);
+    let geometry = log.aux_geometry(storage.metadata()).unwrap();
+    let aux_image_logical_len = geometry.chunk_logical_capacity * geometry.chunk_slot_count;
+    let obsolete = patterned_vec(aux_image_logical_len * 2 + 3);
+    let retained = patterned_vec(aux_image_logical_len);
+    let obsolete_handle = append_with_scratch!(log, &mut storage, &obsolete).unwrap();
+    let obsolete_entry = large_entry_for(&log, &mut storage, obsolete_handle);
+    let obsolete_second_aux = log
+        .read_aux_region_into_storage_scratch(&mut storage, geometry, obsolete_entry.first_aux)
+        .unwrap()
+        .unwrap();
+    let retained_handle = append_with_scratch!(log, &mut storage, &retained).unwrap();
+    let retained_entry = large_entry_for(&log, &mut storage, retained_handle);
+    let (_, retained_record) = record_info_for(&log, &mut storage, retained_handle);
+    assert_eq!(retained_record.record_type, RECORD_LARGE_RECORD_ENTRY);
     let previous_tail = storage.free_list_tail();
 
-    log.truncate_before(&mut storage, large).unwrap();
+    log.truncate_before(&mut storage, retained_handle).unwrap();
 
-    let mut scratch = [0u8; 270];
+    let mut scratch = std::vec![0u8; obsolete.len().max(retained.len())];
     assert!(matches!(
-        log.get(&mut storage, first, &mut scratch, |_| ()),
+        log.get(&mut storage, obsolete_handle, &mut scratch, |_| ()),
         Err(ObjectLogError::InvalidHandle)
     ));
-    assert_get_bytes(&log, &mut storage, large, &object, &mut scratch);
-    assert_eq!(log.first_handle(), Some(large));
+    assert_get_bytes(&log, &mut storage, retained_handle, &retained, &mut scratch);
+    assert_eq!(log.first_handle(), Some(retained_handle));
     assert_ne!(storage.free_list_tail(), previous_tail);
-    assert_eq!(storage.free_list_tail(), Some(first.region_index));
-    assert!(log.region_for_handle(retained_start).is_ok());
+    let erased_byte = storage.metadata().erased_byte;
+    let free_head = storage.last_free_list_head();
+    let chain = free_list_chain(&*storage.backing, erased_byte, free_head);
+    assert!(chain.contains(&obsolete_entry.first_aux.region_index));
+    assert!(chain.contains(&obsolete_second_aux.region_index));
+    assert!(!chain.contains(&retained_entry.first_aux.region_index));
+    assert!(log.region_for_handle(retained_handle).is_ok());
 }
 
 //= spec/object-log.md#durability
@@ -2433,6 +2978,13 @@ fn check_object_log_snapshot_decode_rejects_corrupt_region_metadata() {
     let mut snapshot = [0u8; 160];
     let used = encode_snapshot::<4, 16>(&regions, LOG_METADATA, &mut snapshot).unwrap();
     let mut memory = ObjectLogMemory::<REGION_SIZE, 4, 16>::new();
+    decode_snapshot::<REGION_SIZE, 4, 16>(&snapshot[..used], &mut memory).unwrap();
+
+    let mut interior_first = valid_region;
+    interior_first.first_committed_public_offset = Some(valid_region.start_offset + 1);
+    regions.clear();
+    regions.push(interior_first).unwrap();
+    let used = encode_snapshot::<4, 16>(&regions, LOG_METADATA, &mut snapshot).unwrap();
     decode_snapshot::<REGION_SIZE, 4, 16>(&snapshot[..used], &mut memory).unwrap();
 
     let mut corrupt = snapshot;
@@ -3405,6 +3957,31 @@ fn check_object_log_reads_validate_auxiliary_large_objects() {
         &object,
         &mut std::vec![0; object.len()],
     );
+    let mut empty_scratch = [];
+    log.copy_large_object_range(
+        &mut storage,
+        LargeReadRequest {
+            handle: ObjectLogHandle::new(u32::MAX, u64::MAX, u32::MAX),
+            entry_record: ObjectLogRecordInfo {
+                record_type: RECORD_LARGE_RECORD_ENTRY,
+                body_len: LARGE_RECORD_ENTRY_BODY_LEN,
+                body_crc32c: 0,
+                body_start: 0,
+                record_end: 0,
+            },
+            large_entry: LargeRecordEntryInfo {
+                total_object_len: 0,
+                tail_logical_len: 0,
+                first_aux: AuxRegionPointer {
+                    region_index: u32::MAX,
+                },
+            },
+            object_offset: 0,
+            len: 0,
+        },
+        &mut empty_scratch,
+    )
+    .unwrap();
 
     let original_first = *storage
         .backing
@@ -3419,6 +3996,76 @@ fn check_object_log_reads_validate_auxiliary_large_objects() {
     let chunk_start = first_slot + AUX_CHUNK_FIXED_LEN;
     let link_crc =
         Header::ENCODED_LEN + geometry.next_link_offset + size_of::<u8>() + AUX_POINTER_ENCODED_LEN;
+
+    write_aux_next_link_for_test(&mut storage, geometry, second_aux, first_aux);
+    let mut freed_aux_regions = Vec::<u32, REGION_COUNT>::new();
+    assert!(matches!(
+        log.collect_aux_chain_regions(&mut storage, entry, &mut freed_aux_regions),
+        Err(ObjectLogError::InvalidFrame)
+    ));
+    assert!(matches!(
+        log.get_range(
+            &mut storage,
+            handle,
+            0,
+            object.len() as u64,
+            &mut std::vec![0; object.len()],
+            |_| ()
+        ),
+        Err(ObjectLogError::InvalidFrame)
+    ));
+    storage
+        .backing
+        .write_region(second_aux.region_index, 0, &original_second)
+        .unwrap();
+
+    let mut wrong_collection_header =
+        Header::decode(&original_first[..Header::ENCODED_LEN]).unwrap();
+    wrong_collection_header.collection_id = CollectionId::new(log.collection_id().0 + 1);
+    let mut encoded_header = [0u8; Header::ENCODED_LEN];
+    wrong_collection_header
+        .encode_into(&mut encoded_header)
+        .unwrap();
+    storage
+        .backing
+        .write_region(first_aux.region_index, 0, &encoded_header)
+        .unwrap();
+    assert!(matches!(
+        log.get(
+            &mut storage,
+            handle,
+            &mut std::vec![0; object.len()],
+            |_| ()
+        ),
+        Err(ObjectLogError::InvalidFrame)
+    ));
+    storage
+        .backing
+        .write_region(first_aux.region_index, 0, &original_first)
+        .unwrap();
+
+    let mut wrong_format_header = Header::decode(&original_first[..Header::ENCODED_LEN]).unwrap();
+    wrong_format_header.collection_format = OBJECT_LOG_DATA_V1_FORMAT;
+    wrong_format_header
+        .encode_into(&mut encoded_header)
+        .unwrap();
+    storage
+        .backing
+        .write_region(first_aux.region_index, 0, &encoded_header)
+        .unwrap();
+    assert!(matches!(
+        log.get(
+            &mut storage,
+            handle,
+            &mut std::vec![0; object.len()],
+            |_| ()
+        ),
+        Err(ObjectLogError::InvalidFrame)
+    ));
+    storage
+        .backing
+        .write_region(first_aux.region_index, 0, &original_first)
+        .unwrap();
 
     storage
         .backing
@@ -3516,6 +4163,45 @@ fn check_object_log_reads_validate_auxiliary_large_objects() {
         &(u64::try_from(aux_image_logical_len * 2).unwrap() + 1).to_le_bytes(),
     );
     refresh_record_crc(&mut log, &mut storage, tail_region, tail_record);
+    assert!(matches!(
+        log.get(
+            &mut storage,
+            handle,
+            &mut std::vec![0; object.len()],
+            |_| ()
+        ),
+        Err(ObjectLogError::InvalidFrame)
+    ));
+    restore_region_or_frontier(
+        &mut log,
+        &mut storage,
+        tail_region,
+        saved_frontier,
+        &saved_region,
+    );
+
+    let mut oversized_tail = std::vec![0u8; 4];
+    oversized_tail[..3].copy_from_slice(&object[aux_image_logical_len * 2..]);
+    oversized_tail[3] = 0x99;
+    let mut oversized_tail_record = std::vec![0u8; chunk_record_len(oversized_tail.len()).unwrap()];
+    encode_chunk_record(
+        u64::try_from(aux_image_logical_len * 2).unwrap(),
+        &oversized_tail,
+        &mut oversized_tail_record,
+    )
+    .unwrap();
+    let saved_region = storage
+        .backing
+        .region_bytes(tail_region.region_index)
+        .copied()
+        .unwrap_or([0u8; REGION_SIZE]);
+    let saved_frontier = write_region_or_frontier(
+        &mut log,
+        &mut storage,
+        tail_region,
+        first_tail.offset,
+        &oversized_tail_record,
+    );
     assert!(matches!(
         log.get(
             &mut storage,

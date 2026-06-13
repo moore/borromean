@@ -155,6 +155,31 @@ fn requirement_storage_metadata_uses_storage_version_2() {
 
 //= spec/ring/05-disk-format.md#storage-metadata
 //= type=test
+//# `RING-META-006` `transaction_log_count` MUST be at least `1`.
+#[test]
+fn requirement_storage_metadata_validates_transaction_log_count() {
+    assert_eq!(
+        StorageMetadata::new_with_transaction_logs(4096, 32, 3, 0, 8, 0xff, 0xa5),
+        Err(DiskError::InvalidTransactionLogCount {
+            transaction_log_count: 0,
+            region_count: 32,
+        })
+    );
+    assert_eq!(
+        StorageMetadata::new_with_transaction_logs(4096, 32, 3, 32, 8, 0xff, 0xa5),
+        Err(DiskError::InvalidTransactionLogCount {
+            transaction_log_count: 32,
+            region_count: 32,
+        })
+    );
+
+    let metadata =
+        StorageMetadata::new_with_transaction_logs(4096, 32, 3, 31, 8, 0xff, 0xa5).unwrap();
+    assert_eq!(metadata.transaction_log_count, 31);
+}
+
+//= spec/ring/05-disk-format.md#storage-metadata
+//= type=test
 //# `RING-META-002` `StorageMetadata` MUST be encoded as the exact byte
 //# sequence of the fields shown above, in that order, with no implicit
 //# padding.

@@ -708,7 +708,8 @@ fn requirement_decode_rejects_invalid_escape_sequence() {
 //# `begin_transaction = 0x0d`,
 //# `commit_transaction = 0x0e`,
 //# `transaction_finished = 0x0f`,
-//# `rollback_transaction = 0x10`.
+//# `rollback_transaction = 0x10`,
+//# `add_transaction_collection = 0x11`.
 #[test]
 fn requirement_record_types_use_canonical_byte_codes() {
     let canonical_codes = [
@@ -725,6 +726,7 @@ fn requirement_record_types_use_canonical_byte_codes() {
         (WalRecordType::CommitTransaction, 0x0e),
         (WalRecordType::TransactionFinished, 0x0f),
         (WalRecordType::RollbackTransaction, 0x10),
+        (WalRecordType::AddTransactionCollection, 0x11),
     ];
 
     for (record_type, code) in canonical_codes {
@@ -738,6 +740,25 @@ fn requirement_record_types_use_canonical_byte_codes() {
             Err(WalRecordError::InvalidRecordType(removed_code))
         );
     }
+}
+
+//= spec/ring/04-wal-records.md#wal-record-types
+//= type=test
+//# `RING-WAL-LAYOUT-006` Payload bytes are encoded canonically by record
+//# type:
+#[test]
+fn requirement_add_transaction_collection_round_trips() {
+    let metadata = metadata(4);
+    let record = WalRecord::AddTransactionCollection {
+        collection_id: CollectionId(7),
+        observed_collection_generation: 42,
+    };
+
+    let (physical, encoded_len) = encode_physical(record, metadata);
+    let mut decode_scratch = [0u8; 128];
+    let decoded = decode_record(&physical[..encoded_len], metadata, &mut decode_scratch).unwrap();
+
+    assert_eq!(decoded.record, record);
 }
 
 //= spec/ring/04-wal-records.md#wal-record-types
