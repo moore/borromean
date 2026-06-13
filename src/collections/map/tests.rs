@@ -4081,7 +4081,18 @@ fn assert_empty_map_open_matches_new_map_state() {
         .open_map::<i32, i32, 4>(id, &mut reopen_buffer, crate::test_map_frontier_memory())
         .unwrap();
 
-    assert_eq!(reopened_map.get_frontier(&1).unwrap(), None);
+    assert_eq!(reopened_map.frontier_entry_count(), 0);
+    assert_eq!(reopened_map.run_count(), 0);
+    for key in [-1, 0, 1] {
+        assert_eq!(
+            reopened
+                .with_io_workspace(|flash, workspace| {
+                    reopened_map.get::<REGION_SIZE, _>(flash, workspace, &key)
+                })
+                .unwrap(),
+            None
+        );
+    }
 }
 
 //= spec/map.md#empty-logical-state

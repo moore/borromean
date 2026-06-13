@@ -2716,7 +2716,7 @@ fn requirement_storage_reopen_after_replacement_initializes_allocator_from_recov
     let mut flash = MockFlash::<512, 6, 2048>::new(0xff);
     let (_, reopened, first_region, _) = replace_map_and_reopen_after_cleanup(&mut flash);
 
-    assert_eq!(reopened.free_list_tail(), Some(first_region));
+    assert_eq!(reopened.last_free_list_head(), Some(first_region));
 }
 
 //= spec/map.md#map-storage-integration-requirements
@@ -2787,6 +2787,13 @@ fn requirement_storage_replacement_flush_detaches_reclaimed_region_from_live_sta
         storage.collections()[0].basis(),
         StartupCollectionBasis::Region(second_region)
     );
+    assert!(storage
+        .collections()
+        .iter()
+        .all(|collection| { collection.basis() != StartupCollectionBasis::Region(first_region) }));
+    assert_ne!(storage.wal_head(), first_region);
+    assert_ne!(storage.wal_tail(), first_region);
+    assert_ne!(storage.ready_region(), Some(first_region));
     assert_eq!(storage.free_list_tail(), Some(first_region));
 }
 
