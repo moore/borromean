@@ -80,6 +80,11 @@ fn requirement_each_public_operation_future_completes_when_polled_directly() {
 //# operation to be retried or reconstructed after reset.
 #[test]
 fn requirement_flush_future_keeps_collection_basis_on_previous_state_until_head_commit() {
+    assert_flush_future_keeps_previous_basis_while_pending();
+    assert_flush_future_updates_basis_after_head_commit();
+}
+
+fn assert_flush_future_keeps_previous_basis_while_pending() {
     for pending_polls in 1..=2 {
         let mut flash = MockFlash::<512, 7, 2048>::new(0xff);
         let mut workspace = StorageWorkspace::<512>::new();
@@ -131,7 +136,9 @@ fn requirement_flush_future_keeps_collection_basis_on_previous_state_until_head_
             crate::StartupCollectionBasis::Region(previous_region)
         );
     }
+}
 
+fn assert_flush_future_updates_basis_after_head_commit() {
     let mut flash = MockFlash::<512, 8, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage = Storage::<_, 512, 8, 8>::format(

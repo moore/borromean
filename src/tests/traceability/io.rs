@@ -8,6 +8,11 @@ use super::*;
 //# erases, and durability barriers.
 #[test]
 fn requirement_flash_io_trait_exposes_only_primitive_storage_operations() {
+    assert_flash_io_surface_contains_only_primitive_storage_operations();
+    assert_backend_errors_convert_through_storage_error_types();
+}
+
+fn assert_flash_io_surface_contains_only_primitive_storage_operations() {
     struct SurfaceCheckedFlash;
 
     impl FlashIo for SurfaceCheckedFlash {
@@ -94,7 +99,9 @@ fn requirement_flash_io_trait_exposes_only_primitive_storage_operations() {
         u8,
     ) -> Result<StorageMetadata, StorageFormatError> =
         <SurfaceCheckedFlash as FlashIo>::format_empty_store;
+}
 
+fn assert_backend_errors_convert_through_storage_error_types() {
     #[cfg(feature = "embedded-storage")]
     {
         let io_error = crate::embedded_storage::EmbeddedStorageError::OutOfBounds;

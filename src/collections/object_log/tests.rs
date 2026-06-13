@@ -505,14 +505,14 @@ fn write_aux_next_link_for_test<
 //# object kind.
 #[test]
 fn requirement_object_log_durable_state_is_canonical_and_self_delimiting() {
-    check_object_log_layout_lengths_are_exact();
-    check_object_log_helper_boundaries_are_exact();
-    check_object_log_state_application_validates_exact_edges();
-    check_object_log_read_helpers_validate_exact_storage_scratch_boundaries();
-    check_object_log_flushed_region_metadata_length_bounds_are_exact();
-    check_object_log_snapshot_decode_rejects_corrupt_region_metadata();
-    check_object_log_open_state_validates_region_metadata_bounds();
-    check_object_log_update_payloads_validate_truncate_and_materialized_region_records();
+    assert_object_log_layout_lengths_are_exact();
+    assert_object_log_encoding_helpers_validate_boundaries();
+    assert_object_log_state_application_rejects_malformed_edges();
+    assert_object_log_read_helpers_enforce_storage_scratch_bounds();
+    assert_object_log_flushed_region_metadata_length_bounds_are_exact();
+    assert_object_log_snapshot_decode_rejects_corrupt_region_metadata();
+    assert_object_log_open_state_validates_region_metadata_bounds();
+    assert_object_log_update_payloads_validate_truncate_and_materialized_regions();
 }
 
 //= spec/object-log.md#durability
@@ -524,12 +524,12 @@ fn requirement_object_log_durable_state_is_canonical_and_self_delimiting() {
 //# ordinary region without changing already returned handles.
 #[test]
 fn requirement_object_log_append_placement_preserves_handles_and_progress() {
-    check_object_log_exact_fit_capacity_boundaries_are_stable();
-    check_object_log_direct_inline_append_routing_does_not_start_transactions();
-    check_object_log_generated_record_accepts_exact_empty_region_capacity();
-    check_object_log_large_append_rejects_zero_chunk_capacity_frontier();
-    check_object_log_large_append_progresses_past_full_nonempty_frontier();
-    check_object_log_empty_or_flushed_frontiers_are_not_materialized_again();
+    assert_object_log_exact_fit_capacity_boundaries_are_stable();
+    assert_object_log_inline_routing_leaves_transactions_idle();
+    assert_object_log_generated_record_accepts_exact_empty_region_capacity();
+    assert_object_log_large_append_rejects_zero_chunk_capacity_frontier();
+    assert_object_log_large_append_progresses_past_full_nonempty_frontier();
+    assert_object_log_empty_or_flushed_frontiers_are_not_rematerialized();
 }
 
 //= spec/object-log.md#durability
@@ -540,13 +540,13 @@ fn requirement_object_log_append_placement_preserves_handles_and_progress() {
 //# target updates only when the marker belongs to the target collection.
 #[test]
 fn requirement_object_log_wal_replay_is_collection_scoped() {
-    check_object_log_replay_filters_unrelated_collection_records();
-    check_object_log_replay_new_collection_filters_collection_and_type();
-    check_object_log_replay_ignores_unrelated_begin_and_commit_markers();
-    check_object_log_replay_uses_add_transaction_collection_markers();
-    check_object_log_replay_filters_transaction_finished_markers();
-    check_object_log_replay_filters_rollback_markers();
-    check_object_log_replay_drop_clears_only_target_collection();
+    assert_object_log_replay_ignores_other_collection_records();
+    assert_object_log_replay_applies_only_target_object_log_creation();
+    assert_object_log_replay_scopes_begin_and_commit_markers();
+    assert_object_log_replay_scopes_add_transaction_collection_markers();
+    assert_object_log_replay_scopes_transaction_finished_markers();
+    assert_object_log_replay_scopes_rollback_markers();
+    assert_object_log_replay_drop_clears_only_target_collection();
 }
 
 //= spec/object-log.md#api-and-handles
@@ -556,7 +556,7 @@ fn requirement_object_log_wal_replay_is_collection_scoped() {
 //# object or requested range MUST succeed, including exact-size buffers.
 #[test]
 fn requirement_object_log_reads_treat_scratch_as_minimum_capacity() {
-    check_object_log_reads_accept_exact_scratch_lengths();
+    assert_object_log_reads_accept_exact_scratch_lengths();
 }
 
 //= spec/object-log.md#durability
@@ -568,11 +568,11 @@ fn requirement_object_log_reads_treat_scratch_as_minimum_capacity() {
 //# chunk bounds, tail chunk ordering, logical positions, and CRCs.
 #[test]
 fn requirement_object_log_reads_validate_identity_and_large_chunk_runs() {
-    check_object_log_flushed_region_prologue_is_validated_on_read();
-    check_object_log_reads_validate_auxiliary_large_objects();
+    assert_object_log_flushed_region_prologue_is_validated_on_read();
+    assert_object_log_rejects_malformed_auxiliary_large_object_reads();
 }
 
-fn check_object_log_layout_lengths_are_exact() {
+fn assert_object_log_layout_lengths_are_exact() {
     assert_eq!(HANDLE_ENCODED_LEN, 16);
     assert_eq!(DATA_PROLOGUE_FIXED_LEN, 18);
     assert_eq!(AUX_PROLOGUE_PREFIX_LEN, 18);
@@ -600,7 +600,7 @@ fn check_object_log_layout_lengths_are_exact() {
     );
 }
 
-fn check_object_log_helper_boundaries_are_exact() {
+fn assert_object_log_encoding_helpers_validate_boundaries() {
     assert!(record_type_is_public(RECORD_INLINE_OBJECT));
     assert!(!record_type_is_public(RECORD_OBJECT_CHUNK));
     assert!(record_type_is_public(RECORD_LARGE_RECORD_ENTRY));
@@ -1019,7 +1019,7 @@ fn check_object_log_helper_boundaries_are_exact() {
     ));
 }
 
-fn check_object_log_state_application_validates_exact_edges() {
+fn assert_object_log_state_application_rejects_malformed_edges() {
     let exact_metadata = [0x42u8; 24];
     let mut exact_memory = ObjectLogMemory::<64, 2, 32>::new();
     let mut exact_log = ObjectLog {
@@ -1240,7 +1240,7 @@ fn check_object_log_state_application_validates_exact_edges() {
     assert!(freed.is_empty());
 }
 
-fn check_object_log_exact_fit_capacity_boundaries_are_stable() {
+fn assert_object_log_exact_fit_capacity_boundaries_are_stable() {
     const REGION_SIZE: usize = 512;
     const REGION_COUNT: usize = 24;
 
@@ -1301,7 +1301,7 @@ fn check_object_log_exact_fit_capacity_boundaries_are_stable() {
     assert_eq!(large_record.record_type, RECORD_LARGE_RECORD_ENTRY);
 }
 
-fn check_object_log_direct_inline_append_routing_does_not_start_transactions() {
+fn assert_object_log_inline_routing_leaves_transactions_idle() {
     const REGION_SIZE: usize = 1024;
     const REGION_COUNT: usize = 16;
 
@@ -1414,7 +1414,7 @@ fn check_object_log_direct_inline_append_routing_does_not_start_transactions() {
     );
 }
 
-fn check_object_log_generated_record_accepts_exact_empty_region_capacity() {
+fn assert_object_log_generated_record_accepts_exact_empty_region_capacity() {
     const REGION_SIZE: usize = 512;
     const REGION_COUNT: usize = 16;
 
@@ -1495,7 +1495,7 @@ fn check_object_log_generated_record_accepts_exact_empty_region_capacity() {
     assert_get_bytes(&log, &mut storage, handle, &body, &mut scratch);
 }
 
-fn check_object_log_large_append_rejects_zero_chunk_capacity_frontier() {
+fn assert_object_log_large_append_rejects_zero_chunk_capacity_frontier() {
     const REGION_SIZE: usize = 128;
     const REGION_COUNT: usize = 12;
 
@@ -1544,7 +1544,7 @@ fn check_object_log_large_append_rejects_zero_chunk_capacity_frontier() {
     ));
 }
 
-fn check_object_log_large_append_progresses_past_full_nonempty_frontier() {
+fn assert_object_log_large_append_progresses_past_full_nonempty_frontier() {
     const REGION_SIZE: usize = 512;
     const REGION_COUNT: usize = 18;
 
@@ -1660,7 +1660,7 @@ fn requirement_object_log_replays_unflushed_frontier_from_wal_updates() {
     assert_get(&reopened_log, &mut reopened, handle, b"alpha");
 }
 
-fn check_object_log_replay_filters_unrelated_collection_records() {
+fn assert_object_log_replay_ignores_other_collection_records() {
     const REGION_SIZE: usize = 512;
     const REGION_COUNT: usize = 16;
 
@@ -1709,7 +1709,7 @@ fn check_object_log_replay_filters_unrelated_collection_records() {
     assert_ne!(target_id, other_id);
 }
 
-fn check_object_log_replay_new_collection_filters_collection_and_type() {
+fn assert_object_log_replay_applies_only_target_object_log_creation() {
     const REGION_SIZE: usize = 512;
     const REGION_COUNT: usize = 8;
 
@@ -1759,7 +1759,7 @@ fn check_object_log_replay_new_collection_filters_collection_and_type() {
     assert_eq!(memory_log_metadata(&memory), b"");
 }
 
-fn check_object_log_replay_ignores_unrelated_begin_and_commit_markers() {
+fn assert_object_log_replay_scopes_begin_and_commit_markers() {
     const REGION_SIZE: usize = 512;
     const REGION_COUNT: usize = 8;
 
@@ -1810,7 +1810,7 @@ fn check_object_log_replay_ignores_unrelated_begin_and_commit_markers() {
     assert_no_replayed_inline_object(&mut storage, &mut memory, target_id, handle);
 }
 
-fn check_object_log_replay_uses_add_transaction_collection_markers() {
+fn assert_object_log_replay_scopes_add_transaction_collection_markers() {
     const REGION_SIZE: usize = 512;
     const REGION_COUNT: usize = 8;
 
@@ -1870,7 +1870,7 @@ fn check_object_log_replay_uses_add_transaction_collection_markers() {
     assert_replayed_inline_object(&mut storage, &mut memory, target_id, handle, b"theta");
 }
 
-fn check_object_log_replay_filters_transaction_finished_markers() {
+fn assert_object_log_replay_scopes_transaction_finished_markers() {
     const REGION_SIZE: usize = 512;
     const REGION_COUNT: usize = 8;
 
@@ -1930,7 +1930,7 @@ fn check_object_log_replay_filters_transaction_finished_markers() {
     assert_no_replayed_inline_object(&mut storage, &mut memory, target_id, handle);
 }
 
-fn check_object_log_replay_filters_rollback_markers() {
+fn assert_object_log_replay_scopes_rollback_markers() {
     const REGION_SIZE: usize = 512;
     const REGION_COUNT: usize = 8;
 
@@ -1990,7 +1990,7 @@ fn check_object_log_replay_filters_rollback_markers() {
     assert_no_replayed_inline_object(&mut storage, &mut memory, target_id, handle);
 }
 
-fn check_object_log_replay_drop_clears_only_target_collection() {
+fn assert_object_log_replay_drop_clears_only_target_collection() {
     const REGION_SIZE: usize = 512;
     const REGION_COUNT: usize = 8;
 
@@ -2159,7 +2159,7 @@ fn requirement_object_log_reports_object_len_and_full_read_buffer_size() {
     );
 }
 
-fn check_object_log_reads_accept_exact_scratch_lengths() {
+fn assert_object_log_reads_accept_exact_scratch_lengths() {
     const REGION_SIZE: usize = 512;
     const REGION_COUNT: usize = 96;
     const INLINE: &[u8] = b"exact";
@@ -2233,7 +2233,7 @@ fn check_object_log_reads_accept_exact_scratch_lengths() {
     ));
 }
 
-fn check_object_log_read_helpers_validate_exact_storage_scratch_boundaries() {
+fn assert_object_log_read_helpers_enforce_storage_scratch_bounds() {
     const REGION_SIZE: usize = 128;
     const REGION_COUNT: usize = 8;
 
@@ -2407,7 +2407,7 @@ fn requirement_object_log_handles_survive_flush_and_reopen() {
     assert_get(&reopened_log, &mut reopened, second, b"beta");
 }
 
-fn check_object_log_empty_or_flushed_frontiers_are_not_materialized_again() {
+fn assert_object_log_empty_or_flushed_frontiers_are_not_rematerialized() {
     const REGION_SIZE: usize = 512;
     const REGION_COUNT: usize = 8;
 
@@ -2678,7 +2678,7 @@ fn requirement_object_log_data_regions_carry_immutable_log_metadata() {
     ));
 }
 
-fn check_object_log_flushed_region_prologue_is_validated_on_read() {
+fn assert_object_log_flushed_region_prologue_is_validated_on_read() {
     const REGION_SIZE: usize = 512;
     const REGION_COUNT: usize = 8;
 
@@ -2761,7 +2761,7 @@ fn check_object_log_flushed_region_prologue_is_validated_on_read() {
     ));
 }
 
-fn check_object_log_flushed_region_metadata_length_bounds_are_exact() {
+fn assert_object_log_flushed_region_metadata_length_bounds_are_exact() {
     const REGION_SIZE: usize = 512;
     const REGION_COUNT: usize = 8;
 
@@ -2956,7 +2956,7 @@ fn requirement_object_log_sequence_overflow_is_corrupt() {
     ));
 }
 
-fn check_object_log_snapshot_decode_rejects_corrupt_region_metadata() {
+fn assert_object_log_snapshot_decode_rejects_corrupt_region_metadata() {
     const REGION_SIZE: usize = 512;
 
     let object_start =
@@ -3100,7 +3100,7 @@ fn check_object_log_snapshot_decode_rejects_corrupt_region_metadata() {
     decode_snapshot::<REGION_SIZE, 4, 16>(&snapshot[..used], &mut memory).unwrap();
 }
 
-fn check_object_log_open_state_validates_region_metadata_bounds() {
+fn assert_object_log_open_state_validates_region_metadata_bounds() {
     const REGION_SIZE: usize = 512;
     const REGION_COUNT: usize = 8;
 
@@ -3473,7 +3473,7 @@ fn requirement_object_log_failed_transaction_rolls_back_allocations() {
     assert_eq!(reopened.free_list_tail(), Some(planned.region_index));
 }
 
-fn check_object_log_update_payloads_validate_truncate_and_materialized_region_records() {
+fn assert_object_log_update_payloads_validate_truncate_and_materialized_regions() {
     const REGION_SIZE: usize = 512;
     const REGION_COUNT: usize = 10;
 
@@ -3878,7 +3878,7 @@ fn requirement_object_log_append_routing_classifies_by_chunk_count() {
 //# span associated with exactly one public `LargeRecordEntry`.
 #[test]
 fn requirement_object_log_large_append_rejects_no_progress_geometry() {
-    check_object_log_large_append_rejects_zero_chunk_capacity_frontier();
+    assert_object_log_large_append_rejects_zero_chunk_capacity_frontier();
 
     const REGION_SIZE: usize = 512;
     const REGION_COUNT: usize = 32;
@@ -3916,7 +3916,7 @@ fn requirement_object_log_large_append_rejects_no_progress_geometry() {
     assert_get(&log, &mut storage, public_after, b"after");
 }
 
-fn check_object_log_reads_validate_auxiliary_large_objects() {
+fn assert_object_log_rejects_malformed_auxiliary_large_object_reads() {
     const REGION_SIZE: usize = 512;
     const REGION_COUNT: usize = 64;
 

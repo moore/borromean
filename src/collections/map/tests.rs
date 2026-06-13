@@ -167,9 +167,11 @@ impl LsmKey for () {
 //= type=test
 //# `LsmMap::new(storage, memory)` creates a durable map
 //# collection, assigns it a stable collection id, and returns an empty map
-//# handle.
+//# handle. `collection_id`
+//# returns the stable id that can later be passed to `LsmMap::open` with
+//# fresh map memory.
 #[test]
-fn requirement_object_lsm_map_new_open_get_set_delete_use_storage_owned_scratch() {
+fn requirement_lsm_map_new_assigns_stable_ids_and_returns_empty_map() {
     let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
     let mut storage = Storage::<_, 512, 8>::format(
         &mut flash,
@@ -181,6 +183,115 @@ fn requirement_object_lsm_map_new_open_get_set_delete_use_storage_owned_scratch(
     let mut map = LsmMap::<u16, u16, 8>::new(&mut storage, crate::test_lsm_map_memory()).unwrap();
     assert_eq!(map.collection_id(), CollectionId(1));
     assert_eq!(map.get(&mut storage, &7, |_, value| *value).unwrap(), None);
+
+    let second = LsmMap::<u16, u16, 8>::new(&mut storage, crate::test_lsm_map_memory()).unwrap();
+    assert_eq!(second.collection_id(), CollectionId(2));
+}
+
+//= spec/map.md#map-api-model
+//= type=test
+//# `MAP_CODE` is the stable shared-storage `collection_type` code reserved
+//# for durable map collections; in the current implementation it is
+//# `CollectionType::MAP_CODE`, whose on-disk value is `2`. It identifies the
+//# collection kind in WAL and committed-head records.
+#[test]
+fn requirement_lsm_map_new_records_map_collection_type() {
+    let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
+    let mut storage = Storage::<_, 512, 8>::format(
+        &mut flash,
+        StorageFormatConfig::new(2, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
+
+    let first = LsmMap::<u16, u16, 8>::new(&mut storage, crate::test_lsm_map_memory()).unwrap();
+    let second = LsmMap::<u16, u16, 8>::new(&mut storage, crate::test_lsm_map_memory()).unwrap();
+    assert_wal_records_created_map_collections(
+        &mut storage,
+        first.collection_id(),
+        second.collection_id(),
+    );
+}
+
+fn assert_wal_records_created_map_collections<
+    const REGION_SIZE: usize,
+    const REGION_COUNT: usize,
+    const MAX_LOG: usize,
+    const MAX_COLLECTIONS: usize,
+>(
+    storage: &mut Storage<
+        '_,
+        '_,
+        MockFlash<REGION_SIZE, REGION_COUNT, MAX_LOG>,
+        REGION_SIZE,
+        REGION_COUNT,
+        MAX_COLLECTIONS,
+    >,
+    first_collection_id: CollectionId,
+    second_collection_id: CollectionId,
+) {
+    let mut saw_first_new_collection = false;
+    let mut saw_second_new_collection = false;
+    storage
+        .with_runtime_io_workspace(|runtime, flash, workspace| {
+            runtime.visit_wal_records::<REGION_SIZE, _, (), _>(
+                flash,
+                workspace,
+                |_flash, record| {
+                    match record {
+                        crate::WalRecord::NewCollection {
+                            collection_id,
+                            collection_type,
+                        } if collection_id == first_collection_id => {
+                            assert_eq!(collection_type, crate::CollectionType::MAP_CODE);
+                            saw_first_new_collection = true;
+                        }
+                        crate::WalRecord::NewCollection {
+                            collection_id,
+                            collection_type,
+                        } if collection_id == second_collection_id => {
+                            assert_eq!(collection_type, crate::CollectionType::MAP_CODE);
+                            saw_second_new_collection = true;
+                        }
+                        _ => {}
+                    }
+                    Ok(())
+                },
+            )
+        })
+        .unwrap();
+    assert!(saw_first_new_collection);
+    assert!(saw_second_new_collection);
+}
+
+//= spec/map.md#map-api-model
+//= type=test
+//# `open` reconstructs the logical map from the retained
+//# durable basis and later retained updates using buffers borrowed through
+//# `StorageMemory`.
+//# `get` observes newest-wins map visibility across the mutable frontier and
+//# retained durable layers. If the key is visible, `get` materializes the
+//# value using buffers borrowed through `StorageMemory`, calls `f(key, &V)` exactly once while
+//# the value borrow is valid, and returns `Ok(Some(f_result))`. The `&K`
+//# passed to `f` is the same lookup key reference passed to `get`; it is not
+//# a separately materialized stored key.
+//# If the key is absent, `get` returns `Ok(None)` and does not call `f`.
+//# This lets callers use the value immediately inside the callback or copy
+//# the needed result into `R`, while preventing storage-backed value borrows
+//# from escaping the operation. `set` and `delete` update the logical map and
+//# persist the mutation, flushing the frontier first if bounded in-memory
+//# capacity would otherwise be exceeded.
+#[test]
+fn requirement_lsm_map_get_set_delete_and_open_use_storage_owned_scratch() {
+    let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
+    let mut storage = Storage::<_, 512, 8>::format(
+        &mut flash,
+        StorageFormatConfig::new(2, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
+
+    let mut map = LsmMap::<u16, u16, 8>::new(&mut storage, crate::test_lsm_map_memory()).unwrap();
 
     assert!(!map.set(&mut storage, 7, 70).unwrap());
 
@@ -206,64 +317,7 @@ fn requirement_object_lsm_map_new_open_get_set_delete_use_storage_owned_scratch(
     );
     assert_eq!(callback_calls, 0);
 
-    let second = LsmMap::<u16, u16, 8>::new(&mut storage, crate::test_lsm_map_memory()).unwrap();
-    assert_eq!(second.collection_id(), CollectionId(2));
-
-    {
-        let mut direct_flash = MockFlash::<512, 8, 4096>::new(0xff);
-        let mut direct_storage = Storage::<_, 512, 8>::format(
-            &mut direct_flash,
-            StorageFormatConfig::new(2, 8, 0xa5),
-            crate::test_storage_memory(),
-        )
-        .unwrap();
-        let direct_collection_id = CollectionId(3);
-        direct_storage.create_map(direct_collection_id).unwrap();
-        let mut direct_buffer = [0u8; 128];
-        let mut direct_map = MapFrontier::<u16, u16, 8>::new(
-            direct_collection_id,
-            &mut direct_buffer,
-            crate::test_map_frontier_memory(),
-        )
-        .unwrap();
-        direct_map.set(&mut direct_storage, 9, 90).unwrap();
-        assert_eq!(direct_map.get_frontier(&9).unwrap(), Some(90));
-        direct_map.delete(&mut direct_storage, 9).unwrap();
-        assert_eq!(direct_map.get_frontier(&9).unwrap(), None);
-    }
-
-    let first_collection_id = map.collection_id();
-    let second_collection_id = second.collection_id();
-    let mut saw_first_new_collection = false;
-    let mut saw_second_new_collection = false;
-    storage
-        .with_runtime_io_workspace(|runtime, flash, workspace| {
-            runtime.visit_wal_records::<512, _, (), _>(flash, workspace, |_flash, record| {
-                match record {
-                    crate::WalRecord::NewCollection {
-                        collection_id,
-                        collection_type,
-                    } if collection_id == first_collection_id => {
-                        assert_eq!(collection_type, crate::CollectionType::MAP_CODE);
-                        saw_first_new_collection = true;
-                    }
-                    crate::WalRecord::NewCollection {
-                        collection_id,
-                        collection_type,
-                    } if collection_id == second_collection_id => {
-                        assert_eq!(collection_type, crate::CollectionType::MAP_CODE);
-                        saw_second_new_collection = true;
-                    }
-                    _ => {}
-                }
-                Ok(())
-            })
-        })
-        .unwrap();
-    assert!(saw_first_new_collection);
-    assert!(saw_second_new_collection);
-
-    let collection_id = first_collection_id;
+    let collection_id = map.collection_id();
     drop(storage);
     let mut reopened =
         Storage::<_, 512, 8>::open(&mut flash, crate::test_storage_memory()).unwrap();
@@ -276,6 +330,37 @@ fn requirement_object_lsm_map_new_open_get_set_delete_use_storage_owned_scratch(
             .unwrap(),
         None
     );
+}
+
+//= spec/map.md#map-api-model
+//= type=test
+//# The repository implementation also exposes lower-level storage bindings such as
+//# `Storage::create_map`, `Storage::open_map` with a frontier byte buffer and
+//# `MapFrontierMemory`, storage-aware `MapFrontier::set` / `delete` / `apply_update`,
+//# `append_map_update`, `snapshot_map`, `flush_map`, `compact_map`, and `drop_map`.
+#[test]
+fn requirement_lower_level_map_storage_bindings_support_frontier_mutations() {
+    let mut direct_flash = MockFlash::<512, 8, 4096>::new(0xff);
+    let mut direct_storage = Storage::<_, 512, 8>::format(
+        &mut direct_flash,
+        StorageFormatConfig::new(2, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
+    let direct_collection_id = CollectionId(3);
+    direct_storage.create_map(direct_collection_id).unwrap();
+    let mut direct_buffer = [0u8; 128];
+    let mut direct_map = MapFrontier::<u16, u16, 8>::new(
+        direct_collection_id,
+        &mut direct_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
+
+    direct_map.set(&mut direct_storage, 9, 90).unwrap();
+    assert_eq!(direct_map.get_frontier(&9).unwrap(), Some(90));
+    direct_map.delete(&mut direct_storage, 9).unwrap();
+    assert_eq!(direct_map.get_frontier(&9).unwrap(), None);
 }
 
 #[cfg(feature = "perf-counters")]
@@ -1468,6 +1553,14 @@ fn requirement_load_snapshot_accepts_reversed_adjacent_entry_storage() {
 //# snapshot decoding MUST reject invalid entry references.
 #[test]
 fn requirement_snapshot_encoding_accepts_exact_empty_capacity_and_rejects_invalid_refs() {
+    assert_empty_snapshot_encoding_accepts_exact_header_capacity();
+    assert_snapshot_decode_rejects_ref_start_before_entry_bytes();
+    assert_snapshot_decode_rejects_empty_entry_ref();
+    assert_snapshot_entry_bytes_reject_refs_beyond_entry_bytes();
+    assert_snapshot_decode_rejects_overlapping_nested_entry_refs();
+}
+
+fn assert_empty_snapshot_encoding_accepts_exact_header_capacity() {
     let mut empty = [0u8; SNAPSHOT_HEADER_SIZE];
     let len = encode_snapshot_from_entries_into::<i32, i32>(&[], &mut empty).unwrap();
     assert_eq!(len, empty.len());
@@ -1476,12 +1569,14 @@ fn requirement_snapshot_encoding_accepts_exact_empty_capacity_and_rejects_invali
         snapshot_parts(&[]),
         Err(MapError::SerializationError)
     ));
+}
 
+fn assert_snapshot_decode_rejects_ref_start_before_entry_bytes() {
     let (mut snapshot, snapshot_len) = snapshot_for_entries(&[(1, Some(10)), (2, Some(20))]);
     let refs_offset = snapshot_len - ENTRY_REF_SIZE * 2;
 
     let start_ref: RefType = (ENTRY_COUNT_SIZE - 1).try_into().unwrap();
-    let mut start = start_ref.to_le_bytes();
+    let start = start_ref.to_le_bytes();
     snapshot[refs_offset..refs_offset + ENTRY_REF_POINTER_SIZE].copy_from_slice(&start);
     let mut dest_buffer = [0u8; 512];
     let mut dest = MapFrontier::<i32, i32, 8>::new(
@@ -1494,10 +1589,13 @@ fn requirement_snapshot_encoding_accepts_exact_empty_capacity_and_rejects_invali
         dest.load_snapshot(&snapshot[..snapshot_len]),
         Err(MapError::SerializationError)
     ));
+}
 
+fn assert_snapshot_decode_rejects_empty_entry_ref() {
     let (mut snapshot, snapshot_len) = snapshot_for_entries(&[(1, Some(10)), (2, Some(20))]);
+    let refs_offset = snapshot_len - ENTRY_REF_SIZE * 2;
     let start_ref: RefType = ENTRY_COUNT_SIZE.try_into().unwrap();
-    start = start_ref.to_le_bytes();
+    let start = start_ref.to_le_bytes();
     let end_ref: RefType = ENTRY_COUNT_SIZE.try_into().unwrap();
     let end = end_ref.to_le_bytes();
     snapshot[refs_offset..refs_offset + ENTRY_REF_POINTER_SIZE].copy_from_slice(&start);
@@ -1514,7 +1612,9 @@ fn requirement_snapshot_encoding_accepts_exact_empty_capacity_and_rejects_invali
         dest.load_snapshot(&snapshot[..snapshot_len]),
         Err(MapError::SerializationError)
     ));
+}
 
+fn assert_snapshot_entry_bytes_reject_refs_beyond_entry_bytes() {
     let (mut snapshot, snapshot_len) = snapshot_for_entries(&[(1, Some(10)), (2, Some(20))]);
     let refs_offset = snapshot_len - ENTRY_REF_SIZE * 2;
     let entry_bytes_len = snapshot_parts(&snapshot[..snapshot_len]).unwrap().1;
@@ -1525,7 +1625,9 @@ fn requirement_snapshot_encoding_accepts_exact_empty_capacity_and_rejects_invali
         snapshot_entry_bytes(&snapshot[..snapshot_len], 0),
         Err(MapError::SerializationError)
     ));
+}
 
+fn assert_snapshot_decode_rejects_overlapping_nested_entry_refs() {
     const NESTED_ENTRY_LEN: usize = ENTRY_HEADER_SIZE + size_of::<i32>() + size_of::<u8>();
     let mut nested_entry = [0u8; NESTED_ENTRY_LEN];
     let nested_len = encode_entry_into(&2i32, Some(&7u8), &mut nested_entry).unwrap();
@@ -1593,6 +1695,13 @@ fn requirement_snapshot_encoding_accepts_exact_empty_capacity_and_rejects_invali
 //# overflow errors.
 #[test]
 fn requirement_run_cursor_and_compaction_writer_helpers_cover_boundaries() {
+    assert_run_cursor_advances_segment_positions();
+    assert_run_cursor_reads_ascending_and_descending_run_chains();
+    assert_compaction_writer_reports_state_count_and_fit_errors();
+    assert_compaction_writer_push_flushes_full_segments();
+}
+
+fn assert_run_cursor_advances_segment_positions() {
     let run = MapRunDescriptor {
         source: MapRunSource::RunChain,
         generation: 1,
@@ -1615,7 +1724,9 @@ fn requirement_run_cursor_and_compaction_writer_helpers_cover_boundaries() {
     cursor.active_position = Some(1);
     cursor.advance_segment_position().unwrap();
     assert_eq!(cursor.next_segment_position, Some(0));
+}
 
+fn assert_run_cursor_reads_ascending_and_descending_run_chains() {
     const REGION_SIZE: usize = 256;
     let collection_id = CollectionId(7);
     let mut flash = MockFlash::<REGION_SIZE, 6, 1024>::new(0xff);
@@ -1737,7 +1848,9 @@ fn requirement_run_cursor_and_compaction_writer_helpers_cover_boundaries() {
         .advance::<REGION_SIZE, _>(collection_id, &mut flash, &mut workspace)
         .unwrap();
     assert_eq!(cursor.current.as_ref().map(|entry| entry.key), Some(3));
+}
 
+fn assert_compaction_writer_reports_state_count_and_fit_errors() {
     let mut segment_buffer = [0u8; ENTRY_COUNT_SIZE];
     let mut segment_memory = MapFrontierMemory::<i32, 1>::new();
     let segment = MapFrontier::<i32, LargeValue, 1>::new(
@@ -1804,7 +1917,9 @@ fn requirement_run_cursor_and_compaction_writer_helpers_cover_boundaries() {
         .unwrap());
     assert_eq!(one_entry_writer.segment.get_frontier(&1).unwrap(), Some(10));
     assert_eq!(one_entry_writer.segment.get_frontier(&2).unwrap(), None);
+}
 
+fn assert_compaction_writer_push_flushes_full_segments() {
     const PUSH_REGION_SIZE: usize = 256;
     const PUSH_REGION_COUNT: usize = 8;
     let mut flash = MockFlash::<PUSH_REGION_SIZE, PUSH_REGION_COUNT, 2048>::new(0xff);
@@ -2866,12 +2981,16 @@ fn requirement_committed_run_storage_helpers_validate_headers_and_next_links() {
 //# head-reference checks MUST report manifest and run regions as reachable.
 #[test]
 fn requirement_lookup_and_head_reference_helpers_follow_manifest_runs() {
+    assert_lookup_reads_manifest_run_chain_without_full_region_reads();
+    assert_head_reference_checks_include_manifest_and_run_regions();
+    assert_run_chain_lookup_handles_exact_payload_boundaries();
+}
+
+fn assert_lookup_reads_manifest_run_chain_without_full_region_reads() {
     const REGION_SIZE: usize = 256;
     let collection_id = CollectionId(101);
-    let metadata = StorageMetadata::new(REGION_SIZE as u32, 5, 0, 8, 0xff, 0xa5).unwrap();
     let mut flash = MockFlash::<REGION_SIZE, 5, 1024>::new(0xff);
     let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
-
     let mut map_buffer = [0u8; REGION_SIZE];
     let map = MapFrontier::<i32, i32, 8>::new(
         collection_id,
@@ -2880,37 +2999,7 @@ fn requirement_lookup_and_head_reference_helpers_follow_manifest_runs() {
     )
     .unwrap();
 
-    let run_entries = [
-        Entry {
-            key: 5i32,
-            value: Some(50i32),
-        },
-        Entry {
-            key: 6i32,
-            value: Some(60i32),
-        },
-    ];
-    let mut run_payload = [0u8; REGION_SIZE];
-    let run_used =
-        encode_run_segment_from_entries_into(&mut run_payload, 14, None, &run_entries).unwrap();
-    write_committed_payload(
-        &mut flash,
-        2,
-        2,
-        collection_id,
-        MAP_RUN_V2_FORMAT,
-        &run_payload[..run_used],
-    );
-
-    let run = MapRunDescriptor {
-        source: MapRunSource::RunChain,
-        generation: 14,
-        first_region: 2,
-        region_count: 1,
-        approx_state_count: 2,
-        lower_key: Some(5),
-        upper_key: Some(6),
-    };
+    let run = write_lookup_run_chain_fixture(&mut flash, collection_id);
     flash.clear_operations();
     assert_eq!(
         map.lookup_run_chain::<REGION_SIZE, _>(&mut flash, &mut workspace, &run, &6)
@@ -2940,7 +3029,14 @@ fn requirement_lookup_and_head_reference_helpers_follow_manifest_runs() {
             .unwrap(),
         LookupResult::NotFound
     );
+}
 
+fn assert_head_reference_checks_include_manifest_and_run_regions() {
+    const REGION_SIZE: usize = 256;
+    let collection_id = CollectionId(101);
+    let metadata = StorageMetadata::new(REGION_SIZE as u32, 5, 0, 8, 0xff, 0xa5).unwrap();
+    let mut flash = MockFlash::<REGION_SIZE, 5, 1024>::new(0xff);
+    let run = write_lookup_run_chain_fixture(&mut flash, collection_id);
     let mut manifest_map_buffer = [0u8; REGION_SIZE];
     let mut manifest_map = MapFrontier::<i32, i32, 8>::new(
         collection_id,
@@ -2990,8 +3086,44 @@ fn requirement_lookup_and_head_reference_helpers_follow_manifest_runs() {
         4
     )
     .unwrap());
+}
 
-    assert_run_chain_lookup_handles_exact_payload_boundaries();
+fn write_lookup_run_chain_fixture<
+    const REGION_SIZE: usize,
+    const REGION_COUNT: usize,
+    const MAX_LOG: usize,
+>(
+    flash: &mut MockFlash<REGION_SIZE, REGION_COUNT, MAX_LOG>,
+    collection_id: CollectionId,
+) -> MapRunDescriptor<i32> {
+    write_run_segment_region(
+        flash,
+        2,
+        2,
+        collection_id,
+        14,
+        None,
+        &[
+            Entry {
+                key: 5,
+                value: Some(50),
+            },
+            Entry {
+                key: 6,
+                value: Some(60),
+            },
+        ],
+    );
+
+    MapRunDescriptor {
+        source: MapRunSource::RunChain,
+        generation: 14,
+        first_region: 2,
+        region_count: 1,
+        approx_state_count: 2,
+        lower_key: Some(5),
+        upper_key: Some(6),
+    }
 }
 
 fn assert_run_chain_lookup_handles_exact_payload_boundaries() {

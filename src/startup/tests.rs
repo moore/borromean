@@ -2368,6 +2368,10 @@ fn requirement_open_formatted_store_keeps_max_seen_sequence_for_the_next_region_
 //= spec/ring/06-startup-replay.md#why-reclaimed-wal-regions-cannot-confuse-startup
 //= type=test
 //# `RING-BOOTSTRAP-005` Startup derives the WAL head only from the selected tail's
+//# `LogRegionPrologue` plus any later `head(collection_id = 0, ...)`
+//# records found in that same tail region. Stale headers in free-list
+//# regions therefore do not influence WAL-head recovery once they lose
+//# tail selection.
 #[test]
 fn requirement_open_formatted_store_reports_recovered_nonzero_wal_head() {
     let mut flash = MockFlash::<128, 4, 128>::new(0xff);
@@ -2396,6 +2400,10 @@ fn requirement_open_formatted_store_reports_recovered_nonzero_wal_head() {
 //= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
 //# `RING-STARTUP-027` If replay encountered a torn or checksum-invalid tail record,
+//# retain all state recovered from earlier complete records. The WAL head
+//# is unchanged. Replay may still recover and apply later valid tail
+//# records that begin after the torn bytes, but the first such later valid
+//# record must be `wal_recovery`.
 #[test]
 fn requirement_open_formatted_store_preserves_pending_tail_recovery_boundary() {
     let mut flash = MockFlash::<128, 4, 64>::new(0xff);
@@ -2412,6 +2420,7 @@ fn requirement_open_formatted_store_preserves_pending_tail_recovery_boundary() {
 //= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
 //# `RING-STARTUP-RESULT-007` Transaction-log cursors, live-prefix boundaries, active transaction
+//# descriptors, and incomplete transaction recovery work.
 #[test]
 fn requirement_startup_open_plan_clears_transaction_recovery_scratch() {
     let mut plan = StartupOpenPlan::<4, 8>::empty();
@@ -2449,6 +2458,11 @@ fn requirement_startup_open_plan_clears_transaction_recovery_scratch() {
 //= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
 //# `RING-WAL-VALID-024` If replay reaches the end of a reachable
+//# non-tail private log region with a
+//# pending WAL-recovery boundary that was not closed by `wal_recovery`,
+//# startup must fail because that region contains unresolved mid-log
+//# corruption. A pending WAL-recovery boundary may remain open only at the
+//# end of the current replay tail region.
 #[test]
 fn requirement_non_tail_wal_replay_rejects_unrecovered_boundary() {
     let mut flash = MockFlash::<128, 4, 64>::new(0xff);
@@ -2527,6 +2541,9 @@ fn requirement_classify_replay_record_opens_transaction_descriptor() {
 //= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
 //# `RING-WAL-VALID-028` A transaction log may contain records for any
+//# collection explicitly enrolled by `add_transaction_collection` in the
+//# same open transaction range. Collection mutation records for an
+//# unenrolled collection are invalid in that range.
 #[test]
 fn requirement_transaction_recovery_observes_only_the_transaction_collection_allocator_records() {
     let mut plan = StartupOpenPlan::<4, 8>::empty();
@@ -2605,6 +2622,12 @@ fn requirement_transaction_marker_ids_must_match_the_open_transaction() {
 //= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
 //# `RING-WAL-VALID-013` A WAL record in the current private log tail
+//# region, other than the specific
+//# `alloc_begin(collection_id = 0, next_region_index,
+//# allocation_sequence, free_list_head_after)` that starts WAL rotation or the matching
+//# trailing `link`, is invalid if its aligned end offset leaves fewer than
+//# `wal_rotation_reserve` bytes of currently unwritten space remaining in
+//# that private log region.
 #[test]
 fn requirement_recovery_record_room_rejects_tail_overflow_and_alloc_without_free_head() {
     let mut flash = MockFlash::<128, 4, 64>::new(0xff);
@@ -2655,6 +2678,12 @@ fn requirement_recovery_record_room_rejects_tail_overflow_and_alloc_without_free
 //= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
 //# `RING-WAL-ENC-013` Appending any WAL record to the current private
+//# log tail region, other than the
+//# specific `alloc_begin(collection_id = 0, next_region_index,
+//# allocation_sequence, free_list_head_after)` that starts WAL rotation or the
+//# trailing `link`,
+//# is invalid if doing so would leave fewer than `wal_rotation_reserve`
+//# unwritten bytes in that private log region.
 #[test]
 fn requirement_recovery_record_room_checks_the_next_free_footer_at_exact_tail_end() {
     let mut flash = MockFlash::<128, 4, 64>::new(0xff);
@@ -2679,6 +2708,14 @@ fn requirement_recovery_record_room_checks_the_next_free_footer_at_exact_tail_en
 //= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
 //# `RING-WAL-ENC-009` At an aligned candidate record start in a
+//# reachable private log region:
+//# if the first byte is `erased_byte`, that slot is currently unwritten and
+//# marks the end of the written portion of that private log region;
+//# if the first byte is `wal_record_magic`, that slot is a candidate WAL
+//# record and must parse and validate normally;
+//# if the first byte is neither, that slot lies inside a torn/corrupt WAL
+//# record, so replay keeps scanning forward by aligned
+//# `wal_write_granule` steps and ignores the corrupt bytes.
 #[test]
 fn requirement_recovery_record_writers_accept_records_that_end_at_region_boundary() {
     let mut flash = MockFlash::<128, 4, 128>::new(0xff);
@@ -2711,6 +2748,10 @@ fn requirement_recovery_record_writers_accept_records_that_end_at_region_boundar
 //= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
 //# `RING-WAL-ENC-014` Appending the
+//# `alloc_begin(collection_id = 0, next_region_index, allocation_sequence, free_list_head_after)`
+//# that starts WAL rotation is invalid unless its aligned end offset still
+//# leaves at least `wal_link_reserve` and fewer than
+//# `wal_rotation_reserve` unwritten bytes in that private log region.
 #[test]
 fn requirement_recovery_rotation_start_accepts_only_the_link_reserve_window() {
     let mut flash = MockFlash::<256, 4, 128>::new(0xff);
@@ -2762,6 +2803,10 @@ fn requirement_recovery_rotation_start_accepts_only_the_link_reserve_window() {
 //= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
 //# `RING-WAL-ENC-011` Let `wal_link_reserve` be the aligned encoded
+//# size needed in the
+//# current private log tail region to append the trailing
+//# `link(next_region_index, expected_sequence)` record that completes WAL
+//# rotation.
 #[test]
 fn requirement_recovery_rotation_bridges_large_windows_before_rotating() {
     const REGION_SIZE: usize = 512;
@@ -2813,6 +2858,10 @@ fn requirement_recovery_rotation_bridges_large_windows_before_rotating() {
 //= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
 //# `RING-WAL-VALID-014` The
+//# `alloc_begin(collection_id = 0, next_region_index,
+//# allocation_sequence, free_list_head_after)` that starts WAL rotation is invalid unless its
+//# aligned end offset leaves at least `wal_link_reserve` bytes of currently
+//# unwritten space remaining in that private log region.
 #[test]
 fn requirement_recovery_rotation_rejects_windows_too_small_for_the_link() {
     let mut flash = MockFlash::<256, 4, 128>::new(0xff);
@@ -2832,6 +2881,12 @@ fn requirement_recovery_rotation_rejects_windows_too_small_for_the_link() {
 //= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
 //# `RING-WAL-ENC-012` Let `wal_rotation_reserve` be the total aligned
+//# encoded size needed
+//# in the current private log tail region to append the two WAL records
+//# required to start and complete rotation to a new tail region:
+//# `alloc_begin(collection_id = 0, next_region_index, allocation_sequence,
+//# free_list_head_after)` followed by
+//# `link(next_region_index, expected_sequence)`.
 #[test]
 fn requirement_append_recovery_record_room_rotates_when_tail_lacks_reserve() {
     const REGION_SIZE: usize = 512;
@@ -2911,6 +2966,7 @@ fn requirement_recovery_gap_bridge_writes_invalid_boundary_then_wal_recovery() {
 //= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
 //# `RING-WAL-ENC-007` Every WAL record start offset within a private
+//# log region MUST be aligned to `wal_write_granule`.
 #[test]
 fn requirement_recovery_gap_bridge_rejects_zero_granule_and_tail_overflow() {
     let mut flash = MockFlash::<128, 4, 128>::new(0xff);
@@ -2947,6 +3003,7 @@ fn requirement_recovery_gap_bridge_rejects_zero_granule_and_tail_overflow() {
 //= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
 //# `RING-WAL-ENC-002` `record_magic` MUST equal the storage's configured
+//# `wal_record_magic`.
 #[test]
 fn requirement_first_invalid_wal_boundary_byte_avoids_erased_and_magic_values() {
     assert_eq!(first_invalid_wal_boundary_byte(0, 1), 2);
@@ -2957,6 +3014,7 @@ fn requirement_first_invalid_wal_boundary_byte_avoids_erased_and_magic_values() 
 //= spec/ring/07-reclaim.md#free-region
 //= type=test
 //# `RING-FREE-REGION-001` Establish `region_index` as a free-tail
+//# candidate without erasing it.
 #[test]
 fn requirement_startup_free_pointer_footer_helpers_validate_written_and_decoded_state() {
     let mut flash = MockFlash::<64, 4, 64>::new(0xff);
@@ -2975,6 +3033,9 @@ fn requirement_startup_free_pointer_footer_helpers_validate_written_and_decoded_
 //= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
 //# `RING-WAL-VALID-033` Transaction-log records after a frozen
+//# `range.end` are outside that transaction range. Torn records after
+//# `range.end` do not invalidate the committed range; torn or malformed
+//# records inside a committed range are corruption.
 #[test]
 fn requirement_empty_transaction_replay_interval_does_not_read_past_end_offset() {
     let mut flash = MockFlash::<128, 4, 64>::new(0xff);
@@ -3019,7 +3080,10 @@ fn requirement_open_replay_allocator_record_applies_free_regions() {
 
 //= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
-//# `RING-STARTUP-011` On
+//# If
+//# `collection_id != 0`, do not set `ready_region`; the allocation belongs
+//# to the open transaction-log transaction until commit or rollback
+//# recovery classifies it.
 #[test]
 fn requirement_user_alloc_begin_does_not_conflict_with_reserved_wal_ready_region() {
     let mut collections = heapless::Vec::<StartupCollection, 8>::new();
@@ -3057,6 +3121,7 @@ fn requirement_user_alloc_begin_does_not_conflict_with_reserved_wal_ready_region
 //= spec/ring/05-disk-format.md#free-pointer-footer
 //= type=test
 //# `RING-FREE-006` While a region is allocated for live use, the bytes
+//# in its free-pointer footer are uninterpreted stale data.
 #[test]
 fn requirement_free_list_head_discovery_ignores_footers_in_non_free_regions() {
     let mut flash = MockFlash::<64, 4, 128>::new(0xff);
@@ -3078,120 +3143,121 @@ fn requirement_free_list_head_discovery_ignores_footers_in_non_free_regions() {
 #[test]
 fn requirement_storage_open_path_rejects_invalid_retained_map_region_snapshot_and_update_payloads()
 {
-    {
-        let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
-        let mut workspace = StorageWorkspace::<512>::new();
-        let mut storage = Storage::<_, 512, 5>::format(
-            &mut flash,
-            StorageFormatConfig::new(1, 8, 0xa5),
-            crate::test_storage_memory(),
-        )
+    assert_startup_rejects_invalid_retained_map_region_payload();
+    assert_startup_rejects_invalid_retained_map_snapshot_payload();
+    assert_startup_rejects_invalid_retained_map_update_payload();
+}
+
+fn assert_startup_rejects_invalid_retained_map_region_payload() {
+    let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
+    let mut storage = Storage::<_, 512, 5>::format(
+        &mut flash,
+        StorageFormatConfig::new(1, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
+
+    storage.create_map(CollectionId(43)).unwrap();
+
+    let region_index = storage
+        .with_runtime_io_workspace(|runtime, flash, workspace| {
+            runtime.reserve_next_region::<512, 5, _>(
+                flash,
+                workspace,
+                &mut heapless::Vec::new(),
+                &mut heapless::Vec::new(),
+                &mut crate::storage::WalHeadReclaimPlan::empty(),
+                &mut crate::startup::StartupOpenPlan::empty(),
+            )
+        })
+        .unwrap();
+    storage
+        .with_runtime_io_workspace(|runtime, flash, workspace| {
+            runtime.write_committed_region::<512, 5, _>(
+                flash,
+                workspace,
+                region_index,
+                CollectionId(43),
+                MAP_REGION_V2_FORMAT,
+                &[1, 2, 3],
+            )
+        })
+        .unwrap();
+    storage
+        .append_head(CollectionId(43), CollectionType::MAP_CODE, region_index)
         .unwrap();
 
-        storage.create_map(CollectionId(43)).unwrap();
+    drop(storage);
+    let mut reopened =
+        Storage::<_, 512, 5>::open(&mut flash, crate::test_storage_memory()).unwrap();
+    let mut reopen_buffer = [0u8; 512];
+    let result = reopened.open_map::<i32, i32, 4>(
+        CollectionId(43),
+        &mut reopen_buffer,
+        crate::test_map_frontier_memory(),
+    );
+    assert!(matches!(
+        result,
+        Err(MapStorageError::UnsupportedRegionFormat {
+            collection_id: CollectionId(43),
+            region_index: actual_region,
+            actual: MAP_REGION_V2_FORMAT,
+        }) if actual_region == region_index
+    ));
+}
 
-        let region_index = storage
-            .with_runtime_io_workspace(|runtime, flash, workspace| {
-                runtime.reserve_next_region::<512, 5, _>(
-                    flash,
-                    workspace,
-                    &mut heapless::Vec::new(),
-                    &mut heapless::Vec::new(),
-                    &mut crate::storage::WalHeadReclaimPlan::empty(),
-                    &mut crate::startup::StartupOpenPlan::empty(),
-                )
-            })
-            .unwrap();
-        storage
-            .with_runtime_io_workspace(|runtime, flash, workspace| {
-                runtime.write_committed_region::<512, 5, _>(
-                    flash,
-                    workspace,
-                    region_index,
-                    CollectionId(43),
-                    MAP_REGION_V2_FORMAT,
-                    &[1, 2, 3],
-                )
-            })
-            .unwrap();
-        storage
-            .append_head(CollectionId(43), CollectionType::MAP_CODE, region_index)
-            .unwrap();
+fn assert_startup_rejects_invalid_retained_map_snapshot_payload() {
+    let mut flash = MockFlash::<512, 4, 1024>::new(0xff);
+    let mut storage = Storage::<_, 512, 4>::format(
+        &mut flash,
+        StorageFormatConfig::new(1, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
 
-        drop(storage);
-        let mut reopened =
-            Storage::<_, 512, 5>::open(&mut flash, crate::test_storage_memory()).unwrap();
-        let mut reopen_buffer = [0u8; 512];
-        let result = reopened.open_map::<i32, i32, 4>(
-            CollectionId(43),
-            &mut reopen_buffer,
-            crate::test_map_frontier_memory(),
-        );
-        assert!(matches!(
-            result,
-            Err(MapStorageError::UnsupportedRegionFormat {
-                collection_id: CollectionId(43),
-                region_index: actual_region,
-                actual: MAP_REGION_V2_FORMAT,
-            }) if actual_region == region_index
-        ));
-    }
-
-    {
-        let mut flash = MockFlash::<512, 4, 1024>::new(0xff);
-        let mut workspace = StorageWorkspace::<512>::new();
-        let mut storage = Storage::<_, 512, 4>::format(
-            &mut flash,
-            StorageFormatConfig::new(1, 8, 0xa5),
-            crate::test_storage_memory(),
-        )
+    storage.create_map(CollectionId(44)).unwrap();
+    storage
+        .append_snapshot(CollectionId(44), CollectionType::MAP_CODE, &[1])
         .unwrap();
 
-        storage.create_map(CollectionId(44)).unwrap();
-        storage
-            .append_snapshot(CollectionId(44), CollectionType::MAP_CODE, &[1])
-            .unwrap();
+    drop(storage);
+    let mut reopened =
+        Storage::<_, 512, 4>::open(&mut flash, crate::test_storage_memory()).unwrap();
+    let mut reopen_buffer = [0u8; 512];
+    let result = reopened.open_map::<i32, i32, 4>(
+        CollectionId(44),
+        &mut reopen_buffer,
+        crate::test_map_frontier_memory(),
+    );
+    assert!(matches!(
+        result,
+        Err(MapStorageError::Map(MapError::SerializationError))
+    ));
+}
 
-        drop(storage);
-        let mut reopened =
-            Storage::<_, 512, 4>::open(&mut flash, crate::test_storage_memory()).unwrap();
-        let mut reopen_buffer = [0u8; 512];
-        let result = reopened.open_map::<i32, i32, 4>(
-            CollectionId(44),
-            &mut reopen_buffer,
-            crate::test_map_frontier_memory(),
-        );
-        assert!(matches!(
-            result,
-            Err(MapStorageError::Map(MapError::SerializationError))
-        ));
-    }
+fn assert_startup_rejects_invalid_retained_map_update_payload() {
+    let mut flash = MockFlash::<512, 4, 1024>::new(0xff);
+    let mut storage = Storage::<_, 512, 4>::format(
+        &mut flash,
+        StorageFormatConfig::new(1, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
 
-    {
-        let mut flash = MockFlash::<512, 4, 1024>::new(0xff);
-        let mut workspace = StorageWorkspace::<512>::new();
-        let mut storage = Storage::<_, 512, 4>::format(
-            &mut flash,
-            StorageFormatConfig::new(1, 8, 0xa5),
-            crate::test_storage_memory(),
-        )
-        .unwrap();
+    storage.create_map(CollectionId(45)).unwrap();
+    storage.append_update(CollectionId(45), &[0xff]).unwrap();
 
-        storage.create_map(CollectionId(45)).unwrap();
-        storage.append_update(CollectionId(45), &[0xff]).unwrap();
-
-        drop(storage);
-        let mut reopened =
-            Storage::<_, 512, 4>::open(&mut flash, crate::test_storage_memory()).unwrap();
-        let mut reopen_buffer = [0u8; 512];
-        let result = reopened.open_map::<i32, i32, 4>(
-            CollectionId(45),
-            &mut reopen_buffer,
-            crate::test_map_frontier_memory(),
-        );
-        assert!(matches!(
-            result,
-            Err(MapStorageError::Map(MapError::SerializationError))
-        ));
-    }
+    drop(storage);
+    let mut reopened =
+        Storage::<_, 512, 4>::open(&mut flash, crate::test_storage_memory()).unwrap();
+    let mut reopen_buffer = [0u8; 512];
+    let result = reopened.open_map::<i32, i32, 4>(
+        CollectionId(45),
+        &mut reopen_buffer,
+        crate::test_map_frontier_memory(),
+    );
+    assert!(matches!(
+        result,
+        Err(MapStorageError::Map(MapError::SerializationError))
+    ));
 }

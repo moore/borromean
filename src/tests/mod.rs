@@ -1737,10 +1737,15 @@ fn requirement_storage_map_api_restores_snapshot_and_updates() {
 //# transaction terminal records, or crash recovery.
 #[test]
 fn requirement_storage_map_frontiers_do_not_exceed_the_configured_dirty_collection_reserve() {
+    assert_second_dirty_frontier_is_rejected_until_first_frontier_flushes();
+    assert_compaction_keeps_recovery_reserve_when_another_frontier_is_dirty();
+    assert_compaction_releases_dirty_frontier_slot_when_reserve_is_sufficient();
+}
+
+fn assert_second_dirty_frontier_is_rejected_until_first_frontier_flushes() {
     const REGION_SIZE: usize = 512;
     const REGION_COUNT: usize = 6;
     let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 4096>::new(0xff);
-    let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
     let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT>::format(
         &mut flash,
         StorageFormatConfig::new(2, 8, 0xa5),
@@ -1765,7 +1770,6 @@ fn requirement_storage_map_frontiers_do_not_exceed_the_configured_dirty_collecti
         crate::test_map_frontier_memory(),
     )
     .unwrap();
-    let mut payload_buffer = [0u8; 64];
 
     first_map
         .apply_update(&mut storage, &MapUpdate::Set { key: 1, value: 10 })
@@ -1791,120 +1795,122 @@ fn requirement_storage_map_frontiers_do_not_exceed_the_configured_dirty_collecti
         .apply_update(&mut storage, &MapUpdate::Set { key: 2, value: 20 })
         .unwrap();
     assert_eq!(second_map.get_frontier(&2).unwrap(), Some(20));
+}
 
-    {
-        let mut flash = MockFlash::<REGION_SIZE, 9, 8192>::new(0xff);
-        let mut storage = Storage::<_, REGION_SIZE, 9>::format(
-            &mut flash,
-            StorageFormatConfig::new(2, 8, 0xa5),
-            crate::test_storage_memory(),
-        )
+fn assert_compaction_keeps_recovery_reserve_when_another_frontier_is_dirty() {
+    const REGION_SIZE: usize = 512;
+
+    let mut flash = MockFlash::<REGION_SIZE, 9, 8192>::new(0xff);
+    let mut storage = Storage::<_, REGION_SIZE, 9>::format(
+        &mut flash,
+        StorageFormatConfig::new(2, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
+    let first_id = CollectionId(50);
+    let second_id = CollectionId(51);
+    storage.create_map(first_id).unwrap();
+    storage.create_map(second_id).unwrap();
+
+    let mut first_buffer = [0u8; REGION_SIZE];
+    let mut first_frontier = MapFrontier::<u16, u16, 4>::new(
+        first_id,
+        &mut first_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
+    first_frontier.set_in_memory(1, 10).unwrap();
+    storage
+        .flush_map::<u16, u16, 4>(&mut first_frontier)
         .unwrap();
-        let first_id = CollectionId(50);
-        let second_id = CollectionId(51);
-        storage.create_map(first_id).unwrap();
-        storage.create_map(second_id).unwrap();
-
-        let mut first_buffer = [0u8; REGION_SIZE];
-        let mut first_frontier = MapFrontier::<u16, u16, 4>::new(
-            first_id,
-            &mut first_buffer,
-            crate::test_map_frontier_memory(),
-        )
+    first_frontier.set_in_memory(2, 20).unwrap();
+    storage
+        .flush_map::<u16, u16, 4>(&mut first_frontier)
         .unwrap();
-        first_frontier.set_in_memory(1, 10).unwrap();
-        storage
-            .flush_map::<u16, u16, 4>(&mut first_frontier)
+
+    let mut first_map =
+        LsmMap::<u16, u16, 4>::open(first_id, &mut storage, crate::test_lsm_map_memory())
+            .unwrap()
+            .with_compaction_run_target(1)
             .unwrap();
-        first_frontier.set_in_memory(2, 20).unwrap();
-        storage
-            .flush_map::<u16, u16, 4>(&mut first_frontier)
-            .unwrap();
+    let mut second_map =
+        LsmMap::<u16, u16, 4>::open(second_id, &mut storage, crate::test_lsm_map_memory()).unwrap();
 
-        let mut first_map =
-            LsmMap::<u16, u16, 4>::open(first_id, &mut storage, crate::test_lsm_map_memory())
-                .unwrap()
-                .with_compaction_run_target(1)
-                .unwrap();
-        let mut second_map =
-            LsmMap::<u16, u16, 4>::open(second_id, &mut storage, crate::test_lsm_map_memory())
-                .unwrap();
+    assert!(first_map.set(&mut storage, 3, 30).unwrap());
+    let error = second_map.set(&mut storage, 4, 40).unwrap_err();
+    assert!(matches!(
+        error,
+        MapStorageError::Storage(StorageRuntimeError::TooManyDirtyFrontiers {
+            dirty_frontiers: 2,
+            min_free_regions: 2,
+        })
+    ));
 
-        assert!(first_map.set(&mut storage, 3, 30).unwrap());
-        let error = second_map.set(&mut storage, 4, 40).unwrap_err();
-        assert!(matches!(
-            error,
-            MapStorageError::Storage(StorageRuntimeError::TooManyDirtyFrontiers {
-                dirty_frontiers: 2,
-                min_free_regions: 2,
-            })
-        ));
+    let error = first_map.compact_and_report(&mut storage).unwrap_err();
+    assert!(matches!(
+        error,
+        MapStorageError::Storage(StorageRuntimeError::InsufficientFreeRegions {
+            free_regions: 5,
+            min_free_regions: 2,
+        })
+    ));
+}
 
-        let error = first_map.compact_and_report(&mut storage).unwrap_err();
-        assert!(matches!(
-            error,
-            MapStorageError::Storage(StorageRuntimeError::InsufficientFreeRegions {
-                free_regions: 5,
-                min_free_regions: 2,
-            })
-        ));
-    }
+fn assert_compaction_releases_dirty_frontier_slot_when_reserve_is_sufficient() {
+    const REGION_SIZE: usize = 512;
 
-    {
-        let mut flash = MockFlash::<REGION_SIZE, 12, 8192>::new(0xff);
-        let mut storage = Storage::<_, REGION_SIZE, 12>::format(
-            &mut flash,
-            StorageFormatConfig::new(2, 8, 0xa5),
-            crate::test_storage_memory(),
-        )
+    let mut flash = MockFlash::<REGION_SIZE, 12, 8192>::new(0xff);
+    let mut storage = Storage::<_, REGION_SIZE, 12>::format(
+        &mut flash,
+        StorageFormatConfig::new(2, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
+    let first_id = CollectionId(52);
+    let second_id = CollectionId(53);
+    storage.create_map(first_id).unwrap();
+    storage.create_map(second_id).unwrap();
+
+    let mut first_buffer = [0u8; REGION_SIZE];
+    let mut first_frontier = MapFrontier::<u16, u16, 4>::new(
+        first_id,
+        &mut first_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
+    first_frontier.set_in_memory(1, 10).unwrap();
+    storage
+        .flush_map::<u16, u16, 4>(&mut first_frontier)
         .unwrap();
-        let first_id = CollectionId(52);
-        let second_id = CollectionId(53);
-        storage.create_map(first_id).unwrap();
-        storage.create_map(second_id).unwrap();
-
-        let mut first_buffer = [0u8; REGION_SIZE];
-        let mut first_frontier = MapFrontier::<u16, u16, 4>::new(
-            first_id,
-            &mut first_buffer,
-            crate::test_map_frontier_memory(),
-        )
+    first_frontier.set_in_memory(2, 20).unwrap();
+    storage
+        .flush_map::<u16, u16, 4>(&mut first_frontier)
         .unwrap();
-        first_frontier.set_in_memory(1, 10).unwrap();
-        storage
-            .flush_map::<u16, u16, 4>(&mut first_frontier)
+
+    let mut first_map =
+        LsmMap::<u16, u16, 4>::open(first_id, &mut storage, crate::test_lsm_map_memory())
+            .unwrap()
+            .with_compaction_run_target(1)
             .unwrap();
-        first_frontier.set_in_memory(2, 20).unwrap();
-        storage
-            .flush_map::<u16, u16, 4>(&mut first_frontier)
-            .unwrap();
+    let mut second_map =
+        LsmMap::<u16, u16, 4>::open(second_id, &mut storage, crate::test_lsm_map_memory()).unwrap();
 
-        let mut first_map =
-            LsmMap::<u16, u16, 4>::open(first_id, &mut storage, crate::test_lsm_map_memory())
-                .unwrap()
-                .with_compaction_run_target(1)
-                .unwrap();
-        let mut second_map =
-            LsmMap::<u16, u16, 4>::open(second_id, &mut storage, crate::test_lsm_map_memory())
-                .unwrap();
+    assert!(first_map.set(&mut storage, 3, 30).unwrap());
+    let error = second_map.set(&mut storage, 4, 40).unwrap_err();
+    assert!(matches!(
+        error,
+        MapStorageError::Storage(StorageRuntimeError::TooManyDirtyFrontiers {
+            dirty_frontiers: 2,
+            min_free_regions: 2,
+        })
+    ));
 
-        assert!(first_map.set(&mut storage, 3, 30).unwrap());
-        let error = second_map.set(&mut storage, 4, 40).unwrap_err();
-        assert!(matches!(
-            error,
-            MapStorageError::Storage(StorageRuntimeError::TooManyDirtyFrontiers {
-                dirty_frontiers: 2,
-                min_free_regions: 2,
-            })
-        ));
-
-        assert!(first_map.compact_and_report(&mut storage).unwrap());
-        second_map.set(&mut storage, 4, 40).unwrap();
-        assert_eq!(
-            second_map.get(&mut storage, &4, |_, value| *value).unwrap(),
-            Some(40)
-        );
-    }
+    assert!(first_map.compact_and_report(&mut storage).unwrap());
+    second_map.set(&mut storage, 4, 40).unwrap();
+    assert_eq!(
+        second_map.get(&mut storage, &4, |_, value| *value).unwrap(),
+        Some(40)
+    );
 }
 
 //= spec/ring/01-theory.md#core-requirements
@@ -2196,8 +2202,11 @@ fn requirement_storage_map_api_flushes_committed_region_basis() {
 //# preserving unselected runs and all visible key/value lookups.
 #[test]
 fn requirement_storage_compact_map_target_then_greedy_preserves_unselected_runs() {
-    const REGION_SIZE: usize = 1024;
-    const REGION_COUNT: usize = 18;
+    assert_compaction_run_target_configuration_is_bounded();
+    assert_targeted_compaction_preserves_unselected_runs_and_visible_values();
+}
+
+fn assert_compaction_run_target_configuration_is_bounded() {
     const MAX_RUNS: usize = 8;
 
     assert_eq!(LsmMap::<i32, i32, 1>::default_compaction_run_target(), 1);
@@ -2215,6 +2224,12 @@ fn requirement_storage_compact_map_target_then_greedy_preserves_unselected_runs(
         target_map.with_compaction_run_target(0),
         Err(MapStorageError::InvalidRunTarget)
     ));
+}
+
+fn assert_targeted_compaction_preserves_unselected_runs_and_visible_values() {
+    const REGION_SIZE: usize = 1024;
+    const REGION_COUNT: usize = 18;
+    const MAX_RUNS: usize = 8;
 
     let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 8192>::new(0xff);
     let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
@@ -2258,7 +2273,6 @@ fn requirement_storage_compact_map_target_then_greedy_preserves_unselected_runs(
         .unwrap();
     assert_eq!(before.run_count(), 4);
 
-    let mut scratch_buffer = [0u8; REGION_SIZE];
     let compacted_manifest = storage
         .compact_map::<i32, i32, MAX_RUNS, 3>(CollectionId(70), crate::test_lsm_map_memory())
         .unwrap();
@@ -2429,7 +2443,6 @@ fn requirement_storage_compact_map_streams_replacement_larger_than_frontier_capa
         .unwrap();
     assert_eq!(before.run_count(), 3);
 
-    let mut scratch_buffer = [0u8; REGION_SIZE];
     let compacted_manifest = storage
         .compact_map::<i32, i32, MAX_RUNS, 1>(CollectionId(72), crate::test_lsm_map_memory())
         .unwrap();
@@ -2444,19 +2457,7 @@ fn requirement_storage_compact_map_streams_replacement_larger_than_frontier_capa
         )
         .unwrap();
     assert_eq!(after.run_count(), 1);
-    for run in 0..3 {
-        for offset in 0..ENTRY_COUNT {
-            let key = run * 10 + offset as i32;
-            assert_eq!(
-                storage
-                    .with_io_workspace(|flash, workspace| {
-                        after.get::<REGION_SIZE, _>(flash, workspace, &key)
-                    })
-                    .unwrap(),
-                Some(key * 10)
-            );
-        }
-    }
+    assert_generated_entries_are_visible(&mut storage, &after, ENTRY_COUNT);
 
     let second_manifest = storage
         .compact_map::<i32, i32, MAX_RUNS, 1>(CollectionId(72), crate::test_lsm_map_memory())
@@ -2472,13 +2473,34 @@ fn requirement_storage_compact_map_streams_replacement_larger_than_frontier_capa
         )
         .unwrap();
     assert_eq!(second.run_count(), 1);
+    assert_generated_entries_are_visible(&mut storage, &second, ENTRY_COUNT);
+}
+
+fn assert_generated_entries_are_visible<
+    const REGION_SIZE: usize,
+    const REGION_COUNT: usize,
+    const MAX_LOG: usize,
+    const MAX_RUNS: usize,
+    const MAX_COLLECTIONS: usize,
+>(
+    storage: &mut Storage<
+        '_,
+        '_,
+        MockFlash<REGION_SIZE, REGION_COUNT, MAX_LOG>,
+        REGION_SIZE,
+        REGION_COUNT,
+        MAX_COLLECTIONS,
+    >,
+    map: &MapFrontier<'_, i32, i32, MAX_RUNS>,
+    entry_count: usize,
+) {
     for run in 0..3 {
-        for offset in 0..ENTRY_COUNT {
+        for offset in 0..entry_count {
             let key = run * 10 + offset as i32;
             assert_eq!(
                 storage
                     .with_io_workspace(|flash, workspace| {
-                        second.get::<REGION_SIZE, _>(flash, workspace, &key)
+                        map.get::<REGION_SIZE, _>(flash, workspace, &key)
                     })
                     .unwrap(),
                 Some(key * 10)
