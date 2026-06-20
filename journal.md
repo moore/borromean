@@ -3,6 +3,152 @@
 This journal captures design ideas, motivation, and decision history before they
 are ready to become normative specification text.
 
+## 2026-06-20: Put the Programmer in Control
+
+A recent conversation about TinyFS highlighted an issue in Borromean: a write
+that needs a new region can force an erase cycle under the current design. Erase
+may be slow and a write can unexpectedly turn into an erase causing a unpredictable cost for write. I think this is
+part of a bigger issue where one operation may imply another operation. If we
+are out of buffers, a read could force a write of another collection to free the
+buffer.
+
+The general rule should be that ordinary foreground operations do not hide
+unbounded maintenance work. They may report pressure or return a status that
+says maintenance is needed, but the caller should stay in control of when erase,
+reclaim, compaction, or cross-collection flushing happens.
+
+### Fixing Hidden Erases
+
+The allocator should stop treating allocation as the place where erase happens.
+The free list should become one storage-private logical collection that owns one
+FIFO of free-region entries. Every entry is appended as dirty, then becomes
+ready when erase maintenance advances the ready boundary, then is consumed from
+the head when allocated. This free-space collection should not be user-visible.
+It is allocator-private state, but it should use the same WAL-first management
+style as collections: WAL updates for ordinary changes, with snapshots or region
+materialization available when the allocator metadata needs to be compacted.
+
+The dirty and ready states are ranges in the same queue rather than separate
+queues. The free-space collection tracks the allocation head, the ready
+boundary, and the append tail. Entries from the allocation head up to the ready
+boundary are pre-erased and ready to allocate. Entries from the ready boundary
+to the append tail are dirty and must be erased before allocation. The queue
+frontier, snapshots, and materialized regions can therefore share one internal
+buffer. Any links between materialized queue regions are free-space collection
+metadata; they are not stored in the freed data regions themselves.
+
+The goal is to make the WAL the sole source of allocator truth. Today allocator
+state is split between WAL records and free-pointer footers in free regions.
+Moving to a storage-private free-space collection removes that special region
+footer machinery and doubles down on the core design: "use the WAL".
+
+The free-space collection can be driven by three commands. `free(region)`
+appends a released region at the tail as dirty. `erase(dirty_index)` erases one
+or more entries starting at the ready boundary and then advances the ready
+boundary through those entries. `allocate()` removes the head ready entry and
+reserves that region for writing. Replay derives the allocated region from the
+queue state, so the WAL remains the source of allocator truth rather than
+duplicating allocator state in region footers.
+
+Freeing a region should be cheap: append `free(region)`. Preparing capacity
+should be a bounded maintenance operation: erase some number of dirty regions
+and then append `erase(dirty_index)` to publish the ready-boundary bump. The
+ordering is erase first, then publish the boundary transition. There does not
+need to be a separate sync between the erase and the ready WAL record. If power
+fails before the ready record is durable, replay still sees those entries as
+dirty and may erase them again. If power fails after the ready record is
+durable, the ready record is the evidence that the erase completed before
+publication.
+
+Allocation should take a pre-erased region from the ready range and should not
+perform erase itself. For ordinary collection work, allocation should lean on
+the improved transaction model instead of adding a separate `consumed()`
+command. A `consumed()` marker would create another mini-protocol for
+allocated-but-not-yet-linked regions. Transactions already provide the right
+shape: `allocate()` is transaction-owned until commit, and the collection state
+change that makes the region reachable becomes visible at the same commit
+boundary as the allocator pop.
+
+If the system crashes before commit, recovery rolls back the transaction-owned
+allocation. If the reserved region may have been partially written, rollback
+returns it to the dirty range, not the ready range, so later erase maintenance
+can prepare it again. If the system crashes after commit, replay applies the
+allocator pop and the collection state update together. This costs more buffers
+because allocation now depends on transaction machinery, but that is an
+acceptable tradeoff for an explicit embedded API: the memory requirement is
+visible instead of hidden in allocator recovery complexity.
+
+The allocator still needs a ready-region reserve so user allocation cannot
+consume the last ready region needed for WAL rotation, recovery, transaction-log
+growth, or allocator maintenance. Storage-core allocation paths that are needed
+to run the transaction system itself may still need a privileged non-ordinary
+path, but normal user/data collection allocation should be transaction-scoped.
+A store with many dirty entries but too few ready entries should report
+ready-region pressure instead of letting an ordinary write silently run erase
+work.
+
+All write operations on collections should return a maintenance status that
+indicates whether there is free-region pressure, so the caller does not have to
+poll after each write to know whether they need to run erase, reclaim, or
+collection compaction. I do not know whether that status should include full
+ready/dirty list sizes or just low-water marks plus an explicit stats query.
+
+### Fixing Hidden Writes on Read
+
+When I started this, I thought it would be a feature that callers would not have
+to think about how many buffers they needed and that buffers would be swapped on
+demand. I still think it is a good idea for collection handles to be small and
+not hold buffers, but buffer allocation should be under caller control instead
+of automatic. The current API can silently turn reads into writes if a buffer
+needs to be freed to support the read, or amplify writes if a write needs to
+flush another collection to finish.
+
+Public reads should be storage-write-free. A read may read the device and mutate
+temporary reader state, but it must not perform durable writes, flush another
+collection, erase, reclaim, compact, or evict dirty state. If a read cannot
+complete with the buffers supplied by the caller, it should fail explicitly with
+a capacity or pressure error.
+
+For now, the low-level API should focus on explicit embedded-system control
+rather than a high-level ergonomic abstraction. Predictability and ownership are
+more important for the target use case. Collection/object handles should stay
+small and not hold buffers. Using a handle should require an explicit operation
+object that borrows the buffers it will use. A `Reader` borrows read scratch. A
+normal `Writer` borrows ordinary write scratch. A `TransactionWriter` borrows
+the additional transaction buffers needed for a caller-visible transaction.
+Requiring transaction buffers only for `TransactionWriter` keeps simple writes
+from paying the full transaction-memory cost up front.
+
+Some ordinary writes may still need allocation or other internal multi-command
+work that must be atomic. If no caller-visible transaction is active, storage
+should be able to run a short WAL-only transaction directly in the main WAL.
+This gives us two transaction start forms: the full transaction start that
+points at a transaction log for longer caller-visible transaction work, and a
+bounded inline/WAL-only transaction start for short storage-internal atomic
+groups. The inline form is not a competing public transaction API. It is an
+implementation tool for operations such as allocation when the caller is using a
+normal `Writer`.
+
+Inline transactions should be bounded before they start. Storage should know the
+maximum record count or encoded WAL length, ensure enough WAL room up front, and
+rotate before beginning if necessary. If a full transaction is already active,
+allocation joins that transaction instead of nesting an inline transaction. If
+an inline transaction crashes before commit, replay ignores its effects and
+rolls back any transaction-owned allocation. If its commit is durable, replay
+applies the allocator and collection updates together.
+
+A higher-level API backed by `StorageMemory` or other internally managed buffers
+may still be useful later, but it should be layered over the explicit API rather
+than driving the core design.
+
+We should also clean up the API to take buffer-provider objects instead of
+taking `&mut [u8]` or similar directly everywhere. The exact trait shape can
+come later; we may need different providers for fixed scratch, region-sized
+buffers, DMA-aligned buffers, or payload/range buffers. The goal is to manage
+buffer lifetimes better and support buffer pools. Specifically, Aranya expects
+the `IoManager` to own all the buffers it needs, and our current API makes that
+hard.
+
 ## 2026-06-09: Transaction Logs For Read-Committed WAL Transactions
 
 The current WAL transaction design is useful for internal multi-record recovery,
