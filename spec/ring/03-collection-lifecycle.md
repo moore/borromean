@@ -70,8 +70,9 @@ Latest durable basis is a `drop_collection(collection_id)` tombstone.
 The collection id remains reserved and tracked, but the collection no
 longer has a live durable basis, accepts no further mutations, and its
 older durable bytes are reclaimable once physically detached. Any region
-associated with the dropped collection may be appended to the free list
-if it is not already present there.
+associated with the dropped collection may be appended to the
+free-space collection as a dirty entry if it is not already present
+there.
 
 Collection transitions:
 
@@ -238,10 +239,11 @@ mismatch as corruption.
 9. `RING-FORMAT-009` When a user collection implementation loads a committed region
 basis, it validates that region's `collection_format` according to its
 own rules.
-10. `RING-FORMAT-010` Borromean core reserves two canonical private
+10. `RING-FORMAT-010` Borromean core reserves three canonical private
 `collection_format` values under `collection_id = 0`:
-`main_wal_v2` for the main WAL and `transaction_log_v2` for transaction
-logs. These identifiers are not user-definable.
+`main_wal_v2` for the main WAL, `transaction_log_v2` for transaction
+logs, and `free_space_v2` for free-space collection metadata. These
+identifiers are not user-definable.
 11. `RING-FORMAT-011` Per-region format evolution remains allowed because region headers
 carry `collection_format` independently of the collection's stable
 type.
@@ -295,9 +297,9 @@ active basis for that collection is reclaimable.
 collection is logically absent from the live namespace and any older
 durable basis or update bytes for that collection are reclaimable once
 they are no longer physically reachable. Any region associated with
-that dropped collection may then be added to the free list if it is
-not already in the free-list chain, using
-`free_region(collection_id, region_index)`.
+that dropped collection may then be appended to the free-space
+collection as a dirty free entry if it is not already represented there,
+using `free_region(region_index, append_tail_after)`.
 5. `RING-INVARIANT-005` Historical append validity and retained replay basis are distinct:
 `new_collection` is required before later user-collection records are
 appended, but reclaim may later remove it so replay reconstructs from

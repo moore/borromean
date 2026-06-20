@@ -8,9 +8,9 @@ edge vocabulary used by later chapters.
 
 The storage model has three layers:
 
-- **Stable runtime state**: replayed facts such as WAL head/tail, allocator
-  head/tail, collection states, ready allocation state, and transaction
-  recovery state.
+- **Stable runtime state**: replayed facts such as WAL head/tail,
+  free-space collection cursors, collection states, storage-core
+  allocation reservations, and transaction recovery state.
 - **Active mode**: the single in-flight operation and its local progress
   state.
 - **Durable edge**: one replay-visible write/sync boundary inside a
@@ -18,9 +18,10 @@ The storage model has three layers:
 
 Public operations enter from `Idle`, move through one active mode, and
 return to `Idle` after their durable edge sequence reaches a terminal
-state. Some low-level operations intentionally expose a stable
-intermediate runtime state, such as a reserved `ready_region`; that
-state is not an in-flight mode and is replayable after reset.
+state. Some low-level storage-core operations intentionally expose a
+stable intermediate runtime state, such as a reserved private
+allocation for log rotation. That state is not an in-flight mode and is
+replayable after reset.
 
 The named operation table is the index for later chapters. Collection,
 WAL, allocator, reclaim, format, and open chapters should use those
@@ -140,9 +141,10 @@ The stable runtime state contains:
 - Transaction-log positions: for each configured transaction log, its
   head, tail, append offset, live-prefix boundary, and whether an
   active or recovery transaction descriptor currently references it.
-- Allocator position: durable `last_free_list_head`, runtime
-  `free_list_tail`, current global `allocation_sequence`, and optional
-  WAL-rotation `ready_region`.
+- Free-space collection position: durable `allocation_head`,
+  `ready_boundary`, and `append_tail` cursors, plus any storage-core
+  allocation reservation that has been popped from the ready range but
+  not yet consumed by a durable private-log `link`.
 - `max_seen_sequence`, used to assign the next initialized region
   sequence.
 - The replayed collection table, including each collection id,
@@ -221,10 +223,10 @@ recover from durable media.
 
 Some low-level APIs expose individual transition edges rather than a
 whole collection operation. For example, a WAL rotation start may return
-successfully after `ReserveRegion`, leaving `ready_region` in stable
-runtime state. That is not a lingering active mode; it is replayable
-stable runtime state that a later rotation finish may consume from
-`Idle`.
+successfully after `AllocateRegionForStorageCore`, leaving a
+storage-core allocation reservation in stable runtime state. That is
+not a lingering active mode; it is replayable stable runtime state that
+a later rotation finish may consume from `Idle`.
 
 `Opening(OpenMode)` has these phases:
 
@@ -240,7 +242,7 @@ stable runtime state that a later rotation finish may consume from
   `ApplyWalRecord`. Startup fails if the selected tail is not reachable
   through a valid link chain.
 - `BuildRuntimeState`: construct the stable runtime state from the
-  replay tracker and reconstructed free-list tail.
+  replay tracker and recovered free-space collection cursors.
 - `ValidateLiveCollections`: let supported collection implementations
   validate retained live bases and payloads needed for reads and
   reachability decisions.
@@ -260,15 +262,19 @@ effect after a record is durable:
 | `new_collection(collection_id, collection_type)` | Create a collection entry and move its collection submachine from `NoCollection` to `EmptyClean`. |
 | `update(collection_id, payload)` | Require an existing non-dropped collection, retain the update after that collection's current durable basis, and move `EmptyClean` to `EmptyDirty`, `WALSnapshotClean` to `WALSnapshotDirty`, or `RegionClean` to `RegionDirty`; an already dirty collection remains in the matching dirty state. |
 | `snapshot(collection_id, collection_type, payload)` | If this is the first retained basis record for the collection, create replay state and set the collection type from this record; otherwise require `collection_type` to match the replay-tracked type. Move the collection submachine to `WALSnapshotClean` and discard older pending updates for that collection. |
-| `alloc_begin(collection_id, region_index, allocation_sequence, free_list_head_after)` | Advance `last_free_list_head` to `free_list_head_after` and update the global allocator sequence. For `collection_id = 0`, also set `ready_region = region_index` for WAL rotation recovery; user collection allocations are transaction-owned until their owning transaction commits. |
+| `free_region(region_index, append_tail_after)` | Append `region_index` as a dirty entry at the current `append_tail` and advance `append_tail` to `append_tail_after`. |
+| `erase_free_region_span(count, ready_boundary_after)` | Publish that the next `count` dirty entries starting at the current `ready_boundary` have been erased, then advance `ready_boundary` to `ready_boundary_after`. |
+| `allocate_region(region_index, allocation_head_after)` | Pop the current ready entry, require it to name `region_index`, and advance `allocation_head` to `allocation_head_after`. In a full or inline transaction, the pop is visible only when the transaction commits; on rollback the popped region returns to the dirty range. In a privileged storage-core operation, the pop becomes a replayable private allocation reservation immediately. |
 | `head(collection_id, collection_type, region_index)` for a user collection | Create or validate the collection type, move the collection submachine to `RegionClean`, and discard older pending updates for that collection. |
 | `head(collection_id = 0, collection_type = wal, region_index)` | As a WAL-chain control record, update the effective WAL head in foreground operation. During startup, the last valid tail-local control record selects the effective WAL head before main replay; during the main user-collection replay pass it has no collection-basis effect. |
-| `link(next_region_index, expected_sequence)` | Preserve WAL-chain reachability and consume matching `ready_region` for the linked WAL region. |
+| `link(next_region_index, expected_sequence)` | Preserve private-log reachability and consume a matching storage-core allocation reservation for the linked log region. |
 | `drop_collection(collection_id)` | Move the collection submachine to `Dropped`, clear retained pending updates and volatile frontier state, and leave the collection id reserved. |
-| `free_region(collection_id, region_index)` | Add a region removed from `collection_id` to the durable free-list chain and refresh allocator head/tail state. |
 | `begin_transaction(transaction_log_id, start)` | Open a transaction descriptor for one transaction log starting at `start`. |
+| `begin_inline_transaction(record_count, encoded_len)` | Main-WAL-only bounded transaction for short storage-internal atomic groups; records inside it are ignored until a matching inline commit is durable. |
 | `add_transaction_collection(collection_id, observed_generation)` | In a transaction log, enroll `collection_id`, copy its frontier into a private transaction buffer, and remember the observed committed generation for conflict checks. |
 | `commit_transaction(transaction_log_id, range)` | In the main WAL, freeze and import `range` from `transaction_log_id` at this commit position; after the record is durable, private frontiers for enrolled collections may be atomically installed as visible state. |
+| `commit_inline_transaction(record_count)` | Atomically apply the bounded inline range that began at the matching `begin_inline_transaction`. |
+| `rollback_inline_transaction(record_count)` | Record that an uncommitted inline range was cleaned up and remains non-visible. |
 | `transaction_finished(transaction_log_id, range)` | Close a committed transaction after cleanup is complete and release this transaction-log range reference for garbage collection. |
 | `rollback_transaction(transaction_log_id, range)` | Mark a transaction-log range non-visible after rollback recovery has cleaned transaction-owned storage effects. |
 | `wal_recovery()` | Clear the WAL recovery boundary opened by a prior torn or corrupt tail span. |
@@ -296,23 +302,25 @@ The main operation modes are transition sequences over the same table:
   WAL record, then applies `ApplyWalRecord` to the stable runtime
   state.
 - `AllocatingRegion(AllocationMode)` completes safe foreground reclaim
-  if needed, preserves the minimum free-region reserve, writes and
-  syncs `alloc_begin(collection_id, region_index, allocation_sequence,
-  free_list_head_after)`,
-  then either leaves a WAL rotation target in `ready_region` or records a
-  transaction-owned user allocation.
+  or erase maintenance if needed, preserves the ready-region reserve,
+  writes and syncs `allocate_region(region_index,
+  allocation_head_after)` inside the active full transaction, bounded
+  inline transaction, or privileged storage-core operation, then records
+  either a transaction-owned user allocation or a storage-core private
+  allocation reservation.
 - `WritingCommittedRegion(CommittedRegionWriteMode)` reserves a region,
   erases and writes a committed-region header plus payload, syncs the
   region, appends and syncs the user `head` record, then applies that
   head transition.
-- `RotatingWal(WalRotationMode)` writes and syncs the rotation
-  `alloc_begin` in the reserved tail window, writes and syncs `link`,
-  initializes and syncs the new WAL region, then makes the linked region
-  the append tail.
+- `RotatingWal(WalRotationMode)` writes and syncs a privileged
+  `allocate_region` in the reserved tail window, writes and syncs
+  `link`, initializes and syncs the new WAL region, then makes the
+  linked region the append tail.
 - `ReclaimingWalHead(WalHeadReclaimMode)` plans the old and new WAL
-  heads, preserves allocator state, copies or rewrites live records from
-  the old head, commits the new WAL head, and frees the old head inside
-  a transaction-log-backed cleanup transaction for private log storage.
+  heads, preserves free-space collection cursor state, copies or
+  rewrites live records from the old head, commits the new WAL head, and
+  returns the old head to the free-space collection inside a
+  transaction-log-backed cleanup transaction for private log storage.
 - `TransactionRecovery(TransactionRecoveryMode)` scans incomplete or
   unfinished transaction-log ranges during open, selects rollback
   recovery or committed cleanup recovery based on retained main-WAL
@@ -345,7 +353,7 @@ inside that transition.
 
 | Operation | Active mode | Source | Durable edge sequence | Target or effect |
 | --- | --- | --- | --- | --- |
-| `FormatStorage` | `Formatting(FormatMode)` | unformatted or caller-erased media | `FormatMetadata`, `FormatInitialWalRegion`, `FormatInitialFreeList` | initialized storage in `Idle` |
+| `FormatStorage` | `Formatting(FormatMode)` | unformatted or caller-erased media | `FormatMetadata`, `FormatInitialWalRegion`, `FormatInitialFreeSpaceCollection` | initialized storage in `Idle` |
 | `OpenStorage` | `Opening(OpenMode)` | formatted media | none unless recovery sub-operations are needed | recovered storage in `Idle` |
 | `ReadStorage` | `ReadingStorage(ReadMode)` | `Idle` | none | no durable state change |
 | `LoadCollection` | `LoadingCollection(CollectionLoadMode)` | any live collection state | none | materialized collection handle or frontier |
@@ -357,14 +365,18 @@ inside that transition.
 | `ReplayRetainedSnapshotBasis` | `Opening(OpenMode)` or `ReclaimingWalHead(WalHeadReclaimMode)` | `NoCollection` | none during replay; `CopyRetainedWalRecord` when preserving the record into a new WAL head | `WALSnapshotClean` |
 | `ReplayRetainedRegionBasis` | `Opening(OpenMode)` or `ReclaimingWalHead(WalHeadReclaimMode)` | `NoCollection` | none during replay; `CopyRetainedWalRecord` when preserving the record into a new WAL head | `RegionClean` |
 | `ReplayRetainedDropTombstone` | `Opening(OpenMode)` or `ReclaimingWalHead(WalHeadReclaimMode)` | `NoCollection` | none during replay; `CopyRetainedWalRecord` when preserving the record into a new WAL head | `Dropped` |
-| `ReserveRegionForUse` | `AllocatingRegion(AllocationMode)` | `Idle` with free-list capacity above reserve | `ReserveRegion` | allocator advances; WAL rotation reserves `ready_region`, user allocation remains transaction-owned |
+| `AllocateRegionForUse` | `AllocatingRegion(AllocationMode)` | active full transaction, inline transaction, or privileged storage-core operation with ready range above reserve | `AllocateRegion` | free-space `allocation_head` advances; user allocation remains transaction-owned, storage-core allocation becomes a private reservation |
 | `RotateWalTail` | `RotatingWal(WalRotationMode)` | current WAL tail in rotation window | `StartWalRotation`, `RotateWalLink`, `InitializeRotatedWalRegion` | WAL tail moves to linked region |
 | `BeginTransaction` | `Transacting(TransactionMode)` | `Idle` with an available transaction log | `BeginTransaction` | transaction descriptor opens for one transaction log |
+| `BeginInlineTransaction` | `Transacting(TransactionMode)` | no active full transaction and enough reserved main-WAL tail space | `BeginInlineTransaction` | bounded inline transaction opens in the main WAL |
 | `AddTransactionCollection` | `Transacting(TransactionMode)` | open transaction descriptor and live collection | `AddTransactionCollection` | collection enrolled with private frontier buffer and observed generation |
 | `CommitTransaction` | `Transacting(TransactionMode)` | open transaction descriptor with no generation conflicts | `CommitTransaction` | referenced transaction-log range becomes visible atomically |
+| `CommitInlineTransaction` | `Transacting(TransactionMode)` | open inline transaction whose bounded range is complete | `CommitInlineTransaction` | bounded inline range becomes visible atomically |
+| `RollbackInlineTransaction` | `Transacting(TransactionMode)` or `TransactionRecovery(TransactionRecoveryMode)` | open or recovering uncommitted inline transaction | `RollbackInlineTransaction` | bounded inline range remains non-visible after cleanup |
 | `RollbackTransaction` | `Transacting(TransactionMode)` or `TransactionRecovery(TransactionRecoveryMode)` | open or recovering uncommitted transaction | `RollbackTransaction` | transaction-log range remains non-visible after cleanup |
-| `FreeRegion` | transaction cleanup mode | region detached from its owning collection | `LinkFreeTail`, `CommitFreeRegion` | region enters durable free-list chain |
-| `ReclaimWalHead` | `ReclaimingWalHead(WalHeadReclaimMode)` | reclaimable WAL head | transaction edges, preservation edges, `CommitWalHeadControl`, cleanup frees | WAL head moves and old head enters free-list chain |
+| `FreeRegion` | transaction cleanup mode | region detached from all live references | `AppendFreeRegion` | region enters the dirty range of the free-space collection |
+| `EraseFreeRegionSpan` | `AllocatingRegion(AllocationMode)` or storage maintenance mode | dirty range is non-empty and erase work is allowed | `EraseFreeRegionSpan` | dirty entries become ready entries |
+| `ReclaimWalHead` | `ReclaimingWalHead(WalHeadReclaimMode)` | reclaimable WAL head | transaction edges, preservation edges, `CommitWalHeadControl`, cleanup frees | WAL head moves and old head enters the free-space collection |
 | `CommitWalRecovery` | `AppendingWal(WalAppendMode)` | pending WAL recovery boundary | `CommitWalRecoveryBoundary` | boundary cleared so normal append may resume |
 | `AppendRawWalRecord` | `AppendingWal(WalAppendMode)` | valid record-specific source state | one record-specific durable edge from the table below | `ApplyWalRecord` effect for that record |
 
@@ -374,32 +386,36 @@ Named durable edges for replay-visible durable writes:
 | --- | --- | --- |
 | `FormatMetadata` | Write and sync `StorageMetadata`. | `Format Storage`, `Storage Metadata` |
 | `FormatInitialWalRegion` | Initialize and sync region `0` as the first WAL region. | `Format Storage`, `Header`, `WAL Region Prologue` |
-| `FormatInitialFreeList` | Initialize and sync the formatted free-list chain. | `Format Storage`, `Free-Pointer Footer` |
+| `FormatInitialFreeSpaceCollection` | Initialize and sync the formatted free-space collection metadata chain. | `Format Storage`, `Free-Space Collection Regions` |
 | `CreateCollection` | Write and sync `new_collection`. | `ApplyWalRecord`, `Collection Head Submachine` |
-| `AppendUpdate` | Write and sync `update`. | `ApplyWalRecord`, `RING-ORDER-001`, `RING-CRASH-011` |
+| `AppendUpdate` | Write and sync `update`. | `ApplyWalRecord`, `RING-ORDER-001`, `RING-CRASH-016` |
 | `CommitSnapshotHead` | Write and sync `snapshot`. | `ApplyWalRecord`, `RING-ORDER-002`, `RING-CRASH-001` through `RING-CRASH-002` |
-| `ReserveRegion` | Write and sync `alloc_begin`. | `ApplyWalRecord`, `RING-ALLOC-*`, `RING-CRASH-005` through `RING-CRASH-008` |
-| `StartWalRotation` | Write and sync the rotation-window `alloc_begin` that only a matching `link` may follow in that tail. | `ApplyWalRecord`, `RING-WAL-ENC-014`, `RING-CRASH-008` |
+| `AllocateRegion` | Write and sync `allocate_region(region_index, allocation_head_after)` in the active transaction, inline transaction, or privileged storage-core operation. | `ApplyWalRecord`, `RING-ALLOC-*`, `RING-CRASH-005` through `RING-CRASH-010` |
+| `AppendFreeRegion` | Write and sync `free_region(region_index, append_tail_after)`. | `ApplyWalRecord`, `Free Region` |
+| `EraseFreeRegionSpan` | Erase one or more dirty free-space entries and then write and sync `erase_free_region_span(count, ready_boundary_after)`. | `ApplyWalRecord`, `Free Region`, `RING-CRASH-014` through `RING-CRASH-015` |
+| `StartWalRotation` | Write and sync the rotation-window `allocate_region` that only a matching `link` may follow in that tail. | `ApplyWalRecord`, `RING-WAL-ENC-014`, `RING-CRASH-010` |
 | `WriteCommittedRegion` | Erase, write, and sync a committed-region header and payload. | `RING-ORDER-004`, `Header`, collection-format requirements |
-| `CommitRegionHead` | Write and sync a user-collection `head`. | `ApplyWalRecord`, `RING-ORDER-004`, `RING-CRASH-006` through `RING-CRASH-007` |
-| `RotateWalLink` | Write and sync WAL `link`. | `ApplyWalRecord`, `RING-ORDER-005`, `RING-CRASH-008` through `RING-CRASH-010` |
+| `CommitRegionHead` | Write and sync a user-collection `head`. | `ApplyWalRecord`, `RING-ORDER-004`, `RING-CRASH-007` through `RING-CRASH-009` |
+| `RotateWalLink` | Write and sync WAL `link`. | `ApplyWalRecord`, `RING-ORDER-005`, `RING-CRASH-010` through `RING-CRASH-012` |
 | `InitializeRotatedWalRegion` | Erase, initialize, and sync the linked WAL region. | `RING-ORDER-005`, `WAL Region Prologue`, startup rotation recovery |
 | `CommitWalHeadControl` | Write and sync `head(collection_id = 0, collection_type = wal, ...)`. | `ApplyWalRecord`, WAL reclaim postconditions, startup WAL-head discovery |
 | `CopyRetainedWalRecord` | Copy and sync a retained WAL record into the new WAL head during WAL-head reclaim. | `ApplyWalRecord`, WAL reclaim liveness rules |
 | `RewriteRetainedEmptyBasis` | Write and sync a retained `snapshot` basis that represents an empty live collection whose original `new_collection` record would otherwise be reclaimed. | `ApplyWalRecord`, WAL reclaim liveness rules |
 | `BeginTransaction` | Write and sync main-WAL `begin_transaction(transaction_log_id, start)`. | `ApplyWalRecord`, transaction recovery |
+| `BeginInlineTransaction` | Write and sync main-WAL `begin_inline_transaction(record_count, encoded_len)`. | `ApplyWalRecord`, transaction recovery |
 | `AddTransactionCollection` | Write and sync transaction-log `add_transaction_collection(collection_id, observed_generation)`. | `ApplyWalRecord`, transaction private frontier state |
 | `CommitTransaction` | Write and sync main-WAL `commit_transaction(transaction_log_id, range)`. | `ApplyWalRecord`, transaction recovery |
+| `CommitInlineTransaction` | Write and sync main-WAL `commit_inline_transaction(record_count)`. | `ApplyWalRecord`, transaction recovery |
 | `FinishTransaction` | Write and sync main-WAL `transaction_finished(transaction_log_id, range)`. | `ApplyWalRecord`, transaction recovery |
 | `RollbackTransaction` | Write and sync main-WAL `rollback_transaction(transaction_log_id, range)`. | `ApplyWalRecord`, transaction recovery |
-| `LinkFreeTail` | Write and sync the previous free-list tail footer. | `Free Region`, `Free-Pointer Footer` |
-| `CommitFreeRegion` | Write and sync `free_region(collection_id, region_index)`. | `ApplyWalRecord`, `Free Region` |
-| `CommitWalRecoveryBoundary` | Write and sync `wal_recovery`. | `ApplyWalRecord`, `RING-ORDER-007`, `RING-CRASH-011` |
+| `RollbackInlineTransaction` | Write and sync main-WAL `rollback_inline_transaction(record_count)` when recovery needs a durable terminal marker for an uncommitted inline range. | `ApplyWalRecord`, transaction recovery |
+| `CommitWalRecoveryBoundary` | Write and sync `wal_recovery`. | `ApplyWalRecord`, `RING-ORDER-010`, `RING-CRASH-016` |
 | `CommitDropCollection` | Write and sync `drop_collection`. | `ApplyWalRecord`, `Collection Head Submachine` |
 
 Formatting is modeled as `Formatting(FormatMode)` until the freshly
-initialized metadata, initial WAL region, and initial free-list chain
-are durable. Opening is modeled as `Opening(OpenMode)` until replay and
+initialized metadata, initial WAL region, and initial free-space
+collection metadata are durable. Opening is modeled as
+`Opening(OpenMode)` until replay and
 post-replay recovery produce stable runtime state. After format or
 open succeeds, the storage context is in `Idle`.
 

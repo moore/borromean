@@ -20,7 +20,7 @@ reclaim, compaction, or cross-collection flushing happens.
 ### Fixing Hidden Erases
 
 The allocator should stop treating allocation as the place where erase happens.
-The free list should become one storage-private logical collection that owns one
+The allocator should become one storage-private logical collection that owns one
 FIFO of free-region entries. Every entry is appended as dirty, then becomes
 ready when erase maintenance advances the ready boundary, then is consumed from
 the head when allocated. This free-space collection should not be user-visible.
@@ -37,22 +37,26 @@ frontier, snapshots, and materialized regions can therefore share one internal
 buffer. Any links between materialized queue regions are free-space collection
 metadata; they are not stored in the freed data regions themselves.
 
-The goal is to make the WAL the sole source of allocator truth. Today allocator
-state is split between WAL records and free-pointer footers in free regions.
-Moving to a storage-private free-space collection removes that special region
-footer machinery and doubles down on the core design: "use the WAL".
+The goal is to make the WAL the sole source of allocator truth. The previous
+allocator state was split between WAL records and allocator metadata stored in
+free regions. Moving to a storage-private free-space collection removes that
+special region footer machinery and doubles down on the core design: "use the
+WAL".
 
-The free-space collection can be driven by three commands. `free(region)`
-appends a released region at the tail as dirty. `erase(dirty_index)` erases one
+The free-space collection can be driven by three commands.
+`free_region(region_index, append_tail_after)` appends a released region at the
+tail as dirty. `erase_free_region_span(count, ready_boundary_after)` erases one
 or more entries starting at the ready boundary and then advances the ready
-boundary through those entries. `allocate()` removes the head ready entry and
-reserves that region for writing. Replay derives the allocated region from the
-queue state, so the WAL remains the source of allocator truth rather than
-duplicating allocator state in region footers.
+boundary through those entries. `allocate_region(region_index,
+allocation_head_after)` removes the head ready entry and reserves that region
+for writing. The commands carry their resulting cursor updates so replay and
+cleanup can validate the expected transition.
 
-Freeing a region should be cheap: append `free(region)`. Preparing capacity
-should be a bounded maintenance operation: erase some number of dirty regions
-and then append `erase(dirty_index)` to publish the ready-boundary bump. The
+Freeing a region should be cheap: append
+`free_region(region_index, append_tail_after)`. Preparing capacity should be a
+bounded maintenance operation: erase some number of dirty regions and then
+append `erase_free_region_span(count, ready_boundary_after)` to publish the
+ready-boundary bump. The
 ordering is erase first, then publish the boundary transition. There does not
 need to be a separate sync between the erase and the ready WAL record. If power
 fails before the ready record is durable, replay still sees those entries as
@@ -65,9 +69,10 @@ perform erase itself. For ordinary collection work, allocation should lean on
 the improved transaction model instead of adding a separate `consumed()`
 command. A `consumed()` marker would create another mini-protocol for
 allocated-but-not-yet-linked regions. Transactions already provide the right
-shape: `allocate()` is transaction-owned until commit, and the collection state
-change that makes the region reachable becomes visible at the same commit
-boundary as the allocator pop.
+shape: `allocate_region(region_index, allocation_head_after)` is
+transaction-owned until commit, and the collection state change that makes the
+region reachable becomes visible at the same commit boundary as the allocator
+pop.
 
 If the system crashes before commit, recovery rolls back the transaction-owned
 allocation. If the reserved region may have been partially written, rollback
@@ -229,9 +234,9 @@ Current decisions:
   and private until commit. If the transaction rolls back, those regions must be
   returned through the same allocation recovery rules used by the current
   transaction model.
-- Allocation records should carry a global `u64` allocation sequence assigned
+- Allocation records should carry a global `u64` ordering value assigned
   while storage has exclusive allocator access. Allocator access is globally
-  serialized from selecting the current free-list head through durably recording
+  serialized from selecting the current allocator head through durably recording
   the allocation decision in the ordinary WAL or a reachable transaction log.
   Recovery needs to order the allocation decisions, not the allocated regions
   themselves: after replaying the ordinary WAL and all reachable transaction-log
@@ -240,13 +245,13 @@ Current decisions:
   decision are either reachable from live committed state, already returned, or
   transaction-owned regions that rollback/recovery must return.
 - Every WAL-compatible log segment should checkpoint the allocator cursor in its
-  segment prologue: the free-list head and the global allocation sequence that
-  were current when the segment was initialized. This gives replay a durable
+  segment prologue: the allocator head and ordering value that were current
+  when the segment was initialized. This gives replay a durable
   baseline if an allocation/reservation record at the end of a log segment is
   torn or if an older log prefix containing prior allocation records has been
   reclaimed. Replay starts from the segment checkpoint and then applies only
   complete allocation records after that point; a truncated allocation record is
-  ignored and does not advance the recovered free-list head.
+  ignored and does not advance the recovered allocator head.
 - Transaction-log regions are reclaimed like ordinary WAL regions: only a
   reclaimable prefix may be freed, and only after no retained ordinary-WAL
   commit record, open transaction descriptor, or pending recovery descriptor
@@ -482,7 +487,7 @@ A concrete target is stable-head replacement and reclaim. Build the new stable
 head during the transaction update phase, then write `commit_transaction` as the
 middle marker saying the collection state update is durable and must be kept.
 After that, enter a cleanup phase that frees old regions by mutating the durable
-free-list chain. The transaction is complete only after `transaction_finished`
+allocator queue. The transaction is complete only after `transaction_finished`
 has been written. This should remove the need for a fixed pending-reclaim limit
 because free commands can be persisted and recovered as part of the transaction
 instead of held as a bounded staged list.
@@ -496,7 +501,7 @@ Transaction markers:
   collection-state update. After this marker, recovery keeps the collection-state update and must
   finish cleanup.
 - `transaction_finished`: ends the cleanup phase. This marker means both the collection-state update
-  and allocator/free-list cleanup completed, so recovery can replay the interval normally.
+  and allocator cleanup completed, so recovery can replay the interval normally.
 - `rollback_transaction`: records that pre-commit recovery already cleaned up an uncommitted
   transaction. Recovery can skip transaction-tagged commands in the interval and replay only
   non-transaction-tagged commands.
@@ -536,7 +541,7 @@ The sketch:
    point where the new collection state becomes the committed state for recovery.
 5. After `commit_transaction`, append cleanup commands that free superseded regions. These free
    commands carry `collection_id` because freeing removes the region from that collection. Freeing a
-   region mutates durable allocator state by adding the region to the free-list chain, so cleanup is
+  region mutates durable allocator state by adding the region to the allocator queue, so cleanup is
    part of transaction recovery rather than passive bookkeeping.
 6. After all cleanup commands are complete, durably write `transaction_finished`.
 7. On storage open/recovery, replay can apply commands normally until it reaches
@@ -562,7 +567,7 @@ The sketch:
 11. If WAL end is reached after `commit_transaction` but before `transaction_finished`, replay jumps
     back to the transaction begin position and runs cleanup recovery. The committed collection state
     is kept, cleanup recovery derives the remaining frees from durable collection-specific state,
-    and free-list mutations are replayed or completed until allocator state is consistent with the
+    and allocator mutations are replayed or completed until allocator state is consistent with the
     committed collection state. Recovery then writes `transaction_finished`. This recovery path must
     be idempotent if storage open crashes before the finished marker is durable.
 

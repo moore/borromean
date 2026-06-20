@@ -2,15 +2,16 @@
 
 This chapter defines the physical storage layout after the logical model
 is established: static metadata, region headers, committed payload
-areas, free-pointer footers, and private log-region prologues.
+areas, private free-space collection metadata regions, and private
+log-region prologues.
 
 Mechanism review:
 
 - **Purpose**: define the bytes that survive reset and make independent
   implementations agree on the same media image.
 - **State**: storage metadata, region header sequence and ownership,
-  user payload area, free-pointer footer, and private log-region
-  prologue.
+  user payload area, free-space collection metadata, and private
+  log-region prologue.
 - **Named operations**: `FormatStorage`, `CommitCollectionRegion`,
   `RotateWalTail`, `FreeRegion`, and `OpenStorage` all depend on these
   physical layouts.
@@ -29,9 +30,9 @@ Storage starts with a static metadata region that describes the
 version and configuration parameters that cannot change after
 initialization.
 
-The rest of the database is made up of regions. Each region has a
-header, user data, and a free pointer. The header describes the
-region's sequence number, collection id, collection format, and a
+The rest of the database is made up of regions. Each written region has
+a header followed by region-format-specific data. The header describes
+the region's sequence number, collection id, collection format, and a
 checksum over the header itself.
 
 The sequence number is a monotonically increasing value assigned each
@@ -51,43 +52,37 @@ The collection format defines how user data is encoded in the user
 data section. For user collections, the meaning of non-log
 `collection_format` values is owned by the corresponding
 `collection_type` implementation rather than by Borromean core. This
-spec reserves two canonical core-defined format identifiers for private
-storage logs: `main_wal_v2` for the ordinary WAL and
-`transaction_log_v2` for transaction-log chains. No user collection may
-use either identifier. Storing the format in each region still allows
+spec reserves three canonical core-defined format identifiers for
+private storage regions: `main_wal_v2` for the ordinary WAL,
+`transaction_log_v2` for transaction-log chains, and `free_space_v2` for
+materialized free-space collection metadata. No user collection may use
+any of those identifiers. Storing the format in each region still allows
 per-collection format evolution over time.
 
-The free pointer stores the location of the next free region for
-regions that have been freed, so the region in question is in the free
-list. This field is written not when the region is freed, but when the
-next region is freed. This is the mechanism used to make the free list
-a FIFO. A free region whose free-pointer slot is still uninitialized
-(for example, left in the erased state) is the current free-list tail.
-A free region is defined by membership in the durable free-list chain,
-not by a distinct on-disk header encoding. Free regions may still
-contain stale header and payload bytes from their prior use; those
-bytes are ignored while the region is free. The free-pointer footer of
-a region must not be written while that region is allocated for live
-use. Allocation first erases the region, then writes the region header
-and collection payload, leaving the free-pointer area untouched. When a
-region is later added to the durable free-list chain, that is when its
-free-pointer footer becomes meaningful. For a newly appended free-list
-tail, `free_pointer.next_tail` remains uninitialized, typically because
-the erased state left from allocation already represents "no
-successor". After a region is durably reachable from the free-list
-chain, it must not be erased until it is allocated for reuse, because
-the free-pointer chain is stored inside the free regions themselves.
+Free regions are defined by membership in the storage-private
+free-space collection, not by bytes stored in the free region itself. A
+free region may still contain stale header and payload bytes from its
+prior use. Those bytes are ignored while the region is named by the
+free-space collection. Allocator links and queue cursors live only in
+WAL records, private log prologues, and `free_space_v2` metadata
+regions. A free region can be erased by explicit erase maintenance
+before the ready-boundary advance is published; after that publication
+the region is ready for allocation.
 
 Deployment sizing guideline: choose `region_size` so the fixed
-per-region header plus free-pointer footer consume less than 10% of the
-region. Private log regions also carry `LogRegionPrologue`, so practical
-deployments normally need additional slack beyond that rule of thumb.
-This is guidance only, not a validity rule.
+per-region header plus the largest private prologue used by a configured
+format leaves useful payload. Private log regions carry
+`LogRegionPrologue`, and free-space metadata regions carry
+`FreeSpaceRegionPrologue`, so practical deployments need slack beyond
+the user collection payload alone. This is guidance only, not a validity
+rule.
 
 A main WAL region is a region whose valid header has
 `collection_id = 0` and `collection_format = main_wal_v2`. A
 transaction-log region is a region whose valid header has
-`collection_id = 0` and `collection_format = transaction_log_v2`.
+`collection_id = 0` and `collection_format = transaction_log_v2`. A
+free-space metadata region is a region whose valid header has
+`collection_id = 0` and `collection_format = free_space_v2`.
 
 ## Storage Requirements
 
@@ -105,21 +100,26 @@ new in-memory `max_seen_sequence`.
 strictly monotonic `sequence` ordering even if crashes or abandoned
 allocations leave gaps.
 5. `RING-STORAGE-005` Borromean core MUST reserve the canonical
-`collection_format` values `main_wal_v2` and `transaction_log_v2` for
-private storage log regions, and user collections MUST NOT use either
-identifier.
+`collection_format` values `main_wal_v2`, `transaction_log_v2`, and
+`free_space_v2` for private storage regions, and user collections MUST
+NOT use any of those identifiers.
 6. `RING-STORAGE-006` A free region MUST be defined by membership in
-the durable free-list chain rather than by a distinct on-disk header
-encoding.
-7. `RING-STORAGE-007` The free-pointer footer of a region MUST NOT be
-written while that region is allocated for live use.
-8. `RING-STORAGE-008` After a region is durably reachable from the
-free-list chain, that region MUST NOT be erased until it is allocated
-for reuse.
+the storage-private free-space collection rather than by a distinct
+on-disk header encoding or by allocator links stored in that free
+region.
+7. `RING-STORAGE-007` Allocator queue links and cursor state MUST NOT
+be stored in freed data regions; they MUST be stored in WAL records,
+private log prologues, or `free_space_v2` metadata regions.
+8. `RING-STORAGE-008` A dirty free-space entry MUST NOT enter the ready
+range until the named region has been erased and the corresponding
+`erase_free_region_span` record or equivalent materialized state is
+durable.
 9. `RING-STORAGE-009` A main WAL region MUST have `collection_id = 0`
 and `collection_format = main_wal_v2`; a transaction-log region MUST
 have `collection_id = 0` and
-`collection_format = transaction_log_v2`.
+`collection_format = transaction_log_v2`; a free-space metadata region
+MUST have `collection_id = 0` and
+`collection_format = free_space_v2`.
 10. `RING-STORAGE-010` The metadata region MUST occupy exactly one
 `region_size` span at storage offset `0`, MUST NOT be counted in
 `region_count`, and data region `0` MUST begin immediately after that
@@ -131,14 +131,16 @@ Borromean defines one canonical byte-level encoding so independently
 written implementations can interoperate on the same media image.
 
 1. `RING-DISK-001` All fixed-width integer fields in `StorageMetadata`,
-`Header`, `LogRegionPrologue`, free-pointer footers, and logical WAL
-records MUST be encoded little-endian.
+`Header`, `LogRegionPrologue`, `FreeSpaceRegionPrologue`,
+`FreeQueuePosition`, `FreeSpaceEntry`, and logical WAL records MUST be
+encoded little-endian.
 2. `RING-DISK-002` The canonical scalar widths are:
 `region_index: u32`, `region_size: u32`, `region_count: u32`,
 `min_free_regions: u32`, `transaction_log_count: u32`,
 `transaction_log_id: u32`, `offset: u32`,
 `wal_write_granule: u32`, `collection_id: u64`, `sequence: u64`,
-`allocation_sequence: u64`, `observed_collection_generation: u64`,
+`free_queue_position_entry_index: u32`, `free_space_entry_count: u32`,
+`observed_collection_generation: u64`,
 `payload_len: u32`, `collection_type: u16`,
 `collection_format: u16`, `erased_byte: u8`, and
 `wal_record_magic: u8`.
@@ -153,10 +155,11 @@ not required to interoperate across deployments.
 namespace recorded durably in region headers. The pair
 `(collection_type, collection_format)` identifies a concrete committed
 region payload encoding for user collections. Borromean core reserves
-`collection_format = 0x0000` globally for `main_wal_v2` and
-`collection_format = 0x0001` globally for `transaction_log_v2`; every
-non-log collection format MUST be neither of those values. For any
-non-log collection type, `0x0002..0x7fff` are stable public format
+`collection_format = 0x0000` globally for `main_wal_v2`,
+`collection_format = 0x0001` globally for `transaction_log_v2`, and
+`collection_format = 0x0002` globally for `free_space_v2`; every
+user-collection format MUST be none of those values. For any
+user-collection type, `0x0003..0x7fff` are stable public format
 identifiers and `0x8000..0xffff` are private deployment-local format
 identifiers.
 5. `RING-DISK-005` Optional region indexes carried inside logical WAL
@@ -164,7 +167,7 @@ records MUST be encoded as `OptRegionIndex`, a one-byte tag followed,
 when the tag is `1`, by a `u32 region_index`. Tag `0` means `none`;
 any other tag value is corruption.
 6. `RING-DISK-006` `metadata_checksum`, `header_checksum`,
-`prologue_checksum`, `footer_checksum`, and `record_checksum` MUST all use the standard
+`prologue_checksum`, and `record_checksum` MUST all use the standard
 CRC-32C (Castagnoli) parameters (`poly = 0x1edc6f41`,
 `init = 0xffffffff`, `refin = true`, `refout = true`,
 `xorout = 0xffffffff`) and MUST be stored little-endian.
@@ -178,7 +181,7 @@ on-disk order.
 
 For main WAL and transaction-log regions, the user-data area begins
 with a fixed `LogRegionPrologue`. That prologue records the head of
-the corresponding log chain and the allocator cursor that was current
+the corresponding log chain and the allocator cursors that were current
 when the log segment was initialized. WAL records do not begin
 immediately after the region `Header`; they begin at the first
 `wal_write_granule`-aligned byte after the end of the
@@ -194,9 +197,9 @@ block-beta
  R2["Last Region"]
  space:4
  block:exp:4
-  h1["Header"]
-  d1["User Data"]
-  a1["Free Pointer"]
+ h1["Header"]
+  d1["Format-Specific Data"]
+  a1["Erased / Unused Space"]
  end
  space:4
  block:header:4
@@ -270,8 +273,8 @@ and read semantics. For user collections, non-WAL
 `collection_type` implementation rather than by Borromean core, and may
 evolve across regions over time without changing the collection's
 stable `collection_type`. Borromean core reserves canonical format
-identifiers `main_wal_v2` and `transaction_log_v2` for private storage
-logs.
+identifiers `main_wal_v2`, `transaction_log_v2`, and `free_space_v2`
+for private storage formats.
 
 The `header_checksum` validates header integrity.
 
@@ -281,44 +284,84 @@ padding.
 2. `RING-HEADER-002` `header_checksum` MUST be CRC-32C over `sequence`,
 `collection_id`, and `collection_format` in on-disk order.
 
-## Free-Pointer Footer
+## Free-Space Collection Regions
 
 ```rust
-struct FreePointerFooter {
-  next_tail: u32,
-  footer_checksum: u32,
+struct FreeQueuePosition {
+  region_index: u32,
+  entry_index: u32,
+}
+
+struct FreeSpaceRegionPrologue {
+  allocation_head: FreeQueuePosition,
+  ready_boundary: FreeQueuePosition,
+  append_tail: FreeQueuePosition,
+  next_metadata_region: OptRegionIndex,
+  entry_count: u32,
+  entries_checksum: u32,
+  prologue_checksum: u32,
+}
+
+struct FreeSpaceEntry {
+  region_index: u32,
 }
 ```
 
-The free-pointer footer occupies the final eight bytes of every data
-region. It is interpreted only when the region is durably reachable
-from the free-list chain.
+`FreeQueuePosition` names an entry slot in the materialized
+free-space collection. `region_index` names a `free_space_v2` metadata
+region, and `entry_index` names the zero-based entry slot within that
+region's free-space entry area. The ordering of positions is the FIFO
+ordering reached by following `next_metadata_region` links and then
+increasing `entry_index` within each metadata region.
 
-1. `RING-FREE-001` The free-pointer footer MUST occupy the final eight
-bytes of the region.
-2. `RING-FREE-002` If all eight footer bytes equal `erased_byte`, the
-footer is uninitialized and represents `next_tail = none`.
-3. `RING-FREE-003` Otherwise the footer MUST decode as
-`next_tail:u32, footer_checksum:u32`, both little-endian, with
-`footer_checksum` equal to CRC-32C over `next_tail`.
-4. `RING-FREE-004` A checksum-valid non-erased footer MUST decode to a
-`u32 region_index` strictly less than `region_count`; any other value is
-malformed.
-5. `RING-FREE-005` Wherever this specification says
-`r.free_pointer.next_tail = x`, it means writing a complete
-`FreePointerFooter` with `next_tail = x` and a matching
-`footer_checksum`.
-6. `RING-FREE-006` While a region is allocated for live use, the bytes
-in its free-pointer footer are uninterpreted stale data and MUST NOT be
-used to infer free-list membership.
+`FreeSpaceRegionPrologue` is present only in `free_space_v2` metadata
+regions. Its three queue positions checkpoint the allocator cursors for
+the materialized free-space collection state represented by that
+metadata chain. `next_metadata_region` links one free-space metadata
+region to the next metadata region; it never links through a freed data
+region. `entry_count` names how many `FreeSpaceEntry` values in this
+metadata region are initialized. `entries_checksum` validates those
+entries. `FreeSpaceEntry` stores the physical region index for one
+free-space FIFO entry.
+
+1. `RING-FREE-001` `FreeQueuePosition` MUST be encoded as the exact byte
+sequence of the fields shown above, in that order, with no implicit
+padding.
+2. `RING-FREE-002` `FreeSpaceRegionPrologue` MUST be encoded as the
+exact byte sequence of the fields shown above, in that order, with no
+implicit padding.
+3. `RING-FREE-003` `FreeSpaceEntry` MUST be encoded as the exact byte
+sequence of the fields shown above, in that order, with no implicit
+padding.
+4. `RING-FREE-004` `prologue_checksum` MUST be CRC-32C over
+`allocation_head`, `ready_boundary`, `append_tail`,
+`next_metadata_region`, `entry_count`, and `entries_checksum` in
+on-disk order.
+5. `RING-FREE-005` The cursor invariant
+`allocation_head <= ready_boundary <= append_tail` MUST hold in the
+materialized free-space collection order.
+6. `RING-FREE-006` Every `FreeSpaceEntry.region_index` and every
+present `next_metadata_region` MUST name a region index strictly less
+than `region_count`.
+7. `RING-FREE-007` A free-space metadata link MUST point only to a
+region with a valid `Header` whose `collection_id = 0` and
+`collection_format = free_space_v2`.
+8. `RING-FREE-008` `entry_count` MUST be less than or equal to the
+number of `FreeSpaceEntry` values that fit after
+`FreeSpaceRegionPrologue` in the region's format-specific data area.
+9. `RING-FREE-009` `entries_checksum` MUST be CRC-32C over the exact
+encoded bytes of the first `entry_count` `FreeSpaceEntry` values in
+that metadata region. Bytes after those entries are reserved and MUST
+be ignored by replay.
 
 ## Log Region Prologue
 
 ```rust
 struct LogRegionPrologue {
   log_head_region_index: u32,
-  allocator_free_list_head: OptRegionIndex,
-  allocation_sequence: u64,
+  allocation_head: FreeQueuePosition,
+  ready_boundary: FreeQueuePosition,
+  append_tail: FreeQueuePosition,
   prologue_checksum: u32,
 }
 ```
@@ -339,27 +382,30 @@ initializing a missing/corrupt target region, it must write the same
 already-determined log head into this field rather than choosing a new
 value during recovery.
 
-`allocator_free_list_head` and `allocation_sequence` checkpoint the
-global allocator cursor that was current when the log segment was
-initialized. Replay uses this checkpoint as the baseline for allocator
+`allocation_head`, `ready_boundary`, and `append_tail` checkpoint the
+free-space collection cursors that were current when the log segment
+was initialized. Replay uses this checkpoint as the baseline allocator
 state at the start of the segment, then applies complete later
-`alloc_begin` records. A torn or truncated allocation record after the
-checkpoint does not advance the recovered free-list head.
+free-space collection commands. A torn or truncated allocator command
+after the checkpoint does not advance the recovered cursors.
 
 `prologue_checksum` validates the logical prologue contents. It covers
-`log_head_region_index`, `allocator_free_list_head`, and
-`allocation_sequence` in the same byte order used on disk.
+`log_head_region_index`, `allocation_head`, `ready_boundary`, and
+`append_tail` in the same byte order used on disk.
 
 1. `RING-PROLOGUE-001` `LogRegionPrologue` MUST be encoded as the exact
 byte sequence of the fields shown above, in that order, with no
 implicit padding.
 2. `RING-PROLOGUE-002` `prologue_checksum` MUST be CRC-32C over
-`log_head_region_index`, `allocator_free_list_head`, and
-`allocation_sequence`.
+`log_head_region_index`, `allocation_head`, `ready_boundary`, and
+`append_tail`.
 3. `RING-PROLOGUE-003` `log_head_region_index` MUST be strictly less
 than `region_count`.
-4. `RING-PROLOGUE-004` If `allocator_free_list_head` is present, it
-MUST name a region index strictly less than `region_count`.
+4. `RING-PROLOGUE-004` The checkpointed free-space cursors MUST satisfy
+`allocation_head <= ready_boundary <= append_tail` in the materialized
+free-space collection order, and each cursor MUST name either a valid
+entry position in a `free_space_v2` metadata region or the canonical
+empty tail position of that materialized queue.
 
 Let `wal_record_area_offset` be the first offset within a private log region
 that is both greater than or equal to the end of `Header` plus

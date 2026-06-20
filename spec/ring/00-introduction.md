@@ -18,7 +18,8 @@ A collection's visible state is reconstructed from three layers:
 
 The backing store is divided into one static metadata region followed by
 equal-sized data regions. Data regions may be used as WAL regions,
-committed collection regions, or free-list members.
+committed collection regions, free-space collection metadata regions, or
+free regions named by the free-space collection.
 
 Borromean can host multiple collections in the same store, subject to
 compile-time capacity limits such as maximum live collections and
@@ -68,7 +69,8 @@ reconstruct the same state after reset.
 Glossary:
 
 - **Region**: the fixed-size, erase-aligned unit of storage. User data,
-  WAL data, and free-list links all live in regions.
+  WAL data, collection metadata, and allocator metadata all live in
+  regions.
 - **WAL head / WAL tail**: the WAL head is the oldest live WAL region in
   the reachable chain. The WAL tail is the region where new records are
   appended.
@@ -84,8 +86,13 @@ Glossary:
   enough to load the collection. Dirty means newer WAL updates must
   also be replayed over that basis. A dirty collection may also have
   those updates loaded into an in-memory frontier.
-- **Ready region**: a region removed from the free-list head by
-  `alloc_begin` but not yet consumed by `head` or `link`.
+- **Free-space collection**: the storage-private allocator collection
+  that records free regions in FIFO order. Its `allocation_head`,
+  `ready_boundary`, and `append_tail` split the queue into allocated,
+  ready, and dirty ranges.
+- **Ready range**: the free-space collection entries from
+  `allocation_head` to `ready_boundary`. These entries name erased
+  regions that may be allocated without running erase inline.
 - **Transaction log**: a private log chain used by one active
   transaction at a time. Main WAL transaction-control records name the
   transaction-log range that should be rolled back, imported at commit,

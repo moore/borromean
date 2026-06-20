@@ -40,9 +40,9 @@ Borromean is built from a small set of mutually reinforcing choices:
 - Checkpointing partially filled frontiers to the WAL lets the store
   support more live collections than available in-memory frontier
   buffers, within the configured collection limit.
-- Every region allocation is made durable before use and tagged with
-  the owning collection, so a reset cannot lose a removed free-list
-  head.
+- Every region allocation is made durable before use in a transaction
+  or privileged storage-core operation, so a reset cannot lose a
+  consumed ready entry.
 - Multi-step collection changes use WAL transactions so replay can
   distinguish uncommitted updates from committed updates that still
   need allocator cleanup.
@@ -119,17 +119,17 @@ limit.
 
 Each collection's storage-managed resident update frontier has exactly
 the committed-region payload capacity for the configured region size:
-the region size minus the region header and free-pointer footer. That
-keeps dirty frontier memory aligned with the amount of collection data
-that can be written to one committed region and prevents undersized
-resident buffers from causing avoidable region underutilization. If
-applying another update would overflow that frontier, the implementation
-flushes the current logical frontier into collection-defined committed
-state, commits a new durable head, clears the in-memory frontier, and
-continues accepting later updates into RAM over the new committed head.
-Collections therefore remain log-structured: a flush creates new
-immutable committed state instead of rewriting existing live committed
-state in place.
+the region size minus the region header and any collection-format
+overhead. That keeps dirty frontier memory aligned with the amount of
+collection data that can be written to one committed region and
+prevents undersized resident buffers from causing avoidable region
+underutilization. If applying another update would overflow that
+frontier, the implementation flushes the current logical frontier into
+collection-defined committed state, commits a new durable head, clears
+the in-memory frontier, and continues accepting later updates into RAM
+over the new committed head. Collections therefore remain
+log-structured: a flush creates new immutable committed state instead of
+rewriting existing live committed state in place.
 
 In a completed WAL rotation, the last record of the old WAL tail is
 `link(next_region_index, expected_sequence)`, which points to the next
@@ -168,22 +168,39 @@ pre-commit recovery has already cleaned up an abandoned transaction,
 replay records that fact with
 `rollback_transaction(transaction_log_id, range)`.
 
-The storage system also keeps a free list of regions that are
-available to satisfy new allocations. This list is FIFO (first in,
-first out), to support wear leveling. The durable free-list head
-is tracked in WAL replay order so every durable allocator-head change
-is replayed exactly once. Allocations advance the durable free-list
-head through `alloc_begin(collection_id, region_index,
-allocation_sequence, free_list_head_after)`. Any operation that writes a
-newly allocated region must first durably reserve that region with the
-owning collection id and the next global allocation sequence; WAL
-rotation uses `collection_id = 0`. The later `head` or `link` record
-that uses that region consumes the single ready-region reservation.
-Freeing a region appends
-`free_region(collection_id, region_index)`, where the collection id is
-the collection that is losing that region. The free record mutates
-global allocator state, but it remains collection-scoped because it
-removes a region from that collection.
+The storage system also keeps a storage-private free-space collection of
+regions that are available to satisfy new allocations. This collection
+is FIFO (first in, first out), to support wear leveling. It is replayed
+from WAL allocator commands and materialized free-space collection
+regions; free regions themselves do not store allocator links.
+
+The free-space collection has three replay-visible cursors:
+`allocation_head`, `ready_boundary`, and `append_tail`, with the
+invariant `allocation_head <= ready_boundary <= append_tail`. Entries
+before `allocation_head` are no longer free. Entries from
+`allocation_head` up to `ready_boundary` name erased ready regions that
+may be allocated without running erase inline. Entries from
+`ready_boundary` up to `append_tail` name dirty regions that must be
+erased before they can be allocated.
+
+Freeing a region appends `free_region(region_index, append_tail_after)`,
+which adds a detached region at `append_tail` as dirty. Erase
+maintenance erases a bounded dirty span and then appends
+`erase_free_region_span(count, ready_boundary_after)`, which publishes
+the ready-boundary advance. Allocation appends
+`allocate_region(region_index, allocation_head_after)`, which consumes
+the current ready entry and reserves that region. These commands are
+self-checking cursor transitions: replay validates the named region or
+cursor update against the current free-space collection state before
+applying it.
+
+Ordinary user/data allocations are transaction-owned. If the enclosing
+transaction commits, the allocator pop and collection state update
+become visible together. If it rolls back, any reserved region that may
+have been written is returned to the dirty range. Storage-core
+allocations needed to run WAL rotation, transaction-log growth, or
+allocator maintenance may use privileged non-ordinary paths, but those
+paths must preserve a ready-region reserve.
 
 Borromean must also maintain a configured `min_free_regions` reserve.
 Let `max_in_memory_dirty_collections` be the maximum number of dirty
@@ -199,16 +216,17 @@ Under that assumption, `min_free_regions` must be at least
 `max_in_memory_dirty_collections + 1`. The extra `+1` region is
 reserved so WAL rotation, reclaim bookkeeping, or crash recovery can
 still make forward progress before the first region is freed.
-While the free-list contains at most `min_free_regions` free regions,
-ordinary foreground mutations must not be accepted unless they are part
-of space-recovery work: operations that make regions reclaimable,
-or complete reclaim. If accepting an ordinary foreground mutation would
-leave the store at or below the reserve, the implementation must first
-attempt such space-recovery work. If space-recovery operations cannot
-restore more than `min_free_regions` free regions, the database must be
-treated as full for purposes of accepting further ordinary writes. At
-that point, more drastic action such as dropping or truncating
-collections, or migrating/reformatting onto a larger backing store, is
+While the ready range contains at most the configured ready-region
+reserve, ordinary foreground mutations must not be accepted unless they
+are part of space-recovery work: operations that make regions
+reclaimable, erase dirty free-space entries, or complete reclaim. If
+accepting an ordinary foreground mutation would leave the store at or
+below the reserve, the implementation must first attempt such
+space-recovery work. If space-recovery operations cannot restore enough
+ready entries, the database must be treated as full for purposes of
+accepting further ordinary writes. At that point, more drastic action
+such as dropping or truncating collections, erasing dirty free-space
+entries, or migrating/reformatting onto a larger backing store is
 required before additional ordinary writes may be accepted.
 
 ## Design Constraints
@@ -223,9 +241,10 @@ append-only facts.
 Oldest-first freeing is necessary for wear leveling, but Borromean
 cannot reclaim old bytes merely because they are old. A region remains
 live while a collection basis, collection-defined region reference,
-WAL-chain link, ready-region reservation, open transaction, or free-list
-link can still require it during replay. The rest of this specification
-defines the operations that make those reachability decisions explicit.
+WAL-chain link, storage-core private allocation reservation, open
+transaction, or free-space collection entry can still require it during
+replay. The rest of this specification defines the operations that make
+those reachability decisions explicit.
 
 This is why the WAL is collection `0`: it is the single replay order for
 state that would otherwise need stable mutable roots. Startup finds the
@@ -265,27 +284,35 @@ once they are no longer physically reachable from live state.
 `head(collection_id = 0, collection_type = wal, region_index = ...)`
 records rather than a WAL-specific head record type.
 9. `RING-CORE-009` Any multi-step collection operation that commits a
-new durable basis and frees old regions MUST be tracked as a
-transaction-log-backed transaction with durable main-WAL begin, commit,
-cleanup, and terminal markers.
-10. `RING-CORE-010` The durable free list MUST be FIFO so allocations
-consume the oldest free regions first.
+new durable basis and frees old regions MUST be tracked as either a
+bounded inline transaction or a transaction-log-backed transaction with
+durable begin, commit, cleanup, and terminal markers.
+10. `RING-CORE-010` The storage-private free-space collection MUST be
+FIFO so allocations consume the oldest ready free regions first.
 11. `RING-CORE-011` Any operation that writes a newly allocated region
 MUST first durably reserve that region with
-`alloc_begin(collection_id, region_index, allocation_sequence, free_list_head_after)`.
-12. `RING-CORE-012` The implementation MUST maintain
+`allocate_region(region_index, allocation_head_after)` in an enclosing
+transaction or privileged storage-core operation.
+12. `RING-CORE-012` `free_region`,
+`erase_free_region_span`, and `allocate_region` records MUST be
+self-checking cursor transitions over the free-space collection, and
+replay MUST reject any allocator command whose region or cursor update
+does not match the current replayed free-space collection state.
+13. `RING-CORE-013` The implementation MUST maintain
 `min_free_regions >= max_in_memory_dirty_collections + 1` so every
 storage-managed dirty frontier can be preserved using one committed
 region while one additional region remains reserved for WAL rotation,
 transaction terminal records, or crash recovery.
-13. `RING-CORE-013` While the free-list contains at most
-`min_free_regions` free regions, ordinary foreground mutations MUST NOT
+14. `RING-CORE-014` While the ready range contains at most the
+configured ready-region reserve, ordinary foreground mutations MUST NOT
 be accepted unless they are part of a space-recovery operation that
-makes regions reclaimable or completes reclaim.
-14. `RING-CORE-014` If space-recovery operations cannot restore more
-than `min_free_regions` free regions, the database MUST treat ordinary
-writes as out of space until space is freed or the store is migrated.
-15. `RING-CORE-015` Each storage-managed resident mutable collection
+makes regions reclaimable, erases dirty free-space entries, or completes
+reclaim.
+15. `RING-CORE-015` If space-recovery operations cannot restore enough
+ready entries, the database MUST treat ordinary writes as out of space
+until space is freed, dirty entries are erased, or the store is
+migrated.
+16. `RING-CORE-016` Each storage-managed resident mutable collection
 frontier MUST have usable byte capacity exactly equal to the
 committed-region payload capacity of one configured durable region.
 16. `RING-CORE-016` If applying another update would exceed that
