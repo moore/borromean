@@ -5,12 +5,13 @@ extern crate std;
 use super::assert_no_alloc;
 use crate::{
     decode_record, encode_record_into, CollectionCreateMode, CollectionId, CollectionUpdateMode,
-    DiskError, FlashIo, FormatStorageFuture, FreePointerFooter, Header, LsmMap, MapError,
-    MapFrontier, MapFrontierMemory, MapStorageError, MapUpdate, MockFlash, MockFormatError,
-    MockOperation, OpenStorageFuture, ReclaimWalHeadFuture, StartupCollectionBasis, StartupError,
-    Storage, StorageFormatConfig, StorageFormatError, StorageIoError, StorageMemory,
-    StorageMetadata, StorageMode, StorageRuntimeError, StorageWorkspace, WalRecord,
-    WalRegionPrologue, MAP_REGION_V2_FORMAT, WAL_V1_FORMAT,
+    DiskError, FlashIo, FormatStorageFuture, FreeQueuePosition, FreeSpaceEntry,
+    FreeSpaceRegionPrologue, Header, LsmMap, MapError, MapFrontier, MapFrontierMemory,
+    MapStorageError, MapUpdate, MockFlash, MockFormatError, MockOperation, OpenStorageFuture,
+    ReclaimWalHeadFuture, StartupCollectionBasis, StartupError, Storage, StorageFormatConfig,
+    StorageFormatError, StorageIoError, StorageMemory, StorageMetadata, StorageMode,
+    StorageRuntimeError, StorageWorkspace, WalRecord, WalRegionPrologue, MAP_REGION_V2_FORMAT,
+    WAL_V1_FORMAT,
 };
 
 struct ForwardingFlash<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize> {

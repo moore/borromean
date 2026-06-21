@@ -94,12 +94,12 @@ fn requirement_blocking_and_future_entry_points_produce_equivalent_storage_state
         reopened_future.collections()
     );
     assert_eq!(
-        reopened_blocking.last_free_list_head(),
-        reopened_future.last_free_list_head()
+        reopened_blocking.ready_free_region(),
+        reopened_future.ready_free_region()
     );
     assert_eq!(
-        reopened_blocking.free_list_tail(),
-        reopened_future.free_list_tail()
+        reopened_blocking.free_space_tail_region(),
+        reopened_future.free_space_tail_region()
     );
 
     let mut blocking_map_buffer = [0u8; REGION_SIZE];

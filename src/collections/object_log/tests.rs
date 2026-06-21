@@ -454,22 +454,19 @@ fn refresh_record_crc<
     }
 }
 
-fn free_list_chain<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize>(
-    flash: &MockFlash<REGION_SIZE, REGION_COUNT, MAX_LOG>,
-    erased_byte: u8,
-    head: Option<u32>,
-) -> std::vec::Vec<u32> {
-    let mut chain = std::vec::Vec::new();
-    let mut current = head;
-    let footer_offset = REGION_SIZE - FreePointerFooter::ENCODED_LEN;
-    while let Some(region_index) = current {
-        assert!(chain.len() <= REGION_COUNT);
-        chain.push(region_index);
-        let region = flash.region_bytes(region_index).unwrap();
-        let footer = FreePointerFooter::decode(&region[footer_offset..], erased_byte).unwrap();
-        current = footer.next_tail;
-    }
-    chain
+fn dirty_free_regions<
+    'a,
+    'db,
+    'storage_mem,
+    IO: FlashIo,
+    const REGION_SIZE: usize,
+    const REGION_COUNT: usize,
+    const MAX_COLLECTIONS: usize,
+>(
+    storage: &'a Storage<'db, 'storage_mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
+) -> &'a [u32] {
+    let (_, ready_boundary, append_tail, _, _) = storage.free_space_cursors();
+    &storage.free_space_entries()[ready_boundary as usize..append_tail as usize]
 }
 
 fn write_aux_next_link_for_test<
@@ -534,10 +531,10 @@ fn requirement_object_log_append_placement_preserves_handles_and_progress() {
 
 //= spec/object-log.md#durability
 //= type=test
-//# `RING-OBJECT-027` Object-log WAL replay MUST rebuild only the target
-//# object-log collection: records for other collection ids or collection types
-//# MUST NOT alter target state, and lifecycle or transaction markers MUST affect
-//# target updates only when the marker belongs to the target collection.
+//# `RING-OBJECT-027` Object-log WAL replay MUST rebuild only the target object-log
+//# collection: records for other collection ids or collection types MUST NOT alter target
+//# state, and lifecycle or transaction markers MUST affect target updates only when the
+//# marker belongs to the target collection.
 #[test]
 fn requirement_object_log_wal_replay_is_collection_scoped() {
     assert_object_log_replay_ignores_other_collection_records();
@@ -625,11 +622,11 @@ fn assert_object_log_encoding_helpers_validate_boundaries() {
     ));
 
     let metadata = StorageMetadata::new(512, 8, 1, 8, 0xff, 0xa5).unwrap();
-    assert_eq!(committed_payload_capacity::<512>(metadata).unwrap(), 482);
+    assert_eq!(committed_payload_capacity::<512>(metadata).unwrap(), 490);
     let unaligned_metadata = StorageMetadata::new(512, 8, 1, 16, 0xff, 0xa5).unwrap();
     assert_eq!(
         committed_payload_capacity::<512>(unaligned_metadata).unwrap(),
-        474
+        490
     );
 
     let prologue_len = data_prologue_len(LOG_METADATA.len()).unwrap();
@@ -790,14 +787,14 @@ fn assert_object_log_encoding_helpers_validate_boundaries() {
             - OBJECT_CHUNK_FIXED_BODY_LEN
     );
 
-    let narrow_metadata = StorageMetadata::new(96, 8, 1, 1, 0xff, 0xa5).unwrap();
+    let narrow_metadata = StorageMetadata::new(64, 8, 1, 1, 0xff, 0xa5).unwrap();
     assert!(matches!(
-        aux_geometry::<96>(narrow_metadata, 1),
+        aux_geometry::<64>(narrow_metadata, 1),
         Err(ObjectLogError::ObjectTooLarge {
             len,
             capacity
         }) if len == AUX_PROLOGUE_PREFIX_LEN + 1 + AUX_PROLOGUE_CRC_LEN + AUX_LINK_PRESENT_LEN
-            && capacity == committed_payload_capacity::<96>(narrow_metadata).unwrap()
+            && capacity == committed_payload_capacity::<64>(narrow_metadata).unwrap()
     ));
 
     let geometry = aux_geometry::<512>(tail_metadata, LOG_METADATA.len()).unwrap();
@@ -910,7 +907,7 @@ fn assert_object_log_encoding_helpers_validate_boundaries() {
         Err(ObjectLogError::InvalidFrame)
     ));
 
-    const LINK_REGION_SIZE: usize = 64;
+    const LINK_REGION_SIZE: usize = 96;
     const LINK_REGION_COUNT: usize = 4;
     let mut link_flash = MockFlash::<LINK_REGION_SIZE, LINK_REGION_COUNT, 1024>::new(0xff);
     let mut link_storage = Storage::<_, LINK_REGION_SIZE, LINK_REGION_COUNT>::format(
@@ -1244,7 +1241,7 @@ fn assert_object_log_exact_fit_capacity_boundaries_are_stable() {
     const REGION_SIZE: usize = 512;
     const REGION_COUNT: usize = 24;
 
-    let log_metadata = [0x42u8; 192];
+    let log_metadata = [0x42u8; 420];
     let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 8192>::new(0xff);
     let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT>::format(
         &mut flash,
@@ -1253,19 +1250,28 @@ fn assert_object_log_exact_fit_capacity_boundaries_are_stable() {
     )
     .unwrap();
     let payload_capacity = committed_payload_capacity::<REGION_SIZE>(storage.metadata()).unwrap();
-    let footer_offset = REGION_SIZE - FreePointerFooter::ENCODED_LEN;
-    let aligned_footer_boundary =
-        footer_offset - footer_offset % storage.metadata().wal_write_granule as usize;
+    let aligned_region_boundary =
+        REGION_SIZE - REGION_SIZE % storage.metadata().wal_write_granule as usize;
     assert_eq!(
         payload_capacity,
-        aligned_footer_boundary - Header::ENCODED_LEN
+        aligned_region_boundary - Header::ENCODED_LEN
     );
 
     let object_capacity =
         empty_region_record_capacity(payload_capacity, log_metadata.len()).unwrap();
     let exact_inline_len = object_capacity - RECORD_HEADER_LEN;
-    let mut memory = ObjectLogMemory::<REGION_SIZE, 16, 224>::new();
-    let mut log = ObjectLog::new(&mut storage, &mut memory, &log_metadata).unwrap();
+    assert!(aux_geometry::<REGION_SIZE>(storage.metadata(), log_metadata.len()).is_err());
+
+    let mut memory = ObjectLogMemory::<REGION_SIZE, 16, 448>::new();
+    let collection_id = CollectionId::new(7);
+    storage
+        .append_new_collection(collection_id, CollectionType::OBJECT_LOG_CODE)
+        .unwrap();
+    let mut log = ObjectLog {
+        collection_id,
+        memory: &mut memory,
+    };
+    log.apply_log_metadata(&log_metadata).unwrap();
     let exact = std::vec![0x5au8; exact_inline_len];
     let exact_handle = append_with_scratch!(log, &mut storage, &exact).unwrap();
     let (region, record) = record_info_for(&log, &mut storage, exact_handle);
@@ -1305,7 +1311,7 @@ fn assert_object_log_inline_routing_leaves_transactions_idle() {
     const REGION_SIZE: usize = 1024;
     const REGION_COUNT: usize = 16;
 
-    let log_metadata = [0x42u8; 300];
+    let log_metadata = [0x42u8; 308];
     let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 8192>::new(0xff);
     let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT>::format(
         &mut flash,
@@ -1368,7 +1374,7 @@ fn assert_object_log_inline_routing_leaves_transactions_idle() {
 
     const SMALL_REGION_SIZE: usize = 512;
     const SMALL_REGION_COUNT: usize = 16;
-    let log_metadata = [0x42u8; 399];
+    let log_metadata = [0x42u8; 420];
     let mut flash = MockFlash::<SMALL_REGION_SIZE, SMALL_REGION_COUNT, 8192>::new(0xff);
     let mut storage = Storage::<_, SMALL_REGION_SIZE, SMALL_REGION_COUNT>::format(
         &mut flash,
@@ -1382,7 +1388,7 @@ fn assert_object_log_inline_routing_leaves_transactions_idle() {
     let exact_inline_len = empty_region_record_capacity(payload_capacity, log_metadata.len())
         .unwrap()
         - RECORD_HEADER_LEN;
-    let mut memory = ObjectLogMemory::<SMALL_REGION_SIZE, 4, 416>::new();
+    let mut memory = ObjectLogMemory::<SMALL_REGION_SIZE, 4, 448>::new();
     let collection_id = CollectionId::new(7);
     storage
         .append_new_collection(collection_id, CollectionType::OBJECT_LOG_CODE)
@@ -1782,7 +1788,7 @@ fn assert_object_log_replay_scopes_begin_and_commit_markers() {
     append_raw_inline_update(&mut storage, target_id, handle, b"alpha");
     let mut memory = ObjectLogMemory::<REGION_SIZE, 4, 16>::new();
     replay_into_memory(&mut storage, target_id, &mut memory).unwrap();
-    assert_replayed_inline_object(&mut storage, &mut memory, target_id, handle, b"alpha");
+    assert_no_replayed_inline_object(&mut storage, &mut memory, target_id, handle);
 
     let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 4096>::new(0xff);
     let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT>::format(
@@ -1807,7 +1813,7 @@ fn assert_object_log_replay_scopes_begin_and_commit_markers() {
         .unwrap();
     let mut memory = ObjectLogMemory::<REGION_SIZE, 4, 16>::new();
     replay_into_memory(&mut storage, target_id, &mut memory).unwrap();
-    assert_no_replayed_inline_object(&mut storage, &mut memory, target_id, handle);
+    assert_replayed_inline_object(&mut storage, &mut memory, target_id, handle, b"beta");
 }
 
 fn assert_object_log_replay_scopes_add_transaction_collection_markers() {
@@ -1867,7 +1873,7 @@ fn assert_object_log_replay_scopes_add_transaction_collection_markers() {
         .unwrap();
     let mut memory = ObjectLogMemory::<REGION_SIZE, 4, 16>::new();
     replay_into_memory(&mut storage, target_id, &mut memory).unwrap();
-    assert_replayed_inline_object(&mut storage, &mut memory, target_id, handle, b"theta");
+    assert_no_replayed_inline_object(&mut storage, &mut memory, target_id, handle);
 }
 
 fn assert_object_log_replay_scopes_transaction_finished_markers() {
@@ -1927,7 +1933,7 @@ fn assert_object_log_replay_scopes_transaction_finished_markers() {
         .unwrap();
     let mut memory = ObjectLogMemory::<REGION_SIZE, 4, 16>::new();
     replay_into_memory(&mut storage, target_id, &mut memory).unwrap();
-    assert_no_replayed_inline_object(&mut storage, &mut memory, target_id, handle);
+    assert_replayed_inline_object(&mut storage, &mut memory, target_id, handle, b"delta");
 }
 
 fn assert_object_log_replay_scopes_rollback_markers() {
@@ -1962,7 +1968,7 @@ fn assert_object_log_replay_scopes_rollback_markers() {
         .unwrap();
     let mut memory = ObjectLogMemory::<REGION_SIZE, 4, 16>::new();
     replay_into_memory(&mut storage, target_id, &mut memory).unwrap();
-    assert_replayed_inline_object(&mut storage, &mut memory, target_id, handle, b"epsilon");
+    assert_no_replayed_inline_object(&mut storage, &mut memory, target_id, handle);
 
     let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 4096>::new(0xff);
     let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT>::format(
@@ -2478,7 +2484,7 @@ fn requirement_object_log_truncate_before_handle_retains_boundary_handle() {
     let first = append_with_scratch!(log, &mut storage, b"alpha").unwrap();
     log.flush(&mut storage).unwrap();
     let second = append_with_scratch!(log, &mut storage, b"beta").unwrap();
-    let previous_tail = storage.free_list_tail();
+    let previous_tail = storage.free_space_tail_region();
 
     log.truncate_before(&mut storage, second).unwrap();
 
@@ -2488,8 +2494,8 @@ fn requirement_object_log_truncate_before_handle_retains_boundary_handle() {
         Err(ObjectLogError::InvalidHandle)
     ));
     assert_get(&log, &mut storage, second, b"beta");
-    assert_ne!(storage.free_list_tail(), previous_tail);
-    assert_eq!(storage.free_list_tail(), Some(first.region_index));
+    assert_ne!(storage.free_space_tail_region(), previous_tail);
+    assert_eq!(storage.free_space_tail_region(), Some(first.region_index));
 
     let third = append_with_scratch!(log, &mut storage, b"gamma").unwrap();
     assert_get(&log, &mut storage, third, b"gamma");
@@ -2530,7 +2536,7 @@ fn requirement_object_log_large_truncation_frees_auxiliary_chains() {
     let retained_entry = large_entry_for(&log, &mut storage, retained_handle);
     let (_, retained_record) = record_info_for(&log, &mut storage, retained_handle);
     assert_eq!(retained_record.record_type, RECORD_LARGE_RECORD_ENTRY);
-    let previous_tail = storage.free_list_tail();
+    let dirty_before = dirty_free_regions(&storage).len();
 
     log.truncate_before(&mut storage, retained_handle).unwrap();
 
@@ -2541,13 +2547,11 @@ fn requirement_object_log_large_truncation_frees_auxiliary_chains() {
     ));
     assert_get_bytes(&log, &mut storage, retained_handle, &retained, &mut scratch);
     assert_eq!(log.first_handle(), Some(retained_handle));
-    assert_ne!(storage.free_list_tail(), previous_tail);
-    let erased_byte = storage.metadata().erased_byte;
-    let free_head = storage.last_free_list_head();
-    let chain = free_list_chain(&*storage.backing, erased_byte, free_head);
-    assert!(chain.contains(&obsolete_entry.first_aux.region_index));
-    assert!(chain.contains(&obsolete_second_aux.region_index));
-    assert!(!chain.contains(&retained_entry.first_aux.region_index));
+    let dirty_regions = dirty_free_regions(&storage);
+    assert!(dirty_regions.len() >= dirty_before + 2);
+    assert!(dirty_regions.contains(&obsolete_entry.first_aux.region_index));
+    assert!(dirty_regions.contains(&obsolete_second_aux.region_index));
+    assert!(!dirty_regions.contains(&retained_entry.first_aux.region_index));
     assert!(log.region_for_handle(retained_handle).is_ok());
 }
 
@@ -3418,7 +3422,7 @@ fn requirement_object_log_failed_transaction_rolls_back_allocations() {
     assert!(matches!(result, Err(ObjectLogError::InvalidHandle)));
 
     let planned = planned.unwrap();
-    assert_eq!(storage.free_list_tail(), Some(planned.region_index));
+    assert!(dirty_free_regions(&storage).contains(&planned.region_index));
     let committed = append_with_scratch!(log, &mut storage, b"committed").unwrap();
     let mut scratch = [0u8; 64];
     assert!(matches!(
@@ -3470,7 +3474,13 @@ fn requirement_object_log_failed_transaction_rolls_back_allocations() {
         reopened_log.get(&mut reopened, planned, &mut scratch, |_| ()),
         Err(ObjectLogError::InvalidHandle)
     ));
-    assert_eq!(reopened.free_list_tail(), Some(planned.region_index));
+    assert!(
+        dirty_free_regions(&reopened).contains(&planned.region_index),
+        "planned region {} not dirty after reopen; cursors {:?}, entries {:?}",
+        planned.region_index,
+        reopened.free_space_cursors(),
+        reopened.free_space_entries()
+    );
 }
 
 fn assert_object_log_update_payloads_validate_truncate_and_materialized_regions() {
@@ -4461,7 +4471,7 @@ fn requirement_object_log_auxiliary_regions_are_transaction_owned() {
             log.get(&mut storage, planned.unwrap(), &mut scratch, |_| ()),
             Err(ObjectLogError::InvalidHandle)
         ));
-        assert!(storage.free_list_tail().is_some());
+        assert!(storage.free_space_tail_region().is_some());
 
         let committed_handle = append_with_scratch!(log, &mut storage, &object).unwrap();
         let entry = large_entry_for(&log, &mut storage, committed_handle);

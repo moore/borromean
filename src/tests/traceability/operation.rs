@@ -9,7 +9,7 @@ use std::task::Poll;
 #[test]
 fn requirement_each_public_operation_future_completes_when_polled_directly() {
     const REGION_SIZE: usize = 512;
-    const REGION_COUNT: usize = 5;
+    const REGION_COUNT: usize = 8;
 
     let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 2048>::new(0xff);
     let mut storage =

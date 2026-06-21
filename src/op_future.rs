@@ -585,7 +585,7 @@ where
                     .copy_live_wal_head_reclaim_state::<REGION_SIZE, REGION_COUNT, IO>(
                         this.storage.backing,
                         &mut this.storage.memory.workspace,
-                        &this.storage.memory.reclaim_plan,
+                        &mut this.storage.memory.reclaim_plan,
                         &mut this.storage.memory.active_collections,
                         &mut this.storage.memory.open_plan,
                         #[cfg(feature = "perf-counters")]

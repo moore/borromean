@@ -2,7 +2,7 @@ use core::mem::size_of;
 
 use crc::{Crc, CRC_32_ISCSI};
 
-use crate::disk::{DiskError, StorageMetadata};
+use crate::disk::{DiskError, FreeQueuePosition, StorageMetadata};
 use crate::CollectionId;
 
 const CRC32C: Crc<u32> = Crc::<u32>::new(&CRC_32_ISCSI);
@@ -109,17 +109,23 @@ pub enum WalRecordType {
     Update,
     /// Appends a collection-specific snapshot payload.
     Snapshot,
-    /// Reserves a free region for use by a collection or WAL rotation.
-    AllocBegin,
+    /// Reserves the current ready free-space entry.
+    AllocateRegion,
     /// Commits a new collection or WAL head.
     Head,
     /// Drops a collection.
     DropCollection,
     /// Links one WAL region to the next.
     Link,
+    /// Publishes erasure of one or more dirty free-space entries.
+    EraseFreeRegionSpan,
+    /// Opens a bounded inline transaction in the main WAL.
+    BeginInlineTransaction,
+    /// Commits a bounded inline transaction in the main WAL.
+    CommitInlineTransaction,
     /// Marks a WAL recovery boundary.
     WalRecovery,
-    /// Adds a region to the free-list tail after it leaves a collection.
+    /// Adds a detached region to the dirty free-space tail.
     FreeRegion,
     /// Starts a collection-scoped WAL transaction.
     BeginTransaction,
@@ -131,6 +137,8 @@ pub enum WalRecordType {
     RollbackTransaction,
     /// Enrolls a collection into the active transaction-log state.
     AddTransactionCollection,
+    /// Rolls back a bounded inline transaction in the main WAL.
+    RollbackInlineTransaction,
 }
 
 impl WalRecordType {
@@ -140,10 +148,13 @@ impl WalRecordType {
             Self::NewCollection => 0x01,
             Self::Update => 0x02,
             Self::Snapshot => 0x03,
-            Self::AllocBegin => 0x04,
+            Self::AllocateRegion => 0x04,
             Self::Head => 0x05,
             Self::DropCollection => 0x06,
             Self::Link => 0x07,
+            Self::EraseFreeRegionSpan => 0x08,
+            Self::BeginInlineTransaction => 0x09,
+            Self::CommitInlineTransaction => 0x0a,
             Self::WalRecovery => 0x0b,
             Self::FreeRegion => 0x0c,
             Self::BeginTransaction => 0x0d,
@@ -151,6 +162,7 @@ impl WalRecordType {
             Self::TransactionFinished => 0x0f,
             Self::RollbackTransaction => 0x10,
             Self::AddTransactionCollection => 0x11,
+            Self::RollbackInlineTransaction => 0x12,
         }
     }
 
@@ -160,10 +172,13 @@ impl WalRecordType {
             0x01 => Ok(Self::NewCollection),
             0x02 => Ok(Self::Update),
             0x03 => Ok(Self::Snapshot),
-            0x04 => Ok(Self::AllocBegin),
+            0x04 => Ok(Self::AllocateRegion),
             0x05 => Ok(Self::Head),
             0x06 => Ok(Self::DropCollection),
             0x07 => Ok(Self::Link),
+            0x08 => Ok(Self::EraseFreeRegionSpan),
+            0x09 => Ok(Self::BeginInlineTransaction),
+            0x0a => Ok(Self::CommitInlineTransaction),
             0x0b => Ok(Self::WalRecovery),
             0x0c => Ok(Self::FreeRegion),
             0x0d => Ok(Self::BeginTransaction),
@@ -171,6 +186,7 @@ impl WalRecordType {
             0x0f => Ok(Self::TransactionFinished),
             0x10 => Ok(Self::RollbackTransaction),
             0x11 => Ok(Self::AddTransactionCollection),
+            0x12 => Ok(Self::RollbackInlineTransaction),
             _ => Err(WalRecordError::InvalidRecordType(code)),
         }
     }
@@ -181,10 +197,8 @@ impl WalRecordType {
             Self::NewCollection
                 | Self::Update
                 | Self::Snapshot
-                | Self::AllocBegin
                 | Self::Head
                 | Self::DropCollection
-                | Self::FreeRegion
                 | Self::AddTransactionCollection
         )
     }
@@ -238,16 +252,12 @@ pub enum WalRecord<'a> {
         /// Collection-specific snapshot payload bytes.
         payload: &'a [u8],
     },
-    /// `alloc_begin(collection_id, region_index, free_list_head_after)`.
-    AllocBegin {
-        /// Collection reserving the region. WAL rotation uses collection id 0.
-        collection_id: CollectionId,
-        /// Free-list region being reserved.
+    /// `allocate_region(region_index, allocation_head_after)`.
+    AllocateRegion {
+        /// Region at the current ready allocation head.
         region_index: u32,
-        /// Globally ordered allocator decision sequence.
-        allocation_sequence: u64,
-        /// Successor free-list head after reserving the region.
-        free_list_head_after: Option<u32>,
+        /// Allocation cursor after the pop.
+        allocation_head_after: FreeQueuePosition,
     },
     /// `head(collection_id, collection_type, region_index)`.
     Head {
@@ -270,12 +280,31 @@ pub enum WalRecord<'a> {
         /// Sequence expected in the linked region header.
         expected_sequence: u64,
     },
-    /// `free_region(collection_id, region_index)`.
+    /// `erase_free_region_span(count, ready_boundary_after)`.
+    EraseFreeRegionSpan {
+        /// Number of dirty entries erased.
+        count: u32,
+        /// Ready boundary after the erased span.
+        ready_boundary_after: FreeQueuePosition,
+    },
+    /// `begin_inline_transaction(record_count, encoded_len)`.
+    BeginInlineTransaction {
+        /// Number of body records in the bounded transaction.
+        record_count: u32,
+        /// Encoded physical length of the body records.
+        encoded_len: u32,
+    },
+    /// `commit_inline_transaction(record_count)`.
+    CommitInlineTransaction {
+        /// Number of body records being committed.
+        record_count: u32,
+    },
+    /// `free_region(region_index, append_tail_after)`.
     FreeRegion {
-        /// Collection losing the region. WAL cleanup uses collection id 0.
-        collection_id: CollectionId,
-        /// Region being appended to the free-list tail.
+        /// Detached region being appended to the free-space collection.
         region_index: u32,
+        /// Append cursor after the dirty entry is added.
+        append_tail_after: FreeQueuePosition,
     },
     /// `begin_transaction(transaction_log_id, start)`.
     BeginTransaction {
@@ -312,6 +341,11 @@ pub enum WalRecord<'a> {
         /// Committed generation observed when the collection was enrolled.
         observed_collection_generation: u64,
     },
+    /// `rollback_inline_transaction(record_count)`.
+    RollbackInlineTransaction {
+        /// Number of body records being rolled back.
+        record_count: u32,
+    },
     /// `wal_recovery()`.
     WalRecovery,
 }
@@ -323,10 +357,13 @@ impl<'a> WalRecord<'a> {
             Self::NewCollection { .. } => WalRecordType::NewCollection,
             Self::Update { .. } => WalRecordType::Update,
             Self::Snapshot { .. } => WalRecordType::Snapshot,
-            Self::AllocBegin { .. } => WalRecordType::AllocBegin,
+            Self::AllocateRegion { .. } => WalRecordType::AllocateRegion,
             Self::Head { .. } => WalRecordType::Head,
             Self::DropCollection { .. } => WalRecordType::DropCollection,
             Self::Link { .. } => WalRecordType::Link,
+            Self::EraseFreeRegionSpan { .. } => WalRecordType::EraseFreeRegionSpan,
+            Self::BeginInlineTransaction { .. } => WalRecordType::BeginInlineTransaction,
+            Self::CommitInlineTransaction { .. } => WalRecordType::CommitInlineTransaction,
             Self::WalRecovery => WalRecordType::WalRecovery,
             Self::FreeRegion { .. } => WalRecordType::FreeRegion,
             Self::BeginTransaction { .. } => WalRecordType::BeginTransaction,
@@ -334,6 +371,7 @@ impl<'a> WalRecord<'a> {
             Self::TransactionFinished { .. } => WalRecordType::TransactionFinished,
             Self::RollbackTransaction { .. } => WalRecordType::RollbackTransaction,
             Self::AddTransactionCollection { .. } => WalRecordType::AddTransactionCollection,
+            Self::RollbackInlineTransaction { .. } => WalRecordType::RollbackInlineTransaction,
         }
     }
 }
@@ -466,33 +504,12 @@ pub fn decode_record<'a>(
         );
         let payload_len =
             usize::try_from(payload_len).map_err(|_| WalRecordError::LengthOverflow)?;
-        let record_type = record_type.ok_or(WalRecordError::MissingRecordType)?;
-
         let prefix_and_payload_len = payload_header_end
             .checked_add(payload_len)
             .ok_or(WalRecordError::LengthOverflow)?;
 
-        if record_type != WalRecordType::AllocBegin {
-            let total_len = prefix_and_payload_len
-                .checked_add(size_of::<u32>())
-                .ok_or(WalRecordError::LengthOverflow)?;
-            total_logical_len = Some(total_len);
-            continue;
-        }
-
-        let alloc_opt_tag_offset = prefix_and_payload_len;
-        if logical_offset <= alloc_opt_tag_offset {
-            continue;
-        }
-
-        let opt_len = match logical_scratch[alloc_opt_tag_offset] {
-            0 => 1usize,
-            1 => 1usize + size_of::<u32>(),
-            tag => return Err(WalRecordError::InvalidOptRegionTag(tag)),
-        };
         let total_len = prefix_and_payload_len
-            .checked_add(opt_len)
-            .and_then(|value| value.checked_add(size_of::<u32>()))
+            .checked_add(size_of::<u32>())
             .ok_or(WalRecordError::LengthOverflow)?;
         total_logical_len = Some(total_len);
     }
@@ -569,17 +586,17 @@ fn encode_logical_record(
             )?;
             offset = write_bytes(buffer, offset, payload)?;
         }
-        WalRecord::AllocBegin {
-            collection_id,
+        WalRecord::AllocateRegion {
             region_index,
-            allocation_sequence,
-            free_list_head_after,
+            allocation_head_after,
         } => {
-            offset = write_u64(buffer, offset, collection_id.0)?;
-            offset = write_u32(buffer, offset, (size_of::<u32>() + size_of::<u64>()) as u32)?;
+            offset = write_u32(
+                buffer,
+                offset,
+                (size_of::<u32>() + free_queue_position_len()) as u32,
+            )?;
             offset = write_u32(buffer, offset, region_index)?;
-            offset = write_u64(buffer, offset, allocation_sequence)?;
-            offset = write_opt_region_index(buffer, offset, free_list_head_after)?;
+            offset = write_free_queue_position(buffer, offset, allocation_head_after)?;
         }
         WalRecord::Head {
             collection_id,
@@ -603,13 +620,42 @@ fn encode_logical_record(
             offset = write_u32(buffer, offset, next_region_index)?;
             offset = write_u64(buffer, offset, expected_sequence)?;
         }
-        WalRecord::FreeRegion {
-            collection_id,
-            region_index,
+        WalRecord::EraseFreeRegionSpan {
+            count,
+            ready_boundary_after,
         } => {
-            offset = write_u64(buffer, offset, collection_id.0)?;
+            offset = write_u32(
+                buffer,
+                offset,
+                (size_of::<u32>() + free_queue_position_len()) as u32,
+            )?;
+            offset = write_u32(buffer, offset, count)?;
+            offset = write_free_queue_position(buffer, offset, ready_boundary_after)?;
+        }
+        WalRecord::BeginInlineTransaction {
+            record_count,
+            encoded_len,
+        } => {
+            offset = write_u32(buffer, offset, (size_of::<u32>() * 2) as u32)?;
+            offset = write_u32(buffer, offset, record_count)?;
+            offset = write_u32(buffer, offset, encoded_len)?;
+        }
+        WalRecord::CommitInlineTransaction { record_count }
+        | WalRecord::RollbackInlineTransaction { record_count } => {
             offset = write_u32(buffer, offset, size_of::<u32>() as u32)?;
+            offset = write_u32(buffer, offset, record_count)?;
+        }
+        WalRecord::FreeRegion {
+            region_index,
+            append_tail_after,
+        } => {
+            offset = write_u32(
+                buffer,
+                offset,
+                (size_of::<u32>() + free_queue_position_len()) as u32,
+            )?;
             offset = write_u32(buffer, offset, region_index)?;
+            offset = write_free_queue_position(buffer, offset, append_tail_after)?;
         }
         WalRecord::BeginTransaction {
             transaction_log_id,
@@ -699,23 +745,19 @@ fn parse_logical_record(logical: &[u8]) -> Result<WalRecord<'_>, WalRecordError>
                 payload,
             })
         }
-        WalRecordType::AllocBegin => {
-            let collection_id = CollectionId(read_u64(logical, &mut offset)?);
+        WalRecordType::AllocateRegion => {
             let payload_len = read_u32(logical, &mut offset)?;
-            if payload_len != (size_of::<u32>() + size_of::<u64>()) as u32 {
+            if payload_len != (size_of::<u32>() + free_queue_position_len()) as u32 {
                 return Err(WalRecordError::PayloadLengthMismatch {
                     record_type,
                     payload_len,
                 });
             }
             let region_index = read_u32(logical, &mut offset)?;
-            let allocation_sequence = read_u64(logical, &mut offset)?;
-            let free_list_head_after = read_opt_region_index(logical, &mut offset)?;
-            Ok(WalRecord::AllocBegin {
-                collection_id,
+            let allocation_head_after = read_free_queue_position(logical, &mut offset)?;
+            Ok(WalRecord::AllocateRegion {
                 region_index,
-                allocation_sequence,
-                free_list_head_after,
+                allocation_head_after,
             })
         }
         WalRecordType::Head => {
@@ -761,19 +803,53 @@ fn parse_logical_record(logical: &[u8]) -> Result<WalRecord<'_>, WalRecordError>
                 expected_sequence,
             })
         }
-        WalRecordType::FreeRegion => {
-            let collection_id = CollectionId(read_u64(logical, &mut offset)?);
+        WalRecordType::EraseFreeRegionSpan => {
             let payload_len = read_u32(logical, &mut offset)?;
-            if payload_len != size_of::<u32>() as u32 {
+            if payload_len != (size_of::<u32>() + free_queue_position_len()) as u32 {
+                return Err(WalRecordError::PayloadLengthMismatch {
+                    record_type,
+                    payload_len,
+                });
+            }
+            let count = read_u32(logical, &mut offset)?;
+            let ready_boundary_after = read_free_queue_position(logical, &mut offset)?;
+            Ok(WalRecord::EraseFreeRegionSpan {
+                count,
+                ready_boundary_after,
+            })
+        }
+        WalRecordType::BeginInlineTransaction => {
+            let payload_len = read_u32(logical, &mut offset)?;
+            if payload_len != (size_of::<u32>() * 2) as u32 {
+                return Err(WalRecordError::PayloadLengthMismatch {
+                    record_type,
+                    payload_len,
+                });
+            }
+            let record_count = read_u32(logical, &mut offset)?;
+            let encoded_len = read_u32(logical, &mut offset)?;
+            Ok(WalRecord::BeginInlineTransaction {
+                record_count,
+                encoded_len,
+            })
+        }
+        WalRecordType::CommitInlineTransaction => {
+            let record_count = read_inline_terminal_payload(logical, &mut offset, record_type)?;
+            Ok(WalRecord::CommitInlineTransaction { record_count })
+        }
+        WalRecordType::FreeRegion => {
+            let payload_len = read_u32(logical, &mut offset)?;
+            if payload_len != (size_of::<u32>() + free_queue_position_len()) as u32 {
                 return Err(WalRecordError::PayloadLengthMismatch {
                     record_type,
                     payload_len,
                 });
             }
             let region_index = read_u32(logical, &mut offset)?;
+            let append_tail_after = read_free_queue_position(logical, &mut offset)?;
             Ok(WalRecord::FreeRegion {
-                collection_id,
                 region_index,
+                append_tail_after,
             })
         }
         WalRecordType::WalRecovery => {
@@ -840,7 +916,26 @@ fn parse_logical_record(logical: &[u8]) -> Result<WalRecord<'_>, WalRecordError>
                 observed_collection_generation,
             })
         }
+        WalRecordType::RollbackInlineTransaction => {
+            let record_count = read_inline_terminal_payload(logical, &mut offset, record_type)?;
+            Ok(WalRecord::RollbackInlineTransaction { record_count })
+        }
     }
+}
+
+fn read_inline_terminal_payload(
+    logical: &[u8],
+    offset: &mut usize,
+    record_type: WalRecordType,
+) -> Result<u32, WalRecordError> {
+    let payload_len = read_u32(logical, offset)?;
+    if payload_len != size_of::<u32>() as u32 {
+        return Err(WalRecordError::PayloadLengthMismatch {
+            record_type,
+            payload_len,
+        });
+    }
+    read_u32(logical, offset)
 }
 
 fn read_transaction_log_control_payload(
@@ -911,26 +1006,25 @@ fn decode_logical_byte(
     }
 }
 
-fn write_opt_region_index(
-    buffer: &mut [u8],
-    offset: usize,
-    region_index: Option<u32>,
-) -> Result<usize, WalRecordError> {
-    match region_index {
-        Some(region_index) => {
-            let offset = write_u8(buffer, offset, 1)?;
-            write_u32(buffer, offset, region_index)
-        }
-        None => write_u8(buffer, offset, 0),
-    }
-}
-
 fn log_position_len() -> usize {
     size_of::<u32>() * 2
 }
 
 fn transaction_range_len() -> usize {
     log_position_len() * 2
+}
+
+fn free_queue_position_len() -> usize {
+    FreeQueuePosition::ENCODED_LEN
+}
+
+fn write_free_queue_position(
+    buffer: &mut [u8],
+    offset: usize,
+    position: FreeQueuePosition,
+) -> Result<usize, WalRecordError> {
+    let offset = write_u32(buffer, offset, position.region_index)?;
+    write_u32(buffer, offset, position.entry_index)
 }
 
 fn write_log_position(
@@ -951,12 +1045,16 @@ fn write_transaction_log_range(
     write_log_position(buffer, offset, range.end)
 }
 
-fn read_opt_region_index(buffer: &[u8], offset: &mut usize) -> Result<Option<u32>, WalRecordError> {
-    match read_u8(buffer, offset)? {
-        0 => Ok(None),
-        1 => Ok(Some(read_u32(buffer, offset)?)),
-        tag => Err(WalRecordError::InvalidOptRegionTag(tag)),
-    }
+fn read_free_queue_position(
+    buffer: &[u8],
+    offset: &mut usize,
+) -> Result<FreeQueuePosition, WalRecordError> {
+    let region_index = read_u32(buffer, offset)?;
+    let entry_index = read_u32(buffer, offset)?;
+    Ok(FreeQueuePosition {
+        region_index,
+        entry_index,
+    })
 }
 
 fn read_log_position(buffer: &[u8], offset: &mut usize) -> Result<LogPosition, WalRecordError> {

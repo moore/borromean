@@ -461,7 +461,9 @@ metadata growth, recovery, or erase maintenance, and it MUST preserve
 the ready-region reserve.
 21. `RING-WAL-VALID-021` `begin_transaction`,
 `commit_transaction`, `transaction_finished`, and
-`rollback_transaction` records are valid only in the main WAL.
+`rollback_transaction` records are valid only in the main WAL, and
+their `transaction_log_id` MUST be less than the configured
+`transaction_log_count`.
 22. `RING-WAL-VALID-022` `add_transaction_collection` is valid only in
 a transaction log and only while that transaction log has an open
 transaction descriptor for the containing range.

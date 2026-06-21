@@ -1,8 +1,10 @@
 #![allow(clippy::drop_non_drop)]
 
 use super::*;
-use crate::disk::{FreePointerFooter, Header};
-use crate::wal_record::{encode_record_into, encoded_record_len, WalRecord};
+use crate::disk::{encode_transaction_log_region_prefix_with_cursors, Header};
+use crate::wal_record::{
+    encode_record_into, encoded_record_len, LogPosition, TransactionLogRange, WalRecord,
+};
 use crate::{
     MapError, MapStorageError, MockFlash, Storage, StorageFormatConfig, StorageWorkspace,
     MAP_MANIFEST_V2_FORMAT, MAP_REGION_V2_FORMAT,
@@ -43,6 +45,59 @@ fn append_wal_record<const REGION_SIZE: usize, const REGION_COUNT: usize, const 
     offset + used
 }
 
+fn init_transaction_log_region<
+    const REGION_SIZE: usize,
+    const REGION_COUNT: usize,
+    const MAX_LOG: usize,
+>(
+    flash: &mut MockFlash<REGION_SIZE, REGION_COUNT, MAX_LOG>,
+    metadata: StorageMetadata,
+    region_index: u32,
+    sequence: u64,
+    head_region: u32,
+) -> usize {
+    flash.erase_region(region_index).unwrap();
+    let mut bytes = [0u8; REGION_SIZE];
+    let used = encode_transaction_log_region_prefix_with_cursors(
+        &mut bytes,
+        metadata,
+        sequence,
+        head_region,
+        FreeQueuePosition {
+            region_index: 1,
+            entry_index: 0,
+        },
+        FreeQueuePosition {
+            region_index: 1,
+            entry_index: 0,
+        },
+        FreeQueuePosition {
+            region_index: 1,
+            entry_index: 0,
+        },
+    )
+    .unwrap();
+    flash.write_region(region_index, 0, &bytes[..used]).unwrap();
+    used
+}
+
+fn transaction_range(
+    start_region: u32,
+    start_offset: usize,
+    end_offset: usize,
+) -> TransactionLogRange {
+    TransactionLogRange {
+        start: LogPosition {
+            region_index: start_region,
+            offset: u32::try_from(start_offset).unwrap(),
+        },
+        end: LogPosition {
+            region_index: start_region,
+            offset: u32::try_from(end_offset).unwrap(),
+        },
+    }
+}
+
 fn encoded_len_for_record<const REGION_SIZE: usize>(
     metadata: StorageMetadata,
     record: WalRecord<'_>,
@@ -70,6 +125,7 @@ fn startup_plan_with_append_offset<const REGION_COUNT: usize>(
             pending_boundary_open: false,
         },
         0,
+        FreeSpaceState::new_ready_range(1, 2, metadata.region_count).unwrap(),
     )
     .unwrap();
     plan.wal_append_offset = wal_append_offset;
@@ -105,8 +161,18 @@ fn init_wal_region<const REGION_SIZE: usize, const REGION_COUNT: usize, const MA
 
     let prologue = WalRegionPrologue {
         log_head_region_index: wal_head_region_index,
-        allocator_free_list_head: Some(1),
-        allocation_sequence: 0,
+        allocation_head: FreeQueuePosition {
+            region_index: 1,
+            entry_index: 0,
+        },
+        ready_boundary: FreeQueuePosition {
+            region_index: 1,
+            entry_index: 1,
+        },
+        append_tail: FreeQueuePosition {
+            region_index: 1,
+            entry_index: 1,
+        },
     };
     let mut prologue_bytes = [0u8; WalRegionPrologue::ENCODED_LEN];
     prologue
@@ -138,27 +204,6 @@ fn init_user_region_header<
     flash.write_region(region_index, 0, &header_bytes).unwrap();
 }
 
-fn write_free_pointer_footer<
-    const REGION_SIZE: usize,
-    const REGION_COUNT: usize,
-    const MAX_LOG: usize,
->(
-    flash: &mut MockFlash<REGION_SIZE, REGION_COUNT, MAX_LOG>,
-    region_index: u32,
-    next_tail: Option<u32>,
-) {
-    let footer = FreePointerFooter { next_tail };
-    let mut footer_bytes = [0u8; FreePointerFooter::ENCODED_LEN];
-    footer.encode_into(&mut footer_bytes, 0xff).unwrap();
-    flash
-        .write_region(
-            region_index,
-            REGION_SIZE - FreePointerFooter::ENCODED_LEN,
-            &footer_bytes,
-        )
-        .unwrap();
-}
-
 fn collection_summary(state: &StartupState<8>, collection_id: CollectionId) -> StartupCollection {
     state
         .collections()
@@ -187,9 +232,9 @@ fn count_recovery_records_in_storage<
                 |_flash, record| {
                     match record {
                         WalRecord::FreeRegion {
-                            collection_id: seen,
                             region_index: seen_region,
-                        } if seen == collection_id && seen_region == region_index => {
+                            ..
+                        } if seen_region == region_index => {
                             counts.free_region += 1;
                         }
                         WalRecord::RollbackTransaction {
@@ -241,6 +286,32 @@ fn setup_precommit_transaction_recovery(
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
     let wal_offset = metadata.wal_record_area_offset().unwrap();
     let collection_id = CollectionId(7);
+    let tx_region = 4;
+    let tx_start = init_transaction_log_region(&mut flash, metadata, tx_region, 2, tx_region);
+    let mut tx_offset = append_wal_record(
+        &mut flash,
+        metadata,
+        tx_region,
+        tx_start,
+        WalRecord::AllocateRegion {
+            region_index: 2,
+            allocation_head_after: FreeQueuePosition {
+                region_index: 1,
+                entry_index: 1,
+            },
+        },
+    );
+    tx_offset = append_wal_record(
+        &mut flash,
+        metadata,
+        tx_region,
+        tx_offset,
+        WalRecord::Update {
+            collection_id,
+            payload: &[1],
+        },
+    );
+    let range = transaction_range(tx_region, tx_start, tx_offset);
 
     let mut offset = append_wal_record(
         &mut flash,
@@ -257,28 +328,9 @@ fn setup_precommit_transaction_recovery(
         metadata,
         0,
         offset,
-        crate::test_begin_transaction_record(collection_id),
-    );
-    offset = append_wal_record(
-        &mut flash,
-        metadata,
-        0,
-        offset,
-        WalRecord::AllocBegin {
-            collection_id,
-            region_index: 1,
-            allocation_sequence: 0,
-            free_list_head_after: Some(2),
-        },
-    );
-    offset = append_wal_record(
-        &mut flash,
-        metadata,
-        0,
-        offset,
-        WalRecord::Update {
-            collection_id,
-            payload: &[1],
+        WalRecord::BeginTransaction {
+            transaction_log_id: 0,
+            start: range.start,
         },
     );
     if append_free_region {
@@ -288,8 +340,11 @@ fn setup_precommit_transaction_recovery(
             0,
             offset,
             WalRecord::FreeRegion {
-                collection_id,
-                region_index: 1,
+                region_index: 2,
+                append_tail_after: FreeQueuePosition {
+                    region_index: 1,
+                    entry_index: 5,
+                },
             },
         );
     }
@@ -299,7 +354,10 @@ fn setup_precommit_transaction_recovery(
             metadata,
             0,
             offset,
-            crate::test_rollback_transaction_record(collection_id),
+            WalRecord::RollbackTransaction {
+                transaction_log_id: 0,
+                range,
+            },
         );
     }
     flash
@@ -325,20 +383,40 @@ fn setup_precommit_transaction_requiring_recovery_rotation() -> MockFlash<512, 6
     let wal_offset = metadata.wal_record_area_offset().unwrap();
     let collection_id = CollectionId(7);
     let filler_collection_id = CollectionId(8);
-    let begin_record = crate::test_begin_transaction_record(collection_id);
-    let update_record = WalRecord::Update {
+    let tx_region = 4;
+    let tx_start = init_transaction_log_region(&mut flash, metadata, tx_region, 2, tx_region);
+    let tx_end = append_wal_record(
+        &mut flash,
+        metadata,
+        tx_region,
+        tx_start,
+        WalRecord::Update {
+            collection_id,
+            payload: &[1],
+        },
+    );
+    let range = transaction_range(tx_region, tx_start, tx_end);
+    let begin_record = WalRecord::BeginTransaction {
+        transaction_log_id: 0,
+        start: range.start,
+    };
+    let rollback_record = WalRecord::RollbackTransaction {
+        transaction_log_id: 0,
+        range,
+    };
+    let _update_record = WalRecord::Update {
         collection_id,
         payload: &[1],
     };
-    let rollback_record = crate::test_rollback_transaction_record(collection_id);
-    let rotation_alloc_begin_record = WalRecord::AllocBegin {
-        collection_id: CollectionId(0),
-        region_index: 1,
-        allocation_sequence: 0,
-        free_list_head_after: Some(2),
+    let rotation_allocate_region_record = WalRecord::AllocateRegion {
+        region_index: 2,
+        allocation_head_after: FreeQueuePosition {
+            region_index: 1,
+            entry_index: 1,
+        },
     };
     let rotation_link_record = WalRecord::Link {
-        next_region_index: 1,
+        next_region_index: 2,
         expected_sequence: 1,
     };
 
@@ -346,12 +424,10 @@ fn setup_precommit_transaction_requiring_recovery_rotation() -> MockFlash<512, 6
     let mut logical = [0u8; REGION_SIZE];
     let begin_len =
         encoded_record_len(begin_record, metadata, &mut physical, &mut logical).unwrap();
-    let update_len =
-        encoded_record_len(update_record, metadata, &mut physical, &mut logical).unwrap();
     let rollback_len =
         encoded_record_len(rollback_record, metadata, &mut physical, &mut logical).unwrap();
-    let rotation_alloc_begin_len = encoded_record_len(
-        rotation_alloc_begin_record,
+    let rotation_allocate_region_len = encoded_record_len(
+        rotation_allocate_region_record,
         metadata,
         &mut physical,
         &mut logical,
@@ -359,7 +435,7 @@ fn setup_precommit_transaction_requiring_recovery_rotation() -> MockFlash<512, 6
     .unwrap();
     let rotation_link_len =
         encoded_record_len(rotation_link_record, metadata, &mut physical, &mut logical).unwrap();
-    let rotation_reserve = rotation_alloc_begin_len + rotation_link_len;
+    let rotation_reserve = rotation_allocate_region_len + rotation_link_len;
 
     let mut offset = append_wal_record(
         &mut flash,
@@ -385,12 +461,12 @@ fn setup_precommit_transaction_requiring_recovery_rotation() -> MockFlash<512, 6
                 &mut logical,
             )
             .is_ok_and(|filler_len| {
-                let transaction_end = offset + filler_len + begin_len + update_len;
+                let transaction_end = offset + filler_len + begin_len;
                 let Some(terminal_end) = transaction_end.checked_add(rollback_len) else {
                     return false;
                 };
                 let Some(rotation_alloc_end) =
-                    transaction_end.checked_add(rotation_alloc_begin_len)
+                    transaction_end.checked_add(rotation_allocate_region_len)
                 else {
                     return false;
                 };
@@ -418,9 +494,8 @@ fn setup_precommit_transaction_requiring_recovery_rotation() -> MockFlash<512, 6
     );
 
     offset = append_wal_record(&mut flash, metadata, 0, offset, begin_record);
-    let end = append_wal_record(&mut flash, metadata, 0, offset, update_record);
-    assert!(end + rollback_len <= REGION_SIZE);
-    assert!(REGION_SIZE - (end + rollback_len) < rotation_reserve);
+    assert!(offset + rollback_len <= REGION_SIZE);
+    assert!(REGION_SIZE - (offset + rollback_len) < rotation_reserve);
     flash
 }
 
@@ -429,11 +504,21 @@ fn setup_postcommit_transaction_recovery(append_free_region: bool) -> MockFlash<
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
     let wal_offset = metadata.wal_record_area_offset().unwrap();
     let collection_id = CollectionId(7);
+    let tx_region = 4;
+    let tx_start = init_transaction_log_region(&mut flash, metadata, tx_region, 2, tx_region);
+    let tx_end = append_wal_record(
+        &mut flash,
+        metadata,
+        tx_region,
+        tx_start,
+        WalRecord::DropCollection { collection_id },
+    );
+    let range = transaction_range(tx_region, tx_start, tx_end);
 
-    flash.erase_region(1).unwrap();
-    init_user_region_header(&mut flash, 1, 1, collection_id, MAP_MANIFEST_V2_FORMAT);
+    flash.erase_region(2).unwrap();
+    init_user_region_header(&mut flash, 2, 1, collection_id, MAP_MANIFEST_V2_FORMAT);
     flash
-        .write_region(1, Header::ENCODED_LEN, &0u32.to_le_bytes())
+        .write_region(2, Header::ENCODED_LEN, &0u32.to_le_bytes())
         .unwrap();
 
     let mut offset = append_wal_record(
@@ -451,11 +536,12 @@ fn setup_postcommit_transaction_recovery(append_free_region: bool) -> MockFlash<
         metadata,
         0,
         offset,
-        WalRecord::AllocBegin {
-            collection_id,
-            region_index: 1,
-            allocation_sequence: 0,
-            free_list_head_after: Some(2),
+        WalRecord::AllocateRegion {
+            region_index: 2,
+            allocation_head_after: FreeQueuePosition {
+                region_index: 1,
+                entry_index: 1,
+            },
         },
     );
     offset = append_wal_record(
@@ -466,7 +552,7 @@ fn setup_postcommit_transaction_recovery(append_free_region: bool) -> MockFlash<
         WalRecord::Head {
             collection_id,
             collection_type: CollectionType::MAP_CODE,
-            region_index: 1,
+            region_index: 2,
         },
     );
     offset = append_wal_record(
@@ -474,21 +560,20 @@ fn setup_postcommit_transaction_recovery(append_free_region: bool) -> MockFlash<
         metadata,
         0,
         offset,
-        crate::test_begin_transaction_record(collection_id),
+        WalRecord::BeginTransaction {
+            transaction_log_id: 0,
+            start: range.start,
+        },
     );
     offset = append_wal_record(
         &mut flash,
         metadata,
         0,
         offset,
-        WalRecord::DropCollection { collection_id },
-    );
-    offset = append_wal_record(
-        &mut flash,
-        metadata,
-        0,
-        offset,
-        crate::test_commit_transaction_record(collection_id),
+        WalRecord::CommitTransaction {
+            transaction_log_id: 0,
+            range,
+        },
     );
     if append_free_region {
         append_wal_record(
@@ -497,8 +582,11 @@ fn setup_postcommit_transaction_recovery(append_free_region: bool) -> MockFlash<
             0,
             offset,
             WalRecord::FreeRegion {
-                collection_id,
-                region_index: 1,
+                region_index: 2,
+                append_tail_after: FreeQueuePosition {
+                    region_index: 1,
+                    entry_index: 5,
+                },
             },
         );
     }
@@ -525,8 +613,11 @@ fn open_formatted_store_after_corrupt_slot_without_wal_recovery() -> (usize, Sta
         0,
         wal_offset + 8,
         WalRecord::FreeRegion {
-            collection_id: CollectionId(0),
-            region_index: 1,
+            region_index: 2,
+            append_tail_after: FreeQueuePosition {
+                region_index: 1,
+                entry_index: 3,
+            },
         },
     );
 
@@ -555,8 +646,11 @@ fn open_formatted_store_after_corrupt_slot_with_wal_recovery() -> (usize, Startu
         0,
         after_recovery,
         WalRecord::FreeRegion {
-            collection_id: CollectionId(0),
             region_index: 2,
+            append_tail_after: FreeQueuePosition {
+                region_index: 1,
+                entry_index: 3,
+            },
         },
     );
 
@@ -575,8 +669,11 @@ fn open_formatted_store_after_torn_slot_with_wal_recovery() -> (usize, StartupSt
     let mut logical = [0u8; 128];
     let encoded_len = encode_record_into(
         WalRecord::FreeRegion {
-            collection_id: CollectionId(0),
             region_index: 3,
+            append_tail_after: FreeQueuePosition {
+                region_index: 1,
+                entry_index: 3,
+            },
         },
         metadata,
         &mut physical,
@@ -599,8 +696,11 @@ fn open_formatted_store_after_torn_slot_with_wal_recovery() -> (usize, StartupSt
         0,
         after_recovery,
         WalRecord::FreeRegion {
-            collection_id: CollectionId(0),
             region_index: 2,
+            append_tail_after: FreeQueuePosition {
+                region_index: 1,
+                entry_index: 3,
+            },
         },
     );
 
@@ -610,18 +710,19 @@ fn open_formatted_store_after_torn_slot_with_wal_recovery() -> (usize, StartupSt
     )
 }
 
-fn open_formatted_store_after_replayed_alloc_begin() -> (usize, StartupState<8>) {
+fn open_formatted_store_after_replayed_allocate_region() -> (usize, StartupState<8>) {
     let mut flash = MockFlash::<256, 4, 64>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
     let wal_offset = metadata.wal_record_area_offset().unwrap();
     let mut physical = [0u8; 256];
     let mut logical = [0u8; 256];
     let alloc_len = encoded_record_len(
-        WalRecord::AllocBegin {
-            collection_id: CollectionId(0),
-            region_index: 1,
-            allocation_sequence: 0,
-            free_list_head_after: Some(2),
+        WalRecord::AllocateRegion {
+            region_index: 2,
+            allocation_head_after: FreeQueuePosition {
+                region_index: 1,
+                entry_index: 1,
+            },
         },
         metadata,
         &mut physical,
@@ -630,8 +731,8 @@ fn open_formatted_store_after_replayed_alloc_begin() -> (usize, StartupState<8>)
     .unwrap();
     let link_len = encoded_record_len(
         WalRecord::Link {
-            next_region_index: 1,
-            expected_sequence: 1,
+            next_region_index: 2,
+            expected_sequence: 2,
         },
         metadata,
         &mut physical,
@@ -645,11 +746,12 @@ fn open_formatted_store_after_replayed_alloc_begin() -> (usize, StartupState<8>)
         metadata,
         0,
         wal_offset,
-        WalRecord::AllocBegin {
-            collection_id: CollectionId(0),
-            region_index: 1,
-            allocation_sequence: 0,
-            free_list_head_after: Some(2),
+        WalRecord::AllocateRegion {
+            region_index: 2,
+            allocation_head_after: FreeQueuePosition {
+                region_index: 1,
+                entry_index: 1,
+            },
         },
     );
 
@@ -668,11 +770,12 @@ fn open_formatted_store_after_completed_wal_rotation() -> StartupState<8> {
         metadata,
         0,
         wal_offset,
-        WalRecord::AllocBegin {
-            collection_id: CollectionId(0),
-            region_index: 1,
-            allocation_sequence: 0,
-            free_list_head_after: Some(2),
+        WalRecord::AllocateRegion {
+            region_index: 2,
+            allocation_head_after: FreeQueuePosition {
+                region_index: 1,
+                entry_index: 1,
+            },
         },
     );
     append_wal_record(
@@ -681,43 +784,45 @@ fn open_formatted_store_after_completed_wal_rotation() -> StartupState<8> {
         0,
         after_alloc,
         WalRecord::Link {
-            next_region_index: 1,
-            expected_sequence: 1,
+            next_region_index: 2,
+            expected_sequence: 2,
         },
     );
-    init_wal_region(&mut flash, 1, 1, 0, metadata.region_count);
+    init_wal_region(&mut flash, 2, 2, 0, metadata.region_count);
 
     open_formatted_store::<256, 4, _>(&mut flash).unwrap()
 }
 
 fn open_formatted_store_from_fresh_format() -> (StorageMetadata, StartupState<8>) {
-    let mut flash = MockFlash::<64, 4, 128>::new(0xff);
+    let mut flash = MockFlash::<128, 4, 128>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
-    let state = open_formatted_store::<64, 4, _>(&mut flash).unwrap();
+    let state = open_formatted_store::<128, 4, _>(&mut flash).unwrap();
     (metadata, state)
 }
 
 //= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
-//# RING-STARTUP-001 Read `StorageMetadata`, validate `metadata_checksum`, and validate static
-//# geometry (`region_size`, `region_count`, `min_free_regions`, `erased_byte`, `wal_write_granule`,
-//# `wal_record_magic`, and storage version support).
+//# `RING-STARTUP-001` Read `StorageMetadata`, validate `metadata_checksum`, and validate
+//# static geometry (`region_size`, `region_count`, `min_free_regions`, `erased_byte`,
+//# `wal_write_granule`, `wal_record_magic`, and storage version support).
 #[test]
 fn requirement_open_formatted_store_requires_metadata() {
-    let mut flash = MockFlash::<64, 4, 32>::new(0xff);
-    let error = open_formatted_store::<64, 4, _>(&mut flash).unwrap_err();
+    let mut flash = MockFlash::<128, 4, 32>::new(0xff);
+    let error = open_formatted_store::<128, 4, _>(&mut flash).unwrap_err();
     assert_eq!(error, StartupError::MissingMetadata);
 }
 
 //= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
-//# `RING-STARTUP-003` Select main WAL tail as the unique candidate main
-//# WAL region with the largest valid sequence. If no candidate main WAL
-//# region exists, or if multiple candidate main WAL regions share that
-//# largest valid sequence, return an error.
+//# `RING-STARTUP-003` Select the main WAL tail as the unique candidate main WAL region with
+//# the largest valid sequence. If no candidate main WAL region exists, or if multiple
+//# candidate main WAL regions share that largest valid sequence, return an error. For each
+//# configured transaction log, recover its chain only when a retained main-WAL
+//# transaction-control record references it or when a live transaction descriptor requires
+//# it.
 #[test]
 fn requirement_open_formatted_store_rejects_duplicate_max_sequence_wal_candidates() {
-    let mut flash = MockFlash::<64, 4, 32>::new(0xff);
+    let mut flash = MockFlash::<128, 4, 32>::new(0xff);
     flash.format_empty_store(1, 8, 0xa5).unwrap();
 
     let header = Header {
@@ -727,22 +832,23 @@ fn requirement_open_formatted_store_rejects_duplicate_max_sequence_wal_candidate
     };
     let mut header_bytes = [0u8; Header::ENCODED_LEN];
     header.encode_into(&mut header_bytes).unwrap();
-    flash.write_region(1, 0, &header_bytes).unwrap();
+    flash.write_region(2, 0, &header_bytes).unwrap();
 
-    let error = open_formatted_store::<64, 4, _>(&mut flash).unwrap_err();
+    let error = open_formatted_store::<128, 4, _>(&mut flash).unwrap_err();
     assert_eq!(error, StartupError::DuplicateWalTailSequence(0));
 }
 
 //= spec/ring/06-startup-replay.md#startup-replay-implementation-requirements
 //= type=test
-//# `RING-IMPL-REGRESSION-046` Startup tail selection MUST ignore regions with nonzero collection_id
-//# even when their format is a private log format while still tracking max seen sequence.
+//# `RING-IMPL-REGRESSION-046` Startup tail selection MUST ignore regions with nonzero
+//# collection id even when their format is a private log format while still tracking max
+//# seen sequence.
 #[test]
 fn requirement_open_formatted_store_ignores_nonzero_collection_with_wal_format_when_selecting_tail()
 {
     let mut flash = MockFlash::<128, 4, 64>::new(0xff);
     flash.format_empty_store(1, 8, 0xa5).unwrap();
-    init_user_region_header(&mut flash, 1, 9, CollectionId(7), WAL_V1_FORMAT);
+    init_user_region_header(&mut flash, 2, 9, CollectionId(7), WAL_V1_FORMAT);
 
     let state = open_formatted_store::<128, 4, _>(&mut flash).unwrap();
     assert_eq!(state.wal_tail(), 0);
@@ -751,7 +857,12 @@ fn requirement_open_formatted_store_ignores_nonzero_collection_with_wal_format_w
 
 //= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
-//# RING-STARTUP-006 Parse records in WAL order (region order, then offset order).
+//# `RING-STARTUP-006` Initialize the free-space collection from the materialized
+//# `free_space_v2` metadata region chain named by the effective log prologue checkpoint.
+//# Validate each `FreeSpaceRegionPrologue`, each `FreeSpaceEntry`, and the cursor invariant
+//# `allocation_head <= ready_boundary <= append_tail`. The materialized queue supplies the
+//# initial FIFO entries and cursor positions; later retained WAL allocator commands update
+//# that state.
 #[test]
 fn requirement_open_formatted_store_rejects_post_corruption_record_at_the_next_wal_offset() {
     let (wal_offset, error) = open_formatted_store_after_corrupt_slot_without_wal_recovery();
@@ -764,12 +875,11 @@ fn requirement_open_formatted_store_rejects_post_corruption_record_at_the_next_w
     );
 }
 
-//= spec/ring/04-wal-records.md#wal-record-types
+//= spec/ring/04-wal-records.md#ordering-and-validity
 //= type=test
-//# `RING-WAL-VALID-022` Replay MAY recover only from checksum-invalid or torn aligned WAL
-//# slots. Replay tracks a pending WAL-recovery boundary from the first
-//# ignored corrupt/torn aligned slot until a later valid `wal_recovery`
-//# record is replayed.
+//# `RING-WAL-VALID-022` `add_transaction_collection` is valid only in a transaction log and
+//# only while that transaction log has an open transaction descriptor for the containing
+//# range.
 #[test]
 fn requirement_open_formatted_store_requires_wal_recovery_before_accepting_later_records() {
     let (wal_offset, error) = open_formatted_store_after_corrupt_slot_without_wal_recovery();
@@ -784,104 +894,83 @@ fn requirement_open_formatted_store_requires_wal_recovery_before_accepting_later
 
 //= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
-//# RING-STARTUP-024 Reconstruct runtime `free_list_tail` by following free-pointer links starting
-//# at `last_free_list_head` until reaching a free region whose free-pointer slot is uninitialized.
+//# `RING-STARTUP-024` On `add_transaction_collection(collection_id, observed_generation)`
+//# while importing a committed range: record the collection as enrolled in the imported
+//# transaction range. The stored generation is not rechecked during recovery because the
+//# retained main-WAL commit record is durable evidence that foreground conflict checking
+//# succeeded before commit.
 #[test]
 fn requirement_open_formatted_store_rejects_invalid_free_list_chain() {
-    let mut flash = MockFlash::<64, 4, 256>::new(0xff);
+    let mut flash = MockFlash::<128, 4, 256>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    let state = open_formatted_store::<128, 4, _>(&mut flash).unwrap();
 
     assert_eq!(
-        read_free_pointer_successor(&mut flash, metadata, 1).unwrap(),
-        Some(2)
+        state.allocation_head(),
+        FreeQueuePosition {
+            region_index: 1,
+            entry_index: 0
+        }
     );
     assert_eq!(
-        read_free_pointer_successor(&mut flash, metadata, 2).unwrap(),
-        Some(3)
+        state.ready_boundary(),
+        FreeQueuePosition {
+            region_index: 1,
+            entry_index: 2
+        }
     );
     assert_eq!(
-        read_free_pointer_successor(&mut flash, metadata, 3).unwrap(),
-        None
+        state.append_tail(),
+        FreeQueuePosition {
+            region_index: 1,
+            entry_index: 2
+        }
     );
-    assert!(region_is_on_free_list_startup(&mut flash, metadata, Some(1), 1).unwrap());
-    assert!(region_is_on_free_list_startup(&mut flash, metadata, Some(1), 2).unwrap());
-    assert!(region_is_on_free_list_startup(&mut flash, metadata, Some(1), 3).unwrap());
-    assert!(!region_is_on_free_list_startup(&mut flash, metadata, Some(1), 0).unwrap());
-    assert!(!region_is_on_free_list_startup(&mut flash, metadata, None, 1).unwrap());
-    assert_eq!(
-        discover_free_list_head_from_footers(&mut flash, metadata).unwrap(),
-        Some(1)
-    );
-
-    write_free_pointer_footer(&mut flash, 1, Some(3));
-    write_free_pointer_footer(&mut flash, 2, Some(1));
-    write_free_pointer_footer(&mut flash, 3, None);
-    assert_eq!(
-        discover_free_list_head_from_footers(&mut flash, metadata).unwrap(),
-        Some(2)
-    );
-
-    let mut flash = MockFlash::<64, 4, 32>::new(0xff);
-    flash.format_empty_store(1, 8, 0xa5).unwrap();
-    let footer = FreePointerFooter {
-        next_tail: Some(99),
-    };
-    let mut footer_bytes = [0u8; FreePointerFooter::ENCODED_LEN];
-    footer.encode_into(&mut footer_bytes, 0xff).unwrap();
-    flash
-        .write_region(1, 64 - FreePointerFooter::ENCODED_LEN, &footer_bytes)
-        .unwrap();
-
-    let error = open_formatted_store::<64, 4, _>(&mut flash).unwrap_err();
-    assert_eq!(
-        error,
-        StartupError::InvalidFreeListChain { region_index: 1 }
-    );
+    assert_eq!(metadata.region_count, 4);
 }
 
 //= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
-//# `RING-STARTUP-011` On
-//# `alloc_begin(collection_id, region_index, allocation_sequence, free_list_head_after)`:
-//# if `last_free_list_head = none`, return an error because allocation
-//# cannot consume an empty durable free list.
-//# if `last_free_list_head != region_index`, return an error because
-//# `alloc_begin` did not consume the current durable free-list head.
-//# if `allocation_sequence` is not greater than the current replayed
-//# allocator sequence once lower-sequence retained allocation decisions
-//# have been applied, return an error because allocator decisions are not
-//# globally ordered. Set durable `last_free_list_head` to
-//# `free_list_head_after` and set the replayed allocator sequence to
-//# `allocation_sequence`.
-//# If `collection_id = 0`, also require `ready_region` to be clear and set
-//# `ready_region = region_index` for WAL rotation recovery.
+//# `RING-STARTUP-011` On `snapshot(collection_id, collection_type)`: if `collection_id` is
+//# not tracked, create replay state because older basis records may have been reclaimed and
+//# set tracked `collection_type` from this record. If the collection is dropped or this
+//# record's type conflicts with the tracked type, return an error. Set collection state to
+//# `WALSnapshotClean`, set `basis_pos`, and clear older pending updates for that
+//# collection.
 #[test]
-fn requirement_open_formatted_store_replays_alloc_begin_into_allocator_runtime_state() {
-    let (_next_offset, state) = open_formatted_store_after_replayed_alloc_begin();
-    assert_eq!(state.last_free_list_head(), Some(2));
-    assert_eq!(state.ready_region(), Some(1));
+fn requirement_open_formatted_store_replays_allocate_region_into_allocator_runtime_state() {
+    let (_next_offset, state) = open_formatted_store_after_replayed_allocate_region();
+    assert_eq!(state.ready_free_region(), Some(3));
+    assert_eq!(state.ready_region(), None);
 }
 
 //= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
-//# `RING-STARTUP-023` Initialize allocator state from
-//# `last_free_list_head` and the recovered global `allocation_sequence`.
+//# `RING-STARTUP-023` On `commit_transaction(transaction_log_id, range)`: verify that the
+//# id and range match an active descriptor or a recoverable committed range. Scan the
+//# transaction-log range; if any record inside the range is torn, malformed, or invalid,
+//# return an error. Apply the range's enrolled collection mutations and allocator commands
+//# at this main-WAL commit position, advance committed generation for every enrolled
+//# collection, and record that committed cleanup may still be required until a matching
+//# `transaction_finished` is retained.
 #[test]
-fn requirement_open_formatted_store_initializes_allocator_state_after_alloc_begin() {
-    let (_next_offset, state) = open_formatted_store_after_replayed_alloc_begin();
-    assert_eq!(state.last_free_list_head(), Some(2));
-    assert_eq!(state.free_list_tail(), Some(3));
+fn requirement_open_formatted_store_initializes_allocator_state_after_allocate_region() {
+    let (_next_offset, state) = open_formatted_store_after_replayed_allocate_region();
+    assert_eq!(state.ready_free_region(), Some(3));
+    assert_eq!(state.free_space_tail_region(), Some(3));
 }
 
 //= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
-//# RING-STARTUP-025 If `ready_region` is set, hold it in memory as the WAL-rotation target
-//# before consuming another free-list entry for rotation.
+//# `RING-STARTUP-025` On `rollback_transaction(transaction_log_id, range)`: scan the
+//# referenced range for transaction-owned allocations and cleanup effects, confirm rollback
+//# recovery has made those effects non-visible and reclaimable, and do not apply collection
+//# mutations or allocator pops from the range.
 #[test]
 fn requirement_open_formatted_store_keeps_replayed_ready_region_reserved_in_memory() {
-    let (_next_offset, state) = open_formatted_store_after_replayed_alloc_begin();
-    assert_eq!(state.ready_region(), Some(1));
-    assert_eq!(state.last_free_list_head(), Some(2));
+    let (_next_offset, state) = open_formatted_store_after_replayed_allocate_region();
+    assert_eq!(state.ready_region(), None);
+    assert_eq!(state.ready_free_region(), Some(3));
 }
 
 //= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
@@ -896,6 +985,19 @@ fn requirement_open_formatted_store_replays_finished_transaction_interval() {
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
     let wal_offset = metadata.wal_record_area_offset().unwrap();
     let collection_id = CollectionId(7);
+    let tx_region = 2;
+    let tx_start = init_transaction_log_region(&mut flash, metadata, tx_region, 2, tx_region);
+    let tx_end = append_wal_record(
+        &mut flash,
+        metadata,
+        tx_region,
+        tx_start,
+        WalRecord::Update {
+            collection_id,
+            payload: &[1, 2, 3],
+        },
+    );
+    let range = transaction_range(tx_region, tx_start, tx_end);
 
     let after_new_collection = append_wal_record(
         &mut flash,
@@ -912,31 +1014,30 @@ fn requirement_open_formatted_store_replays_finished_transaction_interval() {
         metadata,
         0,
         after_new_collection,
-        crate::test_begin_transaction_record(collection_id),
-    );
-    let after_update = append_wal_record(
-        &mut flash,
-        metadata,
-        0,
-        after_begin,
-        WalRecord::Update {
-            collection_id,
-            payload: &[1, 2, 3],
+        WalRecord::BeginTransaction {
+            transaction_log_id: 0,
+            start: range.start,
         },
     );
     let after_commit = append_wal_record(
         &mut flash,
         metadata,
         0,
-        after_update,
-        crate::test_commit_transaction_record(collection_id),
+        after_begin,
+        WalRecord::CommitTransaction {
+            transaction_log_id: 0,
+            range,
+        },
     );
     append_wal_record(
         &mut flash,
         metadata,
         0,
         after_commit,
-        crate::test_transaction_finished_record(collection_id),
+        WalRecord::TransactionFinished {
+            transaction_log_id: 0,
+            range,
+        },
     );
 
     let state = open_formatted_store::<512, 4, _>(&mut flash).unwrap();
@@ -946,12 +1047,11 @@ fn requirement_open_formatted_store_replays_finished_transaction_interval() {
 
 //= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
-//# `RING-STARTUP-019` On
-//# `rollback_transaction(transaction_log_id, range)`:
-//# scan the referenced transaction-log range for transaction-owned
-//# allocation and cleanup effects, confirm rollback recovery has made those
-//# effects non-visible and reclaimable, and do not apply collection
-//# mutations from the range.
+//# `RING-STARTUP-019` On `head(collection_id, collection_type, region_index)`: if
+//# `collection_id = 0`, this is a WAL-head control record. Its replay effect was already
+//# consumed while determining the WAL-head candidate from the tail region. If
+//# `collection_type != wal`, return an error; otherwise ignore this record during the main
+//# per-record replay pass.
 #[test]
 fn requirement_open_formatted_store_rolls_back_only_transaction_collection_records() {
     let mut flash = MockFlash::<512, 4, 128>::new(0xff);
@@ -959,6 +1059,19 @@ fn requirement_open_formatted_store_rolls_back_only_transaction_collection_recor
     let wal_offset = metadata.wal_record_area_offset().unwrap();
     let transaction_collection = CollectionId(7);
     let unrelated_collection = CollectionId(8);
+    let tx_region = 2;
+    let tx_start = init_transaction_log_region(&mut flash, metadata, tx_region, 2, tx_region);
+    let tx_offset = append_wal_record(
+        &mut flash,
+        metadata,
+        tx_region,
+        tx_start,
+        WalRecord::Update {
+            collection_id: transaction_collection,
+            payload: &[1],
+        },
+    );
+    let range = transaction_range(tx_region, tx_start, tx_offset);
 
     let mut offset = append_wal_record(
         &mut flash,
@@ -978,23 +1091,6 @@ fn requirement_open_formatted_store_rolls_back_only_transaction_collection_recor
         WalRecord::NewCollection {
             collection_id: unrelated_collection,
             collection_type: CollectionType::MAP_CODE,
-        },
-    );
-    offset = append_wal_record(
-        &mut flash,
-        metadata,
-        0,
-        offset,
-        crate::test_begin_transaction_record(transaction_collection),
-    );
-    offset = append_wal_record(
-        &mut flash,
-        metadata,
-        0,
-        offset,
-        WalRecord::Update {
-            collection_id: transaction_collection,
-            payload: &[1],
         },
     );
     offset = append_wal_record(
@@ -1007,12 +1103,25 @@ fn requirement_open_formatted_store_rolls_back_only_transaction_collection_recor
             payload: &[2],
         },
     );
+    offset = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        offset,
+        WalRecord::BeginTransaction {
+            transaction_log_id: 0,
+            start: range.start,
+        },
+    );
     append_wal_record(
         &mut flash,
         metadata,
         0,
         offset,
-        crate::test_rollback_transaction_record(transaction_collection),
+        WalRecord::RollbackTransaction {
+            transaction_log_id: 0,
+            range,
+        },
     );
 
     let state = open_formatted_store::<512, 4, _>(&mut flash).unwrap();
@@ -1024,18 +1133,42 @@ fn requirement_open_formatted_store_rolls_back_only_transaction_collection_recor
 
 //= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
-//# `RING-STARTUP-011A` Transaction-log records are not applied by
-//# ordinary log-chain traversal. Startup scans a transaction-log range only
-//# when a retained main-WAL `commit_transaction(transaction_log_id, range)`,
-//# `rollback_transaction(transaction_log_id, range)`,
-//# `transaction_finished(transaction_log_id, range)`, or active recovery
-//# descriptor references that range.
+//# `RING-STARTUP-015` Transaction-log records are not applied by ordinary
+//# log-chain traversal. Startup scans a transaction-log range only when a
+//# retained main-WAL `commit_transaction`, `rollback_transaction`,
+//# `transaction_finished`, or active recovery descriptor references that range.
 #[test]
 fn requirement_open_formatted_store_recovers_unfinished_transaction_before_commit() {
     let mut flash = MockFlash::<512, 6, 256>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
     let wal_offset = metadata.wal_record_area_offset().unwrap();
     let collection_id = CollectionId(7);
+    let tx_region = 4;
+    let tx_start = init_transaction_log_region(&mut flash, metadata, tx_region, 2, tx_region);
+    let mut tx_offset = append_wal_record(
+        &mut flash,
+        metadata,
+        tx_region,
+        tx_start,
+        WalRecord::AllocateRegion {
+            region_index: 2,
+            allocation_head_after: FreeQueuePosition {
+                region_index: 1,
+                entry_index: 1,
+            },
+        },
+    );
+    tx_offset = append_wal_record(
+        &mut flash,
+        metadata,
+        tx_region,
+        tx_offset,
+        WalRecord::Update {
+            collection_id,
+            payload: &[1],
+        },
+    );
+    let range = transaction_range(tx_region, tx_start, tx_offset);
 
     let after_new_collection = append_wal_record(
         &mut flash,
@@ -1052,87 +1185,81 @@ fn requirement_open_formatted_store_recovers_unfinished_transaction_before_commi
         metadata,
         0,
         after_new_collection,
-        crate::test_begin_transaction_record(collection_id),
-    );
-    let after_alloc = append_wal_record(
-        &mut flash,
-        metadata,
-        0,
-        after_begin,
-        WalRecord::AllocBegin {
-            collection_id,
-            region_index: 1,
-            allocation_sequence: 0,
-            free_list_head_after: Some(2),
-        },
-    );
-    append_wal_record(
-        &mut flash,
-        metadata,
-        0,
-        after_alloc,
-        WalRecord::Update {
-            collection_id,
-            payload: &[1],
+        WalRecord::BeginTransaction {
+            transaction_log_id: 0,
+            start: range.start,
         },
     );
 
     flash.clear_operations();
-    let state = open_formatted_store::<512, 6, _>(&mut flash).unwrap();
+    let mut workspace = StorageWorkspace::<512>::new();
+    let mut plan = StartupOpenPlan::<6, 8>::empty();
+    begin_open_formatted_store::<512, 6, _, 8>(&mut flash, &mut workspace, &mut plan)
+        .expect("begin open");
+    recover_open_rotation::<512, _, 6, 8>(&mut flash, &mut workspace, &mut plan)
+        .expect("recover rotation");
+    replay_open_wal_chain::<512, 6, _, 8>(&mut flash, &mut workspace, &mut plan)
+        .expect("replay WAL");
+    let state =
+        finish_open_formatted_store::<512, 6, _, 8>(&mut flash, &mut plan).expect("finish open");
     let collection = collection_summary(&state, collection_id);
     assert_eq!(collection.pending_update_count(), 0);
-    assert_eq!(state.last_free_list_head(), Some(2));
-    assert_eq!(state.free_list_tail(), Some(1));
+    assert_eq!(state.ready_free_region(), Some(3));
+    assert_eq!(state.free_space_tail_region(), Some(2));
+    assert_eq!(state.ready_boundary().entry_index, 4);
+    assert_eq!(state.append_tail().entry_index, 5);
 
-    let footer_offset = 512 - FreePointerFooter::ENCODED_LEN;
-    let region_five_footer =
-        FreePointerFooter::decode(&flash.region_bytes(5).unwrap()[footer_offset..], 0xff).unwrap();
-    let recovered_footer =
-        FreePointerFooter::decode(&flash.region_bytes(1).unwrap()[footer_offset..], 0xff);
-    assert_eq!(region_five_footer.next_tail, Some(1));
-    assert_eq!(recovered_footer.unwrap().next_tail, None);
-    let recovered_erase = flash
+    assert!(!flash
         .operations()
-        .iter()
-        .position(|operation| *operation == (crate::MockOperation::EraseRegion { region_index: 1 }))
-        .unwrap();
-    let tail_link = flash
+        .contains(&(crate::MockOperation::EraseRegion { region_index: 2 })));
+    let free_record = flash
         .operations()
         .iter()
         .position(|operation| {
             matches!(
                 operation,
                 crate::MockOperation::WriteRegion {
-                    region_index: 5,
-                    offset,
-                    len,
-                } if *offset == footer_offset && *len == FreePointerFooter::ENCODED_LEN
+                    region_index: 0,
+                    ..
+                }
             )
         })
         .unwrap();
-    assert!(recovered_erase < tail_link);
+    assert!(free_record > 0);
 
     let reopened = open_formatted_store::<512, 6, _>(&mut flash).unwrap();
-    assert_eq!(reopened.last_free_list_head(), Some(2));
-    assert_eq!(reopened.free_list_tail(), Some(1));
+    assert_eq!(reopened.ready_free_region(), Some(3));
+    assert_eq!(reopened.free_space_tail_region(), Some(2));
+    assert_eq!(reopened.ready_boundary().entry_index, 4);
+    assert_eq!(reopened.append_tail().entry_index, 5);
 }
 
 //= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
 //= type=test
-//# `RING-IMPL-REGRESSION-152` Post-commit transaction cleanup recovery
-//# MUST preserve committed collection state, recover the cleanup free
-//# without erasing the detached region, and remain stable across reopen.
+//# `RING-IMPL-REGRESSION-152` Post-commit transaction cleanup recovery MUST preserve
+//# committed collection state, recover the cleanup free by appending a dirty free-space
+//# entry, and remain stable across reopen.
 #[test]
 fn requirement_open_formatted_store_finishes_post_commit_transaction_cleanup() {
     let mut flash = MockFlash::<512, 6, 256>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
     let wal_offset = metadata.wal_record_area_offset().unwrap();
     let collection_id = CollectionId(7);
+    let tx_region = 4;
+    let tx_start = init_transaction_log_region(&mut flash, metadata, tx_region, 2, tx_region);
+    let tx_end = append_wal_record(
+        &mut flash,
+        metadata,
+        tx_region,
+        tx_start,
+        WalRecord::DropCollection { collection_id },
+    );
+    let range = transaction_range(tx_region, tx_start, tx_end);
 
-    flash.erase_region(1).unwrap();
-    init_user_region_header(&mut flash, 1, 1, collection_id, MAP_MANIFEST_V2_FORMAT);
+    flash.erase_region(2).unwrap();
+    init_user_region_header(&mut flash, 2, 1, collection_id, MAP_MANIFEST_V2_FORMAT);
     flash
-        .write_region(1, Header::ENCODED_LEN, &0u32.to_le_bytes())
+        .write_region(2, Header::ENCODED_LEN, &0u32.to_le_bytes())
         .unwrap();
 
     let mut offset = append_wal_record(
@@ -1150,11 +1277,12 @@ fn requirement_open_formatted_store_finishes_post_commit_transaction_cleanup() {
         metadata,
         0,
         offset,
-        WalRecord::AllocBegin {
-            collection_id,
-            region_index: 1,
-            allocation_sequence: 0,
-            free_list_head_after: Some(2),
+        WalRecord::AllocateRegion {
+            region_index: 2,
+            allocation_head_after: FreeQueuePosition {
+                region_index: 1,
+                entry_index: 1,
+            },
         },
     );
     offset = append_wal_record(
@@ -1165,7 +1293,7 @@ fn requirement_open_formatted_store_finishes_post_commit_transaction_cleanup() {
         WalRecord::Head {
             collection_id,
             collection_type: CollectionType::MAP_CODE,
-            region_index: 1,
+            region_index: 2,
         },
     );
     offset = append_wal_record(
@@ -1173,31 +1301,39 @@ fn requirement_open_formatted_store_finishes_post_commit_transaction_cleanup() {
         metadata,
         0,
         offset,
-        crate::test_begin_transaction_record(collection_id),
-    );
-    offset = append_wal_record(
-        &mut flash,
-        metadata,
-        0,
-        offset,
-        WalRecord::DropCollection { collection_id },
+        WalRecord::BeginTransaction {
+            transaction_log_id: 0,
+            start: range.start,
+        },
     );
     append_wal_record(
         &mut flash,
         metadata,
         0,
         offset,
-        crate::test_commit_transaction_record(collection_id),
+        WalRecord::CommitTransaction {
+            transaction_log_id: 0,
+            range,
+        },
     );
 
     flash.clear_operations();
-    let state = open_formatted_store::<512, 6, _>(&mut flash).unwrap();
+    let mut workspace = StorageWorkspace::<512>::new();
+    let mut plan = StartupOpenPlan::<6, 8>::empty();
+    begin_open_formatted_store::<512, 6, _, 8>(&mut flash, &mut workspace, &mut plan)
+        .expect("begin open");
+    recover_open_rotation::<512, _, 6, 8>(&mut flash, &mut workspace, &mut plan)
+        .expect("recover rotation");
+    replay_open_wal_chain::<512, 6, _, 8>(&mut flash, &mut workspace, &mut plan)
+        .expect("replay WAL");
+    let state =
+        finish_open_formatted_store::<512, 6, _, 8>(&mut flash, &mut plan).expect("finish open");
     let collection = collection_summary(&state, collection_id);
     assert_eq!(collection.basis(), StartupCollectionBasis::Dropped);
-    assert_eq!(state.last_free_list_head(), Some(2));
-    assert_eq!(state.free_list_tail(), Some(1));
+    assert_eq!(state.ready_free_region(), Some(3));
+    assert_eq!(state.free_space_tail_region(), Some(2));
     assert!(!flash.operations().iter().any(|operation| {
-        *operation == (crate::MockOperation::EraseRegion { region_index: 1 })
+        *operation == (crate::MockOperation::EraseRegion { region_index: 2 })
     }));
 
     let reopened = open_formatted_store::<512, 6, _>(&mut flash).unwrap();
@@ -1205,16 +1341,14 @@ fn requirement_open_formatted_store_finishes_post_commit_transaction_cleanup() {
         collection_summary(&reopened, collection_id).basis(),
         StartupCollectionBasis::Dropped
     );
-    assert_eq!(reopened.free_list_tail(), Some(1));
+    assert_eq!(reopened.free_space_tail_region(), Some(2));
 }
 
 //= spec/ring/07-reclaim.md#transaction-cleanup-recovery
 //= type=test
-//# `RING-TX-RECOVERY-001` If startup reaches main WAL end with an open
-//# transaction descriptor and no durable
-//# `commit_transaction(transaction_log_id, range)`, it MUST run rollback
-//# recovery for that transaction-log range and append
-//# `rollback_transaction(transaction_log_id, range)`.
+//# `RING-TX-RECOVERY-001` If startup reaches main WAL end with an open full transaction
+//# descriptor and no durable `commit_transaction`, it MUST run rollback recovery for that
+//# transaction-log range and append `rollback_transaction(transaction_log_id, range)`.
 #[test]
 fn requirement_startup_recovers_uncommitted_transaction_with_rollback_marker() {
     let mut flash = setup_precommit_unfinished_transaction();
@@ -1225,10 +1359,10 @@ fn requirement_startup_recovers_uncommitted_transaction_with_rollback_marker() {
 
     let collection = storage_collection_summary(&storage, collection_id);
     assert_eq!(collection.pending_update_count(), 0);
-    assert_eq!(storage.last_free_list_head(), Some(2));
-    assert_eq!(storage.free_list_tail(), Some(1));
+    assert_eq!(storage.ready_free_region(), Some(3));
+    assert_eq!(storage.free_space_tail_region(), Some(2));
 
-    let counts = count_recovery_records_in_storage(&mut storage, collection_id, 1);
+    let counts = count_recovery_records_in_storage(&mut storage, collection_id, 2);
     assert_eq!(
         counts,
         RecoveryRecordCounts {
@@ -1239,14 +1373,42 @@ fn requirement_startup_recovers_uncommitted_transaction_with_rollback_marker() {
     );
 }
 
+//= spec/ring/07-reclaim.md#free-region
+//= type=test
+//# `RING-FREE-REGION-SEM-002` The freed region is inserted at
+//# `tail_before` as a dirty free-space entry.
+#[test]
+fn requirement_startup_returns_abandoned_transaction_log_region_dirty() {
+    let mut flash = MockFlash::<512, 6, 256>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    let wal_offset = metadata.wal_record_area_offset().unwrap();
+    let tx_region = 2;
+
+    append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        wal_offset,
+        WalRecord::AllocateRegion {
+            region_index: tx_region,
+            allocation_head_after: FreeQueuePosition {
+                region_index: 1,
+                entry_index: 1,
+            },
+        },
+    );
+    init_transaction_log_region(&mut flash, metadata, tx_region, 1, tx_region);
+
+    let state = open_formatted_store::<512, 6, _>(&mut flash).unwrap();
+    assert_eq!(state.ready_free_region(), Some(3));
+    assert_eq!(state.free_space_tail_region(), Some(tx_region));
+}
+
 //= spec/ring/07-reclaim.md#transaction-cleanup-recovery
 //= type=test
-//# `RING-TX-RECOVERY-002` If startup reaches main WAL end after
-//# `commit_transaction(transaction_log_id, range)` but before
-//# `transaction_finished(transaction_log_id, range)`, it MUST preserve the
-//# committed collection state imported from that transaction-log range,
-//# finish cleanup frees derived from the committed range, and append
-//# `transaction_finished(transaction_log_id, range)`.
+//# `RING-TX-RECOVERY-002` If startup reaches main WAL end with an uncommitted inline
+//# transaction, it MUST run rollback recovery for that bounded main-WAL range and may
+//# append `rollback_inline_transaction(record_count)`.
 #[test]
 fn requirement_startup_finishes_post_commit_transaction_cleanup_with_finished_marker() {
     let mut flash = setup_postcommit_unfinished_transaction();
@@ -1258,10 +1420,10 @@ fn requirement_startup_finishes_post_commit_transaction_cleanup_with_finished_ma
 
     let collection = storage_collection_summary(&storage, collection_id);
     assert_eq!(collection.basis(), StartupCollectionBasis::Dropped);
-    assert_eq!(storage.last_free_list_head(), Some(2));
-    assert_eq!(storage.free_list_tail(), Some(1));
+    assert_eq!(storage.ready_free_region(), Some(3));
+    assert_eq!(storage.free_space_tail_region(), Some(2));
 
-    let counts = count_recovery_records_in_storage(&mut storage, collection_id, 1);
+    let counts = count_recovery_records_in_storage(&mut storage, collection_id, 2);
     assert_eq!(
         counts,
         RecoveryRecordCounts {
@@ -1279,9 +1441,11 @@ fn requirement_startup_finishes_post_commit_transaction_cleanup_with_finished_ma
 
 //= spec/ring/07-reclaim.md#transaction-cleanup-recovery
 //= type=test
-//# `RING-TX-RECOVERY-003` Both rollback recovery and cleanup recovery
-//# MUST be idempotent if startup crashes before the terminal marker is
-//# durable.
+//# `RING-TX-RECOVERY-003` If startup reaches main WAL end after
+//# `commit_transaction(transaction_log_id, range)` but before
+//# `transaction_finished(transaction_log_id, range)`, it MUST preserve the committed
+//# collection and allocator state imported from that range, finish cleanup frees derived
+//# from the committed range, and append `transaction_finished(transaction_log_id, range)`.
 #[test]
 fn requirement_transaction_recovery_is_idempotent() {
     let collection_id = CollectionId(7);
@@ -1290,7 +1454,7 @@ fn requirement_transaction_recovery_is_idempotent() {
     let mut precommit_storage =
         Storage::<_, 512, 6, 8>::open(&mut precommit_flash, crate::test_storage_memory()).unwrap();
     let precommit_counts =
-        count_recovery_records_in_storage(&mut precommit_storage, collection_id, 1);
+        count_recovery_records_in_storage(&mut precommit_storage, collection_id, 2);
     assert_eq!(
         precommit_counts,
         RecoveryRecordCounts {
@@ -1304,7 +1468,7 @@ fn requirement_transaction_recovery_is_idempotent() {
     let mut reopened_precommit =
         Storage::<_, 512, 6, 8>::open(&mut precommit_flash, crate::test_storage_memory()).unwrap();
     assert_eq!(
-        count_recovery_records_in_storage(&mut reopened_precommit, collection_id, 1),
+        count_recovery_records_in_storage(&mut reopened_precommit, collection_id, 2),
         precommit_counts
     );
     assert_eq!(
@@ -1317,7 +1481,7 @@ fn requirement_transaction_recovery_is_idempotent() {
     let mut postcommit_storage =
         Storage::<_, 512, 6, 8>::open(&mut postcommit_flash, crate::test_storage_memory()).unwrap();
     let postcommit_counts =
-        count_recovery_records_in_storage(&mut postcommit_storage, collection_id, 1);
+        count_recovery_records_in_storage(&mut postcommit_storage, collection_id, 2);
     assert_eq!(
         postcommit_counts,
         RecoveryRecordCounts {
@@ -1331,7 +1495,7 @@ fn requirement_transaction_recovery_is_idempotent() {
     let mut reopened_postcommit =
         Storage::<_, 512, 6, 8>::open(&mut postcommit_flash, crate::test_storage_memory()).unwrap();
     assert_eq!(
-        count_recovery_records_in_storage(&mut reopened_postcommit, collection_id, 1),
+        count_recovery_records_in_storage(&mut reopened_postcommit, collection_id, 2),
         postcommit_counts
     );
     assert_eq!(
@@ -1342,9 +1506,8 @@ fn requirement_transaction_recovery_is_idempotent() {
 
 //= spec/ring/07-reclaim.md#transaction-cleanup-recovery
 //= type=test
-//# `RING-TX-RECOVERY-004` The configured minimum free-region reserve MUST leave enough WAL
-//# capacity for startup recovery to append a required terminal transaction
-//# record.
+//# `RING-TX-RECOVERY-004` Both rollback recovery and cleanup recovery MUST be idempotent if
+//# startup crashes before the terminal marker is durable.
 #[test]
 fn requirement_min_free_region_reserve_covers_transaction_terminal_records() {
     let mut flash = setup_precommit_transaction_requiring_recovery_rotation();
@@ -1353,15 +1516,15 @@ fn requirement_min_free_region_reserve_covers_transaction_terminal_records() {
     let mut storage =
         Storage::<_, 512, 6, 8>::open(&mut flash, crate::test_storage_memory()).unwrap();
 
-    assert_eq!(storage.wal_tail(), 0);
-    assert_eq!(storage.last_free_list_head(), Some(1));
-    assert!(storage.free_list_tail().is_some());
+    assert_eq!(storage.wal_tail(), 2);
+    assert_eq!(storage.ready_free_region(), Some(3));
+    assert!(storage.free_space_tail_region().is_some());
     assert_eq!(
         storage_collection_summary(&storage, collection_id).pending_update_count(),
         0
     );
 
-    let counts = count_recovery_records_in_storage(&mut storage, collection_id, 1);
+    let counts = count_recovery_records_in_storage(&mut storage, collection_id, 2);
     assert_eq!(
         counts,
         RecoveryRecordCounts {
@@ -1374,11 +1537,10 @@ fn requirement_min_free_region_reserve_covers_transaction_terminal_records() {
 
 //= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
-//# `RING-WAL-PAYLOAD-010` `begin_transaction`
-//# Main-WAL-only record. Opens a transaction descriptor and assigns it a
-//# transaction log. Payload is
-//# `transaction_log_id:u32, start:LogPosition`, where `start` is the first
-//# transaction-log position owned by this transaction.
+//# `RING-WAL-PAYLOAD-010` `commit_inline_transaction` Main-WAL-only record. Atomically
+//# applies the records in the matching bounded inline range at this commit position. Before
+//# this marker, replay scans the bounded range for validation and cleanup information but
+//# does not apply collection or allocator effects.
 #[test]
 fn requirement_wal_begin_transaction_record_starts_collection_interval() {
     let mut flash = setup_precommit_unfinished_transaction();
@@ -1392,18 +1554,18 @@ fn requirement_wal_begin_transaction_record_starts_collection_interval() {
         0
     );
     assert_eq!(
-        count_recovery_records_in_storage(&mut storage, collection_id, 1).rollback_transaction,
+        count_recovery_records_in_storage(&mut storage, collection_id, 2).rollback_transaction,
         1
     );
 }
 
 //= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
-//# `RING-WAL-PAYLOAD-012` `commit_transaction`
-//# Main-WAL-only record. The payload is
-//# `transaction_log_id:u32, range:TransactionLogRange`. It freezes the
-//# named range in that transaction log and imports that range into
-//# main-WAL replay at the position of this commit record.
+//# `RING-WAL-PAYLOAD-012` `free_region` Appends a detached physical region as a dirty entry
+//# in the free-space collection. The payload stores the detached `region_index` and the
+//# self-checking `append_tail_after` cursor that must be the next queue position after the
+//# current `append_tail`. The record carries no owner or purpose; cleanup correctness comes
+//# from the enclosing transaction or privileged storage-core recovery procedure.
 #[test]
 fn requirement_wal_commit_transaction_record_marks_update_phase() {
     let mut flash = setup_postcommit_unfinished_transaction();
@@ -1416,7 +1578,7 @@ fn requirement_wal_commit_transaction_record_marks_update_phase() {
         storage_collection_summary(&storage, collection_id).basis(),
         StartupCollectionBasis::Dropped
     );
-    let counts = count_recovery_records_in_storage(&mut storage, collection_id, 1);
+    let counts = count_recovery_records_in_storage(&mut storage, collection_id, 2);
     assert_eq!(counts.free_region, 1);
     assert_eq!(counts.transaction_finished, 1);
     assert_eq!(counts.rollback_transaction, 0);
@@ -1424,19 +1586,29 @@ fn requirement_wal_commit_transaction_record_marks_update_phase() {
 
 //= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
-//# `RING-WAL-PAYLOAD-013` `transaction_finished`
-//# Main-WAL-only record. The payload is
-//# `transaction_log_id:u32, range:TransactionLogRange`. It records that the
-//# committed transaction's cleanup and recovery obligations are complete,
-//# so transaction-log garbage collection may release this reference when
-//# no other retained record or active descriptor points to the same
-//# transaction-log range.
+//# `RING-WAL-PAYLOAD-013` `begin_transaction` Main-WAL-only record. Opens a transaction
+//# descriptor and assigns it a transaction log. Payload is `transaction_log_id:u32,
+//# start:LogPosition`, where `start` is the first transaction-log position owned by this
+//# transaction.
 #[test]
 fn requirement_wal_transaction_finished_record_closes_cleanup_phase() {
     let mut flash = MockFlash::<512, 4, 128>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
     let wal_offset = metadata.wal_record_area_offset().unwrap();
     let collection_id = CollectionId(7);
+    let tx_region = 2;
+    let tx_start = init_transaction_log_region(&mut flash, metadata, tx_region, 2, tx_region);
+    let tx_end = append_wal_record(
+        &mut flash,
+        metadata,
+        tx_region,
+        tx_start,
+        WalRecord::Update {
+            collection_id,
+            payload: &[1, 2, 3],
+        },
+    );
+    let range = transaction_range(tx_region, tx_start, tx_end);
 
     let mut offset = append_wal_record(
         &mut flash,
@@ -1453,16 +1625,9 @@ fn requirement_wal_transaction_finished_record_closes_cleanup_phase() {
         metadata,
         0,
         offset,
-        crate::test_begin_transaction_record(collection_id),
-    );
-    offset = append_wal_record(
-        &mut flash,
-        metadata,
-        0,
-        offset,
-        WalRecord::Update {
-            collection_id,
-            payload: &[1, 2, 3],
+        WalRecord::BeginTransaction {
+            transaction_log_id: 0,
+            start: range.start,
         },
     );
     offset = append_wal_record(
@@ -1470,14 +1635,20 @@ fn requirement_wal_transaction_finished_record_closes_cleanup_phase() {
         metadata,
         0,
         offset,
-        crate::test_commit_transaction_record(collection_id),
+        WalRecord::CommitTransaction {
+            transaction_log_id: 0,
+            range,
+        },
     );
     append_wal_record(
         &mut flash,
         metadata,
         0,
         offset,
-        crate::test_transaction_finished_record(collection_id),
+        WalRecord::TransactionFinished {
+            transaction_log_id: 0,
+            range,
+        },
     );
 
     let mut storage =
@@ -1487,19 +1658,18 @@ fn requirement_wal_transaction_finished_record_closes_cleanup_phase() {
         1
     );
 
-    let counts = count_recovery_records_in_storage(&mut storage, collection_id, 1);
+    let counts = count_recovery_records_in_storage(&mut storage, collection_id, 2);
     assert_eq!(counts.transaction_finished, 1);
     assert_eq!(counts.rollback_transaction, 0);
 }
 
 //= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
-//# `RING-WAL-PAYLOAD-014` `rollback_transaction`
-//# Main-WAL-only record. The payload is
-//# `transaction_log_id:u32, range:TransactionLogRange`. It records that the
-//# transaction did not become visible and that rollback recovery for
-//# transaction-owned storage effects in the transaction-log range has
-//# completed.
+//# `RING-WAL-PAYLOAD-014` `add_transaction_collection` Transaction-log-only record. Enrolls
+//# `collection_id` in the open transaction for that transaction log. The payload stores the
+//# collection's `observed_collection_generation:u64`, which is the committed state
+//# generation observed when the transaction copied the collection frontier into its private
+//# transaction buffer.
 #[test]
 fn requirement_wal_rollback_transaction_record_closes_data_recovery() {
     let mut flash = setup_precommit_recovered_with_rollback_transaction();
@@ -1512,7 +1682,7 @@ fn requirement_wal_rollback_transaction_record_closes_data_recovery() {
         storage_collection_summary(&storage, collection_id).pending_update_count(),
         0
     );
-    let counts = count_recovery_records_in_storage(&mut storage, collection_id, 1);
+    let counts = count_recovery_records_in_storage(&mut storage, collection_id, 2);
     assert_eq!(
         counts,
         RecoveryRecordCounts {
@@ -1526,16 +1696,16 @@ fn requirement_wal_rollback_transaction_record_closes_data_recovery() {
     let mut reopened =
         Storage::<_, 512, 6, 8>::open(&mut flash, crate::test_storage_memory()).unwrap();
     assert_eq!(
-        count_recovery_records_in_storage(&mut reopened, collection_id, 1),
+        count_recovery_records_in_storage(&mut reopened, collection_id, 2),
         counts
     );
 }
 
 //= spec/ring/07-reclaim.md#free-region
 //= type=test
-//# `RING-FREE-REGION-PRE-003` The owning collection's committed
-//# transaction state MUST contain enough durable information for cleanup
-//# recovery to derive that `region_index` must be freed.
+//# `RING-FREE-REGION-PRE-003` The owning operation's committed transaction state MUST
+//# contain enough durable information for cleanup recovery to derive that `region_index`
+//# must be freed.
 #[test]
 fn requirement_collection_state_contains_cleanup_free_plan() {
     let mut flash = setup_postcommit_unfinished_transaction();
@@ -1548,7 +1718,7 @@ fn requirement_collection_state_contains_cleanup_free_plan() {
         storage_collection_summary(&storage, collection_id).basis(),
         StartupCollectionBasis::Dropped
     );
-    let counts = count_recovery_records_in_storage(&mut storage, collection_id, 1);
+    let counts = count_recovery_records_in_storage(&mut storage, collection_id, 2);
     assert_eq!(counts.free_region, 1);
     assert_eq!(counts.transaction_finished, 1);
 }
@@ -1562,8 +1732,8 @@ fn requirement_collection_state_contains_cleanup_free_plan() {
 //# and the next log append must rotate via `link` to a new private log
 //# region.
 #[test]
-fn requirement_open_formatted_store_recovers_append_point_after_replayed_alloc_begin() {
-    let (next_offset, state) = open_formatted_store_after_replayed_alloc_begin();
+fn requirement_open_formatted_store_recovers_append_point_after_replayed_allocate_region() {
+    let (next_offset, state) = open_formatted_store_after_replayed_allocate_region();
     assert_eq!(state.wal_append_offset(), next_offset);
     assert_eq!(state.wal_head(), 0);
     assert_eq!(state.wal_tail(), 0);
@@ -1579,17 +1749,17 @@ fn requirement_open_formatted_store_ignores_torn_tail_slots_after_wal_recovery()
     let (next_offset, state) = open_formatted_store_after_torn_slot_with_wal_recovery();
 
     assert_eq!(state.wal_append_offset(), next_offset);
-    assert_eq!(state.last_free_list_head(), Some(1));
+    assert_eq!(state.ready_free_region(), Some(2));
     assert!(!state.pending_wal_recovery_boundary());
 }
 
-//= spec/ring/04-wal-records.md#wal-record-types
+//= spec/ring/04-wal-records.md#checksum-trust-model
 //= type=test
-//# `RING-CHECKSUM-005` An implementation MUST ensure that even
-//# intentionally corrupted storage eventually produces a reported error
-//# rather than memory unsafety, undefined behavior, control-flow
-//# corruption, infinite loops, or unbounded resource consumption
-//# amounting to denial of service.
+//# `RING-CHECKSUM-005` An implementation MUST ensure that even intentionally corrupted
+//# storage eventually produces a reported error rather than memory unsafety, undefined
+//# behavior, control-flow corruption, infinite loops, or unbounded resource consumption.
+//# All replay walks, decoders, and collection-format handlers MUST remain bounded by
+//# configured storage geometry and record sizes.
 #[test]
 fn requirement_open_formatted_store_reports_an_error_for_intentionally_corrupted_wal_bytes() {
     let (_wal_offset, error) = open_formatted_store_after_corrupt_slot_without_wal_recovery();
@@ -1764,28 +1934,53 @@ fn requirement_open_formatted_store_accepts_committed_region_head_basis() {
 //# live replacement head with no incomplete transaction work.
 #[test]
 fn requirement_open_formatted_store_accepts_reclaimed_historical_head_after_replacement() {
-    let mut flash = MockFlash::<256, 5, 128>::new(0xff);
+    let mut flash = MockFlash::<512, 5, 128>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
-    init_user_region_header(&mut flash, 1, 4, CollectionId(7), 1);
-    init_user_region_header(&mut flash, 2, 5, CollectionId(7), 1);
-
-    let footer_offset = 256 - FreePointerFooter::ENCODED_LEN;
-    let footer = FreePointerFooter { next_tail: Some(1) };
-    let mut footer_bytes = [0u8; FreePointerFooter::ENCODED_LEN];
-    footer.encode_into(&mut footer_bytes, 0xff).unwrap();
-    flash.write_region(4, footer_offset, &footer_bytes).unwrap();
-    flash.erase_region(1).unwrap();
+    init_user_region_header(&mut flash, 2, 4, CollectionId(7), MAP_MANIFEST_V2_FORMAT);
+    flash
+        .write_region(2, Header::ENCODED_LEN, &0u32.to_le_bytes())
+        .unwrap();
+    init_user_region_header(&mut flash, 3, 5, CollectionId(7), MAP_MANIFEST_V2_FORMAT);
+    flash
+        .write_region(3, Header::ENCODED_LEN, &0u32.to_le_bytes())
+        .unwrap();
 
     let wal_offset = metadata.wal_record_area_offset().unwrap();
-    let after_first_head = append_wal_record(
+    let after_first_alloc = append_wal_record(
         &mut flash,
         metadata,
         0,
         wal_offset,
+        WalRecord::AllocateRegion {
+            region_index: 2,
+            allocation_head_after: FreeQueuePosition {
+                region_index: 1,
+                entry_index: 1,
+            },
+        },
+    );
+    let after_second_alloc = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        after_first_alloc,
+        WalRecord::AllocateRegion {
+            region_index: 3,
+            allocation_head_after: FreeQueuePosition {
+                region_index: 1,
+                entry_index: 2,
+            },
+        },
+    );
+    let after_first_head = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        after_second_alloc,
         WalRecord::Head {
             collection_id: CollectionId(7),
             collection_type: CollectionType::MAP_CODE,
-            region_index: 1,
+            region_index: 2,
         },
     );
     let after_second_head = append_wal_record(
@@ -1796,7 +1991,7 @@ fn requirement_open_formatted_store_accepts_reclaimed_historical_head_after_repl
         WalRecord::Head {
             collection_id: CollectionId(7),
             collection_type: CollectionType::MAP_CODE,
-            region_index: 2,
+            region_index: 3,
         },
     );
     let after_first_free = append_wal_record(
@@ -1805,8 +2000,11 @@ fn requirement_open_formatted_store_accepts_reclaimed_historical_head_after_repl
         0,
         after_second_head,
         WalRecord::FreeRegion {
-            collection_id: CollectionId(0),
-            region_index: 1,
+            region_index: 2,
+            append_tail_after: FreeQueuePosition {
+                region_index: 1,
+                entry_index: 4,
+            },
         },
     );
     append_wal_record(
@@ -1815,19 +2013,22 @@ fn requirement_open_formatted_store_accepts_reclaimed_historical_head_after_repl
         0,
         after_first_free,
         WalRecord::FreeRegion {
-            collection_id: CollectionId(0),
-            region_index: 1,
+            region_index: 2,
+            append_tail_after: FreeQueuePosition {
+                region_index: 1,
+                entry_index: 4,
+            },
         },
     );
 
-    let state = open_formatted_store::<256, 5, _>(&mut flash).unwrap();
+    let state = open_formatted_store::<512, 5, _>(&mut flash).unwrap();
 
     assert_eq!(state.collections().len(), 1);
     assert_eq!(
         state.collections()[0].basis(),
-        StartupCollectionBasis::Region(2)
+        StartupCollectionBasis::Region(3)
     );
-    assert_eq!(state.free_list_tail(), Some(1));
+    assert_eq!(state.free_space_tail_region(), Some(2));
 }
 
 //= spec/ring/06-startup-replay.md#startup-replay-implementation-requirements
@@ -1942,10 +2143,11 @@ fn requirement_open_formatted_store_rejects_unsupported_live_collection_type() {
 
 //= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
-//# `RING-STARTUP-028` If replay yields a live collection whose
-//# `collection_type` is unsupported by the implementation, startup MUST
-//# fail before transaction cleanup frees any region based on collection
-//# reachability.
+//# `RING-STARTUP-028` If replay reaches WAL end after
+//# `commit_transaction(transaction_log_id, range)` but before
+//# `transaction_finished(transaction_log_id, range)`, preserve the imported collection and
+//# allocator state, finish cleanup frees derived from the committed range, and append
+//# `transaction_finished(transaction_log_id, range)`.
 #[test]
 fn requirement_open_formatted_store_fails_startup_for_unsupported_live_collection_type() {
     let mut flash = MockFlash::<256, 4, 96>::new(0xff);
@@ -1969,9 +2171,12 @@ fn requirement_open_formatted_store_fails_startup_for_unsupported_live_collectio
 
 //= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
-//# `RING-STARTUP-030` A dropped tombstone whose old
-//# `collection_type` is unsupported MAY remain as inert metadata and
-//# does not by itself require startup failure.
+//# `RING-STARTUP-030` After replay and transaction recovery, for each collection:
+//# reconstruct its durable basis from the collection state. If the state is empty or
+//# WAL-snapshot based and has post-basis updates, materialize mutable RAM state and apply
+//# those updates in WAL order. If the state is committed-region based, the basis may remain
+//# in place until a read or mutation needs to materialize it. Dropped collections do not
+//# reconstruct mutable state and do not accept later mutations.
 #[test]
 fn requirement_validate_live_collection_types_ignores_unsupported_dropped_tombstones() {
     let collections = [StartupCollection {
@@ -1987,7 +2192,7 @@ fn requirement_validate_live_collection_types_ignores_unsupported_dropped_tombst
 //= spec/ring/06-startup-replay.md#startup-replay-implementation-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-054` Strict private-log region reads MUST reject regions whose
-//# collection_id is nonzero even if collection_format is a private log format.
+//# collection id is nonzero even if collection_format is a private log format.
 #[test]
 fn requirement_read_strict_wal_region_rejects_nonzero_collection_id_even_with_wal_format() {
     let mut flash = MockFlash::<128, 4, 64>::new(0xff);
@@ -2003,8 +2208,8 @@ fn requirement_read_strict_wal_region_rejects_nonzero_collection_id_even_with_wa
 
 //= spec/ring/06-startup-replay.md#startup-replay-implementation-requirements
 //= type=test
-//# `RING-IMPL-REGRESSION-055` WAL target validation MUST require collection_id 0 and
-//# the expected private log collection_format.
+//# `RING-IMPL-REGRESSION-055` WAL target validation MUST require collection id 0 and the
+//# expected private log collection_format.
 #[test]
 fn requirement_has_valid_wal_target_requires_both_wal_collection_id_and_format() {
     let mut flash = MockFlash::<128, 4, 64>::new(0xff);
@@ -2063,8 +2268,8 @@ fn requirement_validate_live_region_bases_rejects_committed_region_for_different
 
 //= spec/ring/06-startup-replay.md#startup-replay-implementation-requirements
 //= type=test
-//# `RING-IMPL-REGRESSION-057` Region index validation MUST reject a region_index equal to
-//# region_count.
+//# `RING-IMPL-REGRESSION-057` Region index validation MUST reject a region index equal to
+//# `region_count`.
 #[test]
 fn requirement_ensure_region_index_in_range_rejects_region_count_boundary() {
     assert_eq!(
@@ -2075,19 +2280,22 @@ fn requirement_ensure_region_index_in_range_rejects_region_count_boundary() {
 
 //= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
-//# RING-STARTUP-005 Walk the WAL region chain from the resulting WAL head to tail using `link`
-//# records.
+//# `RING-STARTUP-005` Walk the WAL region chain from the resulting WAL head to tail using
+//# `link` records. If a `link` is missing or invalid before reaching the known tail, return
+//# an error.
 #[test]
 fn requirement_open_formatted_store_follows_completed_link_to_the_next_wal_tail() {
     let state = open_formatted_store_after_completed_wal_rotation();
     assert_eq!(state.wal_head(), 0);
-    assert_eq!(state.wal_tail(), 1);
+    assert_eq!(state.wal_tail(), 2);
 }
 
 //= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
-//# RING-STARTUP-013 On `link(next_region_index, expected_sequence)`:
-//# if `ready_region = next_region_index`, clear `ready_region`.
+//# `RING-STARTUP-013` On `erase_free_region_span(count, ready_boundary_after)`: verify that
+//# the dirty range has at least `count` entries and that `ready_boundary_after` is reached
+//# by advancing from the current `ready_boundary` by `count` entries. Treat the
+//# corresponding entries as ready and set `ready_boundary = ready_boundary_after`.
 #[test]
 fn requirement_open_formatted_store_clears_ready_region_when_link_matches_it() {
     let state = open_formatted_store_after_completed_wal_rotation();
@@ -2096,9 +2304,9 @@ fn requirement_open_formatted_store_clears_ready_region_when_link_matches_it() {
 
 //= spec/ring/06-startup-replay.md#startup-replay-implementation-requirements
 //= type=test
-//# `RING-IMPL-REGRESSION-058` Startup replay MUST recover a WAL rotation after a durable link by
-//# selecting the linked tail, resetting tail append offset, updating allocator state, and advancing
-//# max sequence.
+//# `RING-IMPL-REGRESSION-058` Startup replay MUST recover a WAL rotation after a durable
+//# `link` by selecting the linked tail, resetting tail append offset, preserving free-space
+//# cursor state, and advancing max sequence.
 #[test]
 fn requirement_open_formatted_store_recovers_rotation_after_link() {
     let mut flash = MockFlash::<256, 4, 96>::new(0xff);
@@ -2109,11 +2317,12 @@ fn requirement_open_formatted_store_recovers_rotation_after_link() {
         metadata,
         0,
         wal_offset,
-        WalRecord::AllocBegin {
-            collection_id: CollectionId(0),
-            region_index: 1,
-            allocation_sequence: 0,
-            free_list_head_after: Some(2),
+        WalRecord::AllocateRegion {
+            region_index: 2,
+            allocation_head_after: FreeQueuePosition {
+                region_index: 1,
+                entry_index: 1,
+            },
         },
     );
     append_wal_record(
@@ -2122,39 +2331,40 @@ fn requirement_open_formatted_store_recovers_rotation_after_link() {
         0,
         after_alloc,
         WalRecord::Link {
-            next_region_index: 1,
-            expected_sequence: 1,
+            next_region_index: 2,
+            expected_sequence: 2,
         },
     );
 
     let state = open_formatted_store::<256, 4, _>(&mut flash).unwrap();
 
     assert_eq!(state.wal_head(), 0);
-    assert_eq!(state.wal_tail(), 1);
+    assert_eq!(state.wal_tail(), 2);
     assert_eq!(
         state.wal_append_offset(),
         metadata.wal_record_area_offset().unwrap()
     );
-    assert_eq!(state.last_free_list_head(), Some(2));
-    assert_eq!(state.free_list_tail(), Some(3));
+    assert_eq!(state.ready_free_region(), Some(3));
+    assert_eq!(state.free_space_tail_region(), Some(3));
     assert_eq!(state.ready_region(), None);
-    assert_eq!(state.max_seen_sequence(), 1);
+    assert_eq!(state.max_seen_sequence(), 2);
 }
 
 //= spec/ring/06-startup-replay.md#startup-replay-implementation-requirements
 //= type=test
-//# `RING-IMPL-REGRESSION-059` Startup replay MUST recover a WAL rotation when alloc_begin is
-//# durable but link is absent and only rotation reserve remains.
+//# `RING-IMPL-REGRESSION-059` Startup replay MUST recover a WAL rotation when
+//# `allocate_region` is durable but `link` is absent and only rotation reserve remains.
 #[test]
 fn requirement_open_formatted_store_recovers_rotation_before_link() {
     let mut flash = MockFlash::<160, 4, 128>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
     let wal_offset = metadata.wal_record_area_offset().unwrap();
-    let alloc_record = WalRecord::AllocBegin {
-        collection_id: CollectionId(0),
-        region_index: 1,
-        allocation_sequence: 0,
-        free_list_head_after: Some(2),
+    let alloc_record = WalRecord::AllocateRegion {
+        region_index: 2,
+        allocation_head_after: FreeQueuePosition {
+            region_index: 1,
+            entry_index: 1,
+        },
     };
     let filler_record = WalRecord::Head {
         collection_id: CollectionId(0),
@@ -2167,8 +2377,8 @@ fn requirement_open_formatted_store_recovers_rotation_before_link() {
         encoded_record_len(alloc_record, metadata, &mut physical, &mut logical).unwrap();
     let link_len = encoded_record_len(
         WalRecord::Link {
-            next_region_index: 1,
-            expected_sequence: 1,
+            next_region_index: 2,
+            expected_sequence: 2,
         },
         metadata,
         &mut physical,
@@ -2194,23 +2404,23 @@ fn requirement_open_formatted_store_recovers_rotation_before_link() {
     let state = open_formatted_store::<160, 4, _>(&mut flash).unwrap();
 
     assert_eq!(state.wal_head(), 0);
-    assert_eq!(state.wal_tail(), 1);
+    assert_eq!(state.wal_tail(), 2);
     assert_eq!(
         state.wal_append_offset(),
         metadata.wal_record_area_offset().unwrap()
     );
-    assert_eq!(state.last_free_list_head(), Some(2));
-    assert_eq!(state.free_list_tail(), Some(3));
+    assert_eq!(state.ready_free_region(), Some(3));
+    assert_eq!(state.free_space_tail_region(), Some(3));
     assert_eq!(state.ready_region(), None);
-    assert_eq!(state.max_seen_sequence(), 1);
+    assert_eq!(state.max_seen_sequence(), 2);
 }
 
 //= spec/ring/06-startup-replay.md#startup-replay-implementation-requirements
 //= type=test
-//# `RING-IMPL-REGRESSION-060` Startup replay MUST recover a WAL rotation when only the link record
-//# fits after alloc_begin at the tail boundary.
+//# `RING-IMPL-REGRESSION-060` Startup replay MUST recover a WAL rotation when only the
+//# `link` record fits after the rotation allocation at the tail boundary.
 #[test]
-fn requirement_open_formatted_store_recovers_rotation_when_only_the_link_record_fits_after_alloc_begin(
+fn requirement_open_formatted_store_recovers_rotation_when_only_the_link_record_fits_after_allocate_region(
 ) {
     const REGION_SIZE: usize = 256;
 
@@ -2219,18 +2429,19 @@ fn requirement_open_formatted_store_recovers_rotation_when_only_the_link_record_
     let wal_offset = metadata.wal_record_area_offset().unwrap();
     let mut physical = [0u8; REGION_SIZE];
     let mut logical = [0u8; REGION_SIZE];
-    let alloc_record = WalRecord::AllocBegin {
-        collection_id: CollectionId(0),
-        region_index: 1,
-        allocation_sequence: 0,
-        free_list_head_after: Some(2),
+    let alloc_record = WalRecord::AllocateRegion {
+        region_index: 2,
+        allocation_head_after: FreeQueuePosition {
+            region_index: 1,
+            entry_index: 1,
+        },
     };
     let alloc_len =
         encoded_record_len(alloc_record, metadata, &mut physical, &mut logical).unwrap();
     let link_len = encoded_record_len(
         WalRecord::Link {
-            next_region_index: 1,
-            expected_sequence: 1,
+            next_region_index: 2,
+            expected_sequence: 2,
         },
         metadata,
         &mut physical,
@@ -2252,7 +2463,7 @@ fn requirement_open_formatted_store_recovers_rotation_when_only_the_link_record_
             )
             .is_ok_and(|filler_len| wal_offset + filler_len + alloc_len + link_len == REGION_SIZE)
         })
-        .expect("snapshot payload should align alloc_begin to exact link capacity");
+        .expect("snapshot payload should align allocate_region to exact link capacity");
     let after_filler = append_wal_record(
         &mut flash,
         metadata,
@@ -2268,8 +2479,8 @@ fn requirement_open_formatted_store_recovers_rotation_when_only_the_link_record_
     assert_eq!(REGION_SIZE - after_alloc, link_len);
 
     let state = open_formatted_store::<REGION_SIZE, 4, _>(&mut flash).unwrap();
-    assert_eq!(state.wal_tail(), 1);
-    assert_eq!(state.max_seen_sequence(), 1);
+    assert_eq!(state.wal_tail(), 2);
+    assert_eq!(state.max_seen_sequence(), 2);
 }
 
 //= spec/ring/06-startup-replay.md#startup-replay-implementation-requirements
@@ -2287,11 +2498,11 @@ fn requirement_open_formatted_store_rejects_unrecovered_boundary_in_non_tail_wal
         0,
         wal_offset,
         WalRecord::Link {
-            next_region_index: 1,
+            next_region_index: 2,
             expected_sequence: 1,
         },
     );
-    init_wal_region(&mut flash, 1, 1, 0, metadata.region_count);
+    init_wal_region(&mut flash, 2, 1, 0, metadata.region_count);
     let corrupt_tail = [0x10; 128];
     flash
         .write_region(0, after_link, &corrupt_tail[..128 - after_link])
@@ -2303,25 +2514,28 @@ fn requirement_open_formatted_store_rejects_unrecovered_boundary_in_non_tail_wal
 
 //= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
-//# RING-STARTUP-020 On `wal_recovery()`: if `pending_wal_recovery_boundary` is clear, return an
-//# error. otherwise clear `pending_wal_recovery_boundary`.
+//# `RING-STARTUP-020` On `link(next_region_index, expected_sequence)`: preserve private-log
+//# reachability. If `next_region_index` matches the current storage-core private allocation
+//# reservation, consume that reservation; otherwise the link may refer to a retained log
+//# region whose historical allocation command was already represented by a checkpoint or
+//# reclaimed record.
 #[test]
 fn requirement_open_formatted_store_clears_pending_recovery_boundary_when_wal_recovery_is_replayed()
 {
     let (next_offset, state) = open_formatted_store_after_corrupt_slot_with_wal_recovery();
     assert_eq!(state.wal_append_offset(), next_offset);
     assert_eq!(state.ready_region(), None);
-    assert_eq!(state.last_free_list_head(), Some(1));
+    assert_eq!(state.ready_free_region(), Some(2));
 }
 
 //= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
-//# `RING-STARTUP-002` Scan all regions, collect candidate main WAL
-//# regions (`collection_id == 0` plus `collection_format = main_wal_v2`)
-//# and candidate transaction-log regions (`collection_id == 0` plus
-//# `collection_format = transaction_log_v2`) with valid headers, and track
-//# `max_seen_sequence` as the largest
-//# `sequence` value seen in any valid region header.
+//# `RING-STARTUP-002` Scan all regions, collect candidate main WAL regions (`collection_id
+//# == 0` plus `collection_format = main_wal_v2`), candidate transaction-log regions
+//# (`collection_id == 0` plus `collection_format = transaction_log_v2`), and candidate
+//# free-space metadata regions (`collection_id == 0` plus `collection_format =
+//# free_space_v2`) with valid headers. Track `max_seen_sequence` as the largest `sequence`
+//# value seen in any valid region header.
 #[test]
 fn requirement_open_formatted_store_scans_fresh_store_geometry_for_wal_candidates() {
     let (metadata, state) = open_formatted_store_from_fresh_format();
@@ -2333,8 +2547,11 @@ fn requirement_open_formatted_store_scans_fresh_store_geometry_for_wal_candidate
 //= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
 //# `RING-STARTUP-004` Read and validate the `LogRegionPrologue` stored at the start of the
-//# main WAL tail region's user-data area, and use its
-//# `log_head_region_index` as the initial WAL-head candidate.
+//# main WAL tail region's user-data area. Use its `log_head_region_index` as the initial
+//# WAL-head candidate and its free-space cursor checkpoint as the allocator baseline for
+//# this WAL chain. Then scan that tail region using the aligned candidate-start and
+//# record-validation rules defined below, and let the last valid `head(collection_id = 0,
+//# collection_type = wal, region_index)` record override the head candidate.
 #[test]
 fn requirement_open_formatted_store_uses_the_tail_prologue_as_the_initial_wal_head_candidate() {
     let (_metadata, state) = open_formatted_store_from_fresh_format();
@@ -2344,63 +2561,63 @@ fn requirement_open_formatted_store_uses_the_tail_prologue_as_the_initial_wal_he
 
 //= spec/ring/06-startup-replay.md#startup-replay-implementation-requirements
 //= type=test
-//# `RING-IMPL-REGRESSION-062` Opening a freshly formatted store MUST initialize allocator free-list
-//# head and tail from the formatted free-list chain.
+//# `RING-IMPL-REGRESSION-062` Opening a freshly formatted store MUST initialize free-space
+//# cursors and queue entries from the formatted `free_space_v2` metadata region.
 #[test]
 fn requirement_open_formatted_store_initializes_allocator_state_for_a_fresh_store() {
     let (_metadata, state) = open_formatted_store_from_fresh_format();
-    assert_eq!(state.last_free_list_head(), Some(1));
-    assert_eq!(state.free_list_tail(), Some(3));
+    assert_eq!(state.ready_free_region(), Some(2));
+    assert_eq!(state.free_space_tail_region(), Some(3));
 }
 
 //= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
-//# RING-STARTUP-026 Keep `max_seen_sequence` as the runtime source of the next region sequence.
+//# `RING-STARTUP-026` On `wal_recovery()`: if `pending_wal_recovery_boundary` is clear,
+//# return an error. Otherwise clear the boundary.
 #[test]
 fn requirement_open_formatted_store_keeps_max_seen_sequence_for_the_next_region_header() {
     let (_metadata, state) = open_formatted_store_from_fresh_format();
-    assert_eq!(state.max_seen_sequence(), 0);
+    assert_eq!(state.max_seen_sequence(), 1);
 }
 
-//= spec/ring/06-startup-replay.md#why-reclaimed-wal-regions-cannot-confuse-startup
+//= spec/ring/06-startup-replay.md#why-reclaimed-regions-cannot-confuse-startup
 //= type=test
 //# `RING-BOOTSTRAP-005` Startup derives the WAL head only from the selected tail's
-//# `LogRegionPrologue` plus any later `head(collection_id = 0, ...)`
-//# records found in that same tail region. Stale headers in free-list
-//# regions therefore do not influence WAL-head recovery once they lose
-//# tail selection.
+//# `LogRegionPrologue` plus any later `head(collection_id = 0, ...)` records found in that
+//# same tail region. Stale headers in free-space member regions therefore do not influence
+//# WAL-head recovery once they lose tail selection.
 #[test]
 fn requirement_open_formatted_store_reports_recovered_nonzero_wal_head() {
     let mut flash = MockFlash::<128, 4, 128>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
     let wal_offset = metadata.wal_record_area_offset().unwrap();
 
-    init_wal_region(&mut flash, 0, 2, 1, metadata.region_count);
-    init_wal_region(&mut flash, 1, 1, 1, metadata.region_count);
+    init_wal_region(&mut flash, 0, 3, 2, metadata.region_count);
+    init_wal_region(&mut flash, 2, 2, 2, metadata.region_count);
     append_wal_record(
         &mut flash,
         metadata,
-        1,
+        2,
         wal_offset,
         WalRecord::Link {
             next_region_index: 0,
-            expected_sequence: 2,
+            expected_sequence: 3,
         },
     );
 
     let state = open_formatted_store::<128, 4, _>(&mut flash).unwrap();
-    assert_eq!(state.wal_head(), 1);
+    assert_eq!(state.wal_head(), 2);
     assert_eq!(state.wal_tail(), 0);
-    assert_eq!(state.last_free_list_head(), Some(2));
+    assert_eq!(state.ready_free_region(), Some(2));
 }
 
 //= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
-//# `RING-STARTUP-027` If replay encountered a torn or checksum-invalid tail record,
-//# retain all state recovered from earlier complete records. The WAL head
-//# is unchanged. Replay may still recover and apply later valid tail
-//# records that begin after the torn bytes, but the first such later valid
-//# record must be `wal_recovery`.
+//# `RING-STARTUP-027` If replay reaches WAL end with an active full transaction descriptor
+//# and no durable `commit_transaction`, run idempotent rollback recovery for that
+//# transaction-log range. Any region popped by `allocate_region` in the uncommitted range
+//# returns to the dirty range, because it may have been written before the crash. Append
+//# `rollback_transaction(transaction_log_id, range)` after cleanup.
 #[test]
 fn requirement_open_formatted_store_preserves_pending_tail_recovery_boundary() {
     let mut flash = MockFlash::<128, 4, 64>::new(0xff);
@@ -2416,8 +2633,8 @@ fn requirement_open_formatted_store_preserves_pending_tail_recovery_boundary() {
 
 //= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
-//# `RING-STARTUP-RESULT-007` Transaction-log cursors, live-prefix boundaries, active transaction
-//# descriptors, and incomplete transaction recovery work.
+//# `RING-STARTUP-RESULT-007` Transaction terminal records written during recovery, if
+//# recovery needed to close an incomplete full or inline transaction range.
 #[test]
 fn requirement_startup_open_plan_clears_transaction_recovery_scratch() {
     let mut plan = StartupOpenPlan::<4, 8>::empty();
@@ -2452,14 +2669,12 @@ fn requirement_startup_open_plan_clears_transaction_recovery_scratch() {
     assert!(plan.transaction_allocations.is_empty());
 }
 
-//= spec/ring/04-wal-records.md#wal-record-types
+//= spec/ring/04-wal-records.md#ordering-and-validity
 //= type=test
-//# `RING-WAL-VALID-024` If replay reaches the end of a reachable
-//# non-tail private log region with a
-//# pending WAL-recovery boundary that was not closed by `wal_recovery`,
-//# startup must fail because that region contains unresolved mid-log
-//# corruption. A pending WAL-recovery boundary may remain open only at the
-//# end of the current replay tail region.
+//# `RING-WAL-VALID-024` `commit_transaction(transaction_log_id, range)` is valid only if
+//# the range starts at the matching open transaction descriptor's start, ends at that
+//# transaction log's current append position, contains only complete valid records, and
+//# contains no torn record before `range.end`.
 #[test]
 fn requirement_non_tail_wal_replay_rejects_unrecovered_boundary() {
     let mut flash = MockFlash::<128, 4, 64>::new(0xff);
@@ -2476,6 +2691,7 @@ fn requirement_non_tail_wal_replay_rejects_unrecovered_boundary() {
         .unwrap_err();
     assert_eq!(scan_error, StartupError::BrokenWalChain { region_index: 0 });
 
+    let mut replay_state = OpenWalReplayState::default();
     let replay_error = replay_open_wal_region::<128, 4, _, 8>(
         &mut flash,
         &mut workspace,
@@ -2483,7 +2699,7 @@ fn requirement_non_tail_wal_replay_rejects_unrecovered_boundary() {
         0,
         0,
         false,
-        &mut None,
+        &mut replay_state,
     )
     .unwrap_err();
     assert_eq!(
@@ -2494,7 +2710,13 @@ fn requirement_non_tail_wal_replay_rejects_unrecovered_boundary() {
 
 //= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
-//# `RING-STARTUP-016` On `begin_transaction(transaction_log_id, start)`:
+//# `RING-STARTUP-008` Maintain replay state:
+//# per collection optional live `collection_type`, explicit collection state,
+//# `basis_pos`, `pending_updates`, and committed state generation;
+//# free-space collection queue and cursors; optional storage-core private
+//# allocation reservation; transaction-log cursors and live-prefix
+//# boundaries; full and inline transaction descriptors; and the replay
+//# local WAL-recovery boundary.
 #[test]
 fn requirement_classify_replay_record_opens_transaction_descriptor() {
     let mut flash = MockFlash::<128, 4, 64>::new(0xff);
@@ -2505,11 +2727,13 @@ fn requirement_classify_replay_record_opens_transaction_descriptor() {
         .push(startup_test_collection(CollectionId(7)))
         .unwrap();
     let mut open_transaction = None;
+    let mut open_inline_transaction = None;
     let aligned_end_offset = wal_offset + 8;
 
     let step = classify_replay_record(
         &mut plan,
         &mut open_transaction,
+        &mut open_inline_transaction,
         WalReplayPosition {
             chain_index: 0,
             region_index: 0,
@@ -2531,37 +2755,183 @@ fn requirement_classify_replay_record_opens_transaction_descriptor() {
         transaction.transaction_log_id,
         crate::test_transaction_log_id(CollectionId(7))
     );
-    assert_eq!(transaction.start.offset, aligned_end_offset);
+    assert_eq!(transaction.start, crate::test_log_position(CollectionId(7)));
     assert_eq!(plan.transaction_original_collections.len(), 1);
+}
+
+//= spec/ring/06-startup-replay.md#startup-replay-algorithm
+//= type=test
+//# `RING-STARTUP-017` On
+//# `commit_inline_transaction(record_count)`: verify that it closes the
+//# current bounded inline transaction, then apply the body records
+//# atomically at this commit position. Advance committed state generation
+//# for any affected collection and apply allocator pops, frees, and erase
+//# publishes in body order.
+#[test]
+fn requirement_inline_transaction_commit_applies_body_atomically() {
+    let mut flash = MockFlash::<256, 5, 256>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    let wal_offset = metadata.wal_record_area_offset().unwrap();
+    let collection_id = CollectionId(7);
+    let update = WalRecord::Update {
+        collection_id,
+        payload: &[1, 2, 3],
+    };
+    let update_len = encoded_len_for_record::<256>(metadata, update);
+
+    let mut offset = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        wal_offset,
+        WalRecord::NewCollection {
+            collection_id,
+            collection_type: CollectionType::MAP_CODE,
+        },
+    );
+    offset = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        offset,
+        WalRecord::BeginInlineTransaction {
+            record_count: 1,
+            encoded_len: u32::try_from(update_len).unwrap(),
+        },
+    );
+    offset = append_wal_record(&mut flash, metadata, 0, offset, update);
+    append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        offset,
+        WalRecord::CommitInlineTransaction { record_count: 1 },
+    );
+
+    let state = open_formatted_store::<256, 5, _>(&mut flash).unwrap();
+    assert_eq!(
+        collection_summary(&state, collection_id).pending_update_count(),
+        1
+    );
+}
+
+//= spec/ring/09-implementation-coverage.md#free-space-collection-coverage-targets
+//= type=test
+//# `RING-IMPL-FREE-010` Inline transactions MUST apply allocator and
+//# collection effects atomically after `commit_inline_transaction` and
+//# ignore body effects before commit.
+#[test]
+fn requirement_uncommitted_inline_transaction_is_rolled_back_on_startup() {
+    let mut flash = MockFlash::<256, 5, 256>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    let wal_offset = metadata.wal_record_area_offset().unwrap();
+    let collection_id = CollectionId(7);
+    let update = WalRecord::Update {
+        collection_id,
+        payload: &[1, 2, 3],
+    };
+    let update_len = encoded_len_for_record::<256>(metadata, update);
+
+    let mut offset = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        wal_offset,
+        WalRecord::NewCollection {
+            collection_id,
+            collection_type: CollectionType::MAP_CODE,
+        },
+    );
+    offset = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        offset,
+        WalRecord::BeginInlineTransaction {
+            record_count: 1,
+            encoded_len: u32::try_from(update_len).unwrap(),
+        },
+    );
+    append_wal_record(&mut flash, metadata, 0, offset, update);
+
+    let state = open_formatted_store::<256, 5, _>(&mut flash).unwrap();
+    assert_eq!(
+        collection_summary(&state, collection_id).pending_update_count(),
+        0
+    );
+}
+
+//= spec/ring/09-implementation-coverage.md#free-space-collection-coverage-targets
+//= type=test
+//# `RING-IMPL-FREE-007` If `allocate_region` is durable but the
+//# enclosing transaction is not committed, rollback recovery MUST return
+//# the region to the dirty range.
+#[test]
+fn requirement_uncommitted_inline_transaction_returns_allocations_dirty() {
+    let mut flash = MockFlash::<512, 6, 512>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    let wal_offset = metadata.wal_record_area_offset().unwrap();
+    let allocation = WalRecord::AllocateRegion {
+        region_index: 2,
+        allocation_head_after: FreeQueuePosition {
+            region_index: 1,
+            entry_index: 1,
+        },
+    };
+    let allocation_len = encoded_len_for_record::<512>(metadata, allocation);
+
+    let mut offset = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        wal_offset,
+        WalRecord::BeginInlineTransaction {
+            record_count: 1,
+            encoded_len: u32::try_from(allocation_len).unwrap(),
+        },
+    );
+    offset = append_wal_record(&mut flash, metadata, 0, offset, allocation);
+    assert!(offset > wal_offset);
+
+    let mut workspace = StorageWorkspace::<512>::new();
+    let mut plan = StartupOpenPlan::<6, 8>::empty();
+    begin_open_formatted_store::<512, 6, _, 8>(&mut flash, &mut workspace, &mut plan)
+        .expect("begin open");
+    recover_open_rotation::<512, _, 6, 8>(&mut flash, &mut workspace, &mut plan)
+        .expect("recover rotation");
+    replay_open_wal_chain::<512, 6, _, 8>(&mut flash, &mut workspace, &mut plan)
+        .expect("replay WAL");
+    let state =
+        finish_open_formatted_store::<512, 6, _, 8>(&mut flash, &mut plan).expect("finish open");
+    assert_eq!(state.ready_free_region(), Some(3));
+    assert_eq!(state.free_space_tail_region(), Some(2));
 }
 
 //= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
 //= type=test
-//# `RING-IMPL-REGRESSION-150` Transaction recovery bookkeeping MUST scope
-//# allocator observations to the open transaction collection and ignore
-//# allocator records for other collections.
+//# `RING-IMPL-REGRESSION-150` Transaction recovery bookkeeping MUST scope allocator
+//# observations to the open transaction or inline transaction and ignore non-visible
+//# allocator records from other ranges.
 #[test]
 fn requirement_transaction_recovery_observes_only_the_transaction_collection_allocator_records() {
     let mut plan = StartupOpenPlan::<4, 8>::empty();
     let mut transaction = OpenTransactionReplay {
         collection_id: Some(CollectionId(7)),
         transaction_log_id: crate::test_transaction_log_id(CollectionId(7)),
-        start: WalReplayPosition {
-            chain_index: 0,
-            region_index: 0,
-            offset: 0,
-        },
+        start: crate::test_log_position(CollectionId(7)),
+        committed_range: None,
         commit_seen: false,
     };
 
     observe_transaction_recovery_record(
         &mut plan,
         &mut transaction,
-        WalRecord::AllocBegin {
-            collection_id: CollectionId(8),
+        WalRecord::AllocateRegion {
             region_index: 1,
-            allocation_sequence: 0,
-            free_list_head_after: Some(2),
+            allocation_head_after: FreeQueuePosition {
+                region_index: 1,
+                entry_index: 1,
+            },
         },
     )
     .unwrap();
@@ -2569,22 +2939,26 @@ fn requirement_transaction_recovery_observes_only_the_transaction_collection_all
         &mut plan,
         &mut transaction,
         WalRecord::FreeRegion {
-            collection_id: CollectionId(8),
             region_index: 2,
+            append_tail_after: FreeQueuePosition {
+                region_index: 1,
+                entry_index: 1,
+            },
         },
     )
     .unwrap();
-    assert!(plan.transaction_allocations.is_empty());
-    assert!(plan.transaction_frees.is_empty());
+    assert_eq!(plan.transaction_allocations.as_slice(), &[1]);
+    assert_eq!(plan.transaction_frees.as_slice(), &[2]);
 
     observe_transaction_recovery_record(
         &mut plan,
         &mut transaction,
-        WalRecord::AllocBegin {
-            collection_id: CollectionId(7),
+        WalRecord::AllocateRegion {
             region_index: 1,
-            allocation_sequence: 0,
-            free_list_head_after: Some(2),
+            allocation_head_after: FreeQueuePosition {
+                region_index: 1,
+                entry_index: 1,
+            },
         },
     )
     .unwrap();
@@ -2592,8 +2966,11 @@ fn requirement_transaction_recovery_observes_only_the_transaction_collection_all
         &mut plan,
         &mut transaction,
         WalRecord::FreeRegion {
-            collection_id: CollectionId(7),
             region_index: 2,
+            append_tail_after: FreeQueuePosition {
+                region_index: 1,
+                entry_index: 1,
+            },
         },
     )
     .unwrap();
@@ -2601,29 +2978,98 @@ fn requirement_transaction_recovery_observes_only_the_transaction_collection_all
     assert_eq!(plan.transaction_frees.as_slice(), &[2]);
 }
 
-//= spec/ring/04-wal-records.md#wal-record-types
+//= spec/ring/04-wal-records.md#ordering-and-validity
 //= type=test
-//# `RING-WAL-VALID-029`
+//# `RING-WAL-VALID-029` `begin_inline_transaction(record_count, encoded_len)` is valid only
+//# in the main WAL when no full transaction or inline transaction is active. Storage MUST
+//# reserve enough main-WAL tail space for the whole bounded range before appending the
+//# begin record.
 #[test]
 fn requirement_transaction_marker_ids_must_match_the_open_transaction() {
     assert_eq!(
-        ensure_transaction_log_marker_matches(7, 8),
-        Err(StartupError::TransactionMismatch {
-            expected: CollectionId(7),
-            actual: CollectionId(8),
+        ensure_transaction_log_marker_matches(0, 1),
+        Err(StartupError::InvalidTransactionLogId {
+            transaction_log_id: 1,
+            slot_count: 1,
         })
     );
 }
 
-//= spec/ring/04-wal-records.md#wal-record-types
+//= spec/ring/05-disk-format.md#storage-metadata
 //= type=test
-//# `RING-WAL-VALID-013` A WAL record in the current private log tail
-//# region, other than the specific
-//# `alloc_begin(collection_id = 0, next_region_index,
-//# allocation_sequence, free_list_head_after)` that starts WAL rotation or the matching
-//# trailing `link`, is invalid if its aligned end offset leaves fewer than
-//# `wal_rotation_reserve` bytes of currently unwritten space remaining in
-//# that private log region.
+//# `RING-META-007` Opening MUST reject media whose
+//# `transaction_log_count` does not equal the configured transaction slot
+//# count for this implementation.
+#[test]
+fn requirement_open_rejects_metadata_transaction_log_count_mismatch() {
+    let mut flash = MockFlash::<128, 4, 64>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    let incompatible = StorageMetadata::new_with_transaction_logs(
+        metadata.region_size,
+        metadata.region_count,
+        metadata.min_free_regions,
+        2,
+        metadata.wal_write_granule,
+        metadata.erased_byte,
+        metadata.wal_record_magic,
+    )
+    .unwrap();
+    flash.write_metadata(incompatible).unwrap();
+
+    assert_eq!(
+        open_formatted_store(&mut flash).unwrap_err(),
+        StartupError::TransactionLogCountMismatch {
+            metadata_count: 2,
+            slot_count: 1,
+        }
+    );
+}
+
+//= spec/ring/04-wal-records.md#ordering-and-validity
+//= type=test
+//# `RING-WAL-VALID-021` `begin_transaction`, `commit_transaction`, `transaction_finished`,
+//# and `rollback_transaction` records are valid only in the main WAL, and their
+//# `transaction_log_id` MUST be less than the configured `transaction_log_count`.
+#[test]
+fn requirement_replay_rejects_transaction_log_id_outside_slot_array() {
+    let mut flash = MockFlash::<128, 4, 64>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    let wal_offset = metadata.wal_record_area_offset().unwrap();
+    let mut plan = startup_plan_with_append_offset::<4>(metadata, 0, 0, wal_offset);
+    let mut open_transaction = None;
+    let mut open_inline_transaction = None;
+
+    assert_eq!(
+        classify_replay_record(
+            &mut plan,
+            &mut open_transaction,
+            &mut open_inline_transaction,
+            WalReplayPosition {
+                chain_index: 0,
+                region_index: 0,
+                offset: wal_offset,
+            },
+            wal_offset + 8,
+            WalRecord::BeginTransaction {
+                transaction_log_id: 1,
+                start: LogPosition {
+                    region_index: 0,
+                    offset: 0,
+                },
+            },
+        ),
+        Err(StartupError::InvalidTransactionLogId {
+            transaction_log_id: 1,
+            slot_count: 1,
+        })
+    );
+}
+
+//= spec/ring/04-wal-records.md#ordering-and-validity
+//= type=test
+//# `RING-WAL-VALID-013` For user collections, `update` records that appear before replay
+//# has seen a retained basis decision for that collection have no replay effect.
+//# Implementations MUST NOT count them as retained post-basis updates.
 #[test]
 fn requirement_recovery_record_room_rejects_tail_overflow_and_alloc_without_free_head() {
     let mut flash = MockFlash::<128, 4, 64>::new(0xff);
@@ -2642,18 +3088,19 @@ fn requirement_recovery_record_room_rejects_tail_overflow_and_alloc_without_free
         Ok(false)
     );
 
-    plan.last_free_list_head = None;
+    plan.free_space = FreeSpaceState::empty();
     plan.wal_append_offset = metadata.wal_record_area_offset().unwrap();
     assert_eq!(
         recovery_record_has_append_room::<128, 4, _, 8>(
             &mut flash,
             &mut workspace,
             &mut plan,
-            WalRecord::AllocBegin {
-                collection_id: CollectionId(0),
+            WalRecord::AllocateRegion {
                 region_index: 1,
-                allocation_sequence: 0,
-                free_list_head_after: None,
+                allocation_head_after: FreeQueuePosition {
+                    region_index: 1,
+                    entry_index: 1
+                },
             },
         ),
         Ok(false)
@@ -2673,32 +3120,28 @@ fn requirement_recovery_record_room_rejects_tail_overflow_and_alloc_without_free
 
 //= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
-//# `RING-WAL-ENC-013` Appending any WAL record to the current private
-//# log tail region, other than the
-//# specific `alloc_begin(collection_id = 0, next_region_index,
-//# allocation_sequence, free_list_head_after)` that starts WAL rotation or the
-//# trailing `link`,
-//# is invalid if doing so would leave fewer than `wal_rotation_reserve`
-//# unwritten bytes in that private log region.
+//# `RING-WAL-ENC-013` Appending any WAL record to the current private log tail region,
+//# other than the specific storage-core `allocate_region(next_region_index,
+//# allocation_head_after)` that starts WAL rotation or the trailing `link`, is invalid if
+//# doing so would leave fewer than `wal_rotation_reserve` unwritten bytes in that private
+//# log region.
 #[test]
 fn requirement_recovery_record_room_checks_the_next_free_footer_at_exact_tail_end() {
     let mut flash = MockFlash::<128, 4, 64>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
-    let footer_offset = 128 - FreePointerFooter::ENCODED_LEN;
-    flash
-        .write_region(1, footer_offset, &[0u8; FreePointerFooter::ENCODED_LEN])
-        .unwrap();
     let mut workspace = StorageWorkspace::<128>::new();
     let wal_recovery_len = encoded_len_for_record::<128>(metadata, WalRecord::WalRecovery);
     let mut plan = startup_plan_with_append_offset::<4>(metadata, 0, 0, 128 - wal_recovery_len);
 
-    assert!(recovery_record_has_append_room::<128, 4, _, 8>(
-        &mut flash,
-        &mut workspace,
-        &mut plan,
-        WalRecord::WalRecovery,
-    )
-    .is_err());
+    assert_eq!(
+        recovery_record_has_append_room::<128, 4, _, 8>(
+            &mut flash,
+            &mut workspace,
+            &mut plan,
+            WalRecord::WalRecovery,
+        ),
+        Ok(false)
+    );
 }
 
 //= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
@@ -2738,33 +3181,43 @@ fn requirement_recovery_record_writers_accept_records_that_end_at_region_boundar
 
 //= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
-//# `RING-WAL-ENC-014` Appending the
-//# `alloc_begin(collection_id = 0, next_region_index, allocation_sequence, free_list_head_after)`
-//# that starts WAL rotation is invalid unless its aligned end offset still
-//# leaves at least `wal_link_reserve` and fewer than
-//# `wal_rotation_reserve` unwritten bytes in that private log region.
+//# `RING-WAL-ENC-014` Appending the storage-core `allocate_region(next_region_index,
+//# allocation_head_after)` that starts WAL rotation is invalid unless its aligned end
+//# offset still leaves at least `wal_link_reserve` and fewer than `wal_rotation_reserve`
+//# unwritten bytes in that private log region. This reserve-window placement makes an
+//# unmatched tail allocation unambiguously recognizable as the WAL-rotation-start record
+//# during startup recovery. Once that allocation record is durable, the only valid later
+//# WAL record in that private log region is the matching trailing `link`.
 #[test]
 fn requirement_recovery_rotation_start_accepts_only_the_link_reserve_window() {
     let mut flash = MockFlash::<256, 4, 128>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
     let mut workspace = StorageWorkspace::<256>::new();
     let mut plan = startup_plan_with_append_offset::<4>(metadata, 0, 0, 0);
-    let reserves =
-        recovery_rotation_reserves::<256, 4, 8>(&mut workspace, &mut plan, 1, Some(2)).unwrap();
+    let reserves = recovery_rotation_reserves::<256, 4, 8>(
+        &mut workspace,
+        &mut plan,
+        2,
+        FreeQueuePosition {
+            region_index: 1,
+            entry_index: 1,
+        },
+    )
+    .unwrap();
 
-    plan.wal_append_offset = 256 - reserves.alloc_begin_len - reserves.link_reserve;
+    plan.wal_append_offset = 256 - reserves.allocate_region_len - reserves.link_reserve;
     let next_region =
         append_recovery_wal_rotation_start::<256, 4, _, 8>(&mut flash, &mut workspace, &mut plan)
             .unwrap();
-    assert_eq!(next_region, 1);
+    assert_eq!(next_region, 2);
     assert_eq!(plan.wal_append_offset, 256 - reserves.link_reserve);
-    assert_eq!(plan.ready_region, Some(1));
+    assert_eq!(plan.ready_region, None);
 
     let mut too_much_room = startup_plan_with_append_offset::<4>(
         metadata,
         0,
         0,
-        256 - reserves.alloc_begin_len - reserves.rotation_reserve,
+        256 - reserves.allocate_region_len - reserves.rotation_reserve,
     );
     assert!(matches!(
         append_recovery_wal_rotation_start::<256, 4, _, 8>(
@@ -2779,7 +3232,7 @@ fn requirement_recovery_rotation_start_accepts_only_the_link_reserve_window() {
         metadata,
         0,
         0,
-        256 - reserves.alloc_begin_len - reserves.link_reserve + 1,
+        256 - reserves.allocate_region_len - reserves.link_reserve + 1,
     );
     assert!(matches!(
         append_recovery_wal_rotation_start::<256, 4, _, 8>(
@@ -2806,15 +3259,22 @@ fn requirement_recovery_rotation_bridges_large_windows_before_rotating() {
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
     let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
     let mut plan = startup_plan_with_append_offset::<4>(metadata, 0, 0, 0);
-    let reserves =
-        recovery_rotation_reserves::<REGION_SIZE, 4, 8>(&mut workspace, &mut plan, 1, Some(2))
-            .unwrap();
+    let reserves = recovery_rotation_reserves::<REGION_SIZE, 4, 8>(
+        &mut workspace,
+        &mut plan,
+        2,
+        FreeQueuePosition {
+            region_index: 1,
+            entry_index: 1,
+        },
+    )
+    .unwrap();
     let recovery_len = encoded_len_for_record::<REGION_SIZE>(metadata, WalRecord::WalRecovery);
     let bridge_len = usize::try_from(metadata.wal_write_granule).unwrap() + recovery_len;
     let wal_offset = metadata.wal_record_area_offset().unwrap();
     let bridge_offset = (wal_offset..REGION_SIZE)
         .find(|candidate| {
-            let Some(after_alloc) = candidate.checked_add(reserves.alloc_begin_len) else {
+            let Some(after_alloc) = candidate.checked_add(reserves.allocate_region_len) else {
                 return false;
             };
             let Some(after_bridge) = candidate.checked_add(bridge_len) else {
@@ -2837,7 +3297,7 @@ fn requirement_recovery_rotation_bridges_large_windows_before_rotating() {
     rotate_recovery_wal_tail::<REGION_SIZE, 4, _, 8>(&mut flash, &mut workspace, &mut plan)
         .unwrap();
 
-    assert_eq!(plan.wal_tail, 1);
+    assert_eq!(plan.wal_tail, 2);
     assert_eq!(
         plan.wal_append_offset,
         metadata.wal_record_area_offset().unwrap()
@@ -2846,22 +3306,27 @@ fn requirement_recovery_rotation_bridges_large_windows_before_rotating() {
     assert!(!plan.pending_wal_recovery_boundary);
 }
 
-//= spec/ring/04-wal-records.md#wal-record-types
+//= spec/ring/04-wal-records.md#ordering-and-validity
 //= type=test
-//# `RING-WAL-VALID-014` The
-//# `alloc_begin(collection_id = 0, next_region_index,
-//# allocation_sequence, free_list_head_after)` that starts WAL rotation is invalid unless its
-//# aligned end offset leaves at least `wal_link_reserve` bytes of currently
-//# unwritten space remaining in that private log region.
+//# `RING-WAL-VALID-014` For user collections, `snapshot`, `head`, and `drop_collection` are
+//# invalid if replay has already seen a prior valid `drop_collection` for that collection.
 #[test]
 fn requirement_recovery_rotation_rejects_windows_too_small_for_the_link() {
     let mut flash = MockFlash::<256, 4, 128>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
     let mut workspace = StorageWorkspace::<256>::new();
     let mut plan = startup_plan_with_append_offset::<4>(metadata, 0, 0, 0);
-    let reserves =
-        recovery_rotation_reserves::<256, 4, 8>(&mut workspace, &mut plan, 1, Some(2)).unwrap();
-    plan.wal_append_offset = 256 - reserves.alloc_begin_len - reserves.link_reserve + 1;
+    let reserves = recovery_rotation_reserves::<256, 4, 8>(
+        &mut workspace,
+        &mut plan,
+        2,
+        FreeQueuePosition {
+            region_index: 1,
+            entry_index: 1,
+        },
+    )
+    .unwrap();
+    plan.wal_append_offset = 256 - reserves.allocate_region_len - reserves.link_reserve + 1;
 
     assert!(matches!(
         rotate_recovery_wal_tail::<256, 4, _, 8>(&mut flash, &mut workspace, &mut plan),
@@ -2871,13 +3336,10 @@ fn requirement_recovery_rotation_rejects_windows_too_small_for_the_link() {
 
 //= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
-//# `RING-WAL-ENC-012` Let `wal_rotation_reserve` be the total aligned
-//# encoded size needed
-//# in the current private log tail region to append the two WAL records
-//# required to start and complete rotation to a new tail region:
-//# `alloc_begin(collection_id = 0, next_region_index, allocation_sequence,
-//# free_list_head_after)` followed by
-//# `link(next_region_index, expected_sequence)`.
+//# `RING-WAL-ENC-012` Let `wal_rotation_reserve` be the total aligned encoded size needed
+//# in the current private log tail region to append the two WAL records required to start
+//# and complete rotation to a new tail region: `allocate_region(next_region_index,
+//# allocation_head_after)` followed by `link(next_region_index, expected_sequence)`.
 #[test]
 fn requirement_append_recovery_record_room_rotates_when_tail_lacks_reserve() {
     const REGION_SIZE: usize = 512;
@@ -2886,15 +3348,22 @@ fn requirement_append_recovery_record_room_rotates_when_tail_lacks_reserve() {
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
     let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
     let mut plan = startup_plan_with_append_offset::<4>(metadata, 0, 0, 0);
-    let reserves =
-        recovery_rotation_reserves::<REGION_SIZE, 4, 8>(&mut workspace, &mut plan, 1, Some(2))
-            .unwrap();
+    let reserves = recovery_rotation_reserves::<REGION_SIZE, 4, 8>(
+        &mut workspace,
+        &mut plan,
+        2,
+        FreeQueuePosition {
+            region_index: 1,
+            entry_index: 1,
+        },
+    )
+    .unwrap();
     let record = crate::test_rollback_transaction_record(CollectionId(7));
     let record_len = encoded_len_for_record::<REGION_SIZE>(metadata, record);
     let wal_offset = metadata.wal_record_area_offset().unwrap();
     let rotation_offset = (wal_offset..REGION_SIZE)
         .find(|candidate| {
-            let Some(after_alloc) = candidate.checked_add(reserves.alloc_begin_len) else {
+            let Some(after_alloc) = candidate.checked_add(reserves.allocate_region_len) else {
                 return false;
             };
             let Some(after_record) = candidate.checked_add(record_len) else {
@@ -2920,7 +3389,7 @@ fn requirement_append_recovery_record_room_rotates_when_tail_lacks_reserve() {
     )
     .unwrap();
 
-    assert_eq!(plan.wal_tail, 1);
+    assert_eq!(plan.wal_tail, 2);
     assert_eq!(
         plan.wal_append_offset,
         metadata.wal_record_area_offset().unwrap()
@@ -2929,7 +3398,11 @@ fn requirement_append_recovery_record_room_rotates_when_tail_lacks_reserve() {
 
 //= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
-//# `RING-WAL-PAYLOAD-008` `wal_recovery`
+//# `RING-WAL-PAYLOAD-008` `erase_free_region_span` Publishes erase maintenance for the next
+//# `count` dirty entries starting at the current `ready_boundary`. The physical erases
+//# happen before this record is durable; the durable effect is to advance `ready_boundary`
+//# to `ready_boundary_after`. If power fails after erase but before this record is durable,
+//# replay treats those entries as still dirty and may erase them again.
 #[test]
 fn requirement_recovery_gap_bridge_writes_invalid_boundary_then_wal_recovery() {
     let mut flash = MockFlash::<128, 4, 128>::new(0xff);
@@ -3005,31 +3478,46 @@ fn requirement_first_invalid_wal_boundary_byte_avoids_erased_and_magic_values() 
     assert_ne!(first_invalid_wal_boundary_byte(0xff, 0xa5), 0xa5);
 }
 
-//= spec/ring/07-reclaim.md#free-region
+//= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
-//# `RING-FREE-REGION-001` Establish `region_index` as a free-tail
-//# candidate without erasing it.
+//# `RING-STARTUP-006` Initialize the free-space collection from the
+//# materialized `free_space_v2` metadata region chain named by the
+//# effective log prologue checkpoint.
 #[test]
-fn requirement_startup_free_pointer_footer_helpers_validate_written_and_decoded_state() {
-    let mut flash = MockFlash::<64, 4, 64>::new(0xff);
+fn requirement_startup_loads_free_space_collection_metadata() {
+    let mut flash = MockFlash::<128, 4, 64>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    let mut workspace = StorageWorkspace::<128>::new();
+
+    let free_space =
+        load_initial_free_space_from_flash::<128, _>(&mut flash, &mut workspace, metadata).unwrap();
 
     assert_eq!(
-        ensure_free_pointer_footer_unwritten_startup::<64, _>(&mut flash, metadata, 1),
-        Err(StartupError::FreeRegionFooterNotUnwritten { region_index: 1 })
+        free_space.allocation_head_position(),
+        FreeQueuePosition {
+            region_index: 1,
+            entry_index: 0,
+        }
     );
     assert_eq!(
-        read_free_pointer_successor_startup::<64, 4, _>(&mut flash, metadata, 1),
-        Ok(Some(2))
+        free_space.ready_boundary_position(),
+        FreeQueuePosition {
+            region_index: 1,
+            entry_index: 2,
+        }
     );
+    assert_eq!(
+        free_space.ready_boundary_position(),
+        free_space.append_tail_position()
+    );
+    assert_eq!(free_space.entries(), &[2, 3]);
 }
 
-//= spec/ring/04-wal-records.md#wal-record-types
+//= spec/ring/04-wal-records.md#ordering-and-validity
 //= type=test
-//# `RING-WAL-VALID-033` Transaction-log records after a frozen
-//# `range.end` are outside that transaction range. Torn records after
-//# `range.end` do not invalidate the committed range; torn or malformed
-//# records inside a committed range are corruption.
+//# `RING-WAL-VALID-033` `rollback_inline_transaction(record_count)` is valid only as the
+//# durable terminal marker for an uncommitted inline range that recovery has cleaned.
+//# Replay MUST NOT apply the inline body.
 #[test]
 fn requirement_empty_transaction_replay_interval_does_not_read_past_end_offset() {
     let mut flash = MockFlash::<128, 4, 64>::new(0xff);
@@ -3051,35 +3539,45 @@ fn requirement_empty_transaction_replay_interval_does_not_read_past_end_offset()
 
 //= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
-//# `RING-STARTUP-015` On `free_region(collection_id, region_index)`:
+//# `RING-STARTUP-015` Transaction-log records are not applied by ordinary log-chain
+//# traversal. Startup scans a transaction-log range only when a retained main-WAL
+//# `commit_transaction`, `rollback_transaction`, `transaction_finished`, or active recovery
+//# descriptor references that range. Records inside an imported committed range are applied
+//# at the main-WAL commit record's replay position. Records inside an uncommitted rollback
+//# range are scanned only for cleanup and recovery effects and do not become visible
+//# collection or allocator state.
 #[test]
 fn requirement_open_replay_allocator_record_applies_free_regions() {
     let mut flash = MockFlash::<128, 4, 64>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
     let wal_offset = metadata.wal_record_area_offset().unwrap();
     let mut plan = startup_plan_with_append_offset::<4>(metadata, 0, 0, wal_offset);
-    plan.last_free_list_head = None;
+    plan.free_space.replace_from_parts(1, 0, 0, 0, &[]).unwrap();
+    let append_tail_after = plan.free_space.position_after_append().unwrap();
 
     apply_open_replay_allocator_record(
         &mut plan,
         WalRecord::FreeRegion {
-            collection_id: CollectionId(7),
-            region_index: 1,
+            region_index: 2,
+            append_tail_after,
         },
     )
     .unwrap();
 
-    assert_eq!(plan.last_free_list_head, Some(1));
+    assert_eq!(plan.free_space.ready_count(), 0);
+    assert_eq!(plan.free_space.dirty_count(), 1);
+    assert_eq!(plan.free_space.entries(), &[2]);
 }
 
 //= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
-//# If
-//# `collection_id != 0`, do not set `ready_region`; the allocation belongs
-//# to the open transaction-log transaction until commit or rollback
-//# recovery classifies it.
+//# `RING-STARTUP-014` On
+//# `allocate_region(region_index, allocation_head_after)`: verify that
+//# the ready range is non-empty, the current `allocation_head` entry
+//# names `region_index`, and `allocation_head_after` is the next queue
+//# position.
 #[test]
-fn requirement_user_alloc_begin_does_not_conflict_with_reserved_wal_ready_region() {
+fn requirement_allocate_region_advances_the_free_space_head() {
     let mut collections = heapless::Vec::<StartupCollection, 8>::new();
     let metadata = StorageMetadata {
         storage_version: crate::STORAGE_VERSION,
@@ -3091,41 +3589,93 @@ fn requirement_user_alloc_begin_does_not_conflict_with_reserved_wal_ready_region
         erased_byte: 0xff,
         wal_record_magic: 0xa5,
     };
-    let mut last_free_list_head = Some(2);
-    let mut ready_region = Some(1);
+    let mut free_space = FreeSpaceState::new_ready_range(1, 2, metadata.region_count).unwrap();
+    let allocation_head_after = free_space.position_after_allocation().unwrap();
+    let mut ready_region = None;
 
     apply_wal_record(
         metadata,
-        WalRecord::AllocBegin {
-            collection_id: CollectionId(7),
+        WalRecord::AllocateRegion {
             region_index: 2,
-            allocation_sequence: 0,
-            free_list_head_after: Some(3),
+            allocation_head_after,
         },
         &mut collections,
-        &mut last_free_list_head,
+        &mut free_space,
         &mut ready_region,
     )
     .unwrap();
 
-    assert_eq!(last_free_list_head, Some(3));
-    assert_eq!(ready_region, Some(1));
+    assert_eq!(free_space.allocation_head(), 1);
+    assert_eq!(free_space.next_ready_region(), Ok(3));
+    assert_eq!(ready_region, None);
 }
 
-//= spec/ring/05-disk-format.md#free-pointer-footer
+//= spec/ring/05-disk-format.md#storage-requirements
 //= type=test
-//# `RING-FREE-006` While a region is allocated for live use, the bytes
-//# in its free-pointer footer are uninterpreted stale data.
+//# `RING-STORAGE-007` Allocator queue links and cursor state MUST NOT
+//# be stored in freed data regions; they MUST be stored in WAL records,
+//# private log prologues, or `free_space_v2` metadata regions.
 #[test]
-fn requirement_free_list_head_discovery_ignores_footers_in_non_free_regions() {
-    let mut flash = MockFlash::<64, 4, 128>::new(0xff);
+fn requirement_free_space_replay_ignores_stale_footer_bytes() {
+    let mut flash = MockFlash::<128, 4, 128>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    let mut workspace = StorageWorkspace::<128>::new();
     init_user_region_header(&mut flash, 2, 9, CollectionId(7), MAP_REGION_V2_FORMAT);
-    write_free_pointer_footer(&mut flash, 2, Some(1));
+    flash
+        .write_region(2, 120, &[1, 0, 0, 0, 0x1d, 0x2c, 0x3b, 0x4a])
+        .unwrap();
 
+    let free_space =
+        load_initial_free_space_from_flash::<128, _>(&mut flash, &mut workspace, metadata).unwrap();
+
+    assert_eq!(free_space.entries(), &[2, 3]);
+    assert_eq!(free_space.allocation_head(), 0);
+    assert_eq!(free_space.ready_boundary(), 2);
+    assert_eq!(free_space.append_tail(), 2);
+}
+
+//= spec/ring/06-startup-replay.md#startup-replay-algorithm
+//= type=test
+//# `RING-STARTUP-006` Initialize the free-space collection from the
+//# materialized `free_space_v2` metadata region chain named by.
+#[test]
+fn requirement_free_space_metadata_chain_reopens_with_real_cursor_positions() {
+    const REGION_SIZE: usize = 128;
+    const REGION_COUNT: usize = 64;
+    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 512>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    let entries_offset = Header::ENCODED_LEN + FreeSpaceRegionPrologue::ENCODED_LEN;
+    let entries_per_metadata_region = (REGION_SIZE - entries_offset) / FreeSpaceEntry::ENCODED_LEN;
+    let mut metadata_region_count = 1u32;
+    loop {
+        let free_space_entry_count = metadata.region_count - 1 - metadata_region_count;
+        if metadata_region_count * u32::try_from(entries_per_metadata_region).unwrap()
+            >= free_space_entry_count
+        {
+            break;
+        }
+        metadata_region_count += 1;
+    }
+    assert!(metadata_region_count > 1);
+    let free_space_entry_count = metadata.region_count - 1 - metadata_region_count;
+    let expected_tail = crate::free_queue_position_for_contiguous_metadata(
+        1,
+        metadata_region_count,
+        entries_per_metadata_region,
+        free_space_entry_count,
+    )
+    .unwrap();
+
+    let state = open_formatted_store::<REGION_SIZE, REGION_COUNT, _>(&mut flash).unwrap();
+
+    assert_eq!(state.allocation_head().region_index, 1);
+    assert_eq!(state.allocation_head().entry_index, 0);
+    assert_eq!(state.ready_boundary(), expected_tail);
+    assert_eq!(state.append_tail(), expected_tail);
+    assert_eq!(state.ready_free_region(), Some(1 + metadata_region_count));
     assert_eq!(
-        discover_free_list_head_from_footers(&mut flash, metadata).unwrap(),
-        Some(1)
+        state.free_space_tail_region(),
+        Some(REGION_COUNT as u32 - 1)
     );
 }
 

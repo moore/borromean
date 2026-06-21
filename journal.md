@@ -5,12 +5,11 @@ are ready to become normative specification text.
 
 ## 2026-06-20: Put the Programmer in Control
 
-A recent conversation about TinyFS highlighted an issue in Borromean: a write
-that needs a new region can force an erase cycle under the current design. Erase
-may be slow and a write can unexpectedly turn into an erase causing a unpredictable cost for write. I think this is
-part of a bigger issue where one operation may imply another operation. If we
-are out of buffers, a read could force a write of another collection to free the
-buffer.
+A recent conversation about TinyFS highlighted an issue in Borromean: a write that needs a new
+region can force an erase cycle under the current design. Erase may be slow and a write can
+unexpectedly turn into an erase causing a unpredictable cost for write. I think this is part of a
+bigger issue where one operation may imply another operation. If we are out of buffers, a read could
+force a write of another collection to free the buffer.
 
 The general rule should be that ordinary foreground operations do not hide
 unbounded maintenance work. They may report pressure or return a status that
@@ -541,7 +540,7 @@ The sketch:
    point where the new collection state becomes the committed state for recovery.
 5. After `commit_transaction`, append cleanup commands that free superseded regions. These free
    commands carry `collection_id` because freeing removes the region from that collection. Freeing a
-  region mutates durable allocator state by adding the region to the allocator queue, so cleanup is
+   region mutates durable allocator state by adding the region to the allocator queue, so cleanup is
    part of transaction recovery rather than passive bookkeeping.
 6. After all cleanup commands are complete, durably write `transaction_finished`.
 7. On storage open/recovery, replay can apply commands normally until it reaches

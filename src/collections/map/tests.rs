@@ -1585,9 +1585,10 @@ fn requirement_two_lsm_maps_reload_storage_owned_frontier_buffer() {
     );
 }
 
-//= spec/map.md#map-api-model
+//= spec/map.md#snapshot-frontier-and-logical-map-requirements
 //= type=test
-//# `set` and `delete` update the logical map and persist the mutation.
+//# `RING-IMPL-REGRESSION-033` Map read/write operations MUST return
+//# the latest inserted values for generated.
 #[test]
 fn requirement_lsm_map_writes_remain_durable_without_frontier_flush() {
     let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
@@ -1628,8 +1629,8 @@ fn requirement_lsm_map_writes_remain_durable_without_frontier_flush() {
 //# changing the logical map.
 #[test]
 fn requirement_object_lsm_map_compaction_signal_and_compact_preserve_visible_state() {
-    let mut flash = MockFlash::<512, 12, 4096>::new(0xff);
-    let mut storage = Storage::<_, 512, 12>::format(
+    let mut flash = MockFlash::<512, 16, 4096>::new(0xff);
+    let mut storage = Storage::<_, 512, 16>::format(
         &mut flash,
         StorageFormatConfig::new(2, 8, 0xa5),
         crate::test_storage_memory(),
@@ -1691,10 +1692,10 @@ fn requirement_object_lsm_map_compaction_signal_and_compact_preserve_visible_sta
 }
 
 #[cfg(feature = "perf-counters")]
-//= spec/map.md#map-api-model
+//= spec/map.md#map-compaction-requirements
 //= type=test
-//# `compact` performs whole-run compaction for that map using caller-owned
-//# scratch buffers.
+//# `RING-IMPL-REGRESSION-110` Run-target then greedy map compaction MUST reduce selected
+//# runs while preserving unselected runs and.
 #[test]
 fn requirement_object_lsm_map_compaction_reuses_cached_frontier() {
     let mut flash = MockFlash::<512, 12, 4096>::new(0xff);
@@ -2582,8 +2583,8 @@ fn requirement_run_segment_payload_round_trip_preserves_header_bounds_and_snapsh
 //# and snapshot helpers MUST decode exact empty-snapshot payloads.
 #[test]
 fn requirement_committed_region_and_legacy_snapshot_helpers_accept_exact_boundaries() {
-    const REGION_SIZE: usize = Header::ENCODED_LEN + FreePointerFooter::ENCODED_LEN;
-    let metadata = StorageMetadata::new(REGION_SIZE as u32, 2, 0, 8, 0xff, 0xa5).unwrap();
+    const REGION_SIZE: usize = Header::ENCODED_LEN;
+    let metadata = StorageMetadata::new(REGION_SIZE as u32, 2, 0, 1, 0xff, 0xa5).unwrap();
     let mut flash = MockFlash::<REGION_SIZE, 2, 16>::new(0xff);
     init_user_region_header(&mut flash, 0, 1, CollectionId(95), MAP_REGION_V2_FORMAT);
 
@@ -2593,15 +2594,8 @@ fn requirement_committed_region_and_legacy_snapshot_helpers_accept_exact_boundar
     assert_eq!(payload, &[] as &[u8]);
 
     const FULL_PAYLOAD_REGION_SIZE: usize = 64;
-    let full_payload_metadata = StorageMetadata::new(
-        (FULL_PAYLOAD_REGION_SIZE + FreePointerFooter::ENCODED_LEN) as u32,
-        2,
-        0,
-        8,
-        0xff,
-        0xa5,
-    )
-    .unwrap();
+    let full_payload_metadata =
+        StorageMetadata::new(FULL_PAYLOAD_REGION_SIZE as u32, 2, 0, 8, 0xff, 0xa5).unwrap();
     let mut flash = MockFlash::<FULL_PAYLOAD_REGION_SIZE, 2, 16>::new(0xff);
     init_user_region_header(&mut flash, 0, 1, CollectionId(96), MAP_REGION_V2_FORMAT);
     let mut region = [0u8; FULL_PAYLOAD_REGION_SIZE];
@@ -3163,9 +3157,9 @@ fn requirement_frontier_run_planning_counts_all_committed_payload_segments() {
 //# `RING-IMPL-REGRESSION-025` Reclaiming map run regions MUST move all tracked run-chain regions to
 //# the storage free-list tail.
 #[test]
-fn requirement_reclaim_run_regions_moves_run_segments_to_free_list_tail() {
+fn requirement_reclaim_run_regions_moves_run_segments_to_free_space_tail_region() {
     const REGION_SIZE: usize = 256;
-    const REGION_COUNT: usize = 8;
+    const REGION_COUNT: usize = 9;
 
     let collection_id = CollectionId(106);
     let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 4096>::new(0xff);
@@ -3204,7 +3198,7 @@ fn requirement_reclaim_run_regions_moves_run_segments_to_free_list_tail() {
         .unwrap();
     assert_eq!(run.region_count, 1);
     let first_region = run.first_region;
-    let previous_tail = storage.free_list_tail();
+    let previous_tail = storage.free_space_tail_region();
     map.runs.push(run).unwrap();
 
     storage
@@ -3228,8 +3222,8 @@ fn requirement_reclaim_run_regions_moves_run_segments_to_free_list_tail() {
             Ok::<(), MapStorageError>(())
         })
         .unwrap();
-    assert_ne!(storage.free_list_tail(), previous_tail);
-    assert_eq!(storage.free_list_tail(), Some(first_region));
+    assert_ne!(storage.free_space_tail_region(), previous_tail);
+    assert_eq!(storage.free_space_tail_region(), Some(first_region));
 }
 
 //= spec/map.md#run-manifest-and-committed-map-region-requirements
@@ -3289,7 +3283,7 @@ fn requirement_commit_manifest_reclaims_previous_manifest_and_retains_only_run_c
         })
         .unwrap();
     assert_ne!(second_manifest, first_manifest);
-    assert_eq!(storage.free_list_tail(), Some(first_manifest));
+    assert_eq!(storage.free_space_tail_region(), Some(first_manifest));
     assert!(map
         .runs
         .iter()
@@ -3603,8 +3597,7 @@ fn write_lookup_run_chain_fixture<
 
 fn assert_run_chain_lookup_handles_exact_payload_boundaries() {
     {
-        const REGION_SIZE: usize =
-            Header::ENCODED_LEN + RUN_SEGMENT_FIXED_SIZE + FreePointerFooter::ENCODED_LEN;
+        const REGION_SIZE: usize = Header::ENCODED_LEN + RUN_SEGMENT_FIXED_SIZE;
         let collection_id = CollectionId(109);
         let mut flash = MockFlash::<REGION_SIZE, 1, 64>::new(0xff);
         let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
@@ -3646,8 +3639,7 @@ fn assert_run_chain_lookup_handles_exact_payload_boundaries() {
         const ENTRY_LEN: usize = ENTRY_HEADER_SIZE + size_of::<i32>() + VALUE_LEN;
         const SNAPSHOT_LEN: usize = SNAPSHOT_HEADER_SIZE + ENTRY_LEN + ENTRY_REF_SIZE;
         const RUN_PAYLOAD_LEN: usize = RUN_SEGMENT_FIXED_SIZE + 2 * size_of::<i32>() + SNAPSHOT_LEN;
-        const REGION_SIZE: usize =
-            Header::ENCODED_LEN + RUN_PAYLOAD_LEN + FreePointerFooter::ENCODED_LEN;
+        const REGION_SIZE: usize = Header::ENCODED_LEN + RUN_PAYLOAD_LEN;
 
         let collection_id = CollectionId(110);
         let mut flash = MockFlash::<REGION_SIZE, 1, 128>::new(0xff);
@@ -4053,7 +4045,7 @@ fn requirement_empty_map_open_matches_new_map_state() {
 
 fn assert_empty_map_open_matches_new_map_state() {
     const REGION_SIZE: usize = 512;
-    const REGION_COUNT: usize = 4;
+    const REGION_COUNT: usize = 5;
     let id = CollectionId(70);
 
     let mut empty_buffer = [0u8; REGION_SIZE];
@@ -4500,7 +4492,7 @@ fn requirement_region_loading_matches_embedded_snapshot_loading() {
 #[test]
 fn requirement_map_updates_append_new_head_records_and_replacement_reclaims_the_old_tail_region() {
     const REGION_SIZE: usize = 512;
-    const REGION_COUNT: usize = 7;
+    const REGION_COUNT: usize = 8;
 
     let mut buffer = [0u8; REGION_SIZE];
     let mut map = MapFrontier::<i32, i32>::new(
@@ -4562,7 +4554,7 @@ fn requirement_map_updates_append_new_head_records_and_replacement_reclaims_the_
         storage.runtime().collections()[0].basis(),
         crate::StartupCollectionBasis::Region(second_region)
     );
-    assert_eq!(storage.free_list_tail(), Some(first_region));
+    assert_eq!(storage.free_space_tail_region(), Some(first_region));
 }
 
 //= spec/map.md#validation-and-open-rules
@@ -4745,9 +4737,9 @@ fn requirement_load_snapshot_rejects_overlapping_entry_refs() {
 
 //= spec/ring/01-theory.md#core-requirements
 //= type=test
-//# `RING-CORE-015` Each storage-managed resident mutable collection
-//# frontier MUST have usable byte capacity exactly equal to the
-//# committed-region payload capacity of one configured durable region.
+//# `RING-CORE-015` If space-recovery operations cannot restore enough ready entries, the
+//# database MUST treat ordinary writes as out of space until space is freed, dirty entries
+//# are erased, or the store is migrated.
 #[test]
 fn requirement_mutable_map_frontier_capacity_is_bounded_by_its_configured_buffer() {
     let min_capacity_for_three_updates = (ENTRY_COUNT_SIZE..256)
@@ -5167,7 +5159,7 @@ fn requirement_storage_region_flush_restores_map_basis() {
 
 fn assert_storage_region_flush_restores_map_basis() {
     const REGION_SIZE: usize = 512;
-    const REGION_COUNT: usize = 4;
+    const REGION_COUNT: usize = 5;
 
     let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 1024>::new(0xff);
     let mut workspace = StorageWorkspace::<REGION_SIZE>::new();

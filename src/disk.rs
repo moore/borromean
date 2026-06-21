@@ -11,6 +11,8 @@ pub const STORAGE_VERSION: u32 = 2;
 pub const MAIN_WAL_V2_FORMAT: u16 = 0;
 /// Stable `collection_format` reserved for transaction-log regions.
 pub const TRANSACTION_LOG_V2_FORMAT: u16 = 1;
+/// Stable `collection_format` reserved for free-space metadata regions.
+pub const FREE_SPACE_V2_FORMAT: u16 = 2;
 /// Backwards-compatible name for the current main-WAL format.
 pub const WAL_V1_FORMAT: u16 = MAIN_WAL_V2_FORMAT;
 
@@ -230,8 +232,7 @@ pub(crate) fn encode_log_region_prefix(
     sequence: u64,
     collection_format: u16,
     log_head: u32,
-    allocator_free_list_head: Option<u32>,
-    allocation_sequence: u64,
+    cursors: FreeSpaceCursors,
 ) -> Result<usize, DiskError> {
     let prefix_len = metadata.wal_record_area_offset()?;
     ensure_len(buffer, prefix_len)?;
@@ -246,8 +247,9 @@ pub(crate) fn encode_log_region_prefix(
 
     let prologue = LogRegionPrologue {
         log_head_region_index: log_head,
-        allocator_free_list_head,
-        allocation_sequence,
+        allocation_head: cursors.allocation_head,
+        ready_boundary: cursors.ready_boundary,
+        append_tail: cursors.append_tail,
     };
     prologue.encode_into(
         &mut buffer[Header::ENCODED_LEN..Header::ENCODED_LEN + LogRegionPrologue::ENCODED_LEN],
@@ -268,9 +270,212 @@ pub fn encode_wal_region_prefix(
         sequence,
         MAIN_WAL_V2_FORMAT,
         wal_head,
-        None,
-        0,
+        FreeSpaceCursors::ZERO,
     )
+}
+
+pub fn encode_wal_region_prefix_with_cursors(
+    buffer: &mut [u8],
+    metadata: StorageMetadata,
+    sequence: u64,
+    wal_head: u32,
+    allocation_head: FreeQueuePosition,
+    ready_boundary: FreeQueuePosition,
+    append_tail: FreeQueuePosition,
+) -> Result<usize, DiskError> {
+    encode_log_region_prefix(
+        buffer,
+        metadata,
+        sequence,
+        MAIN_WAL_V2_FORMAT,
+        wal_head,
+        FreeSpaceCursors::new(allocation_head, ready_boundary, append_tail),
+    )
+}
+
+pub fn encode_transaction_log_region_prefix_with_cursors(
+    buffer: &mut [u8],
+    metadata: StorageMetadata,
+    sequence: u64,
+    transaction_log_head: u32,
+    allocation_head: FreeQueuePosition,
+    ready_boundary: FreeQueuePosition,
+    append_tail: FreeQueuePosition,
+) -> Result<usize, DiskError> {
+    encode_log_region_prefix(
+        buffer,
+        metadata,
+        sequence,
+        TRANSACTION_LOG_V2_FORMAT,
+        transaction_log_head,
+        FreeSpaceCursors::new(allocation_head, ready_boundary, append_tail),
+    )
+}
+
+pub fn free_queue_position_for_contiguous_metadata(
+    first_metadata_region: u32,
+    metadata_region_count: u32,
+    entries_per_region: usize,
+    queue_index: u32,
+) -> Result<FreeQueuePosition, DiskError> {
+    if metadata_region_count == 0 || entries_per_region == 0 {
+        return Err(DiskError::BufferTooSmall {
+            needed: 1,
+            available: 0,
+        });
+    }
+    let entries_per_region =
+        u32::try_from(entries_per_region).map_err(|_| DiskError::BufferTooSmall {
+            needed: entries_per_region,
+            available: u32::MAX as usize,
+        })?;
+    let segment = (queue_index / entries_per_region).min(metadata_region_count - 1);
+    let region_index =
+        first_metadata_region
+            .checked_add(segment)
+            .ok_or(DiskError::InvalidRegionIndex {
+                region_index: u32::MAX,
+                region_count: u32::MAX,
+            })?;
+    let base = segment
+        .checked_mul(entries_per_region)
+        .ok_or(DiskError::BufferTooSmall {
+            needed: usize::MAX,
+            available: entries_per_region as usize,
+        })?;
+    Ok(FreeQueuePosition {
+        region_index,
+        entry_index: queue_index - base,
+    })
+}
+
+/// Encodes a single free-space metadata region with the supplied entries.
+pub fn encode_free_space_region(
+    buffer: &mut [u8],
+    metadata: StorageMetadata,
+    sequence: u64,
+    region_index: u32,
+    entries: &[u32],
+) -> Result<usize, DiskError> {
+    let entry_count = u32::try_from(entries.len()).map_err(|_| DiskError::BufferTooSmall {
+        needed: entries.len(),
+        available: u32::MAX as usize,
+    })?;
+    let tail = FreeQueuePosition {
+        region_index,
+        entry_index: entry_count,
+    };
+    encode_free_space_region_with_cursors(
+        buffer,
+        metadata,
+        sequence,
+        region_index,
+        FreeSpaceCursors::new(
+            FreeQueuePosition {
+                region_index,
+                entry_index: 0,
+            },
+            tail,
+            tail,
+        ),
+        entries,
+    )
+}
+
+/// Encodes a single free-space metadata region with explicit cursor state.
+pub fn encode_free_space_region_with_cursors(
+    buffer: &mut [u8],
+    metadata: StorageMetadata,
+    sequence: u64,
+    region_index: u32,
+    cursors: FreeSpaceCursors,
+    entries: &[u32],
+) -> Result<usize, DiskError> {
+    encode_free_space_region_segment(
+        buffer,
+        metadata,
+        sequence,
+        region_index,
+        cursors,
+        None,
+        entries,
+    )
+}
+
+/// Encodes one region segment of the free-space metadata collection.
+pub fn encode_free_space_region_segment(
+    buffer: &mut [u8],
+    metadata: StorageMetadata,
+    sequence: u64,
+    region_index: u32,
+    cursors: FreeSpaceCursors,
+    next_metadata_region: Option<u32>,
+    entries: &[u32],
+) -> Result<usize, DiskError> {
+    ensure_len(
+        buffer,
+        Header::ENCODED_LEN + FreeSpaceRegionPrologue::ENCODED_LEN,
+    )?;
+    if region_index >= metadata.region_count {
+        return Err(DiskError::InvalidRegionIndex {
+            region_index,
+            region_count: metadata.region_count,
+        });
+    }
+    buffer.fill(metadata.erased_byte);
+
+    let entry_count = u32::try_from(entries.len()).map_err(|_| DiskError::BufferTooSmall {
+        needed: entries.len(),
+        available: u32::MAX as usize,
+    })?;
+    let entries_len = entries
+        .len()
+        .checked_mul(FreeSpaceEntry::ENCODED_LEN)
+        .ok_or(DiskError::BufferTooSmall {
+            needed: usize::MAX,
+            available: buffer.len(),
+        })?;
+    let entries_offset = Header::ENCODED_LEN + FreeSpaceRegionPrologue::ENCODED_LEN;
+    ensure_len(buffer, entries_offset + entries_len)?;
+
+    let header = Header {
+        sequence,
+        collection_id: CollectionId(0),
+        collection_format: FREE_SPACE_V2_FORMAT,
+    };
+    header.encode_into(buffer)?;
+
+    let mut offset = entries_offset;
+    for entry in entries.iter().copied() {
+        let encoded = FreeSpaceEntry {
+            region_index: entry,
+        };
+        encoded.encode_into(
+            &mut buffer[offset..offset + FreeSpaceEntry::ENCODED_LEN],
+            metadata.region_count,
+        )?;
+        offset += FreeSpaceEntry::ENCODED_LEN;
+    }
+    let entries_checksum = crc32(&buffer[entries_offset..offset]);
+    let prologue = FreeSpaceRegionPrologue {
+        allocation_head: cursors.allocation_head,
+        ready_boundary: cursors.ready_boundary,
+        append_tail: cursors.append_tail,
+        next_metadata_region,
+        entry_count,
+        entries_checksum,
+    };
+    prologue.encode_into(
+        &mut buffer
+            [Header::ENCODED_LEN..Header::ENCODED_LEN + FreeSpaceRegionPrologue::ENCODED_LEN],
+        metadata.region_count,
+    )?;
+    Ok(offset)
+}
+
+/// Computes the checksum used for initialized free-space entries.
+pub fn free_space_entries_checksum(entries: &[u8]) -> u32 {
+    crc32(entries)
 }
 
 /// Per-region header shared by WAL and committed collection regions.
@@ -331,16 +536,18 @@ impl Header {
 pub struct LogRegionPrologue {
     /// Region index that replay should treat as the logical log head.
     pub log_head_region_index: u32,
-    /// Allocator free-list head current when this log segment was initialized.
-    pub allocator_free_list_head: Option<u32>,
-    /// Global allocation sequence current when this log segment was initialized.
-    pub allocation_sequence: u64,
+    /// Free-space allocation cursor current when this log segment was initialized.
+    pub allocation_head: FreeQueuePosition,
+    /// Free-space ready/dirty boundary current when this log segment was initialized.
+    pub ready_boundary: FreeQueuePosition,
+    /// Free-space append cursor current when this log segment was initialized.
+    pub append_tail: FreeQueuePosition,
 }
 
 impl LogRegionPrologue {
     /// Encoded byte length of [`LogRegionPrologue`].
     pub const ENCODED_LEN: usize =
-        size_of::<u32>() + size_of::<u8>() + size_of::<u32>() + size_of::<u64>() + size_of::<u32>();
+        size_of::<u32>() + FreeQueuePosition::ENCODED_LEN * 3 + size_of::<u32>();
 
     /// Encodes the log prologue and validates its region references.
     pub fn encode_into(&self, buffer: &mut [u8], region_count: u32) -> Result<usize, DiskError> {
@@ -350,21 +557,17 @@ impl LogRegionPrologue {
                 region_count,
             });
         }
-        if let Some(free_list_head) = self.allocator_free_list_head {
-            if free_list_head >= region_count {
-                return Err(DiskError::InvalidRegionIndex {
-                    region_index: free_list_head,
-                    region_count,
-                });
-            }
-        }
+        self.allocation_head.validate(region_count)?;
+        self.ready_boundary.validate(region_count)?;
+        self.append_tail.validate(region_count)?;
 
         ensure_len(buffer, Self::ENCODED_LEN)?;
 
         let mut offset = 0;
         offset = write_u32(buffer, offset, self.log_head_region_index)?;
-        offset = write_opt_region_index(buffer, offset, self.allocator_free_list_head)?;
-        offset = write_u64(buffer, offset, self.allocation_sequence)?;
+        offset = self.allocation_head.encode_into_at(buffer, offset)?;
+        offset = self.ready_boundary.encode_into_at(buffer, offset)?;
+        offset = self.append_tail.encode_into_at(buffer, offset)?;
         let checksum = crc32(&buffer[..offset]);
         let offset = write_u32(buffer, offset, checksum)?;
         Ok(offset)
@@ -376,8 +579,9 @@ impl LogRegionPrologue {
 
         let mut offset = 0;
         let log_head_region_index = read_u32(buffer, &mut offset)?;
-        let allocator_free_list_head = read_opt_region_index(buffer, &mut offset)?;
-        let allocation_sequence = read_u64(buffer, &mut offset)?;
+        let allocation_head = FreeQueuePosition::decode_from(buffer, &mut offset)?;
+        let ready_boundary = FreeQueuePosition::decode_from(buffer, &mut offset)?;
+        let append_tail = FreeQueuePosition::decode_from(buffer, &mut offset)?;
         let checksum = read_u32(buffer, &mut offset)?;
 
         let expected = crc32(&buffer[..offset - size_of::<u32>()]);
@@ -391,19 +595,15 @@ impl LogRegionPrologue {
                 region_count,
             });
         }
-        if let Some(free_list_head) = allocator_free_list_head {
-            if free_list_head >= region_count {
-                return Err(DiskError::InvalidRegionIndex {
-                    region_index: free_list_head,
-                    region_count,
-                });
-            }
-        }
+        allocation_head.validate(region_count)?;
+        ready_boundary.validate(region_count)?;
+        append_tail.validate(region_count)?;
 
         Ok(Self {
             log_head_region_index,
-            allocator_free_list_head,
-            allocation_sequence,
+            allocation_head,
+            ready_boundary,
+            append_tail,
         })
     }
 }
@@ -411,76 +611,213 @@ impl LogRegionPrologue {
 /// Backwards-compatible alias for code that still names the current log prologue as WAL-only.
 pub type WalRegionPrologue = LogRegionPrologue;
 
-/// Footer stored in free-list regions to chain unused regions together.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FreePointerFooter {
-    /// Successor free-list region, or `None` for the current tail.
-    pub next_tail: Option<u32>,
+/// Position inside the materialized free-space FIFO.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct FreeQueuePosition {
+    /// Free-space metadata region containing the entry slot.
+    pub region_index: u32,
+    /// Zero-based entry slot within that free-space metadata region.
+    pub entry_index: u32,
 }
 
-impl FreePointerFooter {
-    /// Encoded byte length of [`FreePointerFooter`].
+impl FreeQueuePosition {
+    /// Encoded byte length of [`FreeQueuePosition`].
     pub const ENCODED_LEN: usize = size_of::<u32>() * 2;
+    /// Zero position used before free-space metadata has been loaded.
+    pub const ZERO: Self = Self {
+        region_index: 0,
+        entry_index: 0,
+    };
 
-    /// Encodes the free-list footer into `buffer`.
-    pub fn encode_into(&self, buffer: &mut [u8], erased_byte: u8) -> Result<usize, DiskError> {
-        ensure_len(buffer, Self::ENCODED_LEN)?;
-
-        match self.next_tail {
-            Some(next_tail) => {
-                let mut offset = 0;
-                offset = write_u32(buffer, offset, next_tail)?;
-                let checksum = crc32(&buffer[..offset]);
-                let offset = write_u32(buffer, offset, checksum)?;
-                Ok(offset)
-            }
-            None => {
-                buffer[..Self::ENCODED_LEN].fill(erased_byte);
-                Ok(Self::ENCODED_LEN)
-            }
-        }
+    /// Encodes this position into `buffer`.
+    pub fn encode_into(&self, buffer: &mut [u8]) -> Result<usize, DiskError> {
+        self.encode_into_at(buffer, 0)
     }
 
-    /// Decodes a free-list footer from the supplied bytes.
-    pub fn decode(buffer: &[u8], erased_byte: u8) -> Result<Self, DiskError> {
-        ensure_len(buffer, Self::ENCODED_LEN)?;
-        if buffer[..Self::ENCODED_LEN]
-            .iter()
-            .all(|byte| *byte == erased_byte)
-        {
-            return Ok(Self { next_tail: None });
+    fn encode_into_at(&self, buffer: &mut [u8], mut offset: usize) -> Result<usize, DiskError> {
+        offset = write_u32(buffer, offset, self.region_index)?;
+        offset = write_u32(buffer, offset, self.entry_index)?;
+        Ok(offset)
+    }
+
+    /// Decodes a position from `buffer`.
+    pub fn decode(buffer: &[u8]) -> Result<Self, DiskError> {
+        let mut offset = 0;
+        Self::decode_from(buffer, &mut offset)
+    }
+
+    fn decode_from(buffer: &[u8], offset: &mut usize) -> Result<Self, DiskError> {
+        Ok(Self {
+            region_index: read_u32(buffer, offset)?,
+            entry_index: read_u32(buffer, offset)?,
+        })
+    }
+
+    fn validate(self, region_count: u32) -> Result<(), DiskError> {
+        if self.region_index >= region_count {
+            return Err(DiskError::InvalidRegionIndex {
+                region_index: self.region_index,
+                region_count,
+            });
         }
+        Ok(())
+    }
+}
+
+/// Cursor checkpoint for the materialized free-space FIFO.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FreeSpaceCursors {
+    /// Current allocation head.
+    pub allocation_head: FreeQueuePosition,
+    /// Current ready/dirty boundary.
+    pub ready_boundary: FreeQueuePosition,
+    /// Current append tail.
+    pub append_tail: FreeQueuePosition,
+}
+
+impl FreeSpaceCursors {
+    /// Zero cursor set used before free-space metadata has been loaded.
+    pub const ZERO: Self = Self {
+        allocation_head: FreeQueuePosition::ZERO,
+        ready_boundary: FreeQueuePosition::ZERO,
+        append_tail: FreeQueuePosition::ZERO,
+    };
+
+    /// Builds a cursor set from explicit positions.
+    pub const fn new(
+        allocation_head: FreeQueuePosition,
+        ready_boundary: FreeQueuePosition,
+        append_tail: FreeQueuePosition,
+    ) -> Self {
+        Self {
+            allocation_head,
+            ready_boundary,
+            append_tail,
+        }
+    }
+}
+
+/// Prologue stored in each `free_space_v2` metadata region.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FreeSpaceRegionPrologue {
+    /// Current allocation head checkpoint.
+    pub allocation_head: FreeQueuePosition,
+    /// Current ready/dirty boundary checkpoint.
+    pub ready_boundary: FreeQueuePosition,
+    /// Current append tail checkpoint.
+    pub append_tail: FreeQueuePosition,
+    /// Next free-space metadata region in FIFO order.
+    pub next_metadata_region: Option<u32>,
+    /// Number of initialized entries in this metadata region.
+    pub entry_count: u32,
+    /// CRC-32C of initialized entry bytes.
+    pub entries_checksum: u32,
+}
+
+impl FreeSpaceRegionPrologue {
+    /// Encoded byte length of [`FreeSpaceRegionPrologue`].
+    pub const ENCODED_LEN: usize =
+        FreeQueuePosition::ENCODED_LEN * 3 + size_of::<u8>() + size_of::<u32>() * 4;
+
+    /// Encodes this prologue into `buffer`.
+    pub fn encode_into(&self, buffer: &mut [u8], region_count: u32) -> Result<usize, DiskError> {
+        self.allocation_head.validate(region_count)?;
+        self.ready_boundary.validate(region_count)?;
+        self.append_tail.validate(region_count)?;
+        if let Some(next) = self.next_metadata_region {
+            if next >= region_count {
+                return Err(DiskError::InvalidRegionIndex {
+                    region_index: next,
+                    region_count,
+                });
+            }
+        }
+        ensure_len(buffer, Self::ENCODED_LEN)?;
 
         let mut offset = 0;
-        let next_tail = read_u32(buffer, &mut offset)?;
+        offset = self.allocation_head.encode_into_at(buffer, offset)?;
+        offset = self.ready_boundary.encode_into_at(buffer, offset)?;
+        offset = self.append_tail.encode_into_at(buffer, offset)?;
+        offset = write_opt_region_index(buffer, offset, self.next_metadata_region)?;
+        offset = write_u32(buffer, offset, self.entry_count)?;
+        offset = write_u32(buffer, offset, self.entries_checksum)?;
+        let checksum = crc32(&buffer[..offset]);
+        let offset = write_u32(buffer, offset, checksum)?;
+        Ok(offset)
+    }
+
+    /// Decodes this prologue from `buffer`.
+    pub fn decode(buffer: &[u8], region_count: u32) -> Result<Self, DiskError> {
+        ensure_len(buffer, Self::ENCODED_LEN)?;
+        let mut offset = 0;
+        let allocation_head = FreeQueuePosition::decode_from(buffer, &mut offset)?;
+        let ready_boundary = FreeQueuePosition::decode_from(buffer, &mut offset)?;
+        let append_tail = FreeQueuePosition::decode_from(buffer, &mut offset)?;
+        let next_metadata_region = read_opt_region_index(buffer, &mut offset)?;
+        let entry_count = read_u32(buffer, &mut offset)?;
+        let entries_checksum = read_u32(buffer, &mut offset)?;
         let checksum = read_u32(buffer, &mut offset)?;
+
         let expected = crc32(&buffer[..offset - size_of::<u32>()]);
         if checksum != expected {
             return Err(DiskError::InvalidChecksum);
         }
-
-        Ok(Self {
-            next_tail: Some(next_tail),
-        })
-    }
-
-    /// Decodes a free-list footer and validates the referenced region index.
-    pub fn decode_with_region_count(
-        buffer: &[u8],
-        erased_byte: u8,
-        region_count: u32,
-    ) -> Result<Self, DiskError> {
-        let footer = Self::decode(buffer, erased_byte)?;
-        if let Some(next_tail) = footer.next_tail {
-            if next_tail >= region_count {
+        allocation_head.validate(region_count)?;
+        ready_boundary.validate(region_count)?;
+        append_tail.validate(region_count)?;
+        if let Some(next) = next_metadata_region {
+            if next >= region_count {
                 return Err(DiskError::InvalidRegionIndex {
-                    region_index: next_tail,
+                    region_index: next,
                     region_count,
                 });
             }
         }
 
-        Ok(footer)
+        Ok(Self {
+            allocation_head,
+            ready_boundary,
+            append_tail,
+            next_metadata_region,
+            entry_count,
+            entries_checksum,
+        })
+    }
+}
+
+/// One materialized free-space FIFO entry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FreeSpaceEntry {
+    /// Physical free region named by this FIFO entry.
+    pub region_index: u32,
+}
+
+impl FreeSpaceEntry {
+    /// Encoded byte length of [`FreeSpaceEntry`].
+    pub const ENCODED_LEN: usize = size_of::<u32>();
+
+    /// Encodes this entry into `buffer`.
+    pub fn encode_into(&self, buffer: &mut [u8], region_count: u32) -> Result<usize, DiskError> {
+        if self.region_index >= region_count {
+            return Err(DiskError::InvalidRegionIndex {
+                region_index: self.region_index,
+                region_count,
+            });
+        }
+        write_u32(buffer, 0, self.region_index)
+    }
+
+    /// Decodes this entry from `buffer`.
+    pub fn decode(buffer: &[u8], region_count: u32) -> Result<Self, DiskError> {
+        let mut offset = 0;
+        let region_index = read_u32(buffer, &mut offset)?;
+        if region_index >= region_count {
+            return Err(DiskError::InvalidRegionIndex {
+                region_index,
+                region_count,
+            });
+        }
+        Ok(Self { region_index })
     }
 }
 

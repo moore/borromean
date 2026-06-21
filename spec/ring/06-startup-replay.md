@@ -230,12 +230,12 @@ effect was already consumed while determining the WAL-head candidate
 from the tail region. If `collection_type != wal`, return an error;
 otherwise ignore this record during the main per-record replay pass.
 
-   For user collections, create replay state if older records may have
-   been reclaimed, validate type consistency, reject dropped
-   collections, validate that the target region header names the same
-   collection id, set collection state to `RegionClean`, set
-   `basis_pos`, and clear older WAL updates/snapshots for that
-   collection.
+    For user collections, create replay state if older records may have
+    been reclaimed, validate type consistency, reject dropped
+    collections, validate that the target region header names the same
+    collection id, set collection state to `RegionClean`, set
+    `basis_pos`, and clear older WAL updates/snapshots for that
+    collection.
 20. `RING-STARTUP-020` On
 `link(next_region_index, expected_sequence)`: preserve private-log
 reachability. If `next_region_index` matches the current storage-core

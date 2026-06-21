@@ -7,7 +7,11 @@ use std::os::fd::AsRawFd;
 use std::path::Path;
 use std::time::Instant;
 
-use crate::disk::{encode_wal_region_prefix, DiskError, FreePointerFooter, StorageMetadata};
+use crate::disk::{
+    encode_free_space_region_segment, encode_log_region_prefix,
+    free_queue_position_for_contiguous_metadata, DiskError, FreeSpaceCursors, FreeSpaceEntry,
+    FreeSpaceRegionPrologue, Header, StorageMetadata, MAIN_WAL_V2_FORMAT,
+};
 use crate::flash_io::{FlashIo, StorageFormatError, StorageIoError};
 
 /// Linux allocation behavior used when creating a [`FileBacking`].
@@ -287,6 +291,13 @@ pub enum FileBackingFormatError {
         region_count: u32,
         /// Requested minimum number of free regions.
         min_free_regions: u32,
+    },
+    /// `REGION_SIZE` is too small for required metadata or private region prologues.
+    RegionSizeTooSmall {
+        /// Configured region size in bytes.
+        region_size: u32,
+        /// Minimum required region size in bytes.
+        min_region_size: u32,
     },
     /// `REGION_COUNT` does not fit in a `u32`.
     RegionCountTooLarge,
@@ -625,13 +636,6 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize> FileBacking<REGION_SIZ
         let region_count =
             u32::try_from(REGION_COUNT).map_err(|_| FileBackingFormatError::RegionCountTooLarge)?;
 
-        if region_count < 2 + min_free_regions {
-            return Err(FileBackingFormatError::InsufficientRegions {
-                region_count,
-                min_free_regions,
-            });
-        }
-
         let metadata = StorageMetadata::new(
             region_size,
             region_count,
@@ -640,6 +644,60 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize> FileBacking<REGION_SIZ
             self.options.erased_byte,
             wal_record_magic,
         )?;
+        let free_space_entries_offset = Header::ENCODED_LEN + FreeSpaceRegionPrologue::ENCODED_LEN;
+        let entries_per_metadata_region = REGION_SIZE
+            .checked_sub(free_space_entries_offset)
+            .ok_or(FileBackingFormatError::RegionSizeTooSmall {
+                region_size,
+                min_region_size: u32::try_from(free_space_entries_offset).unwrap_or(u32::MAX),
+            })?
+            / FreeSpaceEntry::ENCODED_LEN;
+        if entries_per_metadata_region == 0 {
+            return Err(FileBackingFormatError::RegionSizeTooSmall {
+                region_size,
+                min_region_size: u32::try_from(
+                    free_space_entries_offset + FreeSpaceEntry::ENCODED_LEN,
+                )
+                .unwrap_or(u32::MAX),
+            });
+        }
+        let mut metadata_region_count = 1u32;
+        loop {
+            if region_count <= 1 + metadata_region_count {
+                return Err(FileBackingFormatError::InsufficientRegions {
+                    region_count,
+                    min_free_regions,
+                });
+            }
+            let free_space_entry_count = region_count - 1 - metadata_region_count;
+            if free_space_entry_count < min_free_regions {
+                return Err(FileBackingFormatError::InsufficientRegions {
+                    region_count,
+                    min_free_regions,
+                });
+            }
+            let capacity = metadata_region_count
+                .checked_mul(
+                    u32::try_from(entries_per_metadata_region)
+                        .map_err(|_| FileBackingFormatError::RegionCountTooLarge)?,
+                )
+                .ok_or(FileBackingFormatError::RegionCountTooLarge)?;
+            if capacity >= free_space_entry_count {
+                break;
+            }
+            metadata_region_count = metadata_region_count
+                .checked_add(1)
+                .ok_or(FileBackingFormatError::RegionCountTooLarge)?;
+        }
+        let free_space_entry_count = region_count - 1 - metadata_region_count;
+        let free_space_region_len = free_space_entries_offset + FreeSpaceEntry::ENCODED_LEN;
+        if REGION_SIZE < free_space_region_len {
+            let min_region_size = u32::try_from(free_space_region_len).unwrap_or(u32::MAX);
+            return Err(FileBackingFormatError::RegionSizeTooSmall {
+                region_size,
+                min_region_size,
+            });
+        }
 
         self.write_metadata(metadata)?;
 
@@ -648,22 +706,64 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize> FileBacking<REGION_SIZ
         }
 
         let mut prefix = [self.options.erased_byte; REGION_SIZE];
-        let prefix_len = encode_wal_region_prefix(&mut prefix, metadata, 0, 0)?;
+        let tail = free_queue_position_for_contiguous_metadata(
+            1,
+            metadata_region_count,
+            entries_per_metadata_region,
+            free_space_entry_count,
+        )?;
+        let allocation_head = free_queue_position_for_contiguous_metadata(
+            1,
+            metadata_region_count,
+            entries_per_metadata_region,
+            0,
+        )?;
+        let cursors = FreeSpaceCursors::new(allocation_head, tail, tail);
+        let prefix_len =
+            encode_log_region_prefix(&mut prefix, metadata, 0, MAIN_WAL_V2_FORMAT, 0, cursors)?;
         self.write_region(0, 0, &prefix[..prefix_len])?;
 
-        let footer_offset = REGION_SIZE
-            .checked_sub(FreePointerFooter::ENCODED_LEN)
-            .ok_or(FileBackingError::OutOfBounds)?;
-        for region_index in 1..region_count {
-            let next_tail = if region_index + 1 < region_count {
+        let mut free_space_region = [self.options.erased_byte; REGION_SIZE];
+        let mut entries = [0u32; REGION_COUNT];
+        let entry_count = usize::try_from(free_space_entry_count)
+            .map_err(|_| FileBackingFormatError::RegionCountTooLarge)?;
+        for (slot, region_index) in entries[..entry_count]
+            .iter_mut()
+            .zip((1 + metadata_region_count)..region_count)
+        {
+            *slot = region_index;
+        }
+        let tail = free_queue_position_for_contiguous_metadata(
+            1,
+            metadata_region_count,
+            entries_per_metadata_region,
+            free_space_entry_count,
+        )?;
+        let cursors = FreeSpaceCursors::new(allocation_head, tail, tail);
+        for metadata_region_index in 0..metadata_region_count {
+            let region_index = 1 + metadata_region_index;
+            let start = usize::try_from(metadata_region_index)
+                .map_err(|_| FileBackingFormatError::RegionCountTooLarge)?
+                .checked_mul(entries_per_metadata_region)
+                .ok_or(FileBackingFormatError::RegionCountTooLarge)?;
+            let end = start
+                .saturating_add(entries_per_metadata_region)
+                .min(entry_count);
+            let next_metadata_region = if metadata_region_index + 1 < metadata_region_count {
                 Some(region_index + 1)
             } else {
                 None
             };
-            let footer = FreePointerFooter { next_tail };
-            let mut footer_bytes = [0u8; FreePointerFooter::ENCODED_LEN];
-            footer.encode_into(&mut footer_bytes, self.options.erased_byte)?;
-            self.write_region(region_index, footer_offset, &footer_bytes)?;
+            let free_space_len = encode_free_space_region_segment(
+                &mut free_space_region,
+                metadata,
+                1,
+                region_index,
+                cursors,
+                next_metadata_region,
+                &entries[start..end],
+            )?;
+            self.write_region(region_index, 0, &free_space_region[..free_space_len])?;
         }
 
         self.sync()?;

@@ -117,8 +117,8 @@ pub(crate) fn test_map_frontier_memory<K, const MAX_RUNS: usize>(
 }
 
 #[cfg(test)]
-pub(crate) fn test_transaction_log_id(collection_id: CollectionId) -> u32 {
-    u32::try_from(collection_id.0).unwrap_or(u32::MAX)
+pub(crate) fn test_transaction_log_id(_collection_id: CollectionId) -> u32 {
+    0
 }
 
 #[cfg(test)]
@@ -229,6 +229,7 @@ pub mod perf_metrics;
 pub use perf_metrics::*;
 
 mod collections;
+mod free_space;
 pub use collections::*;
 
 /// Small vector-like abstractions used by advanced collection helpers.
@@ -400,6 +401,8 @@ pub struct StorageMemory<
 impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_COLLECTIONS: usize>
     StorageMemory<REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>
 {
+    pub const SLOT_COUNT: usize = TRANSACTION_SLOT_COUNT;
+
     /// Allocates caller-owned storage memory.
     pub fn new() -> Self {
         Self {
@@ -857,6 +860,11 @@ where
             open_plan,
             frontier_run,
         )?;
+    state.commit_collection_transaction::<REGION_SIZE, REGION_COUNT, IO>(
+        backing,
+        workspace,
+        collection_id,
+    )?;
     opened.reclaim_run_regions::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
         state, backing, workspace,
     )?;
@@ -880,6 +888,8 @@ impl<
         const MAX_COLLECTIONS: usize,
     > Storage<'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>
 {
+    pub const SLOT_COUNT: usize = TRANSACTION_SLOT_COUNT;
+
     /// Formats an empty store and returns it as a caller-driven future.
     pub fn format_future(
         backing: &'db mut IO,
@@ -1208,17 +1218,27 @@ impl<
         self.memory.state.wal_append_offset()
     }
 
-    /// Returns the current free-list head, if any.
-    pub fn last_free_list_head(&self) -> Option<u32> {
-        self.memory.state.last_free_list_head()
+    /// Returns the ready entry at the current free-space allocation head, if any.
+    pub fn ready_free_region(&self) -> Option<u32> {
+        self.memory.state.ready_free_region()
     }
 
-    /// Returns the current free-list tail, if any.
-    pub fn free_list_tail(&self) -> Option<u32> {
-        self.memory.state.free_list_tail()
+    /// Returns the region at the current free-space append tail, if any.
+    pub fn free_space_tail_region(&self) -> Option<u32> {
+        self.memory.state.free_space_tail_region()
     }
 
-    /// Returns a region reserved by `alloc_begin` but not yet linked.
+    #[cfg(test)]
+    pub(crate) fn free_space_cursors(&self) -> (u32, u32, u32, u32, u32) {
+        self.memory.state.free_space_cursors()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn free_space_entries(&self) -> &[u32] {
+        self.memory.state.free_space_entries()
+    }
+
+    /// Returns a region reserved for WAL rotation but not yet linked.
     pub fn ready_region(&self) -> Option<u32> {
         self.memory.state.ready_region()
     }
@@ -1369,7 +1389,7 @@ impl<
                 let result = this
                     .memory
                     .state
-                    .append_update::<REGION_SIZE, REGION_COUNT, IO>(
+                    .append_update_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
                         this.backing,
                         &mut this.memory.workspace,
                         collection_id,
@@ -1460,23 +1480,29 @@ impl<
         )
     }
 
-    /// Appends an `alloc_begin` WAL record for a free-list region.
-    pub fn append_alloc_begin(
+    /// Appends an `allocate_region` WAL record for the ready free-space head.
+    pub fn append_allocate_region_for_test(
         &mut self,
         region_index: u32,
-        free_list_head_after: Option<u32>,
     ) -> Result<(), StorageRuntimeError> {
         self.run_storage_operation(
             StorageMode::AllocatingRegion(AllocationMode::Running),
             |this| {
+                let current = this.memory.state.allocation_head();
+                let allocation_head_after = crate::FreeQueuePosition {
+                    region_index: current.region_index,
+                    entry_index: current
+                        .entry_index
+                        .checked_add(1)
+                        .ok_or(StorageRuntimeError::WalRotationRequired)?,
+                };
                 this.memory
                     .state
-                    .append_alloc_begin::<REGION_SIZE, REGION_COUNT, IO>(
+                    .append_allocate_region::<REGION_SIZE, REGION_COUNT, IO>(
                         this.backing,
                         &mut this.memory.workspace,
-                        CollectionId(0),
                         region_index,
-                        free_list_head_after,
+                        allocation_head_after,
                     )
             },
         )

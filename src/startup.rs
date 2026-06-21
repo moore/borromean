@@ -1,12 +1,17 @@
 use heapless::Vec;
 
 use crate::disk::{
-    encode_wal_region_prefix, DiskError, FreePointerFooter, Header, StorageMetadata,
-    WalRegionPrologue, WAL_V1_FORMAT,
+    free_space_entries_checksum, DiskError, FreeQueuePosition, FreeSpaceCursors, FreeSpaceEntry,
+    FreeSpaceRegionPrologue, Header, StorageMetadata, WalRegionPrologue, FREE_SPACE_V2_FORMAT,
+    TRANSACTION_LOG_V2_FORMAT, WAL_V1_FORMAT,
 };
 use crate::flash_io::FlashIo;
 use crate::flash_io::StorageIoError;
-use crate::storage::{FreeRegionPreparation, StorageRuntime, StorageRuntimeError};
+use crate::free_space::{FreeSpaceError, FreeSpaceState};
+use crate::storage::{
+    RetainedTransactionLog, StorageRuntime, StorageRuntimeError, TransactionLogOutcome,
+    MAX_RETAINED_TRANSACTION_LOGS, MAX_RETAINED_TRANSACTION_LOG_REGIONS, TRANSACTION_SLOT_COUNT,
+};
 use crate::wal_record::{
     decode_record, encode_record_into, encoded_record_len, LogPosition, TransactionLogRange,
     WalRecord, WalRecordError,
@@ -51,6 +56,8 @@ pub enum StartupError {
         /// Region at which the malformed chain was detected.
         region_index: u32,
     },
+    /// The free-space collection metadata or a free-space WAL command was malformed.
+    InvalidFreeSpaceCollection,
     /// Replay referenced a region outside the formatted range.
     InvalidRegionReference(u32),
     /// A WAL chain was missing its expected link record.
@@ -71,13 +78,6 @@ pub enum StartupError {
         region_index: u32,
         /// Offset of the unexpected marker.
         offset: usize,
-    },
-    /// An `alloc_begin` record did not match the tracked free-list head.
-    InvalidAllocBegin {
-        /// Region named by the bad record.
-        region_index: u32,
-        /// Free-list head replay expected at that point.
-        last_free_list_head: Option<u32>,
     },
     /// Replay saw two distinct ready regions.
     DoubleReadyRegion {
@@ -127,18 +127,28 @@ pub enum StartupError {
     NoFreeRegionForTransactionRecovery,
     /// Startup transaction recovery found an invalid WAL rotation reserve window.
     InvalidWalRotationWindow {
-        /// Bytes that would remain after the `alloc_begin` record.
+        /// Bytes that would remain after the `allocate_region` record.
         remaining_after: usize,
         /// Bytes required for the full rotation sequence.
         rotation_reserve: usize,
     },
     /// A region being returned to the free list did not have an unwritten footer.
-    FreeRegionFooterNotUnwritten {
-        /// Region whose free-pointer footer was already written.
-        region_index: u32,
-    },
     /// Replay found a live collection type not supported by this build.
     UnsupportedLiveCollectionType(u16),
+    /// Formatted metadata does not match this build's transaction slot count.
+    TransactionLogCountMismatch {
+        /// Transaction-log slots declared by media metadata.
+        metadata_count: u32,
+        /// Transaction-log slots supported by this runtime.
+        slot_count: u32,
+    },
+    /// Replay referenced a transaction-log slot outside this runtime.
+    InvalidTransactionLogId {
+        /// Transaction-log slot id from the WAL record.
+        transaction_log_id: u32,
+        /// Transaction-log slots supported by this runtime.
+        slot_count: u32,
+    },
     /// A checked length conversion or addition overflowed.
     LengthOverflow,
 }
@@ -170,6 +180,12 @@ impl From<StorageIoError> for StartupError {
 impl From<WalRecordError> for StartupError {
     fn from(error: WalRecordError) -> Self {
         Self::WalRecord(error)
+    }
+}
+
+impl From<FreeSpaceError> for StartupError {
+    fn from(_error: FreeSpaceError) -> Self {
+        Self::InvalidFreeSpaceCollection
     }
 }
 
@@ -224,11 +240,12 @@ pub struct StartupState<const MAX_COLLECTIONS: usize = 8> {
     wal_head: u32,
     wal_tail: u32,
     wal_append_offset: usize,
-    last_free_list_head: Option<u32>,
-    free_list_tail: Option<u32>,
+    free_space: FreeSpaceState,
     ready_region: Option<u32>,
     max_seen_sequence: u64,
     collections: Vec<StartupCollection, MAX_COLLECTIONS>,
+    #[allow(dead_code)]
+    retained_transaction_logs: Vec<RetainedTransactionLog, MAX_RETAINED_TRANSACTION_LOGS>,
     pending_wal_recovery_boundary: bool,
 }
 
@@ -253,14 +270,29 @@ impl<const MAX_COLLECTIONS: usize> StartupState<MAX_COLLECTIONS> {
         self.wal_append_offset
     }
 
-    /// Returns the current free-list head, if any.
-    pub fn last_free_list_head(&self) -> Option<u32> {
-        self.last_free_list_head
+    /// Returns the recovered free-space allocation cursor.
+    pub fn allocation_head(&self) -> FreeQueuePosition {
+        self.free_space.allocation_head_position()
     }
 
-    /// Returns the current free-list tail, if any.
-    pub fn free_list_tail(&self) -> Option<u32> {
-        self.free_list_tail
+    /// Returns the recovered free-space ready boundary.
+    pub fn ready_boundary(&self) -> FreeQueuePosition {
+        self.free_space.ready_boundary_position()
+    }
+
+    /// Returns the recovered free-space append tail.
+    pub fn append_tail(&self) -> FreeQueuePosition {
+        self.free_space.append_tail_position()
+    }
+
+    /// Returns the ready entry at the recovered free-space allocation head, if any.
+    pub fn ready_free_region(&self) -> Option<u32> {
+        self.free_space.next_ready_region().ok()
+    }
+
+    /// Returns the region at the recovered free-space append tail, if any.
+    pub fn free_space_tail_region(&self) -> Option<u32> {
+        self.free_space.entries().last().copied()
     }
 
     /// Returns a reserved ready region, if replay found one.
@@ -276,6 +308,12 @@ impl<const MAX_COLLECTIONS: usize> StartupState<MAX_COLLECTIONS> {
     /// Returns the replay-tracked collections.
     pub fn collections(&self) -> &[StartupCollection] {
         self.collections.as_slice()
+    }
+
+    /// Returns transaction-log regions pinned by reachable main-WAL control records.
+    #[allow(dead_code)]
+    pub(crate) fn retained_transaction_logs(&self) -> &[RetainedTransactionLog] {
+        self.retained_transaction_logs.as_slice()
     }
 
     /// Returns whether replay left an open WAL recovery boundary.
@@ -294,10 +332,9 @@ impl<const MAX_COLLECTIONS: usize> StartupState<MAX_COLLECTIONS> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LastValidRecord {
-    AllocBegin {
-        collection_id: CollectionId,
+    AllocateRegion {
         region_index: u32,
-        free_list_head_after: Option<u32>,
+        allocation_head_after: FreeQueuePosition,
         aligned_end_offset: usize,
     },
     Link {
@@ -325,6 +362,7 @@ struct WalReplayPosition {
     offset: usize,
 }
 
+#[allow(dead_code)]
 fn transaction_replay_range(
     start: WalReplayPosition,
     end: WalReplayPosition,
@@ -345,14 +383,33 @@ fn transaction_replay_range(
 struct OpenTransactionReplay {
     collection_id: Option<CollectionId>,
     transaction_log_id: u32,
-    start: WalReplayPosition,
+    start: LogPosition,
+    committed_range: Option<TransactionLogRange>,
     commit_seen: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct OpenInlineTransactionReplay {
+    body_start: WalReplayPosition,
+    expected_record_count: u32,
+    expected_encoded_len: u32,
+    seen_record_count: u32,
+    seen_encoded_len: u32,
+}
+
+#[derive(Debug, Default)]
+struct OpenWalReplayState {
+    open_transaction: Option<OpenTransactionReplay>,
+    open_inline_transaction: Option<OpenInlineTransactionReplay>,
+    pending_inline_rollback_cleanup: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 enum TransactionReplayMode {
     ApplyFullInterval,
     SkipTransactionCollectionData(CollectionId),
+    ApplyRollbackCleanupOnly,
 }
 
 #[derive(Debug)]
@@ -364,7 +421,7 @@ pub(crate) struct StartupOpenPlan<const REGION_COUNT: usize, const MAX_COLLECTIO
     max_seen_sequence: u64,
     wal_chain: Vec<u32, REGION_COUNT>,
     collections: Vec<StartupCollection, MAX_COLLECTIONS>,
-    last_free_list_head: Option<u32>,
+    free_space: FreeSpaceState,
     ready_region: Option<u32>,
     wal_append_offset: usize,
     pending_wal_recovery_boundary: bool,
@@ -374,6 +431,7 @@ pub(crate) struct StartupOpenPlan<const REGION_COUNT: usize, const MAX_COLLECTIO
     transaction_cleanup_regions: Vec<u32, REGION_COUNT>,
     transaction_old_regions: Vec<u32, REGION_COUNT>,
     transaction_new_regions: Vec<u32, REGION_COUNT>,
+    retained_transaction_logs: Vec<RetainedTransactionLog, MAX_RETAINED_TRANSACTION_LOGS>,
 }
 
 impl<const REGION_COUNT: usize, const MAX_COLLECTIONS: usize>
@@ -402,7 +460,7 @@ impl<const REGION_COUNT: usize, const MAX_COLLECTIONS: usize>
             max_seen_sequence: 0,
             wal_chain: Vec::new(),
             collections: Vec::new(),
-            last_free_list_head: None,
+            free_space: FreeSpaceState::empty(),
             ready_region: None,
             wal_append_offset: 0,
             pending_wal_recovery_boundary: false,
@@ -412,6 +470,7 @@ impl<const REGION_COUNT: usize, const MAX_COLLECTIONS: usize>
             transaction_cleanup_regions: Vec::new(),
             transaction_old_regions: Vec::new(),
             transaction_new_regions: Vec::new(),
+            retained_transaction_logs: Vec::new(),
         }
     }
 
@@ -422,6 +481,7 @@ impl<const REGION_COUNT: usize, const MAX_COLLECTIONS: usize>
         wal_tail: u32,
         tail_scan: RegionScanResult,
         max_seen_sequence: u64,
+        free_space: FreeSpaceState,
     ) -> Result<(), StartupError> {
         self.metadata = metadata;
         self.wal_head_candidate = wal_head_candidate;
@@ -430,11 +490,7 @@ impl<const REGION_COUNT: usize, const MAX_COLLECTIONS: usize>
         self.max_seen_sequence = max_seen_sequence;
         self.wal_chain.clear();
         self.collections.clear();
-        self.last_free_list_head = if metadata.region_count >= 2 {
-            Some(1)
-        } else {
-            None
-        };
+        self.free_space = free_space;
         self.ready_region = None;
         self.wal_append_offset =
             usize::try_from(metadata.region_size).map_err(|_| StartupError::LengthOverflow)?;
@@ -445,18 +501,21 @@ impl<const REGION_COUNT: usize, const MAX_COLLECTIONS: usize>
         self.transaction_cleanup_regions.clear();
         self.transaction_old_regions.clear();
         self.transaction_new_regions.clear();
+        self.retained_transaction_logs.clear();
         Ok(())
     }
 
     pub(crate) fn clear(&mut self) {
         self.wal_chain.clear();
         self.collections.clear();
+        self.free_space = FreeSpaceState::empty();
         self.transaction_original_collections.clear();
         self.transaction_allocations.clear();
         self.transaction_frees.clear();
         self.transaction_cleanup_regions.clear();
         self.transaction_old_regions.clear();
         self.transaction_new_regions.clear();
+        self.retained_transaction_logs.clear();
     }
 
     fn capture_transaction_original_collections(&mut self) -> Result<(), StartupError> {
@@ -481,6 +540,73 @@ impl<const REGION_COUNT: usize, const MAX_COLLECTIONS: usize>
         self.transaction_cleanup_regions.clear();
         self.transaction_old_regions.clear();
         self.transaction_new_regions.clear();
+    }
+
+    fn retain_transaction_log(
+        &mut self,
+        transaction_log_id: u32,
+        range: TransactionLogRange,
+        regions: &[u32],
+        outcome: TransactionLogOutcome,
+    ) -> Result<(), StartupError> {
+        ensure_transaction_log_id_in_range(transaction_log_id)?;
+        if let Some(retained) = self.retained_transaction_logs.iter_mut().find(|retained| {
+            retained.transaction_log_id == transaction_log_id && retained.range.start == range.start
+        }) {
+            retained.range = range;
+            retained.outcome = outcome;
+            retained.regions.clear();
+            for region_index in regions.iter().copied() {
+                retained
+                    .regions
+                    .push(region_index)
+                    .map_err(|_| StartupError::LengthOverflow)?;
+            }
+            return Ok(());
+        }
+
+        let mut retained_regions = Vec::new();
+        for region_index in regions.iter().copied() {
+            retained_regions
+                .push(region_index)
+                .map_err(|_| StartupError::LengthOverflow)?;
+        }
+        self.retained_transaction_logs
+            .push(RetainedTransactionLog {
+                transaction_log_id,
+                range,
+                regions: retained_regions,
+                outcome,
+            })
+            .map_err(|_| StartupError::LengthOverflow)
+    }
+
+    fn mark_transaction_log_finished(
+        &mut self,
+        transaction_log_id: u32,
+        range: TransactionLogRange,
+    ) -> Result<(), StartupError> {
+        ensure_transaction_log_id_in_range(transaction_log_id)?;
+        if let Some(retained) = self.retained_transaction_logs.iter_mut().find(|retained| {
+            retained.transaction_log_id == transaction_log_id && retained.range.start == range.start
+        }) {
+            retained.range = range;
+            retained.outcome = TransactionLogOutcome::Finished;
+            return Ok(());
+        }
+
+        let mut regions = Vec::new();
+        regions
+            .push(range.start.region_index)
+            .map_err(|_| StartupError::LengthOverflow)?;
+        self.retained_transaction_logs
+            .push(RetainedTransactionLog {
+                transaction_log_id,
+                range,
+                regions,
+                outcome: TransactionLogOutcome::Finished,
+            })
+            .map_err(|_| StartupError::LengthOverflow)
     }
 }
 
@@ -522,6 +648,16 @@ pub(crate) fn begin_open_formatted_store<
         .read_metadata()?
         .ok_or(StartupError::MissingMetadata)?;
     metadata.validate()?;
+    let slot_count =
+        u32::try_from(TRANSACTION_SLOT_COUNT).map_err(|_| StartupError::LengthOverflow)?;
+    if metadata.transaction_log_count != slot_count {
+        return Err(StartupError::TransactionLogCountMismatch {
+            metadata_count: metadata.transaction_log_count,
+            slot_count,
+        });
+    }
+    let free_space =
+        load_initial_free_space_from_flash::<REGION_SIZE, IO>(flash, workspace, metadata)?;
 
     let (known_tail, max_seen_sequence) = locate_wal_tail::<REGION_SIZE, _>(flash, metadata)?;
     let tail_prologue = read_wal_prologue(flash, known_tail, metadata.region_count)?;
@@ -557,10 +693,8 @@ pub(crate) fn begin_open_formatted_store<
         known_tail,
         tail_scan,
         max_seen_sequence,
+        free_space,
     )?;
-    if wal_head_candidate != 0 {
-        plan.last_free_list_head = discover_free_list_head_from_footers(flash, metadata)?;
-    }
     Ok(())
 }
 
@@ -578,9 +712,16 @@ pub(crate) fn recover_open_rotation<
         flash,
         workspace,
         plan.metadata,
-        plan.wal_head_candidate,
-        plan.wal_tail,
-        plan.tail_scan,
+        RotationRecoveryContext {
+            wal_head: plan.wal_head_candidate,
+            known_tail: plan.wal_tail,
+            tail_scan: plan.tail_scan,
+            cursors: FreeSpaceCursors::new(
+                plan.free_space.allocation_head_position(),
+                plan.free_space.ready_boundary_position(),
+                plan.free_space.append_tail_position(),
+            ),
+        },
         &mut plan.max_seen_sequence,
     )? {
         plan.wal_tail = recovered_tail;
@@ -659,7 +800,7 @@ fn replay_open_wal_chain_once<
     workspace: &mut StorageWorkspace<REGION_SIZE>,
     plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS>,
 ) -> Result<ReplayWalChainOutcome, StartupError> {
-    let mut open_transaction = None;
+    let mut replay_state = OpenWalReplayState::default();
 
     let wal_chain_len = plan.wal_chain.len();
     for index in 0..wal_chain_len {
@@ -676,11 +817,11 @@ fn replay_open_wal_chain_once<
             index,
             region_index,
             is_tail,
-            &mut open_transaction,
+            &mut replay_state,
         )?;
     }
 
-    if let Some(open_transaction) = open_transaction {
+    if let Some(open_transaction) = replay_state.open_transaction {
         recover_unfinished_transaction::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
             flash,
             workspace,
@@ -689,6 +830,56 @@ fn replay_open_wal_chain_once<
         )?;
         return Ok(ReplayWalChainOutcome::RecoveredTransaction);
     }
+
+    if let Some(open_inline) = replay_state.open_inline_transaction {
+        let end = WalReplayPosition {
+            chain_index: wal_chain_len.saturating_sub(1),
+            region_index: plan.wal_tail,
+            offset: plan.wal_append_offset,
+        };
+        replay_transaction_interval::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
+            flash,
+            workspace,
+            plan,
+            open_inline.body_start,
+            end,
+            plan.wal_append_offset,
+            TransactionReplayMode::ApplyRollbackCleanupOnly,
+        )?;
+        append_recovery_record_with_rotation::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
+            flash,
+            workspace,
+            plan,
+            WalRecord::RollbackInlineTransaction {
+                record_count: open_inline.seen_record_count,
+            },
+        )?;
+        let _ = append_recovered_transaction_allocation_frees::<
+            REGION_SIZE,
+            REGION_COUNT,
+            IO,
+            MAX_COLLECTIONS,
+        >(flash, workspace, plan, CollectionId(0))?;
+        plan.clear_transaction_recovery_scratch();
+        return Ok(ReplayWalChainOutcome::RecoveredTransaction);
+    }
+
+    if replay_state.pending_inline_rollback_cleanup {
+        let appended = append_recovered_transaction_allocation_frees::<
+            REGION_SIZE,
+            REGION_COUNT,
+            IO,
+            MAX_COLLECTIONS,
+        >(flash, workspace, plan, CollectionId(0))?;
+        plan.clear_transaction_recovery_scratch();
+        if appended {
+            return Ok(ReplayWalChainOutcome::RecoveredTransaction);
+        }
+    }
+
+    recover_abandoned_transaction_log_regions::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
+        flash, workspace, plan,
+    )?;
 
     Ok(ReplayWalChainOutcome::Complete)
 }
@@ -705,7 +896,7 @@ fn replay_open_wal_region<
     chain_index: usize,
     region_index: u32,
     is_tail: bool,
-    open_transaction: &mut Option<OpenTransactionReplay>,
+    replay_state: &mut OpenWalReplayState,
 ) -> Result<(), StartupError> {
     ensure_region_index_in_range(region_index, plan.metadata.region_count)?;
 
@@ -779,9 +970,13 @@ fn replay_open_wal_region<
                         region_index,
                         offset,
                     };
+                    if replay_state.pending_inline_rollback_cleanup {
+                        observe_inline_rollback_cleanup_record(plan, decoded.record)?;
+                    }
                     let step = classify_replay_record(
                         plan,
-                        open_transaction,
+                        &mut replay_state.open_transaction,
+                        &mut replay_state.open_inline_transaction,
                         current_position,
                         aligned_end_offset,
                         decoded.record,
@@ -812,7 +1007,9 @@ fn replay_open_wal_region<
                 start,
                 end,
                 end_exclusive_offset,
+                resume_offset,
                 mode,
+                cleanup_after_replay,
             } => {
                 replay_transaction_interval::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
                     flash,
@@ -823,7 +1020,37 @@ fn replay_open_wal_region<
                     end_exclusive_offset,
                     mode,
                 )?;
-                offset = end_exclusive_offset;
+                if cleanup_after_replay {
+                    replay_state.pending_inline_rollback_cleanup = true;
+                }
+                offset = resume_offset;
+                reload_region = true;
+            }
+            ReplayStep::ReplayTransactionLog {
+                transaction_log_id,
+                range,
+                mode,
+                outcome,
+                next_offset,
+            } => {
+                let replay_result =
+                    replay_transaction_log_range::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
+                        flash, workspace, plan, range, mode,
+                    )?;
+                plan.retain_transaction_log(
+                    transaction_log_id,
+                    range,
+                    replay_result.regions.as_slice(),
+                    outcome,
+                )?;
+                if let Some(collection_id) = replay_result.collection_id {
+                    if let Some(transaction) = replay_state.open_transaction.as_mut() {
+                        if transaction.collection_id.is_none() {
+                            transaction.collection_id = Some(collection_id);
+                        }
+                    }
+                }
+                offset = next_offset;
                 reload_region = true;
             }
         }
@@ -840,6 +1067,7 @@ fn replay_open_wal_region<
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 enum ReplayStep {
     Advance {
         next_offset: usize,
@@ -848,38 +1076,134 @@ enum ReplayStep {
         start: WalReplayPosition,
         end: WalReplayPosition,
         end_exclusive_offset: usize,
+        resume_offset: usize,
         mode: TransactionReplayMode,
+        cleanup_after_replay: bool,
+    },
+    ReplayTransactionLog {
+        transaction_log_id: u32,
+        range: TransactionLogRange,
+        mode: TransactionReplayMode,
+        outcome: TransactionLogOutcome,
+        next_offset: usize,
     },
 }
 
 fn classify_replay_record<const REGION_COUNT: usize, const MAX_COLLECTIONS: usize>(
     plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS>,
     open_transaction: &mut Option<OpenTransactionReplay>,
+    open_inline_transaction: &mut Option<OpenInlineTransactionReplay>,
     current_position: WalReplayPosition,
     aligned_end_offset: usize,
     record: WalRecord<'_>,
 ) -> Result<ReplayStep, StartupError> {
+    validate_transaction_log_record_id(record)?;
     let next = ReplayStep::Advance {
         next_offset: aligned_end_offset,
     };
 
+    if let Some(inline) = open_inline_transaction.as_mut() {
+        match record {
+            WalRecord::CommitInlineTransaction { record_count } => {
+                if record_count != inline.expected_record_count
+                    || inline.seen_record_count != inline.expected_record_count
+                    || inline.seen_encoded_len != inline.expected_encoded_len
+                {
+                    return Err(StartupError::LengthOverflow);
+                }
+                let start = inline.body_start;
+                let end = current_position;
+                *open_inline_transaction = None;
+                return Ok(ReplayStep::ReplayTransaction {
+                    start,
+                    end,
+                    end_exclusive_offset: current_position.offset,
+                    resume_offset: aligned_end_offset,
+                    mode: TransactionReplayMode::ApplyFullInterval,
+                    cleanup_after_replay: false,
+                });
+            }
+            WalRecord::RollbackInlineTransaction { record_count } => {
+                if record_count != inline.seen_record_count {
+                    return Err(StartupError::LengthOverflow);
+                }
+                let start = inline.body_start;
+                let end = current_position;
+                *open_inline_transaction = None;
+                return Ok(ReplayStep::ReplayTransaction {
+                    start,
+                    end,
+                    end_exclusive_offset: current_position.offset,
+                    resume_offset: aligned_end_offset,
+                    mode: TransactionReplayMode::ApplyRollbackCleanupOnly,
+                    cleanup_after_replay: true,
+                });
+            }
+            WalRecord::BeginInlineTransaction { .. } | WalRecord::BeginTransaction { .. } => {
+                return Err(StartupError::NestedTransaction(CollectionId(0)));
+            }
+            _ => {
+                let record_len = aligned_end_offset
+                    .checked_sub(current_position.offset)
+                    .ok_or(StartupError::LengthOverflow)?;
+                inline.seen_record_count = inline
+                    .seen_record_count
+                    .checked_add(1)
+                    .ok_or(StartupError::LengthOverflow)?;
+                inline.seen_encoded_len = inline
+                    .seen_encoded_len
+                    .checked_add(
+                        u32::try_from(record_len).map_err(|_| StartupError::LengthOverflow)?,
+                    )
+                    .ok_or(StartupError::LengthOverflow)?;
+                if inline.seen_record_count > inline.expected_record_count
+                    || inline.seen_encoded_len > inline.expected_encoded_len
+                {
+                    return Err(StartupError::LengthOverflow);
+                }
+                return Ok(next);
+            }
+        }
+    }
+
     let Some(transaction) = open_transaction.as_mut() else {
-        if let WalRecord::BeginTransaction {
-            transaction_log_id, ..
-        } = record
-        {
-            plan.capture_transaction_original_collections()?;
-            *open_transaction = Some(OpenTransactionReplay {
-                collection_id: None,
+        match record {
+            WalRecord::BeginInlineTransaction {
+                record_count,
+                encoded_len,
+            } => {
+                *open_inline_transaction = Some(OpenInlineTransactionReplay {
+                    body_start: WalReplayPosition {
+                        chain_index: current_position.chain_index,
+                        region_index: current_position.region_index,
+                        offset: aligned_end_offset,
+                    },
+                    expected_record_count: record_count,
+                    expected_encoded_len: encoded_len,
+                    seen_record_count: 0,
+                    seen_encoded_len: 0,
+                });
+                return Ok(next);
+            }
+            WalRecord::CommitInlineTransaction { .. }
+            | WalRecord::RollbackInlineTransaction { .. } => {
+                return Err(StartupError::LengthOverflow);
+            }
+            WalRecord::BeginTransaction {
                 transaction_log_id,
-                start: WalReplayPosition {
-                    chain_index: current_position.chain_index,
-                    region_index: current_position.region_index,
-                    offset: aligned_end_offset,
-                },
-                commit_seen: false,
-            });
-            return Ok(next);
+                start,
+            } => {
+                plan.capture_transaction_original_collections()?;
+                *open_transaction = Some(OpenTransactionReplay {
+                    collection_id: None,
+                    transaction_log_id,
+                    start,
+                    committed_range: None,
+                    commit_seen: false,
+                });
+                return Ok(next);
+            }
+            _ => {}
         }
 
         apply_open_replay_record(plan, record)?;
@@ -887,57 +1211,80 @@ fn classify_replay_record<const REGION_COUNT: usize, const MAX_COLLECTIONS: usiz
     };
 
     match record {
+        WalRecord::BeginInlineTransaction { .. } => {
+            return Err(StartupError::NestedTransaction(
+                transaction.collection_id.unwrap_or(CollectionId(0)),
+            ));
+        }
         WalRecord::BeginTransaction { .. } => {
             return Err(StartupError::NestedTransaction(
                 transaction.collection_id.unwrap_or(CollectionId(0)),
             ));
         }
         WalRecord::CommitTransaction {
-            transaction_log_id, ..
+            transaction_log_id,
+            range,
         } => {
             ensure_transaction_log_marker_matches(
                 transaction.transaction_log_id,
                 transaction_log_id,
             )?;
             transaction.commit_seen = true;
-        }
-        WalRecord::TransactionFinished {
-            transaction_log_id, ..
-        } => {
-            ensure_transaction_log_marker_matches(
-                transaction.transaction_log_id,
+            transaction.committed_range = Some(range);
+            return Ok(ReplayStep::ReplayTransactionLog {
                 transaction_log_id,
-            )?;
-            let start = transaction.start;
-            *open_transaction = None;
-            plan.clear_transaction_recovery_scratch();
-            return Ok(ReplayStep::ReplayTransaction {
-                start,
-                end: current_position,
-                end_exclusive_offset: aligned_end_offset,
+                range,
                 mode: TransactionReplayMode::ApplyFullInterval,
+                outcome: TransactionLogOutcome::Committed,
+                next_offset: aligned_end_offset,
             });
         }
-        WalRecord::RollbackTransaction {
-            transaction_log_id, ..
+        WalRecord::TransactionFinished {
+            transaction_log_id,
+            range,
         } => {
             ensure_transaction_log_marker_matches(
                 transaction.transaction_log_id,
                 transaction_log_id,
             )?;
-            let collection_id = transaction_collection_id(transaction)?;
-            let start = transaction.start;
+            plan.mark_transaction_log_finished(transaction_log_id, range)?;
             *open_transaction = None;
             plan.clear_transaction_recovery_scratch();
-            return Ok(ReplayStep::ReplayTransaction {
-                start,
-                end: current_position,
-                end_exclusive_offset: aligned_end_offset,
-                mode: TransactionReplayMode::SkipTransactionCollectionData(collection_id),
+            return Ok(next);
+        }
+        WalRecord::RollbackTransaction {
+            transaction_log_id,
+            range,
+        } => {
+            ensure_transaction_log_marker_matches(
+                transaction.transaction_log_id,
+                transaction_log_id,
+            )?;
+            *open_transaction = None;
+            plan.clear_transaction_recovery_scratch();
+            return Ok(ReplayStep::ReplayTransactionLog {
+                transaction_log_id,
+                range,
+                mode: TransactionReplayMode::ApplyRollbackCleanupOnly,
+                outcome: TransactionLogOutcome::RolledBack,
+                next_offset: aligned_end_offset,
             });
         }
         _ => {
-            observe_transaction_recovery_record(plan, transaction, record)?;
+            if transaction.commit_seen {
+                observe_transaction_recovery_record(plan, transaction, record)?;
+                apply_open_replay_record(plan, record)?;
+            } else {
+                observe_transaction_recovery_record(plan, transaction, record)?;
+                if matches!(
+                    record,
+                    WalRecord::AllocateRegion { .. }
+                        | WalRecord::FreeRegion { .. }
+                        | WalRecord::EraseFreeRegionSpan { .. }
+                ) {
+                    apply_open_replay_allocator_record(plan, record)?;
+                }
+            }
         }
     }
 
@@ -949,28 +1296,35 @@ fn observe_transaction_recovery_record<const REGION_COUNT: usize, const MAX_COLL
     transaction: &mut OpenTransactionReplay,
     record: WalRecord<'_>,
 ) -> Result<(), StartupError> {
-    if let Some(collection_id) = transaction_record_collection_id(record) {
-        remember_transaction_collection(transaction, collection_id)?;
-    }
-    let Some(transaction_collection_id) = transaction.collection_id else {
-        return Ok(());
-    };
-
     match record {
-        WalRecord::AllocBegin {
-            collection_id,
-            region_index,
-            ..
-        } if collection_id == transaction_collection_id => {
+        WalRecord::AllocateRegion { region_index, .. } => {
             push_unique_region(&mut plan.transaction_allocations, region_index)?;
         }
-        WalRecord::FreeRegion {
-            collection_id,
-            region_index,
-        } if collection_id == transaction_collection_id => {
+        WalRecord::FreeRegion { region_index, .. } => {
             push_unique_region(&mut plan.transaction_frees, region_index)?;
         }
         _ => {}
+    }
+
+    if let Some(collection_id) = transaction_record_collection_id(record) {
+        remember_transaction_collection(transaction, collection_id)?;
+    }
+    if transaction.collection_id.is_none() {
+        return Ok(());
+    }
+
+    Ok(())
+}
+
+fn observe_inline_rollback_cleanup_record<
+    const REGION_COUNT: usize,
+    const MAX_COLLECTIONS: usize,
+>(
+    plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS>,
+    record: WalRecord<'_>,
+) -> Result<(), StartupError> {
+    if let WalRecord::FreeRegion { region_index, .. } = record {
+        push_unique_region(&mut plan.transaction_frees, region_index)?;
     }
     Ok(())
 }
@@ -980,12 +1334,16 @@ fn transaction_record_collection_id(record: WalRecord<'_>) -> Option<CollectionI
         WalRecord::NewCollection { collection_id, .. }
         | WalRecord::Update { collection_id, .. }
         | WalRecord::Snapshot { collection_id, .. }
-        | WalRecord::AllocBegin { collection_id, .. }
         | WalRecord::Head { collection_id, .. }
         | WalRecord::DropCollection { collection_id }
-        | WalRecord::FreeRegion { collection_id, .. }
         | WalRecord::AddTransactionCollection { collection_id, .. } => Some(collection_id),
-        WalRecord::BeginTransaction { .. }
+        WalRecord::AllocateRegion { .. }
+        | WalRecord::EraseFreeRegionSpan { .. }
+        | WalRecord::FreeRegion { .. }
+        | WalRecord::BeginInlineTransaction { .. }
+        | WalRecord::CommitInlineTransaction { .. }
+        | WalRecord::RollbackInlineTransaction { .. }
+        | WalRecord::BeginTransaction { .. }
         | WalRecord::CommitTransaction { .. }
         | WalRecord::TransactionFinished { .. }
         | WalRecord::RollbackTransaction { .. }
@@ -1013,10 +1371,41 @@ fn transaction_collection_id(
 }
 
 fn ensure_transaction_log_marker_matches(expected: u32, actual: u32) -> Result<(), StartupError> {
+    ensure_transaction_log_id_in_range(actual)?;
     if actual != expected {
         return Err(StartupError::TransactionMismatch {
             expected: CollectionId(u64::from(expected)),
             actual: CollectionId(u64::from(actual)),
+        });
+    }
+    Ok(())
+}
+
+fn validate_transaction_log_record_id(record: WalRecord<'_>) -> Result<(), StartupError> {
+    match record {
+        WalRecord::BeginTransaction {
+            transaction_log_id, ..
+        }
+        | WalRecord::CommitTransaction {
+            transaction_log_id, ..
+        }
+        | WalRecord::TransactionFinished {
+            transaction_log_id, ..
+        }
+        | WalRecord::RollbackTransaction {
+            transaction_log_id, ..
+        } => ensure_transaction_log_id_in_range(transaction_log_id),
+        _ => Ok(()),
+    }
+}
+
+fn ensure_transaction_log_id_in_range(transaction_log_id: u32) -> Result<(), StartupError> {
+    let slot_count =
+        u32::try_from(TRANSACTION_SLOT_COUNT).map_err(|_| StartupError::LengthOverflow)?;
+    if transaction_log_id >= slot_count {
+        return Err(StartupError::InvalidTransactionLogId {
+            transaction_log_id,
+            slot_count,
         });
     }
     Ok(())
@@ -1034,6 +1423,112 @@ fn push_unique_region<const CAP: usize>(
         .map_err(|_| StartupError::LengthOverflow)
 }
 
+fn load_initial_free_space_from_flash<const REGION_SIZE: usize, IO: FlashIo>(
+    flash: &mut IO,
+    workspace: &mut StorageWorkspace<REGION_SIZE>,
+    metadata: StorageMetadata,
+) -> Result<FreeSpaceState, StartupError> {
+    if metadata.region_count < 2 {
+        return Err(StartupError::InvalidFreeSpaceCollection);
+    }
+    let mut entries = heapless::Vec::<u32, { crate::free_space::MAX_FREE_QUEUE_ENTRIES }>::new();
+    let mut metadata_regions =
+        heapless::Vec::<u32, { crate::free_space::MAX_FREE_QUEUE_ENTRIES }>::new();
+    let mut first_prologue = None;
+    let mut region_index = 1;
+    let entries_per_region = {
+        let entries_offset = Header::ENCODED_LEN
+            .checked_add(FreeSpaceRegionPrologue::ENCODED_LEN)
+            .ok_or(StartupError::LengthOverflow)?;
+        let available = REGION_SIZE
+            .checked_sub(entries_offset)
+            .ok_or(StartupError::InvalidFreeSpaceCollection)?;
+        let entries_per_region = available / FreeSpaceEntry::ENCODED_LEN;
+        if entries_per_region == 0 {
+            return Err(StartupError::InvalidFreeSpaceCollection);
+        }
+        u32::try_from(entries_per_region).map_err(|_| StartupError::LengthOverflow)?
+    };
+    for _ in 0..metadata.region_count {
+        metadata_regions
+            .push(region_index)
+            .map_err(|_| StartupError::InvalidFreeSpaceCollection)?;
+        let region_bytes = workspace.committed_write_buffer();
+        flash.read_region(region_index, 0, REGION_SIZE, |bytes| {
+            region_bytes.copy_from_slice(bytes);
+        })?;
+
+        let header = Header::decode(&region_bytes[..Header::ENCODED_LEN])?;
+        if header.collection_id != CollectionId(0)
+            || header.collection_format != FREE_SPACE_V2_FORMAT
+        {
+            return Err(StartupError::InvalidFreeSpaceCollection);
+        }
+
+        let prologue_start = Header::ENCODED_LEN;
+        let prologue_end = prologue_start
+            .checked_add(FreeSpaceRegionPrologue::ENCODED_LEN)
+            .ok_or(StartupError::LengthOverflow)?;
+        let prologue = FreeSpaceRegionPrologue::decode(
+            &region_bytes[prologue_start..prologue_end],
+            metadata.region_count,
+        )?;
+        if first_prologue.is_none() {
+            first_prologue = Some(prologue);
+        }
+
+        let entry_count =
+            usize::try_from(prologue.entry_count).map_err(|_| StartupError::LengthOverflow)?;
+        let entries_start = prologue_end;
+        let entries_len = entry_count
+            .checked_mul(FreeSpaceEntry::ENCODED_LEN)
+            .ok_or(StartupError::LengthOverflow)?;
+        let entries_end = entries_start
+            .checked_add(entries_len)
+            .ok_or(StartupError::LengthOverflow)?;
+        if entries_end > REGION_SIZE {
+            return Err(StartupError::InvalidFreeSpaceCollection);
+        }
+        if free_space_entries_checksum(&region_bytes[entries_start..entries_end])
+            != prologue.entries_checksum
+        {
+            return Err(StartupError::InvalidFreeSpaceCollection);
+        }
+
+        let mut offset = entries_start;
+        for _ in 0..entry_count {
+            let entry_end = offset
+                .checked_add(FreeSpaceEntry::ENCODED_LEN)
+                .ok_or(StartupError::LengthOverflow)?;
+            let entry =
+                FreeSpaceEntry::decode(&region_bytes[offset..entry_end], metadata.region_count)?;
+            entries
+                .push(entry.region_index)
+                .map_err(|_| StartupError::InvalidFreeSpaceCollection)?;
+            offset = entry_end;
+        }
+
+        let Some(next_region_index) = prologue.next_metadata_region else {
+            break;
+        };
+        region_index = next_region_index;
+    }
+    let Some(prologue) = first_prologue else {
+        return Err(StartupError::InvalidFreeSpaceCollection);
+    };
+
+    let mut state = FreeSpaceState::empty();
+    state.replace_from_position_parts(
+        metadata_regions.as_slice(),
+        entries_per_region,
+        prologue.allocation_head,
+        prologue.ready_boundary,
+        prologue.append_tail,
+        entries.as_slice(),
+    )?;
+    Ok(state)
+}
+
 fn recover_unfinished_transaction<
     const REGION_SIZE: usize,
     const REGION_COUNT: usize,
@@ -1045,30 +1540,11 @@ fn recover_unfinished_transaction<
     plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS>,
     open_transaction: OpenTransactionReplay,
 ) -> Result<(), StartupError> {
-    let tail_chain_index =
-        plan.wal_chain
-            .len()
-            .checked_sub(1)
-            .ok_or(StartupError::BrokenWalChain {
-                region_index: plan.wal_tail,
-            })?;
-    let tail_position = WalReplayPosition {
-        chain_index: tail_chain_index,
-        region_index: plan.wal_tail,
-        offset: plan.wal_append_offset,
-    };
-    let collection_id = transaction_collection_id(&open_transaction)?;
-
     if open_transaction.commit_seen {
-        replay_transaction_interval::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
-            flash,
-            workspace,
-            plan,
-            open_transaction.start,
-            tail_position,
-            plan.wal_append_offset,
-            TransactionReplayMode::ApplyFullInterval,
-        )?;
+        let range = open_transaction
+            .committed_range
+            .ok_or(StartupError::UnfinishedTransaction(CollectionId(0)))?;
+        let collection_id = transaction_collection_id(&open_transaction).unwrap_or(CollectionId(0));
         derive_transaction_cleanup_regions::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
             flash,
             workspace,
@@ -1087,20 +1563,25 @@ fn recover_unfinished_transaction<
             plan,
             WalRecord::TransactionFinished {
                 transaction_log_id: open_transaction.transaction_log_id,
-                range: transaction_replay_range(open_transaction.start, tail_position)?,
+                range,
             },
         )?;
     } else {
-        replay_transaction_interval::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
+        let range = scan_transaction_log_to_durable_end::<
+            REGION_SIZE,
+            REGION_COUNT,
+            IO,
+            MAX_COLLECTIONS,
+        >(flash, workspace, plan, open_transaction.start)?;
+        let _ = replay_transaction_log_range::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
             flash,
             workspace,
             plan,
-            open_transaction.start,
-            tail_position,
-            plan.wal_append_offset,
-            TransactionReplayMode::SkipTransactionCollectionData(collection_id),
+            range,
+            TransactionReplayMode::ApplyRollbackCleanupOnly,
         )?;
-        append_recovered_transaction_allocation_frees::<
+        let collection_id = transaction_collection_id(&open_transaction).unwrap_or(CollectionId(0));
+        let _ = append_recovered_transaction_allocation_frees::<
             REGION_SIZE,
             REGION_COUNT,
             IO,
@@ -1112,7 +1593,7 @@ fn recover_unfinished_transaction<
             plan,
             WalRecord::RollbackTransaction {
                 transaction_log_id: open_transaction.transaction_log_id,
-                range: transaction_replay_range(open_transaction.start, tail_position)?,
+                range,
             },
         )?;
     }
@@ -1131,7 +1612,8 @@ fn append_recovered_transaction_allocation_frees<
     workspace: &mut StorageWorkspace<REGION_SIZE>,
     plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS>,
     collection_id: CollectionId,
-) -> Result<(), StartupError> {
+) -> Result<bool, StartupError> {
+    let mut appended = false;
     let allocation_count = plan.transaction_allocations.len();
     for index in 0..allocation_count {
         let region_index = plan.transaction_allocations[index];
@@ -1144,11 +1626,11 @@ fn append_recovered_transaction_allocation_frees<
             plan,
             collection_id,
             region_index,
-            FreeRegionPreparation::EraseToUnwrittenFooter,
         )?;
         push_unique_region(&mut plan.transaction_frees, region_index)?;
+        appended = true;
     }
-    Ok(())
+    Ok(appended)
 }
 
 fn append_missing_transaction_cleanup_frees<
@@ -1174,7 +1656,6 @@ fn append_missing_transaction_cleanup_frees<
             plan,
             collection_id,
             region_index,
-            FreeRegionPreparation::RequireUnwrittenFooter,
         )?;
         push_unique_region(&mut plan.transaction_frees, region_index)?;
     }
@@ -1259,9 +1740,93 @@ fn collect_collection_committed_regions<
                 region_index: head_region,
             })
         }
+        Some(CollectionType::OBJECT_LOG_CODE) => {
+            crate::collections::object_log::collect_committed_regions::<
+                REGION_SIZE,
+                IO,
+                REGION_COUNT,
+            >(
+                flash,
+                workspace,
+                metadata,
+                collection.collection_id(),
+                head_region,
+                regions,
+            )
+            .map_err(|_| StartupError::InvalidCommittedRegionHead {
+                collection_id: collection.collection_id(),
+                region_index: head_region,
+            })
+        }
         Some(other) => Err(StartupError::UnsupportedLiveCollectionType(other)),
         None => Ok(()),
     }
+}
+
+fn recover_abandoned_transaction_log_regions<
+    const REGION_SIZE: usize,
+    const REGION_COUNT: usize,
+    IO: FlashIo,
+    const MAX_COLLECTIONS: usize,
+>(
+    flash: &mut IO,
+    workspace: &mut StorageWorkspace<REGION_SIZE>,
+    plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS>,
+) -> Result<(), StartupError> {
+    for region_index in 0..plan.metadata.region_count {
+        if retained_transaction_log_contains_region(plan, region_index)
+            || free_space_active_range_contains_region(&plan.free_space, region_index)
+            || plan.wal_chain.contains(&region_index)
+        {
+            continue;
+        }
+
+        let is_abandoned = flash.read_region(region_index, 0, Header::ENCODED_LEN, |bytes| {
+            Header::decode(bytes).is_ok_and(|header| {
+                header.collection_id == CollectionId(0)
+                    && header.collection_format == TRANSACTION_LOG_V2_FORMAT
+            })
+        })?;
+        if !is_abandoned {
+            continue;
+        }
+
+        append_recovery_free_region_with_rotation::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
+            flash,
+            workspace,
+            plan,
+            CollectionId(0),
+            region_index,
+        )?;
+    }
+    Ok(())
+}
+
+fn retained_transaction_log_contains_region<
+    const REGION_COUNT: usize,
+    const MAX_COLLECTIONS: usize,
+>(
+    plan: &StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS>,
+    region_index: u32,
+) -> bool {
+    plan.retained_transaction_logs
+        .iter()
+        .any(|retained| retained.regions.contains(&region_index))
+}
+
+fn free_space_active_range_contains_region(free_space: &FreeSpaceState, region_index: u32) -> bool {
+    let start = match usize::try_from(free_space.allocation_head()) {
+        Ok(start) => start,
+        Err(_) => return false,
+    };
+    let end = match usize::try_from(free_space.append_tail()) {
+        Ok(end) => end.min(free_space.entries().len()),
+        Err(_) => return false,
+    };
+    free_space
+        .entries()
+        .get(start..end)
+        .is_some_and(|entries| entries.contains(&region_index))
 }
 
 fn append_recovery_free_region_with_rotation<
@@ -1273,40 +1838,25 @@ fn append_recovery_free_region_with_rotation<
     flash: &mut IO,
     workspace: &mut StorageWorkspace<REGION_SIZE>,
     plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS>,
-    collection_id: CollectionId,
+    _collection_id: CollectionId,
     region_index: u32,
-    preparation: FreeRegionPreparation,
 ) -> Result<(), StartupError> {
     append_recovery_record_room_with_rotation::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
         flash,
         workspace,
         plan,
         WalRecord::FreeRegion {
-            collection_id,
             region_index,
+            append_tail_after: plan.free_space.position_after_append()?,
         },
     )?;
-    let already_on_free_list = region_is_on_free_list_startup(
-        flash,
-        plan.metadata,
-        plan.last_free_list_head,
-        region_index,
-    )?;
-    if !already_on_free_list {
-        prepare_region_for_recovery_free::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
-            flash,
-            plan,
-            region_index,
-            preparation,
-        )?;
-    }
     write_recovery_record_and_apply::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
         flash,
         workspace,
         plan,
         WalRecord::FreeRegion {
-            collection_id,
             region_index,
+            append_tail_after: plan.free_space.position_after_append()?,
         },
     )
 }
@@ -1359,7 +1909,7 @@ fn recovery_record_has_append_room<
     IO: FlashIo,
     const MAX_COLLECTIONS: usize,
 >(
-    flash: &mut IO,
+    _flash: &mut IO,
     workspace: &mut StorageWorkspace<REGION_SIZE>,
     plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS>,
     record: WalRecord<'_>,
@@ -1380,19 +1930,15 @@ fn recovery_record_has_append_room<
         .checked_sub(end)
         .ok_or(StartupError::LengthOverflow)?;
 
-    let Some(next_region_index) = plan.last_free_list_head else {
-        return Ok(remaining_after != 0 && !matches!(record, WalRecord::AllocBegin { .. }));
+    let Ok(next_region_index) = plan.free_space.next_ready_region() else {
+        return Ok(remaining_after != 0 && !matches!(record, WalRecord::AllocateRegion { .. }));
     };
-    let free_list_head_after = read_free_pointer_successor_startup::<REGION_SIZE, REGION_COUNT, IO>(
-        flash,
-        plan.metadata,
-        next_region_index,
-    )?;
+    let allocation_head_after = plan.free_space.position_after_allocation()?;
     let reserves = recovery_rotation_reserves::<REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>(
         workspace,
         plan,
         next_region_index,
-        free_list_head_after,
+        allocation_head_after,
     )?;
     Ok(remaining_after >= reserves.rotation_reserve)
 }
@@ -1488,23 +2034,20 @@ fn append_recovery_wal_rotation_start<
     }
 
     let next_region_index = plan
-        .last_free_list_head
-        .ok_or(StartupError::NoFreeRegionForTransactionRecovery)?;
-    let free_list_head_after = read_free_pointer_successor_startup::<REGION_SIZE, REGION_COUNT, IO>(
-        flash,
-        plan.metadata,
-        next_region_index,
-    )?;
+        .free_space
+        .next_ready_region()
+        .map_err(|_| StartupError::NoFreeRegionForTransactionRecovery)?;
+    let allocation_head_after = plan.free_space.position_after_allocation()?;
     let reserves = recovery_rotation_reserves::<REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>(
         workspace,
         plan,
         next_region_index,
-        free_list_head_after,
+        allocation_head_after,
     )?;
     let remaining_after = REGION_SIZE
         .checked_sub(
             plan.wal_append_offset
-                .checked_add(reserves.alloc_begin_len)
+                .checked_add(reserves.allocate_region_len)
                 .ok_or(StartupError::LengthOverflow)?,
         )
         .ok_or(StartupError::LengthOverflow)?;
@@ -1519,24 +2062,20 @@ fn append_recovery_wal_rotation_start<
         flash,
         workspace,
         plan,
-        WalRecord::AllocBegin {
-            collection_id: CollectionId(0),
+        WalRecord::AllocateRegion {
             region_index: next_region_index,
-            allocation_sequence: 0,
-            free_list_head_after,
+            allocation_head_after,
         },
     )?;
     plan.wal_append_offset = plan
         .wal_append_offset
-        .checked_add(reserves.alloc_begin_len)
+        .checked_add(reserves.allocate_region_len)
         .ok_or(StartupError::LengthOverflow)?;
     apply_open_replay_record(
         plan,
-        WalRecord::AllocBegin {
-            collection_id: CollectionId(0),
+        WalRecord::AllocateRegion {
             region_index: next_region_index,
-            allocation_sequence: 0,
-            free_list_head_after,
+            allocation_head_after,
         },
     )?;
     plan.pending_wal_recovery_boundary = false;
@@ -1574,15 +2113,17 @@ fn append_recovery_wal_rotation_finish<
         next_region_index,
         expected_sequence,
         plan.wal_head_candidate,
+        FreeSpaceCursors::new(
+            plan.free_space.allocation_head_position(),
+            plan.free_space.ready_boundary_position(),
+            plan.free_space.append_tail_position(),
+        ),
     )?;
     plan.wal_tail = next_region_index;
     plan.wal_append_offset = plan.metadata.wal_record_area_offset()?;
     plan.ready_region = None;
     plan.max_seen_sequence = expected_sequence;
     plan.pending_wal_recovery_boundary = false;
-    if plan.last_free_list_head.is_none() {
-        plan.transaction_frees.clear();
-    }
     Ok(())
 }
 
@@ -1671,7 +2212,7 @@ fn write_recovery_record_raw<
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct RecoveryRotationReserves {
-    alloc_begin_len: usize,
+    allocate_region_len: usize,
     link_reserve: usize,
     rotation_reserve: usize,
 }
@@ -1684,19 +2225,17 @@ fn recovery_rotation_reserves<
     workspace: &mut StorageWorkspace<REGION_SIZE>,
     plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS>,
     next_region_index: u32,
-    free_list_head_after: Option<u32>,
+    allocation_head_after: FreeQueuePosition,
 ) -> Result<RecoveryRotationReserves, StartupError> {
     let expected_sequence = plan
         .max_seen_sequence
         .checked_add(1)
         .ok_or(StartupError::LengthOverflow)?;
     let (physical, logical) = workspace.encode_buffers();
-    let alloc_begin_len = encode_record_into(
-        WalRecord::AllocBegin {
-            collection_id: CollectionId(0),
+    let allocate_region_len = encode_record_into(
+        WalRecord::AllocateRegion {
             region_index: next_region_index,
-            allocation_sequence: 0,
-            free_list_head_after,
+            allocation_head_after,
         },
         plan.metadata,
         physical,
@@ -1711,127 +2250,14 @@ fn recovery_rotation_reserves<
         physical,
         logical,
     )?;
-    let rotation_reserve = alloc_begin_len
+    let rotation_reserve = allocate_region_len
         .checked_add(link_reserve)
         .ok_or(StartupError::LengthOverflow)?;
     Ok(RecoveryRotationReserves {
-        alloc_begin_len,
+        allocate_region_len,
         link_reserve,
         rotation_reserve,
     })
-}
-
-fn prepare_region_for_recovery_free<
-    const REGION_SIZE: usize,
-    const REGION_COUNT: usize,
-    IO: FlashIo,
-    const MAX_COLLECTIONS: usize,
->(
-    flash: &mut IO,
-    plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS>,
-    region_index: u32,
-    preparation: FreeRegionPreparation,
-) -> Result<(), StartupError> {
-    let free_list_tail =
-        reconstruct_free_list_tail(flash, plan.metadata, plan.last_free_list_head)?;
-    match preparation {
-        FreeRegionPreparation::RequireUnwrittenFooter => {
-            ensure_free_pointer_footer_unwritten_startup::<REGION_SIZE, IO>(
-                flash,
-                plan.metadata,
-                region_index,
-            )?;
-        }
-        FreeRegionPreparation::EraseToUnwrittenFooter => {
-            flash.erase_region(region_index)?;
-            flash.sync()?;
-        }
-    }
-
-    if let Some(free_list_tail) = free_list_tail {
-        write_free_pointer_footer_startup::<REGION_SIZE, IO>(
-            flash,
-            plan.metadata,
-            free_list_tail,
-            Some(region_index),
-        )?;
-        flash.sync()?;
-    }
-
-    Ok(())
-}
-
-fn ensure_free_pointer_footer_unwritten_startup<const REGION_SIZE: usize, IO: FlashIo>(
-    flash: &mut IO,
-    metadata: StorageMetadata,
-    region_index: u32,
-) -> Result<(), StartupError> {
-    let footer_offset = usize::try_from(metadata.region_size)
-        .map_err(|_| StartupError::LengthOverflow)?
-        .checked_sub(FreePointerFooter::ENCODED_LEN)
-        .ok_or(StartupError::LengthOverflow)?;
-    let unwritten = flash.read_region(
-        region_index,
-        footer_offset,
-        FreePointerFooter::ENCODED_LEN,
-        |bytes| bytes.iter().all(|byte| *byte == metadata.erased_byte),
-    )?;
-    if unwritten {
-        Ok(())
-    } else {
-        Err(StartupError::FreeRegionFooterNotUnwritten { region_index })
-    }
-}
-
-fn read_free_pointer_successor_startup<
-    const REGION_SIZE: usize,
-    const REGION_COUNT: usize,
-    IO: FlashIo,
->(
-    flash: &mut IO,
-    metadata: StorageMetadata,
-    region_index: u32,
-) -> Result<Option<u32>, StartupError> {
-    let footer_offset = usize::try_from(metadata.region_size)
-        .map_err(|_| StartupError::LengthOverflow)?
-        .checked_sub(FreePointerFooter::ENCODED_LEN)
-        .ok_or(StartupError::LengthOverflow)?;
-    let footer = flash
-        .read_region(
-            region_index,
-            footer_offset,
-            FreePointerFooter::ENCODED_LEN,
-            |bytes| {
-                FreePointerFooter::decode_with_region_count(
-                    bytes,
-                    metadata.erased_byte,
-                    metadata.region_count,
-                )
-            },
-        )?
-        .map_err(StartupError::from)?;
-    Ok(footer.next_tail)
-}
-
-fn write_free_pointer_footer_startup<const REGION_SIZE: usize, IO: FlashIo>(
-    flash: &mut IO,
-    metadata: StorageMetadata,
-    region_index: u32,
-    next_tail: Option<u32>,
-) -> Result<(), StartupError> {
-    ensure_region_index_in_range(region_index, metadata.region_count)?;
-    if let Some(next_tail) = next_tail {
-        ensure_region_index_in_range(next_tail, metadata.region_count)?;
-    }
-    let footer_offset = usize::try_from(metadata.region_size)
-        .map_err(|_| StartupError::LengthOverflow)?
-        .checked_sub(FreePointerFooter::ENCODED_LEN)
-        .ok_or(StartupError::LengthOverflow)?;
-    let footer = FreePointerFooter { next_tail };
-    let mut footer_bytes = [0u8; FreePointerFooter::ENCODED_LEN];
-    footer.encode_into(&mut footer_bytes, metadata.erased_byte)?;
-    flash.write_region(region_index, footer_offset, &footer_bytes)?;
-    Ok(())
 }
 
 fn replay_transaction_interval<
@@ -1876,6 +2302,282 @@ fn replay_transaction_interval<
             offset_end,
             mode,
         )?;
+    }
+    Ok(())
+}
+
+fn replay_transaction_log_range<
+    const REGION_SIZE: usize,
+    const REGION_COUNT: usize,
+    IO: FlashIo,
+    const MAX_COLLECTIONS: usize,
+>(
+    flash: &mut IO,
+    workspace: &mut StorageWorkspace<REGION_SIZE>,
+    plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS>,
+    range: TransactionLogRange,
+    mode: TransactionReplayMode,
+) -> Result<TransactionLogReplayResult, StartupError> {
+    let mut result = TransactionLogReplayResult {
+        collection_id: None,
+        regions: Vec::new(),
+    };
+    push_unique_region(&mut result.regions, range.start.region_index)?;
+    if range.start == range.end {
+        return Ok(result);
+    }
+    ensure_region_index_in_range(range.start.region_index, plan.metadata.region_count)?;
+    ensure_region_index_in_range(range.end.region_index, plan.metadata.region_count)?;
+    let mut current_region = range.start.region_index;
+    let mut offset =
+        usize::try_from(range.start.offset).map_err(|_| StartupError::LengthOverflow)?;
+    let end_offset = usize::try_from(range.end.offset).map_err(|_| StartupError::LengthOverflow)?;
+    let region_size =
+        usize::try_from(plan.metadata.region_size).map_err(|_| StartupError::LengthOverflow)?;
+    let granule = usize::try_from(plan.metadata.wal_write_granule)
+        .map_err(|_| StartupError::LengthOverflow)?;
+
+    for _ in 0..plan.metadata.region_count {
+        push_unique_region(&mut result.regions, current_region)?;
+        let (region_bytes, _) = workspace.scan_buffers();
+        flash.read_region(current_region, 0, region_bytes.len(), |bytes| {
+            region_bytes.copy_from_slice(bytes);
+        })?;
+        validate_transaction_log_region_bytes(region_bytes, plan.metadata, current_region)?;
+
+        let limit = if current_region == range.end.region_index {
+            end_offset
+        } else {
+            region_size
+        };
+        let mut next_region = None;
+
+        while offset < limit {
+            let next_offset = {
+                let (region_bytes, logical_scratch) = workspace.scan_buffers();
+                if region_bytes[offset] == plan.metadata.erased_byte {
+                    if current_region == range.end.region_index {
+                        return Ok(result);
+                    }
+                    return Err(StartupError::BrokenWalChain {
+                        region_index: current_region,
+                    });
+                }
+                if region_bytes[offset] != plan.metadata.wal_record_magic {
+                    offset
+                        .checked_add(granule)
+                        .ok_or(StartupError::LengthOverflow)?
+                } else {
+                    let decoded = decode_record(
+                        &region_bytes[offset..limit],
+                        plan.metadata,
+                        logical_scratch,
+                    )?;
+                    let next_offset = offset
+                        .checked_add(decoded.encoded_len)
+                        .ok_or(StartupError::LengthOverflow)?;
+                    match decoded.record {
+                        WalRecord::Link {
+                            next_region_index, ..
+                        } => {
+                            next_region = Some(next_region_index);
+                        }
+                        record => {
+                            if result.collection_id.is_none() {
+                                if let Some(collection_id) =
+                                    transaction_record_collection_id(record)
+                                {
+                                    if collection_id != CollectionId(0) {
+                                        result.collection_id = Some(collection_id);
+                                    }
+                                }
+                            }
+                            observe_transaction_log_replay_record(plan, record)?;
+                            apply_transaction_replay_record(plan, record, mode)?;
+                        }
+                    }
+                    next_offset
+                }
+            };
+            offset = next_offset;
+            if next_region.is_some() {
+                break;
+            }
+        }
+
+        if current_region == range.end.region_index {
+            return Ok(result);
+        }
+
+        current_region = next_region.ok_or(StartupError::BrokenWalChain {
+            region_index: current_region,
+        })?;
+        ensure_region_index_in_range(current_region, plan.metadata.region_count)?;
+        offset = plan.metadata.wal_record_area_offset()?;
+    }
+
+    Err(StartupError::BrokenWalChain {
+        region_index: current_region,
+    })
+}
+
+fn scan_transaction_log_to_durable_end<
+    const REGION_SIZE: usize,
+    const REGION_COUNT: usize,
+    IO: FlashIo,
+    const MAX_COLLECTIONS: usize,
+>(
+    flash: &mut IO,
+    workspace: &mut StorageWorkspace<REGION_SIZE>,
+    plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS>,
+    start: LogPosition,
+) -> Result<TransactionLogRange, StartupError> {
+    ensure_region_index_in_range(start.region_index, plan.metadata.region_count)?;
+    let mut current_region = start.region_index;
+    let mut offset = usize::try_from(start.offset).map_err(|_| StartupError::LengthOverflow)?;
+    let region_size =
+        usize::try_from(plan.metadata.region_size).map_err(|_| StartupError::LengthOverflow)?;
+    let granule = usize::try_from(plan.metadata.wal_write_granule)
+        .map_err(|_| StartupError::LengthOverflow)?;
+
+    for _ in 0..plan.metadata.region_count {
+        let (region_bytes, _) = workspace.scan_buffers();
+        flash.read_region(current_region, 0, region_bytes.len(), |bytes| {
+            region_bytes.copy_from_slice(bytes);
+        })?;
+        validate_transaction_log_region_bytes(region_bytes, plan.metadata, current_region)?;
+
+        while offset < region_size {
+            let step = {
+                let (region_bytes, logical_scratch) = workspace.scan_buffers();
+                let start_byte = region_bytes[offset];
+                if start_byte == plan.metadata.erased_byte {
+                    return Ok(TransactionLogRange {
+                        start,
+                        end: LogPosition {
+                            region_index: current_region,
+                            offset: u32::try_from(offset)
+                                .map_err(|_| StartupError::LengthOverflow)?,
+                        },
+                    });
+                }
+                if start_byte != plan.metadata.wal_record_magic {
+                    return Ok(TransactionLogRange {
+                        start,
+                        end: LogPosition {
+                            region_index: current_region,
+                            offset: u32::try_from(offset)
+                                .map_err(|_| StartupError::LengthOverflow)?,
+                        },
+                    });
+                }
+                let decoded = match decode_record(
+                    &region_bytes[offset..region_size],
+                    plan.metadata,
+                    logical_scratch,
+                ) {
+                    Ok(decoded) => decoded,
+                    Err(_) => {
+                        return Ok(TransactionLogRange {
+                            start,
+                            end: LogPosition {
+                                region_index: current_region,
+                                offset: u32::try_from(offset)
+                                    .map_err(|_| StartupError::LengthOverflow)?,
+                            },
+                        });
+                    }
+                };
+                let next_offset = offset
+                    .checked_add(decoded.encoded_len)
+                    .ok_or(StartupError::LengthOverflow)?;
+                match decoded.record {
+                    WalRecord::Link {
+                        next_region_index, ..
+                    } => Some((next_region_index, next_offset)),
+                    _ => {
+                        let _ = granule;
+                        None
+                    }
+                }
+            };
+
+            if let Some((next_region, _next_offset)) = step {
+                current_region = next_region;
+                ensure_region_index_in_range(current_region, plan.metadata.region_count)?;
+                offset = plan.metadata.wal_record_area_offset()?;
+                break;
+            }
+            let (region_bytes, logical_scratch) = workspace.scan_buffers();
+            let decoded = decode_record(
+                &region_bytes[offset..region_size],
+                plan.metadata,
+                logical_scratch,
+            )?;
+            offset = offset
+                .checked_add(decoded.encoded_len)
+                .ok_or(StartupError::LengthOverflow)?;
+        }
+
+        if offset >= region_size {
+            return Ok(TransactionLogRange {
+                start,
+                end: LogPosition {
+                    region_index: current_region,
+                    offset: u32::try_from(region_size).map_err(|_| StartupError::LengthOverflow)?,
+                },
+            });
+        }
+    }
+
+    Err(StartupError::BrokenWalChain {
+        region_index: current_region,
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TransactionLogReplayResult {
+    collection_id: Option<CollectionId>,
+    regions: Vec<u32, MAX_RETAINED_TRANSACTION_LOG_REGIONS>,
+}
+
+fn validate_transaction_log_region_bytes(
+    region_bytes: &[u8],
+    metadata: StorageMetadata,
+    region_index: u32,
+) -> Result<(), StartupError> {
+    let header = Header::decode(&region_bytes[..Header::ENCODED_LEN])?;
+    if header.collection_id != CollectionId(0)
+        || header.collection_format != TRANSACTION_LOG_V2_FORMAT
+    {
+        return Err(StartupError::InvalidWalRegion(region_index));
+    }
+    let prologue_start = Header::ENCODED_LEN;
+    let prologue_end = prologue_start
+        .checked_add(WalRegionPrologue::ENCODED_LEN)
+        .ok_or(StartupError::LengthOverflow)?;
+    WalRegionPrologue::decode(
+        &region_bytes[prologue_start..prologue_end],
+        metadata.region_count,
+    )?;
+    Ok(())
+}
+
+fn observe_transaction_log_replay_record<
+    const REGION_COUNT: usize,
+    const MAX_COLLECTIONS: usize,
+>(
+    plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS>,
+    record: WalRecord<'_>,
+) -> Result<(), StartupError> {
+    match record {
+        WalRecord::AllocateRegion { region_index, .. } => {
+            push_unique_region(&mut plan.transaction_allocations, region_index)?;
+        }
+        WalRecord::FreeRegion { region_index, .. } => {
+            push_unique_region(&mut plan.transaction_frees, region_index)?;
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -1926,6 +2628,9 @@ fn replay_transaction_region_interval<
                     .checked_add(decoded.encoded_len)
                     .ok_or(StartupError::LengthOverflow)?;
                 let is_link = matches!(decoded.record, WalRecord::Link { .. });
+                if mode == TransactionReplayMode::ApplyRollbackCleanupOnly {
+                    observe_transaction_log_replay_record(plan, decoded.record)?;
+                }
                 apply_transaction_replay_record(plan, decoded.record, mode)?;
                 if is_link {
                     return Ok(());
@@ -1945,8 +2650,17 @@ fn apply_transaction_replay_record<const REGION_COUNT: usize, const MAX_COLLECTI
 ) -> Result<(), StartupError> {
     match mode {
         TransactionReplayMode::ApplyFullInterval => apply_open_replay_record(plan, record),
+        TransactionReplayMode::ApplyRollbackCleanupOnly => match record {
+            WalRecord::AllocateRegion { .. } | WalRecord::EraseFreeRegionSpan { .. } => {
+                apply_open_replay_allocator_record(plan, record)
+            }
+            WalRecord::FreeRegion { .. } => Ok(()),
+            _ => Ok(()),
+        },
         TransactionReplayMode::SkipTransactionCollectionData(collection_id) => match record {
-            WalRecord::AllocBegin { .. } | WalRecord::FreeRegion { .. } => {
+            WalRecord::AllocateRegion { .. }
+            | WalRecord::FreeRegion { .. }
+            | WalRecord::EraseFreeRegionSpan { .. } => {
                 apply_open_replay_allocator_record(plan, record)
             }
             _ if wal_record_collection_id(record) == Some(collection_id) => Ok(()),
@@ -1960,12 +2674,16 @@ fn wal_record_collection_id(record: WalRecord<'_>) -> Option<CollectionId> {
         WalRecord::NewCollection { collection_id, .. }
         | WalRecord::Update { collection_id, .. }
         | WalRecord::Snapshot { collection_id, .. }
-        | WalRecord::AllocBegin { collection_id, .. }
         | WalRecord::Head { collection_id, .. }
         | WalRecord::DropCollection { collection_id }
-        | WalRecord::FreeRegion { collection_id, .. }
         | WalRecord::AddTransactionCollection { collection_id, .. } => Some(collection_id),
-        WalRecord::BeginTransaction { .. }
+        WalRecord::AllocateRegion { .. }
+        | WalRecord::EraseFreeRegionSpan { .. }
+        | WalRecord::FreeRegion { .. }
+        | WalRecord::BeginInlineTransaction { .. }
+        | WalRecord::CommitInlineTransaction { .. }
+        | WalRecord::RollbackInlineTransaction { .. }
+        | WalRecord::BeginTransaction { .. }
         | WalRecord::CommitTransaction { .. }
         | WalRecord::TransactionFinished { .. }
         | WalRecord::RollbackTransaction { .. }
@@ -1978,19 +2696,11 @@ fn apply_open_replay_record<const REGION_COUNT: usize, const MAX_COLLECTIONS: us
     plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS>,
     record: WalRecord<'_>,
 ) -> Result<(), StartupError> {
-    if plan.wal_head_candidate != 0
-        && matches!(
-            record,
-            WalRecord::AllocBegin { .. } | WalRecord::FreeRegion { .. }
-        )
-    {
-        return Ok(());
-    }
     apply_wal_record(
         plan.metadata,
         record,
         &mut plan.collections,
-        &mut plan.last_free_list_head,
+        &mut plan.free_space,
         &mut plan.ready_region,
     )
 }
@@ -1999,39 +2709,44 @@ fn apply_open_replay_allocator_record<const REGION_COUNT: usize, const MAX_COLLE
     plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS>,
     record: WalRecord<'_>,
 ) -> Result<(), StartupError> {
-    if plan.wal_head_candidate != 0 {
-        return Ok(());
-    }
-
     match record {
-        WalRecord::AllocBegin {
-            collection_id,
+        WalRecord::AllocateRegion {
             region_index,
-            allocation_sequence,
-            free_list_head_after,
+            allocation_head_after,
         } => apply_wal_record(
             plan.metadata,
-            WalRecord::AllocBegin {
-                collection_id,
+            WalRecord::AllocateRegion {
                 region_index,
-                allocation_sequence,
-                free_list_head_after,
+                allocation_head_after,
             },
             &mut plan.collections,
-            &mut plan.last_free_list_head,
+            &mut plan.free_space,
             &mut plan.ready_region,
         ),
         WalRecord::FreeRegion {
-            collection_id,
             region_index,
+            append_tail_after,
         } => apply_wal_record(
             plan.metadata,
             WalRecord::FreeRegion {
-                collection_id,
                 region_index,
+                append_tail_after,
             },
             &mut plan.collections,
-            &mut plan.last_free_list_head,
+            &mut plan.free_space,
+            &mut plan.ready_region,
+        ),
+        WalRecord::EraseFreeRegionSpan {
+            count,
+            ready_boundary_after,
+        } => apply_wal_record(
+            plan.metadata,
+            WalRecord::EraseFreeRegionSpan {
+                count,
+                ready_boundary_after,
+            },
+            &mut plan.collections,
+            &mut plan.free_space,
             &mut plan.ready_region,
         ),
         _ => Ok(()),
@@ -2050,18 +2765,16 @@ pub(crate) fn finish_open_formatted_store<
 ) -> Result<StartupState<MAX_COLLECTIONS>, StartupError> {
     validate_live_collection_types(&plan.collections)?;
     validate_live_region_bases(flash, &plan.collections)?;
-    let free_list_tail =
-        reconstruct_free_list_tail(flash, plan.metadata, plan.last_free_list_head)?;
     Ok(StartupState {
         metadata: plan.metadata,
         wal_head: plan.wal_head_candidate,
         wal_tail: plan.wal_tail,
         wal_append_offset: plan.wal_append_offset,
-        last_free_list_head: plan.last_free_list_head,
-        free_list_tail,
+        free_space: plan.free_space.clone(),
         ready_region: plan.ready_region,
         max_seen_sequence: plan.max_seen_sequence,
         collections: plan.collections.clone(),
+        retained_transaction_logs: plan.retained_transaction_logs.clone(),
         pending_wal_recovery_boundary: plan.pending_wal_recovery_boundary,
     })
 }
@@ -2078,18 +2791,16 @@ pub(crate) fn finish_open_formatted_store_into_runtime<
 ) -> Result<(), StorageRuntimeError> {
     validate_live_collection_types(&plan.collections)?;
     validate_live_region_bases(flash, &plan.collections)?;
-    let free_list_tail =
-        reconstruct_free_list_tail(flash, plan.metadata, plan.last_free_list_head)?;
     runtime.replace_from_startup_parts(
         plan.metadata,
         plan.wal_head_candidate,
         plan.wal_tail,
         plan.wal_append_offset,
-        plan.last_free_list_head,
-        free_list_tail,
+        plan.free_space.clone(),
         plan.ready_region,
         plan.max_seen_sequence,
         plan.collections.as_slice(),
+        plan.retained_transaction_logs.as_slice(),
         plan.pending_wal_recovery_boundary,
     )
 }
@@ -2129,15 +2840,27 @@ fn locate_wal_tail<const REGION_SIZE: usize, IO: FlashIo>(
     Ok((wal_tail, max_seen_sequence))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RotationRecoveryContext {
+    wal_head: u32,
+    known_tail: u32,
+    tail_scan: RegionScanResult,
+    cursors: FreeSpaceCursors,
+}
+
 fn recover_incomplete_rotation<const REGION_SIZE: usize, IO: FlashIo>(
     flash: &mut IO,
     workspace: &mut StorageWorkspace<REGION_SIZE>,
     metadata: StorageMetadata,
-    wal_head: u32,
-    known_tail: u32,
-    tail_scan: RegionScanResult,
+    recovery: RotationRecoveryContext,
     max_seen_sequence: &mut u64,
 ) -> Result<Option<u32>, StartupError> {
+    let RotationRecoveryContext {
+        wal_head,
+        known_tail,
+        tail_scan,
+        cursors,
+    } = recovery;
     let Some(last_valid_record) = tail_scan.last_valid_record else {
         return Ok(None);
     };
@@ -2165,19 +2888,16 @@ fn recover_incomplete_rotation<const REGION_SIZE: usize, IO: FlashIo>(
                 next_region_index,
                 expected_sequence,
                 wal_head,
+                cursors,
             )?;
             *max_seen_sequence = (*max_seen_sequence).max(expected_sequence);
             Ok(Some(next_region_index))
         }
-        LastValidRecord::AllocBegin {
-            collection_id,
+        LastValidRecord::AllocateRegion {
             region_index,
-            free_list_head_after,
+            allocation_head_after,
             aligned_end_offset,
         } => {
-            if collection_id != CollectionId(0) {
-                return Ok(None);
-            }
             ensure_region_index_in_range(region_index, metadata.region_count)?;
 
             let expected_sequence = max_seen_sequence
@@ -2195,11 +2915,9 @@ fn recover_incomplete_rotation<const REGION_SIZE: usize, IO: FlashIo>(
                 logical_scratch,
             )?;
             let alloc_reserve = encoded_record_len(
-                WalRecord::AllocBegin {
-                    collection_id: CollectionId(0),
+                WalRecord::AllocateRegion {
                     region_index,
-                    allocation_sequence: 0,
-                    free_list_head_after,
+                    allocation_head_after,
                 },
                 metadata,
                 physical_scratch,
@@ -2236,6 +2954,7 @@ fn recover_incomplete_rotation<const REGION_SIZE: usize, IO: FlashIo>(
                 region_index,
                 expected_sequence,
                 wal_head,
+                cursors,
             )?;
             *max_seen_sequence = expected_sequence;
             Ok(Some(region_index))
@@ -2251,12 +2970,20 @@ fn initialize_wal_region<const REGION_SIZE: usize, IO: FlashIo>(
     region_index: u32,
     sequence: u64,
     wal_head: u32,
+    cursors: FreeSpaceCursors,
 ) -> Result<(), StartupError> {
     ensure_region_index_in_range(region_index, metadata.region_count)?;
 
     flash.erase_region(region_index)?;
     let target = workspace.committed_write_buffer();
-    let prefix_len = encode_wal_region_prefix(target, metadata, sequence, wal_head)?;
+    let prefix_len = crate::disk::encode_log_region_prefix(
+        target,
+        metadata,
+        sequence,
+        WAL_V1_FORMAT,
+        wal_head,
+        cursors,
+    )?;
     flash.write_region(region_index, 0, &target[..prefix_len])?;
     flash.sync()?;
     Ok(())
@@ -2429,15 +3156,12 @@ where
             .checked_add(decoded.encoded_len)
             .ok_or(StartupError::LengthOverflow)?;
         last_valid_record = Some(match decoded.record {
-            WalRecord::AllocBegin {
-                collection_id,
+            WalRecord::AllocateRegion {
                 region_index,
-                free_list_head_after,
-                ..
-            } => LastValidRecord::AllocBegin {
-                collection_id,
+                allocation_head_after,
+            } => LastValidRecord::AllocateRegion {
                 region_index,
-                free_list_head_after,
+                allocation_head_after,
                 aligned_end_offset,
             },
             WalRecord::Link {
@@ -2467,11 +3191,18 @@ where
     })
 }
 
+fn free_queue_position_at_or_before(
+    position: FreeQueuePosition,
+    boundary: FreeQueuePosition,
+) -> bool {
+    position.region_index == boundary.region_index && position.entry_index <= boundary.entry_index
+}
+
 pub(crate) fn apply_wal_record<const MAX_COLLECTIONS: usize>(
     metadata: StorageMetadata,
     record: WalRecord<'_>,
     collections: &mut Vec<StartupCollection, MAX_COLLECTIONS>,
-    last_free_list_head: &mut Option<u32>,
+    free_space: &mut FreeSpaceState,
     ready_region: &mut Option<u32>,
 ) -> Result<(), StartupError> {
     match record {
@@ -2546,37 +3277,19 @@ pub(crate) fn apply_wal_record<const MAX_COLLECTIONS: usize>(
                 }
             }
         }
-        WalRecord::AllocBegin {
-            collection_id,
+        WalRecord::AllocateRegion {
             region_index,
-            free_list_head_after,
-            ..
+            allocation_head_after,
         } => {
             ensure_region_index_in_range(region_index, metadata.region_count)?;
-            if let Some(next_head) = free_list_head_after {
-                ensure_region_index_in_range(next_head, metadata.region_count)?;
+            let current_allocation_head = free_space.allocation_head_position();
+            if allocation_head_after == current_allocation_head {
+                return Ok(());
             }
-
-            if collection_id == CollectionId(0) {
-                if let Some(existing) = ready_region {
-                    return Err(StartupError::DoubleReadyRegion {
-                        existing: *existing,
-                        next: region_index,
-                    });
-                }
+            if free_queue_position_at_or_before(allocation_head_after, current_allocation_head) {
+                return Ok(());
             }
-
-            if *last_free_list_head != Some(region_index) {
-                return Err(StartupError::InvalidAllocBegin {
-                    region_index,
-                    last_free_list_head: *last_free_list_head,
-                });
-            }
-
-            *last_free_list_head = free_list_head_after;
-            if collection_id == CollectionId(0) {
-                *ready_region = Some(region_index);
-            }
+            free_space.apply_allocate(region_index, allocation_head_after)?;
         }
         WalRecord::Head {
             collection_id,
@@ -2659,16 +3372,35 @@ pub(crate) fn apply_wal_record<const MAX_COLLECTIONS: usize>(
             }
         }
         WalRecord::FreeRegion {
-            collection_id: _,
             region_index,
+            append_tail_after,
         } => {
             ensure_region_index_in_range(region_index, metadata.region_count)?;
-            if last_free_list_head.is_none() {
-                *last_free_list_head = Some(region_index);
+            if free_queue_position_at_or_before(
+                append_tail_after,
+                free_space.append_tail_position(),
+            ) {
+                return Ok(());
             }
+            free_space.apply_free(region_index, append_tail_after)?;
+        }
+        WalRecord::EraseFreeRegionSpan {
+            count,
+            ready_boundary_after,
+        } => {
+            if free_queue_position_at_or_before(
+                ready_boundary_after,
+                free_space.ready_boundary_position(),
+            ) {
+                return Ok(());
+            }
+            free_space.apply_erase(count, ready_boundary_after)?;
         }
         WalRecord::WalRecovery => {}
-        WalRecord::BeginTransaction { .. }
+        WalRecord::BeginInlineTransaction { .. }
+        | WalRecord::CommitInlineTransaction { .. }
+        | WalRecord::RollbackInlineTransaction { .. }
+        | WalRecord::BeginTransaction { .. }
         | WalRecord::CommitTransaction { .. }
         | WalRecord::TransactionFinished { .. }
         | WalRecord::RollbackTransaction { .. }
@@ -2812,158 +3544,6 @@ fn find_collection_mut<const MAX_COLLECTIONS: usize>(
 ) -> Option<&mut StartupCollection> {
     let index = find_collection(collections.as_slice(), collection_id)?;
     collections.get_mut(index)
-}
-
-fn reconstruct_free_list_tail<IO: FlashIo>(
-    flash: &mut IO,
-    metadata: StorageMetadata,
-    free_list_head: Option<u32>,
-) -> Result<Option<u32>, StartupError> {
-    let Some(mut current_region) = free_list_head else {
-        return Ok(None);
-    };
-
-    let footer_offset =
-        usize::try_from(metadata.region_size).map_err(|_| StartupError::InvalidFreeListChain {
-            region_index: current_region,
-        })? - FreePointerFooter::ENCODED_LEN;
-    for _visited in 0..metadata.region_count {
-        let footer = flash
-            .read_region(
-                current_region,
-                footer_offset,
-                FreePointerFooter::ENCODED_LEN,
-                |bytes| {
-                    FreePointerFooter::decode_with_region_count(
-                        bytes,
-                        metadata.erased_byte,
-                        metadata.region_count,
-                    )
-                },
-            )?
-            .map_err(|_| StartupError::InvalidFreeListChain {
-                region_index: current_region,
-            })?;
-
-        match footer.next_tail {
-            Some(next_region) => current_region = next_region,
-            None => return Ok(Some(current_region)),
-        }
-    }
-
-    Err(StartupError::InvalidFreeListChain {
-        region_index: current_region,
-    })
-}
-
-fn region_is_on_free_list_startup<IO: FlashIo>(
-    flash: &mut IO,
-    metadata: StorageMetadata,
-    free_list_head: Option<u32>,
-    target_region_index: u32,
-) -> Result<bool, StartupError> {
-    let Some(mut current_region) = free_list_head else {
-        return Ok(false);
-    };
-
-    let footer_offset =
-        usize::try_from(metadata.region_size).map_err(|_| StartupError::InvalidFreeListChain {
-            region_index: current_region,
-        })? - FreePointerFooter::ENCODED_LEN;
-    for _visited in 0..metadata.region_count {
-        if current_region == target_region_index {
-            return Ok(true);
-        }
-        let footer = flash
-            .read_region(
-                current_region,
-                footer_offset,
-                FreePointerFooter::ENCODED_LEN,
-                |bytes| {
-                    FreePointerFooter::decode_with_region_count(
-                        bytes,
-                        metadata.erased_byte,
-                        metadata.region_count,
-                    )
-                },
-            )?
-            .map_err(|_| StartupError::InvalidFreeListChain {
-                region_index: current_region,
-            })?;
-
-        match footer.next_tail {
-            Some(next_region) => current_region = next_region,
-            None => return Ok(false),
-        }
-    }
-
-    Err(StartupError::InvalidFreeListChain {
-        region_index: current_region,
-    })
-}
-
-fn discover_free_list_head_from_footers<IO: FlashIo>(
-    flash: &mut IO,
-    metadata: StorageMetadata,
-) -> Result<Option<u32>, StartupError> {
-    for candidate in 0..metadata.region_count {
-        if !region_looks_free(flash, metadata, candidate)? {
-            continue;
-        }
-
-        let mut pointed_to = false;
-        for region_index in 0..metadata.region_count {
-            if region_index == candidate || !region_looks_free(flash, metadata, region_index)? {
-                continue;
-            }
-            if read_free_pointer_successor(flash, metadata, region_index)? == Some(candidate) {
-                pointed_to = true;
-                break;
-            }
-        }
-
-        if !pointed_to {
-            return Ok(Some(candidate));
-        }
-    }
-
-    Ok(None)
-}
-
-fn region_looks_free<IO: FlashIo>(
-    flash: &mut IO,
-    metadata: StorageMetadata,
-    region_index: u32,
-) -> Result<bool, StartupError> {
-    if read_region_header(flash, region_index).is_ok() {
-        return Ok(false);
-    }
-    read_free_pointer_successor(flash, metadata, region_index).map(|_| true)
-}
-
-fn read_free_pointer_successor<IO: FlashIo>(
-    flash: &mut IO,
-    metadata: StorageMetadata,
-    region_index: u32,
-) -> Result<Option<u32>, StartupError> {
-    let footer_offset = usize::try_from(metadata.region_size)
-        .map_err(|_| StartupError::InvalidFreeListChain { region_index })?
-        - FreePointerFooter::ENCODED_LEN;
-    let footer = flash
-        .read_region(
-            region_index,
-            footer_offset,
-            FreePointerFooter::ENCODED_LEN,
-            |bytes| {
-                FreePointerFooter::decode_with_region_count(
-                    bytes,
-                    metadata.erased_byte,
-                    metadata.region_count,
-                )
-            },
-        )?
-        .map_err(|_| StartupError::InvalidFreeListChain { region_index })?;
-    Ok(footer.next_tail)
 }
 
 #[cfg(test)]

@@ -103,18 +103,18 @@ fn todo_startup_uses_storage_context_decode_scratch() {}
 //# operation framework used for normal foreground work.
 #[test]
 fn requirement_blocking_and_future_open_recover_the_same_pending_reclaim_state() {
-    let mut blocking_flash = MockFlash::<512, 6, 2048>::new(0xff);
+    let mut blocking_flash = MockFlash::<512, 10, 2048>::new(0xff);
     let (storage, first_region, second_region) =
         super::super::replace_map_and_free_old_manifest(&mut blocking_flash);
     drop(storage);
     let reopened_blocking =
-        Storage::<_, 512, 6, 8>::open(&mut blocking_flash, crate::test_storage_memory()).unwrap();
+        Storage::<_, 512, 10, 8>::open(&mut blocking_flash, crate::test_storage_memory()).unwrap();
 
-    let mut future_flash = MockFlash::<512, 6, 2048>::new(0xff);
+    let mut future_flash = MockFlash::<512, 10, 2048>::new(0xff);
     let (future_storage, _, _) = super::super::replace_map_and_free_old_manifest(&mut future_flash);
     drop(future_storage);
     let reopened_future = super::super::poll_until_ready(
-        Storage::<_, 512, 6, 8>::open_future(&mut future_flash, crate::test_storage_memory()),
+        Storage::<_, 512, 10, 8>::open_future(&mut future_flash, crate::test_storage_memory()),
         8,
     )
     .unwrap();
@@ -123,18 +123,21 @@ fn requirement_blocking_and_future_open_recover_the_same_pending_reclaim_state()
         reopened_blocking.collections()[0].basis(),
         StartupCollectionBasis::Region(second_region)
     );
-    assert_eq!(reopened_blocking.free_list_tail(), Some(first_region));
+    assert_eq!(
+        reopened_blocking.free_space_tail_region(),
+        Some(first_region)
+    );
 
     assert_eq!(
         reopened_future.collections(),
         reopened_blocking.collections()
     );
     assert_eq!(
-        reopened_future.last_free_list_head(),
-        reopened_blocking.last_free_list_head()
+        reopened_future.ready_free_region(),
+        reopened_blocking.ready_free_region()
     );
     assert_eq!(
-        reopened_future.free_list_tail(),
-        reopened_blocking.free_list_tail()
+        reopened_future.free_space_tail_region(),
+        reopened_blocking.free_space_tail_region()
     );
 }

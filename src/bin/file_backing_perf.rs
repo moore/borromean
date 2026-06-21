@@ -10,10 +10,12 @@ use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use borromean::{
-    encode_wal_region_prefix, AllocationPolicy, FileBacking, FileBackingFileSyncKind,
-    FileBackingOptions, FileBackingScratch, FlashIo, FreePointerFooter, LsmMap, LsmMapMemory,
-    MadvisePolicy, MockError, MockFormatError, Storage, StorageFormatConfig, StorageFormatError,
-    StorageIoError, StorageMemory, StorageMetadata, StoragePerfMetrics,
+    encode_free_space_region_segment, encode_wal_region_prefix_with_cursors,
+    free_queue_position_for_contiguous_metadata, AllocationPolicy, FileBacking,
+    FileBackingFileSyncKind, FileBackingOptions, FileBackingScratch, FlashIo, FreeSpaceCursors,
+    FreeSpaceEntry, FreeSpaceRegionPrologue, Header, LsmMap, LsmMapMemory, MadvisePolicy,
+    MockError, MockFormatError, Storage, StorageFormatConfig, StorageFormatError, StorageIoError,
+    StorageMemory, StorageMetadata, StoragePerfMetrics,
 };
 use fjall::{Database as FjallDatabase, Keyspace as FjallKeyspace, KeyspaceCreateOptions};
 use heapless::Vec as HeaplessVec;
@@ -1102,15 +1104,6 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize> FlashIo
         let region_count =
             u32::try_from(REGION_COUNT).map_err(|_| MockFormatError::RegionCountTooLarge)?;
 
-        if region_count < 2 + min_free_regions {
-            return Err(StorageFormatError::from(
-                MockFormatError::InsufficientRegions {
-                    region_count,
-                    min_free_regions,
-                },
-            ));
-        }
-
         let metadata = StorageMetadata::new(
             region_size,
             region_count,
@@ -1120,6 +1113,75 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize> FlashIo
             wal_record_magic,
         )
         .map_err(|error| StorageFormatError::from(MockFormatError::from(error)))?;
+        let wal_record_area_offset = metadata
+            .wal_record_area_offset()
+            .map_err(|error| StorageFormatError::from(MockFormatError::from(error)))?;
+        let free_space_entries_offset = Header::ENCODED_LEN + FreeSpaceRegionPrologue::ENCODED_LEN;
+        let entries_per_metadata_region = REGION_SIZE
+            .checked_sub(free_space_entries_offset)
+            .ok_or_else(|| {
+                StorageFormatError::from(MockFormatError::RegionSizeTooSmall {
+                    region_size,
+                    min_region_size: u32::try_from(free_space_entries_offset).unwrap_or(u32::MAX),
+                })
+            })?
+            / FreeSpaceEntry::ENCODED_LEN;
+        if entries_per_metadata_region == 0 {
+            return Err(StorageFormatError::from(
+                MockFormatError::RegionSizeTooSmall {
+                    region_size,
+                    min_region_size: u32::try_from(
+                        free_space_entries_offset + FreeSpaceEntry::ENCODED_LEN,
+                    )
+                    .unwrap_or(u32::MAX),
+                },
+            ));
+        }
+        let mut metadata_region_count = 1u32;
+        loop {
+            if region_count <= 1 + metadata_region_count {
+                return Err(StorageFormatError::from(
+                    MockFormatError::InsufficientRegions {
+                        region_count,
+                        min_free_regions,
+                    },
+                ));
+            }
+            let free_space_entry_count = region_count - 1 - metadata_region_count;
+            if free_space_entry_count < min_free_regions {
+                return Err(StorageFormatError::from(
+                    MockFormatError::InsufficientRegions {
+                        region_count,
+                        min_free_regions,
+                    },
+                ));
+            }
+            let capacity = metadata_region_count
+                .checked_mul(
+                    u32::try_from(entries_per_metadata_region).map_err(|_| {
+                        StorageFormatError::from(MockFormatError::RegionCountTooLarge)
+                    })?,
+                )
+                .ok_or_else(|| StorageFormatError::from(MockFormatError::RegionCountTooLarge))?;
+            if capacity >= free_space_entry_count {
+                break;
+            }
+            metadata_region_count = metadata_region_count
+                .checked_add(1)
+                .ok_or_else(|| StorageFormatError::from(MockFormatError::RegionCountTooLarge))?;
+        }
+        let free_space_entry_count = region_count - 1 - metadata_region_count;
+        let min_region_size_usize = StorageMetadata::ENCODED_LEN
+            .max(wal_record_area_offset)
+            .max(free_space_entries_offset + FreeSpaceEntry::ENCODED_LEN);
+        if REGION_SIZE < min_region_size_usize {
+            return Err(StorageFormatError::from(
+                MockFormatError::RegionSizeTooSmall {
+                    region_size,
+                    min_region_size: u32::try_from(min_region_size_usize).unwrap_or(u32::MAX),
+                },
+            ));
+        }
 
         self.write_metadata(metadata).map_err(|error| match error {
             StorageIoError::Mock(error) => StorageFormatError::from(MockFormatError::from(error)),
@@ -1140,9 +1202,32 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize> FlashIo
                 })?;
         }
 
+        let allocation_head = free_queue_position_for_contiguous_metadata(
+            1,
+            metadata_region_count,
+            entries_per_metadata_region,
+            0,
+        )
+        .map_err(|error| StorageFormatError::from(MockFormatError::from(error)))?;
+        let tail = free_queue_position_for_contiguous_metadata(
+            1,
+            metadata_region_count,
+            entries_per_metadata_region,
+            free_space_entry_count,
+        )
+        .map_err(|error| StorageFormatError::from(MockFormatError::from(error)))?;
+        let cursors = FreeSpaceCursors::new(allocation_head, tail, tail);
         let mut prefix = [self.erased_byte; REGION_SIZE];
-        let prefix_len = encode_wal_region_prefix(&mut prefix, metadata, 0, 0)
-            .map_err(|error| StorageFormatError::from(MockFormatError::from(error)))?;
+        let prefix_len = encode_wal_region_prefix_with_cursors(
+            &mut prefix,
+            metadata,
+            0,
+            0,
+            allocation_head,
+            tail,
+            tail,
+        )
+        .map_err(|error| StorageFormatError::from(MockFormatError::from(error)))?;
         self.write_region(0, 0, &prefix[..prefix_len])
             .map_err(|error| match error {
                 StorageIoError::Mock(error) => {
@@ -1153,23 +1238,42 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize> FlashIo
                 StorageIoError::FileBacking(_) => unreachable_storage_format_error(),
             })?;
 
-        let footer_offset = REGION_SIZE
-            .checked_sub(FreePointerFooter::ENCODED_LEN)
-            .ok_or_else(|| {
-                StorageFormatError::from(MockFormatError::from(MockError::OutOfBounds))
-            })?;
-        for region_index in 1..region_count {
-            let next_tail = if region_index + 1 < region_count {
+        let mut free_space_region = [self.erased_byte; REGION_SIZE];
+        let mut entries = [0u32; REGION_COUNT];
+        let entry_count = usize::try_from(free_space_entry_count)
+            .map_err(|_| StorageFormatError::from(MockFormatError::RegionCountTooLarge))?;
+        for (slot, region_index) in entries[..entry_count]
+            .iter_mut()
+            .zip((1 + metadata_region_count)..region_count)
+        {
+            *slot = region_index;
+        }
+        for metadata_region_index in 0..metadata_region_count {
+            free_space_region.fill(self.erased_byte);
+            let region_index = 1 + metadata_region_index;
+            let start = usize::try_from(metadata_region_index)
+                .map_err(|_| StorageFormatError::from(MockFormatError::RegionCountTooLarge))?
+                .checked_mul(entries_per_metadata_region)
+                .ok_or_else(|| StorageFormatError::from(MockFormatError::RegionCountTooLarge))?;
+            let end = start
+                .saturating_add(entries_per_metadata_region)
+                .min(entry_count);
+            let next_metadata_region = if metadata_region_index + 1 < metadata_region_count {
                 Some(region_index + 1)
             } else {
                 None
             };
-            let footer = FreePointerFooter { next_tail };
-            let mut footer_bytes = [0u8; FreePointerFooter::ENCODED_LEN];
-            footer
-                .encode_into(&mut footer_bytes, self.erased_byte)
-                .map_err(|error| StorageFormatError::from(MockFormatError::from(error)))?;
-            self.write_region(region_index, footer_offset, &footer_bytes)
+            let free_space_len = encode_free_space_region_segment(
+                &mut free_space_region,
+                metadata,
+                1,
+                region_index,
+                cursors,
+                next_metadata_region,
+                &entries[start..end],
+            )
+            .map_err(|error| StorageFormatError::from(MockFormatError::from(error)))?;
+            self.write_region(region_index, 0, &free_space_region[..free_space_len])
                 .map_err(|error| match error {
                     StorageIoError::Mock(error) => {
                         StorageFormatError::from(MockFormatError::from(error))
@@ -4161,7 +4265,7 @@ fn print_borromean_core_metrics(metrics: &StoragePerfMetrics) {
         format_nanos(metrics.file_sync_nanos)
     );
     println!(
-        "  borromean wal rotation: attempted={} completed={} total_time={} avg_time={} remaining_min={} remaining_avg={} reserve_avg={} alloc_begin_avg={} link_avg={}",
+        "  borromean wal rotation: attempted={} completed={} total_time={} avg_time={} remaining_min={} remaining_avg={} reserve_avg={} allocate_region_avg={} link_avg={}",
         metrics.wal_rotations_attempted,
         metrics.wal_rotations_completed,
         format_nanos(metrics.wal_rotation_nanos),
@@ -4179,7 +4283,7 @@ fn print_borromean_core_metrics(metrics: &StoragePerfMetrics) {
             metrics.wal_rotations_attempted
         ),
         format_average_bytes(
-            metrics.wal_rotation_alloc_begin_bytes_total,
+            metrics.wal_rotation_allocate_region_bytes_total,
             metrics.wal_rotations_attempted
         ),
         format_average_bytes(

@@ -1,7 +1,7 @@
 //! Durable map collection implementation and storage helpers.
 #![allow(clippy::too_many_arguments)]
 
-use crate::disk::{DiskError, FreePointerFooter, Header};
+use crate::disk::{DiskError, Header};
 use crate::flash_io::{FlashIo, StorageIoError};
 use crate::mock::MockError;
 use crate::startup::StartupOpenPlan;
@@ -1283,9 +1283,7 @@ fn read_committed_region<'a, const REGION_SIZE: usize, IO: FlashIo>(
     })?;
     let header = Header::decode(&region_bytes[..Header::ENCODED_LEN])?;
     let payload_end = usize::try_from(metadata.region_size)
-        .map_err(|_| MapStorageError::Map(MapError::SerializationError))?
-        .checked_sub(FreePointerFooter::ENCODED_LEN)
-        .ok_or(MapStorageError::Map(MapError::SerializationError))?;
+        .map_err(|_| MapStorageError::Map(MapError::SerializationError))?;
     if payload_end > region_bytes.len() {
         return Err(MapStorageError::Map(MapError::SerializationError));
     }
@@ -1423,7 +1421,6 @@ where
 fn committed_payload_capacity<const REGION_SIZE: usize>() -> Result<usize, MapError> {
     REGION_SIZE
         .checked_sub(Header::ENCODED_LEN)
-        .and_then(|remaining| remaining.checked_sub(FreePointerFooter::ENCODED_LEN))
         .ok_or(MapError::SerializationError)
 }
 
@@ -1925,9 +1922,7 @@ where
                     region_index,
                 });
             }
-            let payload_end = REGION_SIZE
-                .checked_sub(FreePointerFooter::ENCODED_LEN)
-                .ok_or(MapStorageError::Map(MapError::SerializationError))?;
+            let payload_end = REGION_SIZE;
             let view = parse_run_segment_payload(&region_bytes[Header::ENCODED_LEN..payload_end])
                 .map_err(|_| MapStorageError::InvalidRun {
                 collection_id,
@@ -2360,9 +2355,7 @@ where
             region_index,
         });
     }
-    let payload_end = REGION_SIZE
-        .checked_sub(FreePointerFooter::ENCODED_LEN)
-        .ok_or(MapStorageError::Map(MapError::SerializationError))?;
+    let payload_end = REGION_SIZE;
     let view = parse_run_segment_payload(&region_bytes[Header::ENCODED_LEN..payload_end]).map_err(
         |_| MapStorageError::InvalidRun {
             collection_id,
@@ -2406,9 +2399,7 @@ fn read_run_segment_next_region<const REGION_SIZE: usize, IO: FlashIo>(
             region_index,
         });
     }
-    let payload_end = REGION_SIZE
-        .checked_sub(FreePointerFooter::ENCODED_LEN)
-        .ok_or(MapStorageError::Map(MapError::SerializationError))?;
+    let payload_end = REGION_SIZE;
     let view = parse_run_segment_payload(&region_bytes[Header::ENCODED_LEN..payload_end]).map_err(
         |_| MapStorageError::InvalidRun {
             collection_id,
@@ -2925,9 +2916,7 @@ where
         key: &K,
         #[cfg(feature = "perf-counters")] mut metrics: Option<&mut StoragePerfMetrics>,
     ) -> Result<LookupResult<V>, MapStorageError> {
-        let payload_end = REGION_SIZE
-            .checked_sub(FreePointerFooter::ENCODED_LEN)
-            .ok_or(MapStorageError::Map(MapError::SerializationError))?;
+        let payload_end = REGION_SIZE;
         let fixed_len = Header::ENCODED_LEN
             .checked_add(RUN_SEGMENT_FIXED_SIZE)
             .ok_or(MapStorageError::Map(MapError::SerializationError))?;
@@ -4253,6 +4242,12 @@ where
         let mut first_region = None;
         let mut region_count = 0u32;
         let mut end_index = entry_count;
+        let owns_transaction = !storage.transaction_open_for(self.id);
+        if owns_transaction {
+            storage.begin_collection_transaction::<REGION_SIZE, REGION_COUNT, IO>(
+                flash, workspace, self.id,
+            )?;
+        }
 
         while end_index > 0 {
             let plan = {
@@ -4295,6 +4290,15 @@ where
                 .checked_add(1)
                 .ok_or(MapError::SerializationError)?;
             end_index = plan.start_index;
+        }
+
+        if owns_transaction {
+            storage.commit_collection_transaction::<REGION_SIZE, REGION_COUNT, IO>(
+                flash, workspace, self.id,
+            )?;
+            storage.finish_collection_transaction::<REGION_SIZE, REGION_COUNT, IO>(
+                flash, workspace, self.id,
+            )?;
         }
 
         Ok(Some(MapRunDescriptor {
@@ -4481,10 +4485,6 @@ where
             CollectionType::MAP_CODE,
             manifest_region,
         )?;
-        storage.commit_collection_transaction::<REGION_SIZE, REGION_COUNT, IO>(
-            flash, workspace, self.id,
-        )?;
-
         if let Some(previous_region) = previous_region {
             storage.append_free_region_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
                 flash,
@@ -4494,6 +4494,9 @@ where
             )?;
         }
         if owns_transaction {
+            storage.commit_collection_transaction::<REGION_SIZE, REGION_COUNT, IO>(
+                flash, workspace, self.id,
+            )?;
             storage.finish_collection_transaction::<REGION_SIZE, REGION_COUNT, IO>(
                 flash, workspace, self.id,
             )?;
@@ -4550,9 +4553,12 @@ where
             open_plan,
             planned_allocations,
         )?;
-        storage.begin_collection_transaction::<REGION_SIZE, REGION_COUNT, IO>(
-            flash, workspace, self.id,
-        )?;
+        let owns_transaction = !storage.transaction_open_for(self.id);
+        if owns_transaction {
+            storage.begin_collection_transaction::<REGION_SIZE, REGION_COUNT, IO>(
+                flash, workspace, self.id,
+            )?;
+        }
 
         let frontier_run = self
             .write_frontier_run_to_storage::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
@@ -4602,10 +4608,6 @@ where
             CollectionType::MAP_CODE,
             manifest_region,
         )?;
-        storage.commit_collection_transaction::<REGION_SIZE, REGION_COUNT, IO>(
-            flash, workspace, self.id,
-        )?;
-
         if let Some(previous_region) = previous_region {
             storage.append_free_region_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
                 flash,
@@ -4614,9 +4616,14 @@ where
                 previous_region,
             )?;
         }
-        storage.finish_collection_transaction::<REGION_SIZE, REGION_COUNT, IO>(
-            flash, workspace, self.id,
-        )?;
+        if owns_transaction {
+            storage.commit_collection_transaction::<REGION_SIZE, REGION_COUNT, IO>(
+                flash, workspace, self.id,
+            )?;
+            storage.finish_collection_transaction::<REGION_SIZE, REGION_COUNT, IO>(
+                flash, workspace, self.id,
+            )?;
+        }
 
         if let Some(run) = frontier_run {
             self.runs

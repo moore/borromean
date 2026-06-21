@@ -20,8 +20,9 @@ fn encode_logical(record: WalRecord<'_>) -> ([u8; 128], usize) {
 
 //= spec/ring/04-wal-records.md#encoding-helper-requirements
 //= type=test
-//# `RING-IMPL-REGRESSION-123` WAL byte helpers MUST advance offsets for byte and byte-slice reads
-//# and writes and report BufferTooSmall with needed and available sizes on short buffers.
+//# `RING-IMPL-REGRESSION-123` WAL byte helpers MUST advance offsets for byte and byte-slice
+//# reads and writes and report `BufferTooSmall` with needed and available sizes on short
+//# buffers.
 #[test]
 fn requirement_wal_byte_helpers_advance_offsets_and_reject_short_buffers() {
     let mut buffer = [0u8; 4];
@@ -203,15 +204,12 @@ fn requirement_decode_record_rejects_empty_logical_scratch_before_writing_first_
 
 //= spec/ring/05-disk-format.md#canonical-on-disk-encoding
 //= type=test
-//# `RING-DISK-002` The canonical scalar widths are:
-//# `region_index: u32`, `region_size: u32`, `region_count: u32`,
-//# `min_free_regions: u32`, `transaction_log_count: u32`,
-//# `transaction_log_id: u32`, `offset: u32`,
-//# `wal_write_granule: u32`, `collection_id: u64`, `sequence: u64`,
-//# `allocation_sequence: u64`, `observed_collection_generation: u64`,
-//# `payload_len: u32`, `collection_type: u16`,
-//# `collection_format: u16`, `erased_byte: u8`, and
-//# `wal_record_magic: u8`.
+//# `RING-DISK-002` The canonical scalar widths are: `region_index: u32`, `region_size:
+//# u32`, `region_count: u32`, `min_free_regions: u32`, `transaction_log_count: u32`,
+//# `transaction_log_id: u32`, `offset: u32`, `wal_write_granule: u32`, `collection_id:
+//# u64`, `sequence: u64`, `free_queue_position_entry_index: u32`, `free_space_entry_count:
+//# u32`, `observed_collection_generation: u64`, `payload_len: u32`, `collection_type: u16`,
+//# `collection_format: u16`, `erased_byte: u8`, and `wal_record_magic: u8`.
 #[test]
 fn requirement_canonical_scalar_widths_match_storage_header_and_wal_field_sizes() {
     let metadata = metadata(16);
@@ -342,43 +340,39 @@ fn requirement_logical_wal_records_encode_fixed_width_fields_little_endian() {
 
 //= spec/ring/05-disk-format.md#canonical-on-disk-encoding
 //= type=test
-//# `RING-DISK-005` Optional region indexes carried inside logical WAL
-//# records MUST be encoded as `OptRegionIndex`, a one-byte tag followed,
-//# when the tag is `1`, by a `u32 region_index`.
+//# `RING-DISK-001` All fixed-width integer fields in
+//# `StorageMetadata`, `Header`, `LogRegionPrologue`,
+//# `FreeSpaceRegionPrologue`, `FreeQueuePosition`,
 #[test]
-fn requirement_optional_region_indexes_use_a_tag_then_little_endian_region_index() {
-    let (alloc_begin_none, alloc_begin_none_len) = encode_logical(WalRecord::AllocBegin {
-        collection_id: CollectionId(7),
+fn requirement_free_queue_positions_use_little_endian_region_and_entry_indexes() {
+    let (allocate_region, allocate_region_len) = encode_logical(WalRecord::AllocateRegion {
         region_index: 3,
-        allocation_sequence: 0,
-        free_list_head_after: None,
+        allocation_head_after: FreeQueuePosition {
+            region_index: 1,
+            entry_index: 7,
+        },
     });
-    let opt_offset = 1 + size_of::<u64>() + 2 * size_of::<u32>() + size_of::<u64>();
+    let payload_offset = 1 + size_of::<u32>();
     assert_eq!(
-        &alloc_begin_none[1 + size_of::<u64>()..1 + size_of::<u64>() + size_of::<u32>()],
-        &((size_of::<u32>() + size_of::<u64>()) as u32).to_le_bytes()
-    );
-    assert_eq!(alloc_begin_none[opt_offset], 0);
-    assert_eq!(
-        alloc_begin_none_len,
-        1 + 2 * size_of::<u64>() + 3 * size_of::<u32>() + size_of::<u8>()
-    );
-
-    let (alloc_begin_some, alloc_begin_some_len) = encode_logical(WalRecord::AllocBegin {
-        collection_id: CollectionId(7),
-        region_index: 3,
-        allocation_sequence: 0,
-        free_list_head_after: Some(0x1122_3344),
-    });
-    assert_eq!(alloc_begin_some[opt_offset], 1);
-    assert_eq!(
-        &alloc_begin_some
-            [opt_offset + size_of::<u8>()..opt_offset + size_of::<u8>() + size_of::<u32>()],
-        0x1122_3344u32.to_le_bytes().as_slice()
+        &allocate_region[1..payload_offset],
+        &((size_of::<u32>() + FreeQueuePosition::ENCODED_LEN) as u32).to_le_bytes()
     );
     assert_eq!(
-        alloc_begin_some_len,
-        1 + 2 * size_of::<u64>() + 4 * size_of::<u32>() + size_of::<u8>()
+        &allocate_region[payload_offset..payload_offset + size_of::<u32>()],
+        3u32.to_le_bytes().as_slice()
+    );
+    assert_eq!(
+        &allocate_region[payload_offset + size_of::<u32>()..payload_offset + 2 * size_of::<u32>()],
+        1u32.to_le_bytes().as_slice()
+    );
+    assert_eq!(
+        &allocate_region
+            [payload_offset + 2 * size_of::<u32>()..payload_offset + 3 * size_of::<u32>()],
+        7u32.to_le_bytes().as_slice()
+    );
+    assert_eq!(
+        allocate_region_len,
+        1 + 3 * size_of::<u32>() + FreeQueuePosition::ENCODED_LEN
     );
 }
 
@@ -455,8 +449,12 @@ fn requirement_record_checksums_cover_prior_logical_bytes_but_exclude_checksum_a
 
 //= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
-//# RING-WAL-ENC-003 After the leading `record_magic`, the rest of the physical WAL record is
-//# encoded with deterministic byte-stuffing over the logical WAL record bytes:
+//# `RING-WAL-ENC-003` After the leading `record_magic`, the rest of the physical WAL record
+//# is encoded with deterministic byte-stuffing over the logical WAL record bytes: for a
+//# logical byte equal to `erased_byte`, emit `wal_escape_byte wal_escape_code_erased`; for
+//# a logical byte equal to `wal_record_magic`, emit `wal_escape_byte
+//# wal_escape_code_magic`; for a logical byte equal to `wal_escape_byte`, emit
+//# `wal_escape_byte wal_escape_code_escape`; all other logical bytes are emitted unchanged.
 #[test]
 fn requirement_escape_codes_use_first_ascending_distinct_values() {
     let escape_codes = WalEscapeCodes::derive(0x00, 0x02);
@@ -485,8 +483,7 @@ fn requirement_encoded_record_begins_with_record_magic() {
 //= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
 //# `RING-WAL-ENC-002` `record_magic` MUST equal the storage's configured
-//# `wal_record_magic`, and `wal_record_magic` must not equal
-//# `erased_byte`, the byte value returned by erased flash.
+//# `wal_record_magic`, and `wal_record_magic` must not equal `erased_byte`.
 #[test]
 fn requirement_wal_record_magic_must_match_storage_configuration_and_differ_from_erased_byte() {
     let error = StorageMetadata::new(128, 8, 1, 16, 0xff, 0xff).unwrap_err();
@@ -510,9 +507,9 @@ fn requirement_wal_record_magic_must_match_storage_configuration_and_differ_from
 
 //= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
-//# RING-WAL-ENC-006 After the full logical record through `record_checksum` has been decoded, any
-//# remaining bytes up to the aligned physical record end are padding. Those padding bytes MUST all
-//# equal `wal_escape_code_escape`.
+//# `RING-WAL-ENC-006` After the full logical record through `record_checksum` has been
+//# decoded, any remaining bytes up to the aligned physical record end are padding. Those
+//# padding bytes MUST all equal `wal_escape_code_escape`.
 #[test]
 fn requirement_decode_rejects_non_escape_padding_bytes() {
     let metadata = metadata(16);
@@ -549,9 +546,8 @@ fn requirement_encoded_record_len_is_rounded_to_wal_write_granule() {
 
 //= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
-//# `RING-WAL-ENC-007` Every WAL record start offset within a private
-//# log region MUST be aligned to
-//# `wal_write_granule`, the smallest writable unit of the backing flash.
+//# `RING-WAL-ENC-007` Every WAL record start offset within a private log region MUST be
+//# aligned to `wal_write_granule`.
 #[test]
 fn requirement_consecutive_wal_record_start_offsets_stay_aligned_to_wal_write_granule() {
     let metadata = metadata(16);
@@ -559,8 +555,11 @@ fn requirement_consecutive_wal_record_start_offsets_stay_aligned_to_wal_write_gr
     let (_first_physical, first_len) = encode_physical(WalRecord::WalRecovery, metadata);
     let (_second_physical, second_len) = encode_physical(
         WalRecord::FreeRegion {
-            collection_id: CollectionId(7),
             region_index: 3,
+            append_tail_after: FreeQueuePosition {
+                region_index: 1,
+                entry_index: 1,
+            },
         },
         metadata,
     );
@@ -699,27 +698,34 @@ fn requirement_decode_rejects_invalid_escape_sequence() {
 //# `new_collection = 0x01`,
 //# `update = 0x02`,
 //# `snapshot = 0x03`,
-//# `alloc_begin = 0x04`,
+//# `allocate_region = 0x04`,
 //# `head = 0x05`,
 //# `drop_collection = 0x06`,
 //# `link = 0x07`,
+//# `erase_free_region_span = 0x08`,
+//# `begin_inline_transaction = 0x09`,
+//# `commit_inline_transaction = 0x0a`,
 //# `wal_recovery = 0x0b`,
 //# `free_region = 0x0c`,
 //# `begin_transaction = 0x0d`,
 //# `commit_transaction = 0x0e`,
 //# `transaction_finished = 0x0f`,
 //# `rollback_transaction = 0x10`,
-//# `add_transaction_collection = 0x11`.
+//# `add_transaction_collection = 0x11`,
+//# `rollback_inline_transaction = 0x12`.
 #[test]
 fn requirement_record_types_use_canonical_byte_codes() {
     let canonical_codes = [
         (WalRecordType::NewCollection, 0x01),
         (WalRecordType::Update, 0x02),
         (WalRecordType::Snapshot, 0x03),
-        (WalRecordType::AllocBegin, 0x04),
+        (WalRecordType::AllocateRegion, 0x04),
         (WalRecordType::Head, 0x05),
         (WalRecordType::DropCollection, 0x06),
         (WalRecordType::Link, 0x07),
+        (WalRecordType::EraseFreeRegionSpan, 0x08),
+        (WalRecordType::BeginInlineTransaction, 0x09),
+        (WalRecordType::CommitInlineTransaction, 0x0a),
         (WalRecordType::WalRecovery, 0x0b),
         (WalRecordType::FreeRegion, 0x0c),
         (WalRecordType::BeginTransaction, 0x0d),
@@ -727,6 +733,7 @@ fn requirement_record_types_use_canonical_byte_codes() {
         (WalRecordType::TransactionFinished, 0x0f),
         (WalRecordType::RollbackTransaction, 0x10),
         (WalRecordType::AddTransactionCollection, 0x11),
+        (WalRecordType::RollbackInlineTransaction, 0x12),
     ];
 
     for (record_type, code) in canonical_codes {
@@ -734,12 +741,10 @@ fn requirement_record_types_use_canonical_byte_codes() {
         assert_eq!(WalRecordType::decode(code).unwrap(), record_type);
     }
 
-    for removed_code in [0x08, 0x09, 0x0a] {
-        assert_eq!(
-            WalRecordType::decode(removed_code),
-            Err(WalRecordError::InvalidRecordType(removed_code))
-        );
-    }
+    assert_eq!(
+        WalRecordType::decode(0x13),
+        Err(WalRecordError::InvalidRecordType(0x13))
+    );
 }
 
 //= spec/ring/04-wal-records.md#wal-record-types
@@ -792,24 +797,26 @@ fn requirement_logical_record_fields_follow_canonical_order() {
 //# payload bytes only.
 #[test]
 fn requirement_payload_len_counts_only_logical_payload_bytes() {
-    let (alloc_begin_logical, _alloc_begin_len) = encode_logical(WalRecord::AllocBegin {
-        collection_id: CollectionId(7),
-        region_index: 3,
-        allocation_sequence: 0,
-        free_list_head_after: Some(4),
-    });
+    let (allocate_region_logical, _allocate_region_len) =
+        encode_logical(WalRecord::AllocateRegion {
+            region_index: 3,
+            allocation_head_after: FreeQueuePosition {
+                region_index: 1,
+                entry_index: 1,
+            },
+        });
 
     assert_eq!(
-        &alloc_begin_logical[1 + size_of::<u64>()..1 + size_of::<u64>() + size_of::<u32>()],
-        &((size_of::<u32>() + size_of::<u64>()) as u32).to_le_bytes()
+        &allocate_region_logical[1..1 + size_of::<u32>()],
+        &((size_of::<u32>() + FreeQueuePosition::ENCODED_LEN) as u32).to_le_bytes()
     );
 }
 
 //= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
-//# It MUST exclude omitted optional fields,
-//# `record_checksum`, the physical leading `record_magic`, and any
-//# physical padding.
+//# `RING-WAL-LAYOUT-003` `payload_len` MUST equal the number of
+//# logical payload bytes only. It MUST exclude `record_checksum`, the
+//# physical leading `record_magic`, and physical padding.
 #[test]
 fn requirement_payload_len_excludes_omitted_fields_checksum_magic_and_padding() {
     let metadata = metadata(16);
@@ -824,9 +831,8 @@ fn requirement_payload_len_excludes_omitted_fields_checksum_magic_and_padding() 
 
 //= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
-//# `RING-WAL-LAYOUT-004` `record_checksum` MUST be CRC-32C over the
-//# logical WAL record bytes from `record_type` through the final byte of
-//# the last field preceding `record_checksum`.
+//# `RING-WAL-LAYOUT-004` `record_checksum` MUST be CRC-32C over the logical WAL record
+//# bytes from `record_type` through the final byte of the payload.
 #[test]
 fn requirement_record_checksum_covers_logical_prefix_bytes() {
     let payload = [0xaa, 0xbb];
@@ -845,16 +851,17 @@ fn requirement_record_checksum_covers_logical_prefix_bytes() {
 
 //= spec/ring/04-wal-records.md#encoding-helper-requirements
 //= type=test
-//# `RING-IMPL-REGRESSION-132` Alloc-begin WAL records MUST round-trip allocation_sequence and
-//# free_list_head_after through physical encoding and decoding.
+//# `RING-IMPL-REGRESSION-132` Allocator WAL records MUST round-trip `region_index` plus
+//# `FreeQueuePosition` payload fields through physical encoding and decoding.
 #[test]
-fn requirement_alloc_begin_round_trips_free_list_head_after() {
+fn requirement_allocate_region_round_trips_allocation_head_after() {
     let metadata = metadata(4);
-    let record = WalRecord::AllocBegin {
-        collection_id: CollectionId(7),
+    let record = WalRecord::AllocateRegion {
         region_index: 3,
-        allocation_sequence: 0,
-        free_list_head_after: Some(4),
+        allocation_head_after: FreeQueuePosition {
+            region_index: 1,
+            entry_index: 1,
+        },
     };
     let (physical, encoded_len) = encode_physical(record, metadata);
     let mut decode_scratch = [0u8; 128];
@@ -864,17 +871,29 @@ fn requirement_alloc_begin_round_trips_free_list_head_after() {
 
 //= spec/ring/04-wal-records.md#wal-record-types
 //= type=test
-//# `RING-WAL-LAYOUT-006` Payload bytes are encoded canonically by record
-//# type:
-//# `update` and `snapshot` payloads are opaque collection-defined bytes;
-//# `alloc_begin`, `head`, and `free_region` payloads are a single
-//# `u32 region_index`;
+//# `RING-WAL-LAYOUT-006` Payload bytes are encoded canonically by record type: `update` and
+//# `snapshot` payloads are opaque collection-defined bytes; `head` payload is
+//# `region_index:u32`; `allocate_region` payload is `region_index:u32,
+//# allocation_head_after:FreeQueuePosition`; `free_region` payload is `region_index:u32,
+//# append_tail_after:FreeQueuePosition`; `erase_free_region_span` payload is `count:u32,
+//# ready_boundary_after:FreeQueuePosition`; `link` payload is `next_region_index:u32`
+//# followed by `expected_sequence:u64`; `begin_inline_transaction` payload is
+//# `record_count:u32, encoded_len:u32`; `commit_inline_transaction` and
+//# `rollback_inline_transaction` payloads are `record_count:u32`; `begin_transaction`
+//# payload is `transaction_log_id:u32, start:LogPosition`; `commit_transaction`,
+//# `transaction_finished`, and `rollback_transaction` payloads are `transaction_log_id:u32,
+//# range:TransactionLogRange`; `add_transaction_collection` payload is
+//# `observed_collection_generation:u64`; `new_collection`, `drop_collection`, and
+//# `wal_recovery` payloads are empty.
 #[test]
 fn requirement_free_region_round_trips_region_index() {
     let metadata = metadata(4);
     let record = WalRecord::FreeRegion {
-        collection_id: CollectionId(7),
         region_index: 3,
+        append_tail_after: FreeQueuePosition {
+            region_index: 1,
+            entry_index: 1,
+        },
     };
     let (physical, encoded_len) = encode_physical(record, metadata);
     let mut decode_scratch = [0u8; 128];

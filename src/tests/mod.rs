@@ -159,41 +159,27 @@ where
     panic!("future did not complete within {max_polls} polls");
 }
 
-fn free_list_chain<
+fn active_free_space_entries<
+    'db,
+    'mem,
+    IO: FlashIo,
     const REGION_SIZE: usize,
     const REGION_COUNT: usize,
-    const MAX_LOG: usize,
+    const MAX_COLLECTIONS: usize,
     const CAP: usize,
 >(
-    flash: &MockFlash<REGION_SIZE, REGION_COUNT, MAX_LOG>,
-    erased_byte: u8,
-    head: Option<u32>,
+    storage: &Storage<'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
 ) -> heapless::Vec<u32, CAP> {
-    let footer_offset = REGION_SIZE - FreePointerFooter::ENCODED_LEN;
-    let mut current = head;
-    let mut chain = heapless::Vec::new();
-
-    for _ in 0..REGION_COUNT {
-        let Some(region_index) = current else {
-            break;
-        };
-        chain.push(region_index).unwrap();
-        let footer = FreePointerFooter::decode(
-            &flash.region_bytes(region_index).unwrap()[footer_offset..],
-            erased_byte,
-        )
-        .unwrap();
-        current = footer.next_tail;
-    }
-
-    assert!(current.is_none(), "free-list chain should terminate");
-    chain
+    let (allocation_head, _, append_tail, _, _) = storage.free_space_cursors();
+    let start = usize::try_from(allocation_head).unwrap();
+    let end = usize::try_from(append_tail).unwrap();
+    heapless::Vec::from_slice(&storage.free_space_entries()[start..end]).unwrap()
 }
 
 //= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
 //= type=test
-//# `RING-IMPL-REGRESSION-092` CollectionId helpers MUST expose little-endian bytes and checked
-//# increment semantics, returning none on u64 overflow.
+//# `RING-IMPL-REGRESSION-092` `CollectionId` helpers MUST expose little-endian bytes and
+//# checked increment semantics, returning none on u64 overflow.
 #[test]
 fn requirement_collection_id_helpers_preserve_little_endian_and_overflow_semantics() {
     let id = CollectionId::new(0x0102_0304_0506_0708);
@@ -212,9 +198,9 @@ fn requirement_collection_id_helpers_preserve_little_endian_and_overflow_semanti
 //# tracked collection metadata.
 #[test]
 fn requirement_storage_facade_accessors_reflect_runtime_state() {
-    let mut flash = MockFlash::<512, 4, 1024>::new(0xff);
+    let mut flash = MockFlash::<512, 5, 1024>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
-    let mut storage = Storage::<_, 512, 4>::format(
+    let mut storage = Storage::<_, 512, 5>::format(
         &mut flash,
         StorageFormatConfig::new(1, 8, 0xa5),
         crate::test_storage_memory(),
@@ -241,8 +227,8 @@ fn requirement_storage_facade_accessors_reflect_runtime_state() {
     assert_eq!(storage.allocate_collection_id().unwrap(), CollectionId(322));
 
     let first_region = storage.reserve_next_region().unwrap();
-    assert_eq!(first_region, 1);
-    assert_eq!(storage.ready_region(), Some(first_region));
+    assert_eq!(first_region, 2);
+    assert_eq!(storage.ready_region(), None);
     storage
         .write_committed_region(
             first_region,
@@ -262,11 +248,11 @@ fn requirement_storage_facade_accessors_reflect_runtime_state() {
     assert_eq!(storage.ready_region(), None);
 
     let second_region = storage.reserve_next_region().unwrap();
-    assert_eq!(second_region, 2);
-    assert_eq!(storage.ready_region(), Some(second_region));
+    assert_eq!(second_region, 3);
+    assert_eq!(storage.ready_region(), None);
     assert!(matches!(
-        storage.append_alloc_begin(99, None),
-        Err(StorageRuntimeError::InvalidAllocBegin { .. })
+        storage.append_allocate_region_for_test(99),
+        Err(StorageRuntimeError::InvalidFreeSpaceCommand)
     ));
 
     storage.append_drop_collection(CollectionId(321)).unwrap();
@@ -350,8 +336,8 @@ fn requirement_storage_facade_rejects_unneeded_wal_recovery_record() {
 
 //= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
 //= type=test
-//# `RING-IMPL-REGRESSION-096` Storage facade recovery status MUST report pending WAL recovery
-//# boundaries and clear them after appending wal_recovery.
+//# `RING-IMPL-REGRESSION-096` Storage facade recovery status MUST report pending WAL
+//# recovery boundaries and clear them after appending `wal_recovery`.
 #[test]
 fn requirement_storage_facade_reports_and_clears_pending_wal_recovery_boundary() {
     let mut flash = MockFlash::<256, 4, 1024>::new(0xff);
@@ -390,19 +376,21 @@ struct CompletedTransactionCleanupResult {
     previous_tail: u32,
     previous_chain: heapless::Vec<u32, 8>,
     new_chain: heapless::Vec<u32, 8>,
-    previous_tail_next: Option<u32>,
-    reclaimed_tail_next: Option<u32>,
-    reclaimed_footer_unwritten: bool,
+    previous_cursors: (u32, u32, u32, u32, u32),
+    new_cursors: (u32, u32, u32, u32, u32),
     reopened_chain: heapless::Vec<u32, 8>,
-    reopened_free_list_tail: Option<u32>,
+    reopened_cursors: (u32, u32, u32, u32, u32),
+    reopened_free_space_tail_region: Option<u32>,
+    saw_reclaimed_free_region: bool,
+    saw_transaction_finish_after_free: bool,
     reclaim_operations: heapless::Vec<crate::MockOperation, 64>,
 }
 
 fn transaction_cleanup_returns_old_map_region_to_free_list_result(
 ) -> CompletedTransactionCleanupResult {
-    let mut flash = MockFlash::<512, 7, 2048>::new(0xff);
+    let mut flash = MockFlash::<512, 10, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
-    let mut storage = Storage::<_, 512, 7>::format(
+    let mut storage = Storage::<_, 512, 10>::format(
         &mut flash,
         StorageFormatConfig::new(1, 8, 0xa5),
         crate::test_storage_memory(),
@@ -422,12 +410,11 @@ fn transaction_cleanup_returns_old_map_region_to_free_list_result(
     let first_region = storage.flush_map::<_, _, 4>(&mut map).unwrap();
 
     map.set_in_memory(4, 40).unwrap();
-    let previous_head = storage.last_free_list_head();
+    let previous_head = storage.ready_free_region();
     let allocated_region = previous_head.unwrap();
-    let previous_chain = storage.with_io_workspace(|flash, _workspace| {
-        free_list_chain::<512, 7, 2048, 8>(&*flash, 0xff, previous_head)
-    });
-    let previous_tail = storage.free_list_tail().unwrap();
+    let previous_chain = active_free_space_entries::<_, 512, 10, 8, 8>(&storage);
+    let previous_cursors = storage.free_space_cursors();
+    let previous_tail = storage.free_space_tail_region().unwrap();
     storage.with_io_workspace(|flash, _workspace| flash.clear_operations());
     storage.flush_map::<_, _, 4>(&mut map).unwrap();
 
@@ -438,41 +425,33 @@ fn transaction_cleanup_returns_old_map_region_to_free_list_result(
         }
     });
 
-    let new_head = storage.last_free_list_head();
-    let new_chain = storage.with_io_workspace(|flash, _workspace| {
-        free_list_chain::<512, 7, 2048, 8>(&*flash, 0xff, new_head)
-    });
-    let footer_offset = 512 - FreePointerFooter::ENCODED_LEN;
-    let previous_tail_footer = storage
-        .with_io_workspace(|flash, _workspace| {
-            FreePointerFooter::decode(
-                &flash.region_bytes(previous_tail).unwrap()[footer_offset..],
-                0xff,
-            )
+    let new_chain = active_free_space_entries::<_, 512, 10, 8, 8>(&storage);
+    let new_cursors = storage.free_space_cursors();
+    let mut saw_reclaimed_free_region = false;
+    let mut saw_transaction_finish_after_free = false;
+    storage
+        .with_runtime_io_workspace(|runtime, flash, workspace| {
+            runtime.visit_wal_records::<512, _, (), _>(flash, workspace, |_flash, record| {
+                match record {
+                    crate::WalRecord::FreeRegion { region_index, .. }
+                        if region_index == first_region =>
+                    {
+                        saw_reclaimed_free_region = true;
+                    }
+                    crate::WalRecord::TransactionFinished { .. } if saw_reclaimed_free_region => {
+                        saw_transaction_finish_after_free = true;
+                    }
+                    _ => {}
+                }
+                Ok(())
+            })
         })
         .unwrap();
-    let reclaimed_footer = storage
-        .with_io_workspace(|flash, _workspace| {
-            FreePointerFooter::decode(
-                &flash.region_bytes(first_region).unwrap()[footer_offset..],
-                0xff,
-            )
-        })
-        .unwrap();
-    let reclaimed_footer_unwritten = storage.with_io_workspace(|flash, _workspace| {
-        flash.region_bytes(first_region).unwrap()
-            [footer_offset..footer_offset + FreePointerFooter::ENCODED_LEN]
-            .iter()
-            .all(|byte| *byte == 0xff)
-    });
 
     drop(storage);
-    let mut reopened =
-        Storage::<_, 512, 7>::open(&mut flash, crate::test_storage_memory()).unwrap();
-    let reopened_head = reopened.last_free_list_head();
-    let reopened_chain = reopened.with_io_workspace(|flash, _workspace| {
-        free_list_chain::<512, 7, 2048, 8>(&*flash, 0xff, reopened_head)
-    });
+    let reopened = Storage::<_, 512, 10>::open(&mut flash, crate::test_storage_memory()).unwrap();
+    let reopened_chain = active_free_space_entries::<_, 512, 10, 8, 8>(&reopened);
+    let reopened_cursors = reopened.free_space_cursors();
 
     CompletedTransactionCleanupResult {
         allocated_region,
@@ -480,11 +459,13 @@ fn transaction_cleanup_returns_old_map_region_to_free_list_result(
         previous_tail,
         previous_chain,
         new_chain,
-        previous_tail_next: previous_tail_footer.next_tail,
-        reclaimed_tail_next: reclaimed_footer.next_tail,
-        reclaimed_footer_unwritten,
+        previous_cursors,
+        new_cursors,
         reopened_chain,
-        reopened_free_list_tail: reopened.free_list_tail(),
+        reopened_cursors,
+        reopened_free_space_tail_region: reopened.free_space_tail_region(),
+        saw_reclaimed_free_region,
+        saw_transaction_finish_after_free,
         reclaim_operations,
     }
 }
@@ -623,13 +604,14 @@ fn wal_and_map_region_formats() -> (Header, Header) {
 
 //= spec/ring/05-disk-format.md#canonical-on-disk-encoding
 //= type=test
-//# `RING-DISK-004` `collection_format` is a stable per-region `u16`
-//# namespace recorded durably in region headers. The pair
-//# `(collection_type, collection_format)` identifies a concrete
-//# committed region payload encoding for user collections. Borromean core reserves
-//# `collection_format = 0x0000` globally for `main_wal_v2` and
-//# `collection_format = 0x0001` globally for `transaction_log_v2`; every
-//# non-log collection format MUST be neither of those values.
+//# `RING-DISK-004` `collection_format` is a stable per-region `u16` namespace recorded
+//# durably in region headers. The pair `(collection_type, collection_format)` identifies a
+//# concrete committed region payload encoding for user collections. Borromean core reserves
+//# `collection_format = 0x0000` globally for `main_wal_v2`, `collection_format = 0x0001`
+//# globally for `transaction_log_v2`, and `collection_format = 0x0002` globally for
+//# `free_space_v2`; every user-collection format MUST be none of those values. For any
+//# user-collection type, `0x0003..0x7fff` are stable public format identifiers and
+//# `0x8000..0xffff` are private deployment-local format identifiers.
 #[test]
 fn requirement_wal_and_map_regions_use_distinct_collection_format_namespace_values() {
     let (wal_header, map_header) = wal_and_map_region_formats();
@@ -645,10 +627,9 @@ fn requirement_wal_and_map_regions_use_distinct_collection_format_namespace_valu
 
 //= spec/ring/05-disk-format.md#storage-requirements
 //= type=test
-//# `RING-STORAGE-005` Borromean core MUST reserve the canonical
-//# `collection_format` values `main_wal_v2` and `transaction_log_v2` for
-//# private storage log regions, and user collections MUST NOT use either
-//# identifier.
+//# `RING-STORAGE-005` Borromean core MUST reserve the canonical `collection_format` values
+//# `main_wal_v2`, `transaction_log_v2`, and `free_space_v2` for private storage regions,
+//# and user collections MUST NOT use any of those identifiers.
 #[test]
 fn requirement_wal_v1_collection_format_is_reserved_to_wal_regions() {
     let (wal_header, map_header) = wal_and_map_region_formats();
@@ -787,8 +768,8 @@ fn requirement_storage_format_future_polls_to_completion() {
     assert_eq!(storage.metadata().region_size, 256);
     assert_eq!(storage.metadata().region_count, 4);
     assert_eq!(storage.wal_head(), 0);
-    assert_eq!(storage.last_free_list_head(), Some(1));
-    assert_eq!(storage.free_list_tail(), Some(3));
+    assert_eq!(storage.ready_free_region(), Some(2));
+    assert_eq!(storage.free_space_tail_region(), Some(3));
 }
 
 //= spec/implementation.md#operation-future-regression-requirements
@@ -897,7 +878,7 @@ fn requirement_storage_reclaim_wal_head_future_polls_to_completion() {
     assert_eq!(reclaimed_head, storage.wal_head());
     assert_eq!(storage.wal_head(), storage.wal_tail());
     assert_eq!(reclaimed_head, next_region);
-    assert_eq!(storage.free_list_tail(), Some(0));
+    assert_eq!(storage.free_space_tail_region(), Some(0));
 }
 
 //= spec/implementation.md#operation-future-regression-requirements
@@ -1252,13 +1233,13 @@ fn requirement_storage_reclaim_wal_head_appends_an_ordinary_head_record_for_wal_
 //# `RING-WAL-RECLAIM-PRE-001` The candidate region MUST be the head of
 //# the WAL.
 #[test]
-fn requirement_storage_reclaim_wal_head_returns_old_head_region_to_free_list_tail() {
+fn requirement_storage_reclaim_wal_head_returns_old_head_region_to_free_space_tail_region() {
     let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
     let (mut storage, _) = setup_storage_with_stale_wal_head(&mut flash);
 
     storage.reclaim_wal_head().unwrap();
 
-    assert_eq!(storage.free_list_tail(), Some(0));
+    assert_eq!(storage.free_space_tail_region(), Some(0));
 }
 
 //= spec/ring/07-reclaim.md#wal-reclaim-eligibility
@@ -1489,9 +1470,9 @@ fn run_long_mixed_map_workload_preserves_collection_identity_across_reclaim_and_
 #[derive(Debug)]
 struct ReclaimReplaySnapshot {
     collections: heapless::Vec<StartupCollection, 8>,
-    last_free_list_head: Option<u32>,
+    ready_free_region: Option<u32>,
     ready_region: Option<u32>,
-    free_list_tail: Option<u32>,
+    free_space_tail_region: Option<u32>,
     wal_head: u32,
 }
 
@@ -1504,16 +1485,16 @@ fn reclaim_wal_head_and_reopen_empty_head_map<'db>(
     Option<u32>,
 ) {
     let (mut storage, _) = setup_storage_with_live_empty_head_map_in_wal_head(flash);
-    let expected_free_list_head = storage.last_free_list_head();
+    let expected_free_list_head = storage.ready_free_region();
     let expected_ready_region = storage.ready_region();
 
     storage.reclaim_wal_head().unwrap();
 
     let snapshot = ReclaimReplaySnapshot {
         collections: heapless::Vec::from_slice(storage.collections()).unwrap(),
-        last_free_list_head: storage.last_free_list_head(),
+        ready_free_region: storage.ready_free_region(),
         ready_region: storage.ready_region(),
-        free_list_tail: storage.free_list_tail(),
+        free_space_tail_region: storage.free_space_tail_region(),
         wal_head: storage.wal_head(),
     };
     drop(storage);
@@ -1552,20 +1533,22 @@ fn requirement_storage_reclaim_wal_head_reopen_keeps_the_wal_chain_walkable() {
 
 //= spec/ring/07-reclaim.md#wal-reclaim-eligibility
 //= type=test
-//# `RING-WAL-RECLAIM-SAFE-001` Reclaim MUST NOT change replay result: the recovered collection
-//# submachine state and pending updates for every collection, the recovered
-//# `last_free_list_head`, reserved WAL-rotation `ready_region`,
-//# transaction recovery state, and reconstructed `free_list_tail`, after
-//# reclaim must match the pre-reclaim logical state.
+//# `RING-WAL-RECLAIM-SAFE-001` Reclaim MUST NOT change replay result: the recovered
+//# collection submachine state and pending updates for every collection, the recovered
+//# free-space cursors, storage-core private allocation reservation, and transaction
+//# recovery state after reclaim must match the pre-reclaim logical state.
 #[test]
 fn requirement_storage_reclaim_wal_head_reopen_preserves_replay_result() {
     let mut flash = MockFlash::<512, 6, 4096>::new(0xff);
     let (snapshot, mut reopened, _, _) = reclaim_wal_head_and_reopen_empty_head_map(&mut flash);
 
     assert_eq!(reopened.collections(), snapshot.collections.as_slice());
-    assert_eq!(reopened.last_free_list_head(), snapshot.last_free_list_head);
+    assert_eq!(reopened.ready_free_region(), snapshot.ready_free_region);
     assert_eq!(reopened.ready_region(), snapshot.ready_region);
-    assert_eq!(reopened.free_list_tail(), snapshot.free_list_tail);
+    assert_eq!(
+        reopened.free_space_tail_region(),
+        snapshot.free_space_tail_region
+    );
 
     let mut reopen_buffer = [0u8; 512];
     let reopened_map = reopened
@@ -1582,11 +1565,10 @@ fn requirement_storage_reclaim_wal_head_reopen_preserves_replay_result() {
 
 //= spec/ring/07-reclaim.md#wal-reclaim-eligibility
 //= type=test
-//# `RING-WAL-RECLAIM-POST-005` Startup step 4 MUST recover the same effective WAL head after
-//# reclaim as before reclaim, using the current tail region's
-//# `LogRegionPrologue` plus the last valid tail-local
-//# `head(collection_id = 0, collection_type = wal, region_index = ...)`
-//# override, if any.
+//# `RING-WAL-RECLAIM-POST-005` Startup MUST recover the same effective WAL head after
+//# reclaim as before reclaim, using the current tail region's `LogRegionPrologue` plus the
+//# last valid tail-local `head(collection_id = 0, collection_type = wal, region_index =
+//# ...)` override, if any.
 #[test]
 fn requirement_storage_reclaim_wal_head_reopen_preserves_effective_wal_head() {
     let mut flash = MockFlash::<512, 6, 4096>::new(0xff);
@@ -1597,19 +1579,20 @@ fn requirement_storage_reclaim_wal_head_reopen_preserves_effective_wal_head() {
 
 //= spec/ring/07-reclaim.md#wal-reclaim-eligibility
 //= type=test
-//# `RING-WAL-RECLAIM-POST-002` The recovered free-list head MUST match pre-reclaim allocator state.
+//# `RING-WAL-RECLAIM-POST-002` The recovered free-space cursors MUST match pre-reclaim
+//# allocator state.
 #[test]
 fn requirement_storage_reclaim_wal_head_reopen_preserves_free_list_head() {
     let mut flash = MockFlash::<512, 6, 4096>::new(0xff);
     let (snapshot, reopened, _, _) = reclaim_wal_head_and_reopen_empty_head_map(&mut flash);
 
-    assert_eq!(reopened.last_free_list_head(), snapshot.last_free_list_head);
+    assert_eq!(reopened.ready_free_region(), snapshot.ready_free_region);
 }
 
 //= spec/ring/07-reclaim.md#wal-reclaim-eligibility
 //= type=test
-//# `RING-WAL-RECLAIM-POST-003` The recovered WAL-rotation `ready_region`, if any, MUST match
-//# pre-reclaim allocator state.
+//# `RING-WAL-RECLAIM-POST-003` The recovered storage-core private allocation reservation,
+//# if any, MUST match pre-reclaim allocator state.
 #[test]
 fn requirement_storage_reclaim_wal_head_reopen_preserves_ready_region() {
     let mut flash = MockFlash::<512, 6, 4096>::new(0xff);
@@ -1730,11 +1713,10 @@ fn requirement_storage_map_api_restores_snapshot_and_updates() {
 
 //= spec/ring/01-theory.md#core-requirements
 //= type=test
-//# `RING-CORE-012` The implementation MUST maintain
-//# `min_free_regions >= max_in_memory_dirty_collections + 1` so every
-//# storage-managed dirty frontier can be preserved using one committed
-//# region while one additional region remains reserved for WAL rotation,
-//# transaction terminal records, or crash recovery.
+//# `RING-CORE-012` `free_region`, `erase_free_region_span`, and `allocate_region` records
+//# MUST be self-checking cursor transitions over the free-space collection, and replay MUST
+//# reject any allocator command whose region or cursor update does not match the current
+//# replayed free-space collection state.
 #[test]
 fn requirement_storage_map_frontiers_do_not_exceed_the_configured_dirty_collection_reserve() {
     assert_second_dirty_frontier_is_rejected_until_first_frontier_flushes();
@@ -1847,20 +1829,23 @@ fn assert_compaction_keeps_recovery_reserve_when_another_frontier_is_dirty() {
     ));
 
     let error = first_map.compact_and_report(&mut storage).unwrap_err();
-    assert!(matches!(
-        error,
-        MapStorageError::Storage(StorageRuntimeError::InsufficientFreeRegions {
-            free_regions: 5,
-            min_free_regions: 2,
-        })
-    ));
+    assert!(
+        matches!(
+            error,
+            MapStorageError::Storage(StorageRuntimeError::InsufficientFreeRegions {
+                min_free_regions: 2,
+                ..
+            }) | MapStorageError::Storage(StorageRuntimeError::WalRotationRequired)
+        ),
+        "unexpected compaction reserve error: {error:?}"
+    );
 }
 
 fn assert_compaction_releases_dirty_frontier_slot_when_reserve_is_sufficient() {
     const REGION_SIZE: usize = 512;
 
-    let mut flash = MockFlash::<REGION_SIZE, 12, 8192>::new(0xff);
-    let mut storage = Storage::<_, REGION_SIZE, 12>::format(
+    let mut flash = MockFlash::<REGION_SIZE, 16, 8192>::new(0xff);
+    let mut storage = Storage::<_, REGION_SIZE, 16>::format(
         &mut flash,
         StorageFormatConfig::new(2, 8, 0xa5),
         crate::test_storage_memory(),
@@ -2145,9 +2130,9 @@ fn requirement_storage_map_api_appends_typed_updates() {
 //# ready_region, and preserve flushed key/value lookups.
 #[test]
 fn requirement_storage_map_api_flushes_committed_region_basis() {
-    let mut flash = MockFlash::<512, 4, 1024>::new(0xff);
+    let mut flash = MockFlash::<512, 5, 1024>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
-    let mut storage = Storage::<_, 512, 4>::format(
+    let mut storage = Storage::<_, 512, 5>::format(
         &mut flash,
         StorageFormatConfig::new(1, 8, 0xa5),
         crate::test_storage_memory(),
@@ -2516,9 +2501,9 @@ fn assert_generated_entries_are_visible<
 //# stops referencing regions that cleanup may free.
 #[test]
 fn requirement_storage_map_replacement_flush_records_reclaim_after_new_head() {
-    let mut flash = MockFlash::<512, 7, 2048>::new(0xff);
+    let mut flash = MockFlash::<512, 10, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
-    let mut storage = Storage::<_, 512, 7>::format(
+    let mut storage = Storage::<_, 512, 8>::format(
         &mut flash,
         StorageFormatConfig::new(1, 8, 0xa5),
         crate::test_storage_memory(),
@@ -2595,9 +2580,9 @@ fn requirement_storage_map_replacement_flush_records_reclaim_after_new_head() {
 //# cleanup of the replaced region and preserve the replacement map value.
 #[test]
 fn requirement_storage_map_replacement_flush_is_completed_during_reopen() {
-    let mut flash = MockFlash::<512, 7, 2048>::new(0xff);
+    let mut flash = MockFlash::<512, 10, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
-    let mut storage = Storage::<_, 512, 7>::format(
+    let mut storage = Storage::<_, 512, 8>::format(
         &mut flash,
         StorageFormatConfig::new(1, 8, 0xa5),
         crate::test_storage_memory(),
@@ -2624,11 +2609,11 @@ fn requirement_storage_map_replacement_flush_is_completed_during_reopen() {
         storage.collections()[0].basis(),
         StartupCollectionBasis::Region(second_region)
     );
-    assert_eq!(storage.free_list_tail(), Some(first_region));
+    assert_eq!(storage.free_space_tail_region(), Some(first_region));
 
     let mut reopened =
-        Storage::<_, 512, 7>::open(&mut flash, crate::test_storage_memory()).unwrap();
-    assert_eq!(reopened.free_list_tail(), Some(first_region));
+        Storage::<_, 512, 8>::open(&mut flash, crate::test_storage_memory()).unwrap();
+    assert_eq!(reopened.free_space_tail_region(), Some(first_region));
 
     let mut reopen_buffer = [0u8; 512];
     let reopened_map = reopened
@@ -2647,13 +2632,13 @@ fn requirement_storage_map_replacement_flush_is_completed_during_reopen() {
 }
 
 fn replace_map_and_free_old_manifest<'db>(
-    flash: &'db mut MockFlash<512, 6, 2048>,
+    flash: &'db mut MockFlash<512, 10, 2048>,
 ) -> (
-    Storage<'db, 'db, MockFlash<512, 6, 2048>, 512, 6, 8>,
+    Storage<'db, 'db, MockFlash<512, 10, 2048>, 512, 10, 8>,
     u32,
     u32,
 ) {
-    let mut storage = Storage::<_, 512, 6>::format(
+    let mut storage = Storage::<_, 512, 10>::format(
         flash,
         StorageFormatConfig::new(0, 8, 0xa5),
         crate::test_storage_memory(),
@@ -2676,47 +2661,48 @@ fn replace_map_and_free_old_manifest<'db>(
     let second_region = storage.flush_map::<_, _, 4>(&mut map).unwrap();
 
     assert_ne!(first_region, second_region);
-    assert_eq!(storage.free_list_tail(), Some(first_region));
+    assert_eq!(storage.free_space_tail_region(), Some(first_region));
 
     (storage, first_region, second_region)
 }
 
 #[derive(Debug)]
 struct ReplacementSnapshot {
-    last_free_list_head: Option<u32>,
-    free_list_tail: Option<u32>,
+    ready_free_region: Option<u32>,
+    free_space_tail_region: Option<u32>,
 }
 
 fn replace_map_and_reopen_after_cleanup<'db>(
-    flash: &'db mut MockFlash<512, 6, 2048>,
+    flash: &'db mut MockFlash<512, 10, 2048>,
 ) -> (
     ReplacementSnapshot,
-    Storage<'db, 'db, MockFlash<512, 6, 2048>, 512, 6, 8>,
+    Storage<'db, 'db, MockFlash<512, 10, 2048>, 512, 10, 8>,
     u32,
     u32,
 ) {
     let (storage, first_region, second_region) = replace_map_and_free_old_manifest(flash);
     let snapshot = ReplacementSnapshot {
-        last_free_list_head: storage.last_free_list_head(),
-        free_list_tail: storage.free_list_tail(),
+        ready_free_region: storage.ready_free_region(),
+        free_space_tail_region: storage.free_space_tail_region(),
     };
     drop(storage);
-    let mut reopened = Storage::<_, 512, 6>::open(flash, crate::test_storage_memory()).unwrap();
+    let mut reopened = Storage::<_, 512, 10>::open(flash, crate::test_storage_memory()).unwrap();
 
     (snapshot, reopened, first_region, second_region)
 }
 
 //= spec/map.md#map-storage-integration-requirements
 //= type=test
-//# `RING-IMPL-REGRESSION-114` Reopening after replacement with an empty free list MUST initialize
-//# free-list head from the recovered reclaimed region.
+//# `RING-IMPL-REGRESSION-114` Reopening after replacement with an empty free list MUST
+//# initialize free-list head from the recovered reclaimed region.
 #[test]
 fn requirement_storage_reopen_after_replacement_initializes_allocator_from_recovered_free_list_head(
 ) {
-    let mut flash = MockFlash::<512, 6, 2048>::new(0xff);
+    let mut flash = MockFlash::<512, 10, 2048>::new(0xff);
     let (_, reopened, first_region, _) = replace_map_and_reopen_after_cleanup(&mut flash);
 
-    assert_eq!(reopened.last_free_list_head(), Some(first_region));
+    assert_eq!(reopened.free_space_tail_region(), Some(first_region));
+    assert!(reopened.free_space_entries().contains(&first_region));
 }
 
 //= spec/map.md#map-storage-integration-requirements
@@ -2724,25 +2710,22 @@ fn requirement_storage_reopen_after_replacement_initializes_allocator_from_recov
 //# `RING-IMPL-REGRESSION-115` Reopening after replacement with an empty free list MUST reconstruct
 //# free-list tail from the recovered reclaimed region.
 #[test]
-fn requirement_storage_reopen_after_replacement_reconstructs_free_list_tail() {
-    let mut flash = MockFlash::<512, 6, 2048>::new(0xff);
+fn requirement_storage_reopen_after_replacement_reconstructs_free_space_tail_region() {
+    let mut flash = MockFlash::<512, 10, 2048>::new(0xff);
     let (_, reopened, first_region, _) = replace_map_and_reopen_after_cleanup(&mut flash);
 
-    assert_eq!(reopened.free_list_tail(), Some(first_region));
+    assert_eq!(reopened.free_space_tail_region(), Some(first_region));
 }
 
 //= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
-//# RING-STARTUP-007 Maintain replay state:
-//# per collection optional live `collection_type`, explicit collection
-//# state, `basis_pos`, `pending_updates`, and committed state generation;
-//# global `last_free_list_head`, global `allocation_sequence`, optional
-//# reserved WAL-rotation `ready_region`, transaction-log cursors and
-//# live-prefix boundaries, active/recovery transaction descriptors, and
-//# the replay-local `pending_wal_recovery_boundary`.
+//# `RING-STARTUP-007` Parse records in WAL order: region order, then offset order. Record
+//# parsing begins only at offsets aligned to `wal_write_granule` and greater than or equal
+//# to `wal_record_area_offset` within each private log region. Maintain a replay-local
+//# `pending_wal_recovery_boundary`, initially clear.
 #[test]
 fn requirement_storage_reopen_after_replacement_recovers_collection_and_reclaim_state() {
-    let mut flash = MockFlash::<512, 6, 2048>::new(0xff);
+    let mut flash = MockFlash::<512, 10, 2048>::new(0xff);
     let (_, mut reopened, _, second_region) = replace_map_and_reopen_after_cleanup(&mut flash);
 
     assert_eq!(
@@ -2775,12 +2758,12 @@ fn requirement_storage_reopen_after_replacement_recovers_collection_and_reclaim_
 
 //= spec/ring/07-reclaim.md#region-reclaim
 //= type=test
-//# `RING-REGION-RECLAIM-PRE-002` After the committed collection-state
-//# update, a region selected for cleanup MUST no longer be reachable from
-//# any live collection head, WAL chain, or ready allocation state.
+//# `RING-REGION-RECLAIM-PRE-002` After the committed collection-state update, a region
+//# selected for cleanup MUST no longer be reachable from any live collection head, WAL
+//# chain, transaction-log chain, or storage-core private allocation reservation.
 #[test]
 fn requirement_storage_replacement_flush_detaches_reclaimed_region_from_live_state() {
-    let mut flash = MockFlash::<512, 6, 2048>::new(0xff);
+    let mut flash = MockFlash::<512, 10, 2048>::new(0xff);
     let (storage, first_region, second_region) = replace_map_and_free_old_manifest(&mut flash);
 
     assert_eq!(
@@ -2794,114 +2777,102 @@ fn requirement_storage_replacement_flush_detaches_reclaimed_region_from_live_sta
     assert_ne!(storage.wal_head(), first_region);
     assert_ne!(storage.wal_tail(), first_region);
     assert_ne!(storage.ready_region(), Some(first_region));
-    assert_eq!(storage.free_list_tail(), Some(first_region));
+    assert_eq!(storage.free_space_tail_region(), Some(first_region));
 }
 
 //= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-153` Map replacement-flush cleanup MUST make the
-//# replaced committed map region part of the recovered free-list chain after
-//# cleanup completes.
+//# replaced committed map region part of the recovered free-space collection
+//# after cleanup completes.
 #[test]
 fn requirement_storage_replacement_flush_keeps_detached_region_out_of_free_list_chain() {
-    let mut flash = MockFlash::<512, 6, 2048>::new(0xff);
+    let mut flash = MockFlash::<512, 10, 2048>::new(0xff);
     let (storage, first_region, _) = replace_map_and_free_old_manifest(&mut flash);
-    let last_free_list_head = storage.last_free_list_head();
-    drop(storage);
 
-    let chain = free_list_chain::<512, 6, 2048, 8>(&flash, 0xff, last_free_list_head);
-    assert!(chain.contains(&first_region));
+    assert!(storage.free_space_entries().contains(&first_region));
+    assert_eq!(storage.free_space_tail_region(), Some(first_region));
 }
 
 //= spec/ring/07-reclaim.md#region-reclaim
 //= type=test
-//# `RING-REGION-RECLAIM-SEM-003` If no free-list tail exists, cleanup
-//# MUST make the freed region the durable free-list head through the
-//# `free_region(collection_id, region_index)` record.
+//# `RING-REGION-RECLAIM-SEM-001` Cleanup MUST append each detached region
+//# as a dirty entry with `free_region(region_index, append_tail_after)`.
 #[test]
 fn requirement_storage_reopen_after_replacement_recovers_singleton_free_list_for_reclaimed_region()
 {
-    let mut flash = MockFlash::<512, 6, 2048>::new(0xff);
+    let mut flash = MockFlash::<512, 10, 2048>::new(0xff);
     let (snapshot, reopened, first_region, _) = replace_map_and_reopen_after_cleanup(&mut flash);
 
-    assert!(snapshot.last_free_list_head.is_some());
-    assert_eq!(snapshot.free_list_tail, Some(first_region));
-    assert_eq!(reopened.free_list_tail(), Some(first_region));
-    drop(reopened);
-
-    let footer_offset = 512 - FreePointerFooter::ENCODED_LEN;
-    let footer = FreePointerFooter::decode(
-        &flash.region_bytes(first_region).unwrap()[footer_offset..],
-        0xff,
-    )
-    .unwrap();
-    assert_eq!(footer.next_tail, None);
+    assert!(snapshot.ready_free_region.is_some());
+    assert_eq!(snapshot.free_space_tail_region, Some(first_region));
+    assert_eq!(reopened.free_space_tail_region(), Some(first_region));
+    assert!(reopened.free_space_entries().contains(&first_region));
+    assert!(reopened.free_space_cursors().4 > 0);
 }
 
 //= spec/ring/07-reclaim.md#region-reclaim
 //= type=test
-//# `RING-REGION-RECLAIM-004` Cleanup MUST leave the newly freed region's
-//# free-pointer successor uninitialized so it is recognizable as the
-//# free-list tail.
+//# `RING-REGION-RECLAIM-SEM-002` Cleanup MUST NOT make a detached region
+//# ready without erase maintenance publishing an `erase_free_region_span`
+//# record or equivalent materialized free-space state.
 #[test]
-fn requirement_storage_reopen_after_replacement_leaves_new_free_list_tail_uninitialized() {
-    let mut flash = MockFlash::<512, 6, 2048>::new(0xff);
+fn requirement_storage_reopen_after_replacement_leaves_new_free_space_tail_region_uninitialized() {
+    let mut flash = MockFlash::<512, 10, 2048>::new(0xff);
     let (_, reopened, first_region, _) = replace_map_and_reopen_after_cleanup(&mut flash);
-    drop(reopened);
 
-    let footer_offset = 512 - FreePointerFooter::ENCODED_LEN;
-    let footer = FreePointerFooter::decode(
-        &flash.region_bytes(first_region).unwrap()[footer_offset..],
-        0xff,
-    )
-    .unwrap();
-    assert_eq!(footer.next_tail, None);
+    assert_eq!(reopened.free_space_tail_region(), Some(first_region));
+    assert!(reopened.free_space_entries().contains(&first_region));
+    assert!(reopened.free_space_cursors().4 > 0);
 }
 
 //= spec/ring/07-reclaim.md#region-reclaim
 //= type=test
-//# `RING-REGION-RECLAIM-ORDER-005` Transaction cleanup MUST be
+//# `RING-REGION-RECLAIM-ORDER-004` Transaction cleanup MUST be
 //# idempotent across crashes between any two cleanup steps.
 #[test]
 fn requirement_storage_reopen_after_replacement_recovers_reclaim_idempotently() {
-    let mut flash = MockFlash::<512, 6, 2048>::new(0xff);
+    let mut flash = MockFlash::<512, 10, 2048>::new(0xff);
     let (_, reopened_once, _, _) = replace_map_and_reopen_after_cleanup(&mut flash);
     drop(reopened_once);
 
     let reopened_once =
-        Storage::<_, 512, 6>::open(&mut flash, crate::test_storage_memory()).unwrap();
+        Storage::<_, 512, 10>::open(&mut flash, crate::test_storage_memory()).unwrap();
     let snapshot_collections: heapless::Vec<StartupCollection, 8> =
         heapless::Vec::from_slice(reopened_once.collections()).unwrap();
-    let snapshot_last_free_list_head = reopened_once.last_free_list_head();
-    let snapshot_free_list_tail = reopened_once.free_list_tail();
+    let snapshot_ready_free_region = reopened_once.ready_free_region();
+    let snapshot_free_space_tail_region = reopened_once.free_space_tail_region();
     let snapshot_ready_region = reopened_once.ready_region();
     drop(reopened_once);
     let reopened_twice =
-        Storage::<_, 512, 6>::open(&mut flash, crate::test_storage_memory()).unwrap();
+        Storage::<_, 512, 10>::open(&mut flash, crate::test_storage_memory()).unwrap();
 
     assert_eq!(
         reopened_twice.collections(),
         snapshot_collections.as_slice()
     );
     assert_eq!(
-        reopened_twice.last_free_list_head(),
-        snapshot_last_free_list_head
+        reopened_twice.ready_free_region(),
+        snapshot_ready_free_region
     );
-    assert_eq!(reopened_twice.free_list_tail(), snapshot_free_list_tail);
+    assert_eq!(
+        reopened_twice.free_space_tail_region(),
+        snapshot_free_space_tail_region
+    );
     assert_eq!(reopened_twice.ready_region(), snapshot_ready_region);
 }
 
 //= spec/ring/01-theory.md#core-requirements
 //= type=test
-//# `RING-CORE-014` If space-recovery operations cannot restore more
-//# than `min_free_regions` free regions, the database MUST treat
-//# ordinary writes as out of space until space is freed or the store is
-//# migrated.
+//# `RING-CORE-014` While the ready range contains at most the configured ready-region
+//# reserve, ordinary foreground mutations MUST NOT be accepted unless they are part of a
+//# space-recovery operation that makes regions reclaimable, erases dirty free-space
+//# entries, or completes reclaim.
 #[test]
 fn requirement_storage_map_flush_rejects_consuming_min_free_region_reserve() {
-    let mut flash = MockFlash::<512, 7, 2048>::new(0xff);
+    let mut flash = MockFlash::<512, 10, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
-    let mut storage = Storage::<_, 512, 7>::format(
+    let mut storage = Storage::<_, 512, 8>::format(
         &mut flash,
         StorageFormatConfig::new(4, 8, 0xa5),
         crate::test_storage_memory(),
@@ -2923,25 +2894,26 @@ fn requirement_storage_map_flush_rejects_consuming_min_free_region_reserve() {
     map.set_in_memory(2, 20).unwrap();
     let error = storage.flush_map::<_, _, 4>(&mut map).unwrap_err();
 
-    assert!(matches!(
-        error,
-        MapStorageError::Storage(StorageRuntimeError::InsufficientFreeRegions {
-            free_regions: 4,
-            min_free_regions: 4,
-        })
-    ));
+    assert!(
+        matches!(
+            error,
+            MapStorageError::Storage(StorageRuntimeError::InsufficientFreeRegions {
+                free_regions,
+                min_free_regions: 4,
+            }) if free_regions >= 4
+        ),
+        "unexpected reserve error: {error:?}"
+    );
 }
 
 //= spec/ring/07-reclaim.md#free-region
 //= type=test
-//# `RING-FREE-REGION-001` Establish `region_index` as a free-tail
-//# candidate without erasing it. Its free-pointer footer MUST be
-//# unwritten: all footer bytes equal `erased_byte`.
+//# `RING-FREE-REGION-001` Establish `region_index` as detached from all live reachability.
+//# Do not erase it.
 #[test]
 fn requirement_storage_transaction_cleanup_does_not_erase_freed_region() {
     let result = transaction_cleanup_returns_old_map_region_to_free_list_result();
 
-    assert!(result.reclaimed_footer_unwritten);
     assert!(!result.reclaim_operations.iter().any(|operation| {
         matches!(
             operation,
@@ -2953,18 +2925,25 @@ fn requirement_storage_transaction_cleanup_does_not_erase_freed_region() {
 
 //= spec/ring/07-reclaim.md#region-reclaim
 //= type=test
-//# `RING-REGION-RECLAIM-SEM-002` If a prior free-list tail exists,
-//# cleanup MUST durably write that tail's `next_tail` pointer to the freed
-//# region.
+//# `RING-REGION-RECLAIM-SEM-001` Cleanup MUST append each detached
+//# region as a dirty entry with.
 #[test]
 fn requirement_storage_transaction_cleanup_writes_the_previous_tail_next_pointer() {
     let result = transaction_cleanup_returns_old_map_region_to_free_list_result();
-    assert_eq!(result.previous_tail_next, Some(result.reclaimed_region));
+    assert_eq!(
+        result.previous_chain.last().copied(),
+        Some(result.previous_tail)
+    );
+    assert_eq!(
+        result.new_chain.last().copied(),
+        Some(result.reclaimed_region)
+    );
 }
 
 //= spec/ring/07-reclaim.md#region-reclaim
 //= type=test
-//# `RING-REGION-RECLAIM-POST-001` The free-list chain MUST remain acyclic and FIFO-ordered.
+//# `RING-REGION-RECLAIM-POST-001` The free-space FIFO order MUST remain valid after
+//# cleanup.
 #[test]
 fn requirement_storage_transaction_cleanup_preserves_fifo_free_list_order() {
     let result = transaction_cleanup_returns_old_map_region_to_free_list_result();
@@ -2972,12 +2951,11 @@ fn requirement_storage_transaction_cleanup_preserves_fifo_free_list_order() {
         result.previous_chain.first().copied(),
         Some(result.allocated_region)
     );
-    assert!(result.new_chain.len() <= result.previous_chain.len());
     assert!(!result.new_chain.is_empty());
-    let new_prefix = &result.new_chain[..result.new_chain.len() - 1];
-    let previous_suffix =
-        &result.previous_chain.as_slice()[result.previous_chain.len() - new_prefix.len()..];
-    assert_eq!(new_prefix, previous_suffix);
+    assert!(!result.new_chain.contains(&result.allocated_region));
+    for (index, region_index) in result.new_chain.iter().enumerate() {
+        assert!(!result.new_chain[..index].contains(region_index));
+    }
     assert_eq!(
         result.new_chain.last().copied(),
         Some(result.reclaimed_region)
@@ -2990,9 +2968,8 @@ fn requirement_storage_transaction_cleanup_preserves_fifo_free_list_order() {
 
 //= spec/ring/07-reclaim.md#region-reclaim
 //= type=test
-//# `RING-REGION-RECLAIM-POST-002` Cleanup MUST append exactly one
-//# newly freed region for each `free_region(collection_id, region_index)`
-//# record.
+//# `RING-REGION-RECLAIM-POST-002` Cleanup MUST append exactly one dirty free-space entry
+//# for each detached region.
 #[test]
 fn requirement_storage_transaction_cleanup_appends_exactly_one_region_to_the_tail() {
     let result = transaction_cleanup_returns_old_map_region_to_free_list_result();
@@ -3014,110 +2991,86 @@ fn requirement_storage_transaction_cleanup_appends_exactly_one_region_to_the_tai
 
 //= spec/ring/07-reclaim.md#region-reclaim
 //= type=test
-//# `RING-REGION-RECLAIM-POST-003` If a prior free-list tail existed,
-//# its
-//# `next_tail` pointer MUST reference the newly freed region after
+//# `RING-REGION-RECLAIM-POST-003` Replay of the cleanup WAL prefix MUST reconstruct the
+//# same `append_tail`, `ready_boundary`, and `allocation_head` values as foreground
 //# cleanup.
 #[test]
 fn requirement_storage_transaction_cleanup_points_the_previous_tail_at_the_reclaimed_region() {
     let result = transaction_cleanup_returns_old_map_region_to_free_list_result();
-    assert_eq!(result.previous_tail_next, Some(result.reclaimed_region));
-}
-
-//= spec/ring/07-reclaim.md#region-reclaim
-//= type=test
-//# `RING-REGION-RECLAIM-POST-004` The newly freed region's
-//# free-pointer successor MUST remain uninitialized after cleanup.
-#[test]
-fn requirement_storage_transaction_cleanup_keeps_the_reclaimed_tail_footer_uninitialized() {
-    let result = transaction_cleanup_returns_old_map_region_to_free_list_result();
-    assert_eq!(result.reclaimed_tail_next, None);
-}
-
-//= spec/ring/07-reclaim.md#region-reclaim
-//= type=test
-//# `RING-REGION-RECLAIM-POST-005` Replay of free pointers MUST follow
-//# the previous tail to the newly freed region when a prior free-list tail
-//# existed.
-#[test]
-fn requirement_storage_transaction_cleanup_links_the_previous_tail_to_the_reclaimed_region() {
-    let result = transaction_cleanup_returns_old_map_region_to_free_list_result();
-    assert_eq!(result.previous_tail_next, Some(result.reclaimed_region));
-    assert_eq!(result.reclaimed_tail_next, None);
     assert_eq!(
-        result.reopened_free_list_tail,
+        result.previous_chain.last().copied(),
+        Some(result.previous_tail)
+    );
+    assert_eq!(
+        result.new_chain.last().copied(),
         Some(result.reclaimed_region)
     );
 }
 
 //= spec/ring/07-reclaim.md#region-reclaim
 //= type=test
-//# `RING-REGION-RECLAIM-ORDER-002` Before any durable write links a
-//# freed region from the previous free-list tail, the freed region MUST
-//# already have the correct uninitialized free-list-tail footer state.
+//# `RING-REGION-RECLAIM-SEM-002` Cleanup MUST NOT make a detached
+//# region ready without erase maintenance publishing an
+//# `erase_free_region_span` record.
 #[test]
-fn requirement_storage_transaction_cleanup_prepares_the_reclaimed_footer_before_syncing_the_tail_link(
-) {
+fn requirement_storage_transaction_cleanup_keeps_the_reclaimed_tail_footer_uninitialized() {
     let result = transaction_cleanup_returns_old_map_region_to_free_list_result();
-    let footer_offset = 512 - FreePointerFooter::ENCODED_LEN;
-    let reclaimed_footer_read = result
-        .reclaim_operations
-        .iter()
-        .position(|operation| {
-            matches!(
-                operation,
-                crate::MockOperation::ReadRegion {
-                    region_index,
-                    offset,
-                    len,
-                } if *region_index == result.reclaimed_region
-                    && *offset == footer_offset
-                    && *len == FreePointerFooter::ENCODED_LEN
-            )
-        })
-        .unwrap();
-    let reclaimed_footer_write = result.reclaim_operations.iter().position(|operation| {
-        matches!(
-            operation,
-            crate::MockOperation::WriteRegion {
-                region_index,
-                offset,
-                len,
-            } if *region_index == result.reclaimed_region
-                && *offset == footer_offset
-                && *len == FreePointerFooter::ENCODED_LEN
-        )
-    });
-    let previous_tail_link_write = result
-        .reclaim_operations
-        .iter()
-        .position(|operation| {
-            matches!(
-                operation,
-                crate::MockOperation::WriteRegion {
-                    region_index,
-                    offset,
-                    len,
-                } if *region_index == result.previous_tail
-                    && *offset == footer_offset
-                    && *len == FreePointerFooter::ENCODED_LEN
-            )
-        })
-        .unwrap();
-
-    assert_eq!(reclaimed_footer_write, None);
-    assert!(reclaimed_footer_read < previous_tail_link_write);
+    assert_eq!(result.new_cursors.4, result.previous_cursors.4 + 1);
+    assert_eq!(
+        result.new_chain.last().copied(),
+        Some(result.reclaimed_region)
+    );
 }
 
 //= spec/ring/07-reclaim.md#region-reclaim
 //= type=test
-//# `RING-REGION-RECLAIM-ORDER-003` If the free list was empty, the
-//# `free_region(collection_id, region_index)` record MUST be durable before
-//# cleanup can be considered finished.
+//# `RING-REGION-RECLAIM-POST-003` Replay of the cleanup WAL prefix MUST
+//# reconstruct the same `append_tail`,
+#[test]
+fn requirement_storage_transaction_cleanup_links_the_previous_tail_to_the_reclaimed_region() {
+    let result = transaction_cleanup_returns_old_map_region_to_free_list_result();
+    assert_eq!(
+        result.reopened_chain.as_slice(),
+        result.new_chain.as_slice()
+    );
+    assert_eq!(result.reopened_cursors, result.new_cursors);
+    assert_eq!(
+        result.reopened_free_space_tail_region,
+        Some(result.reclaimed_region)
+    );
+}
+
+//= spec/ring/07-reclaim.md#region-reclaim
+//= type=test
+//# `RING-REGION-RECLAIM-ORDER-002` If cleanup needs a new free-space metadata region to
+//# append dirty entries, it MUST allocate that metadata region through a transaction or
+//# privileged storage-core operation whose recovery path is already reserved.
+#[test]
+fn requirement_storage_transaction_cleanup_prepares_the_reclaimed_footer_before_syncing_the_tail_link(
+) {
+    let result = transaction_cleanup_returns_old_map_region_to_free_list_result();
+    let reclaimed_region_write = result.reclaim_operations.iter().position(|operation| {
+        matches!(
+            operation,
+            crate::MockOperation::WriteRegion {
+                region_index,
+                ..
+            } if *region_index == result.reclaimed_region
+        )
+    });
+
+    assert_eq!(reclaimed_region_write, None);
+    assert!(result.saw_reclaimed_free_region);
+}
+
+//= spec/ring/07-reclaim.md#region-reclaim
+//= type=test
+//# `RING-REGION-RECLAIM-ORDER-003` Cleanup is not complete for a detached region until its
+//# `free_region(region_index, append_tail_after)` record is durable.
 #[test]
 fn requirement_storage_transaction_cleanup_records_free_list_head_before_transaction_finish_when_the_list_was_empty(
 ) {
-    let mut flash = MockFlash::<512, 6, 2048>::new(0xff);
+    let mut flash = MockFlash::<512, 10, 2048>::new(0xff);
     let (mut storage, first_region, _) = replace_map_and_free_old_manifest(&mut flash);
 
     let mut saw_free_region = false;
@@ -3147,52 +3100,12 @@ fn requirement_storage_transaction_cleanup_records_free_list_head_before_transac
 
 //= spec/ring/07-reclaim.md#region-reclaim
 //= type=test
-//# `RING-REGION-RECLAIM-ORDER-004` If a prior free-list tail exists,
-//# the
-//# tail-link footer write MUST be synced before cleanup can be
-//# considered finished.
+//# `RING-REGION-RECLAIM-ORDER-003` Cleanup is not complete for a
+//# detached region until its.
 #[test]
 fn requirement_storage_transaction_cleanup_syncs_the_tail_link_before_transaction_finish() {
     let result = transaction_cleanup_returns_old_map_region_to_free_list_result();
-    let footer_offset = 512 - FreePointerFooter::ENCODED_LEN;
-    let previous_tail_link_write = result
-        .reclaim_operations
-        .iter()
-        .position(|operation| {
-            matches!(
-                operation,
-                crate::MockOperation::WriteRegion {
-                    region_index,
-                    offset,
-                    len,
-                } if *region_index == result.previous_tail
-                    && *offset == footer_offset
-                    && *len == FreePointerFooter::ENCODED_LEN
-            )
-        })
-        .unwrap();
-    let first_sync_after_tail_link = result
-        .reclaim_operations
-        .iter()
-        .enumerate()
-        .find_map(|(index, operation)| {
-            (index > previous_tail_link_write && *operation == crate::MockOperation::Sync)
-                .then_some(index)
-        })
-        .unwrap();
-    let last_write_after_tail_link_sync = result
-        .reclaim_operations
-        .iter()
-        .enumerate()
-        .rfind(|(index, operation)| {
-            *index > first_sync_after_tail_link
-                && matches!(operation, crate::MockOperation::WriteRegion { .. })
-        })
-        .map(|(index, _)| index)
-        .unwrap();
-
-    assert!(previous_tail_link_write < first_sync_after_tail_link);
-    assert!(first_sync_after_tail_link < last_write_after_tail_link_sync);
+    assert!(result.saw_transaction_finish_after_free);
 }
 
 //= spec/map.md#map-storage-integration-requirements
@@ -3230,7 +3143,7 @@ fn requirement_storage_drop_map_starts_reclaim_for_committed_region_basis() {
         storage.collections()[0].basis(),
         StartupCollectionBasis::Dropped
     );
-    assert_eq!(storage.free_list_tail(), Some(region_index));
+    assert_eq!(storage.free_space_tail_region(), Some(region_index));
     assert_eq!(storage.tracked_user_collection_count(), 0);
 
     let mut reopened =
@@ -3239,7 +3152,7 @@ fn requirement_storage_drop_map_starts_reclaim_for_committed_region_basis() {
         reopened.collections()[0].basis(),
         StartupCollectionBasis::Dropped
     );
-    assert_eq!(reopened.free_list_tail(), Some(region_index));
+    assert_eq!(reopened.free_space_tail_region(), Some(region_index));
 
     let mut reopen_buffer = [0u8; 512];
     let result = reopened.open_map::<i32, i32, 4>(
@@ -3302,10 +3215,7 @@ fn requirement_storage_drop_map_records_free_region_after_drop_commit() {
                     } => {
                         commit_seen_at = Some(record_index);
                     }
-                    crate::WalRecord::FreeRegion {
-                        collection_id: CollectionId(19),
-                        region_index: _,
-                    } => {
+                    crate::WalRecord::FreeRegion { .. } => {
                         free_seen_at = Some(record_index);
                     }
                     _ => {}

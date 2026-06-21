@@ -3,11 +3,11 @@ use core::{fmt, mem::size_of};
 use crc::{Crc, CRC_32_ISCSI};
 use heapless::Vec;
 
-use crate::disk::{FreePointerFooter, Header};
+use crate::disk::Header;
 use crate::flash_io::FlashIo;
 use crate::mode::{CollectionUpdateMode, ReadMode, StorageMode};
 use crate::startup::StartupCollectionBasis;
-use crate::storage::{FreeRegionPreparation, StorageRuntimeError, StorageVisitError};
+use crate::storage::{StorageRuntimeError, StorageVisitError};
 use crate::wal_record::WalRecord;
 use crate::{Collection, CollectionId, CollectionType, Storage, StorageMetadata};
 
@@ -977,12 +977,11 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const LOG_METADAT
             if let Err(error) = storage
                 .memory
                 .state
-                .append_free_region_with_rotation_prepared::<REGION_SIZE, REGION_COUNT, IO>(
+                .append_free_region_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
                     storage.backing,
                     &mut storage.memory.workspace,
                     CollectionId(0),
                     region_index,
-                    FreeRegionPreparation::EraseToUnwrittenFooter,
                 )
             {
                 if first_error.is_none() {
@@ -2992,9 +2991,7 @@ fn replay_object_log<
                             committed: false,
                             checkpointed: false,
                         });
-                        if transaction_log_id == 0
-                            || u64::from(transaction_log_id) == collection_id.0
-                        {
+                        if transaction_log_id == 0 {
                             checkpoint_object_log_replay(memory)?;
                             if let Some(open) = transaction.as_mut() {
                                 open.checkpointed = true;
@@ -3180,6 +3177,260 @@ fn apply_update_payload<
 
 pub(crate) fn empty_snapshot() -> &'static [u8] {
     &EMPTY_SNAPSHOT
+}
+
+pub(crate) fn collect_committed_regions<
+    const REGION_SIZE: usize,
+    IO: FlashIo,
+    const REGION_COUNT: usize,
+>(
+    flash: &mut IO,
+    workspace: &mut crate::StorageWorkspace<REGION_SIZE>,
+    metadata: StorageMetadata,
+    collection_id: CollectionId,
+    head_region: u32,
+    regions: &mut Vec<u32, REGION_COUNT>,
+) -> Result<(), ObjectLogError> {
+    let (data_region, log_metadata_len) = read_committed_data_region_metadata::<REGION_SIZE, IO>(
+        flash,
+        metadata,
+        collection_id,
+        head_region,
+    )?;
+    push_unique_region_index(regions, data_region.region_index)?;
+    collect_committed_region_auxiliary_regions::<REGION_SIZE, IO, REGION_COUNT>(
+        flash,
+        workspace,
+        metadata,
+        collection_id,
+        log_metadata_len,
+        data_region,
+        regions,
+    )
+}
+
+fn read_committed_data_region_metadata<const REGION_SIZE: usize, IO: FlashIo>(
+    flash: &mut IO,
+    metadata: StorageMetadata,
+    collection_id: CollectionId,
+    region_index: u32,
+) -> Result<(ObjectLogRegion, usize), ObjectLogError> {
+    let header = flash
+        .read_region(region_index, 0, Header::ENCODED_LEN, Header::decode)
+        .map_err(StorageRuntimeError::from)?
+        .map_err(|_| ObjectLogError::InvalidFrame)?;
+    if header.collection_id != collection_id
+        || header.collection_format != OBJECT_LOG_DATA_V1_FORMAT
+    {
+        return Err(ObjectLogError::InvalidFrame);
+    }
+
+    let mut prologue = [0u8; DATA_PROLOGUE_FIXED_LEN];
+    flash
+        .read_region(
+            region_index,
+            Header::ENCODED_LEN,
+            DATA_PROLOGUE_FIXED_LEN,
+            |bytes| prologue.copy_from_slice(bytes),
+        )
+        .map_err(StorageRuntimeError::from)?;
+    let (sequence, log_metadata_len) = decode_data_prologue_header(&prologue)?;
+    let start_offset = u32::try_from(Header::ENCODED_LEN + data_prologue_len(log_metadata_len)?)
+        .map_err(|_| ObjectLogError::LengthOverflow)?;
+    let committed_end_offset = u32::try_from(
+        Header::ENCODED_LEN
+            .checked_add(committed_payload_capacity::<REGION_SIZE>(metadata)?)
+            .ok_or(ObjectLogError::LengthOverflow)?,
+    )
+    .map_err(|_| ObjectLogError::LengthOverflow)?;
+    Ok((
+        ObjectLogRegion {
+            region_index,
+            sequence,
+            start_offset,
+            end_offset: committed_end_offset,
+            committed_end_offset,
+            first_committed_public_offset: None,
+            first_planned_public_offset: None,
+            flushed: true,
+        },
+        log_metadata_len,
+    ))
+}
+
+fn collect_committed_region_auxiliary_regions<
+    const REGION_SIZE: usize,
+    IO: FlashIo,
+    const REGION_COUNT: usize,
+>(
+    flash: &mut IO,
+    workspace: &mut crate::StorageWorkspace<REGION_SIZE>,
+    metadata: StorageMetadata,
+    collection_id: CollectionId,
+    log_metadata_len: usize,
+    region: ObjectLogRegion,
+    regions: &mut Vec<u32, REGION_COUNT>,
+) -> Result<(), ObjectLogError> {
+    let mut offset = region.start_offset;
+    while offset < region.committed_end_offset {
+        let mut header = [0u8; RECORD_HEADER_LEN];
+        flash
+            .read_region(
+                region.region_index,
+                usize::try_from(offset).map_err(|_| ObjectLogError::LengthOverflow)?,
+                RECORD_HEADER_LEN,
+                |bytes| header.copy_from_slice(bytes),
+            )
+            .map_err(StorageRuntimeError::from)?;
+        let record = decode_record_info_at(offset, &header)?;
+        if record.record_end > region.committed_end_offset {
+            return Err(ObjectLogError::InvalidFrame);
+        }
+        if record.record_type == RECORD_LARGE_RECORD_ENTRY {
+            let body = workspace.committed_write_buffer();
+            if body.len() < record.body_len {
+                return Err(ObjectLogError::BufferTooSmall {
+                    needed: record.body_len,
+                    available: body.len(),
+                });
+            }
+            flash
+                .read_region(
+                    region.region_index,
+                    record.body_start,
+                    record.body_len,
+                    |bytes| body[..record.body_len].copy_from_slice(bytes),
+                )
+                .map_err(StorageRuntimeError::from)?;
+            let body = &body[..record.body_len];
+            validate_record_body(record.body_crc32c, body)?;
+            validate_record_body_shape(record.record_type, body)?;
+            let large_entry = decode_large_entry_body(body)?;
+            collect_aux_chain_regions_from_flash::<REGION_SIZE, IO, REGION_COUNT>(
+                flash,
+                workspace,
+                metadata,
+                collection_id,
+                log_metadata_len,
+                large_entry,
+                regions,
+            )?;
+        }
+        offset = record.record_end;
+    }
+    Ok(())
+}
+
+fn collect_aux_chain_regions_from_flash<
+    const REGION_SIZE: usize,
+    IO: FlashIo,
+    const REGION_COUNT: usize,
+>(
+    flash: &mut IO,
+    workspace: &mut crate::StorageWorkspace<REGION_SIZE>,
+    metadata: StorageMetadata,
+    collection_id: CollectionId,
+    log_metadata_len: usize,
+    large_entry: LargeRecordEntryInfo,
+    regions: &mut Vec<u32, REGION_COUNT>,
+) -> Result<(), ObjectLogError> {
+    let aux_logical_len = large_entry
+        .total_object_len
+        .checked_sub(u64::from(large_entry.tail_logical_len))
+        .ok_or(ObjectLogError::InvalidFrame)?;
+    if aux_logical_len == 0 {
+        return Ok(());
+    }
+    let geometry = aux_geometry::<REGION_SIZE>(metadata, log_metadata_len)?;
+    let mut current = large_entry.first_aux;
+    let mut expected_logical_start = 0u64;
+    for _ in 0..REGION_COUNT {
+        push_unique_region_index(regions, current.region_index)?;
+        let next = read_aux_region_into_workspace::<REGION_SIZE, IO>(
+            flash,
+            workspace,
+            metadata,
+            collection_id,
+            log_metadata_len,
+            geometry,
+            current,
+        )?;
+        {
+            let payload = workspace.committed_write_buffer();
+            for slot_index in 0..geometry.chunk_slot_count {
+                let (chunk, _) = decode_aux_chunk_slot(
+                    &payload[..geometry.payload_capacity],
+                    geometry,
+                    slot_index,
+                )?;
+                if chunk.logical_start != expected_logical_start {
+                    return Err(ObjectLogError::InvalidFrame);
+                }
+                expected_logical_start = expected_logical_start
+                    .checked_add(
+                        u64::try_from(chunk.chunk_len)
+                            .map_err(|_| ObjectLogError::LengthOverflow)?,
+                    )
+                    .ok_or(ObjectLogError::LengthOverflow)?;
+                if expected_logical_start > aux_logical_len {
+                    return Err(ObjectLogError::InvalidFrame);
+                }
+                if expected_logical_start == aux_logical_len {
+                    if slot_index + 1 != geometry.chunk_slot_count || next.is_some() {
+                        return Err(ObjectLogError::InvalidFrame);
+                    }
+                    return Ok(());
+                }
+            }
+        }
+        current = next.ok_or(ObjectLogError::InvalidFrame)?;
+    }
+    Err(ObjectLogError::InvalidFrame)
+}
+
+fn read_aux_region_into_workspace<const REGION_SIZE: usize, IO: FlashIo>(
+    flash: &mut IO,
+    workspace: &mut crate::StorageWorkspace<REGION_SIZE>,
+    metadata: StorageMetadata,
+    collection_id: CollectionId,
+    log_metadata_len: usize,
+    geometry: AuxGeometry,
+    pointer: AuxRegionPointer,
+) -> Result<Option<AuxRegionPointer>, ObjectLogError> {
+    let header = flash
+        .read_region(pointer.region_index, 0, Header::ENCODED_LEN, Header::decode)
+        .map_err(StorageRuntimeError::from)?
+        .map_err(|_| ObjectLogError::InvalidFrame)?;
+    if header.collection_id != collection_id || header.collection_format != OBJECT_LOG_AUX_V1_FORMAT
+    {
+        return Err(ObjectLogError::InvalidFrame);
+    }
+    let payload = workspace.committed_write_buffer();
+    flash
+        .read_region(
+            pointer.region_index,
+            Header::ENCODED_LEN,
+            geometry.payload_capacity,
+            |bytes| payload[..geometry.payload_capacity].copy_from_slice(bytes),
+        )
+        .map_err(StorageRuntimeError::from)?;
+    let log_metadata_end = AUX_PROLOGUE_PREFIX_LEN
+        .checked_add(log_metadata_len)
+        .ok_or(ObjectLogError::LengthOverflow)?;
+    let log_metadata = payload
+        .get(AUX_PROLOGUE_PREFIX_LEN..log_metadata_end)
+        .ok_or(ObjectLogError::InvalidFrame)?;
+    decode_aux_prologue(
+        &payload[..geometry.payload_capacity],
+        geometry,
+        log_metadata,
+    )
+    .and_then(|()| {
+        decode_aux_next_link(
+            &payload[geometry.next_link_offset..geometry.next_link_offset + geometry.next_link_len],
+            metadata.erased_byte,
+        )
+    })
 }
 
 const EMPTY_SNAPSHOT: [u8; 16] = [b'O', b'L', b'G', b'S', 4, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
@@ -4281,11 +4532,8 @@ fn committed_payload_capacity<const REGION_SIZE: usize>(
     if granule == 0 {
         return Err(ObjectLogError::InvalidEncoding);
     }
-    let footer_offset = REGION_SIZE
-        .checked_sub(FreePointerFooter::ENCODED_LEN)
-        .ok_or(ObjectLogError::LengthOverflow)?;
-    let aligned_footer_boundary = footer_offset - footer_offset % granule;
-    aligned_footer_boundary
+    let aligned_region_boundary = REGION_SIZE - REGION_SIZE % granule;
+    aligned_region_boundary
         .checked_sub(Header::ENCODED_LEN)
         .ok_or(ObjectLogError::LengthOverflow)
 }

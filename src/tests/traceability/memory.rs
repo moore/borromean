@@ -199,9 +199,14 @@ fn requirement_disk_format_buffer_sizes_are_exposed_by_constants_or_workspace_co
     );
     assert_eq!(
         WalRegionPrologue::ENCODED_LEN,
-        size_of::<u32>() + size_of::<u8>() + size_of::<u32>() + size_of::<u64>() + size_of::<u32>()
+        size_of::<u32>() + FreeQueuePosition::ENCODED_LEN * 3 + size_of::<u32>()
     );
-    assert_eq!(FreePointerFooter::ENCODED_LEN, size_of::<u32>() * 2);
+    assert_eq!(FreeQueuePosition::ENCODED_LEN, size_of::<u32>() * 2);
+    assert_eq!(
+        FreeSpaceRegionPrologue::ENCODED_LEN,
+        FreeQueuePosition::ENCODED_LEN * 3 + size_of::<u8>() + size_of::<u32>() * 4
+    );
+    assert_eq!(FreeSpaceEntry::ENCODED_LEN, size_of::<u32>());
 
     let mut workspace = StorageWorkspace::<128>::new();
     {

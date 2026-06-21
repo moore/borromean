@@ -1,8 +1,9 @@
 use embedded_storage_traits::nor_flash::{NorFlash, NorFlashError, NorFlashErrorKind};
 
 use crate::disk::{
-    encode_wal_region_prefix, DiskError, FreePointerFooter, Header, StorageMetadata,
-    WalRegionPrologue,
+    encode_free_space_region_segment, encode_log_region_prefix,
+    free_queue_position_for_contiguous_metadata, DiskError, FreeSpaceCursors, FreeSpaceEntry,
+    FreeSpaceRegionPrologue, Header, StorageMetadata, WalRegionPrologue, MAIN_WAL_V2_FORMAT,
 };
 use crate::flash_io::{FlashIo, StorageFormatError, StorageIoError};
 
@@ -331,13 +332,6 @@ where
         let region_count = u32::try_from(REGION_COUNT)
             .map_err(|_| EmbeddedStorageFormatError::RegionCountTooLarge)?;
 
-        if region_count < 2 + min_free_regions {
-            return Err(EmbeddedStorageFormatError::InsufficientRegions {
-                region_count,
-                min_free_regions,
-            });
-        }
-
         let metadata = StorageMetadata::new(
             region_size,
             region_count,
@@ -350,10 +344,56 @@ where
 
         let wal_header_len = Header::ENCODED_LEN + WalRegionPrologue::ENCODED_LEN;
         let wal_record_area_offset = metadata.wal_record_area_offset()?;
+        let free_space_entries_offset = Header::ENCODED_LEN + FreeSpaceRegionPrologue::ENCODED_LEN;
+        let entries_per_metadata_region = REGION_SIZE
+            .checked_sub(free_space_entries_offset)
+            .ok_or(EmbeddedStorageFormatError::RegionSizeTooSmall {
+                region_size,
+                min_region_size: u32::try_from(free_space_entries_offset).unwrap_or(u32::MAX),
+            })?
+            / FreeSpaceEntry::ENCODED_LEN;
+        if entries_per_metadata_region == 0 {
+            return Err(EmbeddedStorageFormatError::RegionSizeTooSmall {
+                region_size,
+                min_region_size: u32::try_from(
+                    free_space_entries_offset + FreeSpaceEntry::ENCODED_LEN,
+                )
+                .unwrap_or(u32::MAX),
+            });
+        }
+        let mut metadata_region_count = 1u32;
+        loop {
+            if region_count <= 1 + metadata_region_count {
+                return Err(EmbeddedStorageFormatError::InsufficientRegions {
+                    region_count,
+                    min_free_regions,
+                });
+            }
+            let free_space_entry_count = region_count - 1 - metadata_region_count;
+            if free_space_entry_count < min_free_regions {
+                return Err(EmbeddedStorageFormatError::InsufficientRegions {
+                    region_count,
+                    min_free_regions,
+                });
+            }
+            let capacity = metadata_region_count
+                .checked_mul(
+                    u32::try_from(entries_per_metadata_region)
+                        .map_err(|_| EmbeddedStorageFormatError::RegionCountTooLarge)?,
+                )
+                .ok_or(EmbeddedStorageFormatError::RegionCountTooLarge)?;
+            if capacity >= free_space_entry_count {
+                break;
+            }
+            metadata_region_count = metadata_region_count
+                .checked_add(1)
+                .ok_or(EmbeddedStorageFormatError::RegionCountTooLarge)?;
+        }
+        let free_space_entry_count = region_count - 1 - metadata_region_count;
         let min_region_size_usize = StorageMetadata::ENCODED_LEN
             .max(wal_header_len)
             .max(wal_record_area_offset)
-            .max(FreePointerFooter::ENCODED_LEN);
+            .max(free_space_entries_offset + FreeSpaceEntry::ENCODED_LEN);
         if REGION_SIZE < min_region_size_usize {
             let min_region_size = u32::try_from(min_region_size_usize).unwrap_or(u32::MAX);
             return Err(EmbeddedStorageFormatError::RegionSizeTooSmall {
@@ -370,16 +410,62 @@ where
             self.erase_region(region_index)?;
         }
 
-        self.write_wal_region_prefix(0, metadata, 0, 0)?;
+        let tail = free_queue_position_for_contiguous_metadata(
+            1,
+            metadata_region_count,
+            entries_per_metadata_region,
+            free_space_entry_count,
+        )?;
+        let allocation_head = free_queue_position_for_contiguous_metadata(
+            1,
+            metadata_region_count,
+            entries_per_metadata_region,
+            0,
+        )?;
+        let cursors = FreeSpaceCursors::new(allocation_head, tail, tail);
+        self.write_wal_region_prefix(0, metadata, 0, 0, cursors)?;
 
-        let footer_offset = REGION_SIZE - FreePointerFooter::ENCODED_LEN;
-        for region_index in 1..region_count {
-            let next_tail = if region_index + 1 < region_count {
+        let mut free_space_region = [self.options.erased_byte; REGION_SIZE];
+        let mut entries = [0u32; REGION_COUNT];
+        let entry_count = usize::try_from(free_space_entry_count)
+            .map_err(|_| EmbeddedStorageFormatError::RegionCountTooLarge)?;
+        for (slot, region_index) in entries[..entry_count]
+            .iter_mut()
+            .zip((1 + metadata_region_count)..region_count)
+        {
+            *slot = region_index;
+        }
+        let tail = free_queue_position_for_contiguous_metadata(
+            1,
+            metadata_region_count,
+            entries_per_metadata_region,
+            free_space_entry_count,
+        )?;
+        let cursors = FreeSpaceCursors::new(allocation_head, tail, tail);
+        for metadata_region_index in 0..metadata_region_count {
+            let region_index = 1 + metadata_region_index;
+            let start = usize::try_from(metadata_region_index)
+                .map_err(|_| EmbeddedStorageFormatError::RegionCountTooLarge)?
+                .checked_mul(entries_per_metadata_region)
+                .ok_or(EmbeddedStorageFormatError::RegionCountTooLarge)?;
+            let end = start
+                .saturating_add(entries_per_metadata_region)
+                .min(entry_count);
+            let next_metadata_region = if metadata_region_index + 1 < metadata_region_count {
                 Some(region_index + 1)
             } else {
                 None
             };
-            self.write_free_pointer_footer(region_index, footer_offset, metadata, next_tail)?;
+            let free_space_len = encode_free_space_region_segment(
+                &mut free_space_region,
+                metadata,
+                1,
+                region_index,
+                cursors,
+                next_metadata_region,
+                &entries[start..end],
+            )?;
+            self.write_region(region_index, 0, &free_space_region[..free_space_len])?;
         }
 
         self.sync()?;
@@ -620,30 +706,19 @@ where
         metadata: StorageMetadata,
         sequence: u64,
         wal_head: u32,
+        cursors: FreeSpaceCursors,
     ) -> Result<(), EmbeddedStorageError> {
         let prefix_len = metadata.wal_record_area_offset()?;
         let absolute = self.region_absolute_offset(region_index, 0, prefix_len)?;
         self.strict_write_absolute_with(absolute, prefix_len, |target, _erased_byte| {
-            encode_wal_region_prefix(target, metadata, sequence, wal_head)?;
-            Ok(())
-        })
-    }
-
-    fn write_free_pointer_footer(
-        &mut self,
-        region_index: u32,
-        footer_offset: usize,
-        metadata: StorageMetadata,
-        next_tail: Option<u32>,
-    ) -> Result<(), EmbeddedStorageError> {
-        let absolute = self.region_absolute_offset(
-            region_index,
-            footer_offset,
-            FreePointerFooter::ENCODED_LEN,
-        )?;
-        self.strict_write_absolute_with(absolute, FreePointerFooter::ENCODED_LEN, |target, _| {
-            let footer = FreePointerFooter { next_tail };
-            footer.encode_into(target, metadata.erased_byte)?;
+            encode_log_region_prefix(
+                target,
+                metadata,
+                sequence,
+                MAIN_WAL_V2_FORMAT,
+                wal_head,
+                cursors,
+            )?;
             Ok(())
         })
     }

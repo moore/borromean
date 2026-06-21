@@ -248,6 +248,9 @@ earlier `StorageMetadata` field in on-disk order.
 `StorageMetadata` are reserved, MUST be left erased by formatting, and
 MUST be ignored on read.
 6. `RING-META-006` `transaction_log_count` MUST be at least `1`.
+7. `RING-META-007` Opening MUST reject media whose
+`transaction_log_count` does not equal the configured transaction slot
+count for this implementation.
 
 ## Header
 

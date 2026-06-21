@@ -1,4 +1,5 @@
 use super::*;
+use crate::FreeQueuePosition;
 use std::pin::pin;
 use std::task::Poll;
 
@@ -89,8 +90,18 @@ fn requirement_encoding_and_decoding_round_trip_from_plain_byte_buffers() {
 
     let prologue = WalRegionPrologue {
         log_head_region_index: 2,
-        allocator_free_list_head: Some(1),
-        allocation_sequence: 0,
+        allocation_head: FreeQueuePosition {
+            region_index: 1,
+            entry_index: 0,
+        },
+        ready_boundary: FreeQueuePosition {
+            region_index: 1,
+            entry_index: 1,
+        },
+        append_tail: FreeQueuePosition {
+            region_index: 1,
+            entry_index: 1,
+        },
     };
     let mut prologue_bytes = [0u8; WalRegionPrologue::ENCODED_LEN];
     prologue
@@ -101,14 +112,14 @@ fn requirement_encoding_and_decoding_round_trip_from_plain_byte_buffers() {
         prologue
     );
 
-    let footer = FreePointerFooter { next_tail: Some(3) };
-    let mut footer_bytes = [0u8; FreePointerFooter::ENCODED_LEN];
-    footer
-        .encode_into(&mut footer_bytes, metadata.erased_byte)
+    let entry = FreeSpaceEntry { region_index: 3 };
+    let mut entry_bytes = [0u8; FreeSpaceEntry::ENCODED_LEN];
+    entry
+        .encode_into(&mut entry_bytes, metadata.region_count)
         .unwrap();
     assert_eq!(
-        FreePointerFooter::decode(&footer_bytes, metadata.erased_byte).unwrap(),
-        footer
+        FreeSpaceEntry::decode(&entry_bytes, metadata.region_count).unwrap(),
+        entry
     );
 
     let record = WalRecord::Update {

@@ -30,7 +30,7 @@ pub struct StoragePerfMetrics {
     pub wal_rotation_remaining_bytes_total: u64,
     pub wal_rotation_remaining_bytes_min: u64,
     pub wal_rotation_reserve_bytes_total: u64,
-    pub wal_rotation_alloc_begin_bytes_total: u64,
+    pub wal_rotation_allocate_region_bytes_total: u64,
     pub wal_rotation_link_bytes_total: u64,
     pub wal_syncs: u64,
     pub wal_replay_reads: u64,
@@ -260,7 +260,7 @@ impl StoragePerfMetrics {
     pub(crate) fn observe_wal_rotation_window(
         &mut self,
         remaining_bytes: u64,
-        alloc_begin_bytes: u64,
+        allocate_region_bytes: u64,
         link_bytes: u64,
         reserve_bytes: u64,
     ) {
@@ -272,9 +272,9 @@ impl StoragePerfMetrics {
         } else {
             self.wal_rotation_remaining_bytes_min.min(remaining_bytes)
         };
-        self.wal_rotation_alloc_begin_bytes_total = self
-            .wal_rotation_alloc_begin_bytes_total
-            .saturating_add(alloc_begin_bytes);
+        self.wal_rotation_allocate_region_bytes_total = self
+            .wal_rotation_allocate_region_bytes_total
+            .saturating_add(allocate_region_bytes);
         self.wal_rotation_link_bytes_total = self
             .wal_rotation_link_bytes_total
             .saturating_add(link_bytes);

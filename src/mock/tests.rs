@@ -1,5 +1,5 @@
 use super::*;
-use crate::disk::StorageMetadata;
+use crate::disk::{FreeSpaceEntry, FreeSpaceRegionPrologue, StorageMetadata, FREE_SPACE_V2_FORMAT};
 
 //= spec/ring/01-theory.md#core-requirements
 //= type=test
@@ -195,11 +195,10 @@ fn requirement_erase_restores_erased_bytes() {
 
 //= spec/ring/08-durability-formatting.md#format-storage-on-disk-initialization
 //= type=test
-//# `RING-FORMAT-STORAGE-PRE-007`
-//# `region_count >= 2 + min_free_regions`.
+//# `RING-FORMAT-STORAGE-PRE-007` `transaction_log_count >= 1`.
 #[test]
 fn requirement_format_empty_store_rejects_too_few_regions() {
-    let mut flash = MockFlash::<64, 2, 16>::new(0xff);
+    let mut flash = MockFlash::<96, 2, 16>::new(0xff);
     let error = flash.format_empty_store(1, 8, 0xa5).unwrap_err();
     assert_eq!(
         error,
@@ -214,7 +213,7 @@ fn requirement_format_empty_store_rejects_too_few_regions() {
         tiny.format_empty_store(1, 8, 0xa5),
         Err(MockFormatError::RegionSizeTooSmall {
             region_size: 7,
-            min_region_size: 48,
+            min_region_size: 63,
         })
     );
 }
@@ -225,16 +224,16 @@ fn requirement_format_empty_store_rejects_too_few_regions() {
 //# count and persist matching metadata.
 #[test]
 fn requirement_format_empty_store_accepts_exact_minimum_region_count() {
-    let mut flash = MockFlash::<64, 3, 16>::new(0xff);
+    let mut flash = MockFlash::<96, 3, 16>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
 
     assert_eq!(metadata.region_count, 3);
     assert_eq!(flash.metadata(), Some(&metadata));
 
-    let mut exact_size = MockFlash::<48, 3, 16>::new(0xff);
-    let exact_size_metadata = exact_size.format_empty_store(1, 8, 0xa5).unwrap();
+    let mut exact_size = MockFlash::<67, 3, 16>::new(0xff);
+    let exact_size_metadata = exact_size.format_empty_store(1, 1, 0xa5).unwrap();
 
-    assert_eq!(exact_size_metadata.region_size, 48);
+    assert_eq!(exact_size_metadata.region_size, 67);
     assert_eq!(exact_size.metadata(), Some(&exact_size_metadata));
 }
 
@@ -243,7 +242,7 @@ fn requirement_format_empty_store_accepts_exact_minimum_region_count() {
 //# `RING-FORMAT-STORAGE-PRE-003` Region `0` MUST be reserved as the initial main WAL region.
 #[test]
 fn requirement_format_empty_store_reserves_region_zero_as_initial_wal_region() {
-    let mut flash = MockFlash::<64, 4, 32>::new(0xff);
+    let mut flash = MockFlash::<96, 4, 32>::new(0xff);
     flash.format_empty_store(1, 8, 0xa5).unwrap();
 
     let header = Header::decode(&flash.region_bytes(0).unwrap()[..Header::ENCODED_LEN]).unwrap();
@@ -253,16 +252,17 @@ fn requirement_format_empty_store_reserves_region_zero_as_initial_wal_region() {
 
 //= spec/ring/08-durability-formatting.md#format-storage-on-disk-initialization
 //= type=test
-//# `RING-FORMAT-STORAGE-003` Initialize region `0` as main WAL:
-//# write valid `Header` with `collection_id = 0`,
-//# `collection_format = main_wal_v2`, and `sequence = 0`,
-//# write a valid `LogRegionPrologue` with `log_head_region_index = 0`,
-//# `allocator_free_list_head = Some(1)`, and
-//# `allocation_sequence = 0`,
-//# then sync region `0`.
+//# `RING-FORMAT-STORAGE-003` Initialize regions
+//# `1..=initial_free_space_metadata_region_count` as a linked `free_space_v2` metadata
+//# chain. In chain order, their headers MUST use strictly increasing `sequence` values
+//# starting at `0`. The chain's `FreeSpaceRegionPrologue` values MUST set
+//# `allocation_head`, `ready_boundary`, and `append_tail` so every non-reserved data region
+//# after the metadata chain is in the ready range. Its `FreeSpaceEntry` arrays MUST list
+//# those ready regions in ascending region-index order. Sync every initialized free-space
+//# metadata region.
 #[test]
 fn requirement_format_empty_store_initializes_region_zero_with_wal_header_and_prologue() {
-    let mut flash = MockFlash::<64, 4, 32>::new(0xff);
+    let mut flash = MockFlash::<96, 4, 32>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
 
     let header = Header::decode(&flash.region_bytes(0).unwrap()[..Header::ENCODED_LEN]).unwrap();
@@ -289,55 +289,63 @@ fn requirement_format_empty_store_initializes_region_zero_with_wal_header_and_pr
 
 //= spec/ring/08-durability-formatting.md#format-storage-on-disk-initialization
 //= type=test
-//# `RING-FORMAT-STORAGE-POST-003` The free list MUST contain every
-//# non-main-WAL region in ascending region-index order.
+//# `RING-FORMAT-STORAGE-POST-003` The free-space collection MUST contain every region after
+//# the initial free-space metadata chain in ascending region-index order.
 #[test]
 fn requirement_format_empty_store_populates_free_list_in_ascending_order() {
-    let mut flash = MockFlash::<64, 4, 32>::new(0xff);
+    let mut flash = MockFlash::<96, 4, 32>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
 
     assert_eq!(flash.metadata(), Some(&metadata));
 
-    let footer_offset = 64 - FreePointerFooter::ENCODED_LEN;
-    assert!(flash.region_bytes(1).unwrap()[..footer_offset]
-        .iter()
-        .all(|byte| *byte == 0xff));
-    assert!(flash.region_bytes(2).unwrap()[..footer_offset]
-        .iter()
-        .all(|byte| *byte == 0xff));
-    assert!(flash.region_bytes(3).unwrap()[..footer_offset]
-        .iter()
-        .all(|byte| *byte == 0xff));
-    let region1 =
-        FreePointerFooter::decode(&flash.region_bytes(1).unwrap()[footer_offset..], 0xff).unwrap();
-    let region2 =
-        FreePointerFooter::decode(&flash.region_bytes(2).unwrap()[footer_offset..], 0xff).unwrap();
-    let region3 =
-        FreePointerFooter::decode(&flash.region_bytes(3).unwrap()[footer_offset..], 0xff).unwrap();
+    let metadata_region = flash.region_bytes(1).unwrap();
+    let header = Header::decode(&metadata_region[..Header::ENCODED_LEN]).unwrap();
+    assert_eq!(header.collection_id, CollectionId(0));
+    assert_eq!(header.collection_format, FREE_SPACE_V2_FORMAT);
 
-    assert_eq!(region1.next_tail, Some(2));
-    assert_eq!(region2.next_tail, Some(3));
-    assert_eq!(region3.next_tail, None);
+    let prologue_offset = Header::ENCODED_LEN;
+    let entries_offset = prologue_offset + FreeSpaceRegionPrologue::ENCODED_LEN;
+    let prologue =
+        FreeSpaceRegionPrologue::decode(&metadata_region[prologue_offset..entries_offset], 4)
+            .unwrap();
+    assert_eq!(prologue.allocation_head.region_index, 1);
+    assert_eq!(prologue.allocation_head.entry_index, 0);
+    assert_eq!(prologue.ready_boundary.entry_index, 2);
+    assert_eq!(prologue.append_tail.entry_index, 2);
+    assert_eq!(prologue.next_metadata_region, None);
+    assert_eq!(prologue.entry_count, 2);
+
+    let first_entry =
+        FreeSpaceEntry::decode(&metadata_region[entries_offset..entries_offset + 4], 4).unwrap();
+    let second_entry =
+        FreeSpaceEntry::decode(&metadata_region[entries_offset + 4..entries_offset + 8], 4)
+            .unwrap();
+    assert_eq!(first_entry.region_index, 2);
+    assert_eq!(second_entry.region_index, 3);
+    assert!(metadata_region[entries_offset + 8..]
+        .iter()
+        .all(|byte| *byte == 0xff));
 }
 
-//= spec/ring/05-disk-format.md#free-pointer-footer
+//= spec/ring/05-disk-format.md#free-space-collection-regions
 //= type=test
-//# `RING-FREE-001` The free-pointer footer MUST occupy the final eight
-//# bytes of the region.
+//# `RING-FREE-001` `FreeQueuePosition` MUST be encoded as the exact byte sequence of the
+//# fields shown above, in that order, with no implicit padding.
 #[test]
-fn requirement_format_empty_store_writes_free_pointer_footer_in_final_eight_bytes() {
-    let mut flash = MockFlash::<64, 4, 32>::new(0xff);
+fn requirement_format_empty_store_leaves_free_data_regions_erased() {
+    let mut flash = MockFlash::<96, 4, 32>::new(0xff);
     flash.format_empty_store(1, 8, 0xa5).unwrap();
 
-    let footer_offset = 64 - FreePointerFooter::ENCODED_LEN;
-    assert_eq!(footer_offset + FreePointerFooter::ENCODED_LEN, 64);
-    assert!(flash.region_bytes(1).unwrap()[..footer_offset]
+    assert!(flash
+        .region_bytes(2)
+        .unwrap()
         .iter()
         .all(|byte| *byte == 0xff));
-
-    let footer =
-        FreePointerFooter::decode(&flash.region_bytes(1).unwrap()[footer_offset..], 0xff).unwrap();
-    assert_eq!(footer.next_tail, Some(2));
+    assert!(flash
+        .region_bytes(3)
+        .unwrap()
+        .iter()
+        .all(|byte| *byte == 0xff));
 }
 
 //= spec/mock.md#mock-flash-requirements
@@ -346,10 +354,10 @@ fn requirement_format_empty_store_writes_free_pointer_footer_in_final_eight_byte
 //# encoded StorageMetadata erased.
 #[test]
 fn requirement_format_empty_store_leaves_reserved_metadata_bytes_erased() {
-    let mut flash = MockFlash::<64, 4, 32>::new(0xff);
+    let mut flash = MockFlash::<96, 4, 32>::new(0xff);
     flash.format_empty_store(1, 8, 0xa5).unwrap();
 
-    let mut metadata_region = [0u8; 64];
+    let mut metadata_region = [0u8; 96];
     flash.read_storage(0, &mut metadata_region).unwrap();
     assert!(metadata_region[StorageMetadata::ENCODED_LEN..]
         .iter()
@@ -363,17 +371,17 @@ fn requirement_format_empty_store_leaves_reserved_metadata_bytes_erased() {
 //# after that metadata region.
 #[test]
 fn requirement_format_empty_store_places_region_zero_immediately_after_metadata_region() {
-    let mut flash = MockFlash::<64, 4, 32>::new(0xff);
+    let mut flash = MockFlash::<96, 4, 32>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
 
     assert_eq!(metadata.region_count, 4);
 
-    let mut metadata_region = [0u8; 64];
+    let mut metadata_region = [0u8; 96];
     flash.read_storage(0, &mut metadata_region).unwrap();
     assert_eq!(StorageMetadata::decode(&metadata_region).unwrap(), metadata);
 
     let mut header_bytes = [0u8; Header::ENCODED_LEN];
-    flash.read_storage(64, &mut header_bytes).unwrap();
+    flash.read_storage(96, &mut header_bytes).unwrap();
     assert_eq!(
         header_bytes,
         flash.region_bytes(0).unwrap()[..Header::ENCODED_LEN]
@@ -390,15 +398,15 @@ fn requirement_format_empty_store_places_region_zero_immediately_after_metadata_
 //# configuration parameters that do not change after initialization.
 #[test]
 fn requirement_format_empty_store_begins_with_static_metadata_region() {
-    let mut flash = MockFlash::<64, 4, 32>::new(0xff);
+    let mut flash = MockFlash::<96, 4, 32>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
 
-    let mut metadata_region = [0u8; 64];
+    let mut metadata_region = [0u8; 96];
     flash.read_storage(0, &mut metadata_region).unwrap();
     assert_eq!(StorageMetadata::decode(&metadata_region).unwrap(), metadata);
 
     let mut region_zero_prefix = [0u8; Header::ENCODED_LEN];
-    flash.read_storage(64, &mut region_zero_prefix).unwrap();
+    flash.read_storage(96, &mut region_zero_prefix).unwrap();
     let wal_header = Header::decode(&region_zero_prefix).unwrap();
     assert_eq!(wal_header.collection_id, CollectionId(0));
 }

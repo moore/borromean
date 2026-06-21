@@ -2,9 +2,9 @@ use super::*;
 
 //= spec/ring/05-disk-format.md#canonical-on-disk-encoding
 //= type=test
-//# `RING-DISK-001` All fixed-width integer fields in `StorageMetadata`,
-//# `Header`, `LogRegionPrologue`, free-pointer footers, and logical WAL
-//# records MUST be encoded little-endian.
+//# `RING-DISK-001` All fixed-width integer fields in `StorageMetadata`, `Header`,
+//# `LogRegionPrologue`, `FreeSpaceRegionPrologue`, `FreeQueuePosition`, `FreeSpaceEntry`,
+//# and logical WAL records MUST be encoded little-endian.
 #[test]
 fn requirement_disk_structures_encode_fixed_width_fields_little_endian() {
     let metadata = StorageMetadata::new(
@@ -54,8 +54,18 @@ fn requirement_disk_structures_encode_fixed_width_fields_little_endian() {
 
     let prologue = WalRegionPrologue {
         log_head_region_index: 0x0b0c_0d0e,
-        allocator_free_list_head: Some(0x0102_0304),
-        allocation_sequence: 0x1112_1314_1516_1718,
+        allocation_head: FreeQueuePosition {
+            region_index: 1,
+            entry_index: 0,
+        },
+        ready_boundary: FreeQueuePosition {
+            region_index: 1,
+            entry_index: 1,
+        },
+        append_tail: FreeQueuePosition {
+            region_index: 1,
+            entry_index: 1,
+        },
     };
     let mut prologue_bytes = [0u8; WalRegionPrologue::ENCODED_LEN];
     prologue
@@ -66,13 +76,13 @@ fn requirement_disk_structures_encode_fixed_width_fields_little_endian() {
         0x0b0c_0d0eu32.to_le_bytes().as_slice()
     );
 
-    let footer = FreePointerFooter {
-        next_tail: Some(0x2122_2324),
+    let entry = FreeSpaceEntry {
+        region_index: 0x2122_2324,
     };
-    let mut footer_bytes = [0u8; FreePointerFooter::ENCODED_LEN];
-    footer.encode_into(&mut footer_bytes, 0xff).unwrap();
+    let mut entry_bytes = [0u8; FreeSpaceEntry::ENCODED_LEN];
+    entry.encode_into(&mut entry_bytes, u32::MAX).unwrap();
     assert_eq!(
-        &footer_bytes[..size_of::<u32>()],
+        &entry_bytes[..size_of::<u32>()],
         0x2122_2324u32.to_le_bytes().as_slice()
     );
 }
@@ -80,7 +90,7 @@ fn requirement_disk_structures_encode_fixed_width_fields_little_endian() {
 //= spec/ring/05-disk-format.md#canonical-on-disk-encoding
 //= type=test
 //# `RING-DISK-006` `metadata_checksum`, `header_checksum`,
-//# `prologue_checksum`, `footer_checksum`, and `record_checksum` MUST all use the standard
+//# `prologue_checksum`, and `record_checksum` MUST all use the standard
 //# CRC-32C (Castagnoli) parameters (`poly = 0x1edc6f41`,
 //# `init = 0xffffffff`, `refin = true`, `refout = true`,
 //# `xorout = 0xffffffff`) and MUST be stored little-endian.
@@ -116,8 +126,18 @@ fn requirement_disk_structure_checksums_use_crc32c_and_store_little_endian_bytes
 
     let prologue = WalRegionPrologue {
         log_head_region_index: 3,
-        allocator_free_list_head: Some(4),
-        allocation_sequence: 5,
+        allocation_head: FreeQueuePosition {
+            region_index: 1,
+            entry_index: 0,
+        },
+        ready_boundary: FreeQueuePosition {
+            region_index: 1,
+            entry_index: 1,
+        },
+        append_tail: FreeQueuePosition {
+            region_index: 1,
+            entry_index: 1,
+        },
     };
     let mut prologue_bytes = [0u8; WalRegionPrologue::ENCODED_LEN];
     prologue.encode_into(&mut prologue_bytes, 8).unwrap();
@@ -125,19 +145,6 @@ fn requirement_disk_structure_checksums_use_crc32c_and_store_little_endian_bytes
     assert_eq!(
         &prologue_bytes[prologue_checksum_offset..],
         crc32(&prologue_bytes[..prologue_checksum_offset])
-            .to_le_bytes()
-            .as_slice()
-    );
-
-    let footer = FreePointerFooter {
-        next_tail: Some(11),
-    };
-    let mut footer_bytes = [0u8; FreePointerFooter::ENCODED_LEN];
-    footer.encode_into(&mut footer_bytes, 0xff).unwrap();
-    let footer_checksum_offset = FreePointerFooter::ENCODED_LEN - size_of::<u32>();
-    assert_eq!(
-        &footer_bytes[footer_checksum_offset..],
-        crc32(&footer_bytes[..footer_checksum_offset])
             .to_le_bytes()
             .as_slice()
     );
@@ -252,8 +259,8 @@ fn requirement_storage_metadata_decode_ignores_reserved_trailing_bytes() {
 
 //= spec/ring/04-wal-records.md#encoding-helper-requirements
 //= type=test
-//# `RING-IMPL-REGRESSION-035` Disk byte helpers MUST advance offsets on reads and writes and return
-//# BufferTooSmall with needed and available sizes for short buffers.
+//# `RING-IMPL-REGRESSION-035` Disk byte helpers MUST advance offsets on reads and writes
+//# and return `BufferTooSmall` with needed and available sizes for short buffers.
 #[test]
 fn requirement_byte_helpers_advance_offsets_and_reject_short_buffers() {
     let mut buffer = [0u8; 2];
@@ -354,8 +361,18 @@ fn requirement_header_round_trips_sequence_collection_id_collection_format_and_c
 fn requirement_wal_prologue_encodes_fields_in_canonical_order() {
     let prologue = WalRegionPrologue {
         log_head_region_index: 3,
-        allocator_free_list_head: Some(4),
-        allocation_sequence: 5,
+        allocation_head: FreeQueuePosition {
+            region_index: 1,
+            entry_index: 0,
+        },
+        ready_boundary: FreeQueuePosition {
+            region_index: 1,
+            entry_index: 1,
+        },
+        append_tail: FreeQueuePosition {
+            region_index: 1,
+            entry_index: 1,
+        },
     };
     let mut buffer = [0u8; WalRegionPrologue::ENCODED_LEN];
     prologue.encode_into(&mut buffer, 8).unwrap();
@@ -365,15 +382,24 @@ fn requirement_wal_prologue_encodes_fields_in_canonical_order() {
 
 //= spec/ring/05-disk-format.md#log-region-prologue
 //= type=test
-//# `RING-PROLOGUE-002` `prologue_checksum` MUST be CRC-32C over
-//# `log_head_region_index`, `allocator_free_list_head`, and
-//# `allocation_sequence`.
+//# `RING-PROLOGUE-002` `prologue_checksum` MUST be CRC-32C over `log_head_region_index`,
+//# `allocation_head`, `ready_boundary`, and `append_tail`.
 #[test]
 fn requirement_wal_prologue_checksum_covers_head_region_index() {
     let prologue = WalRegionPrologue {
         log_head_region_index: 3,
-        allocator_free_list_head: Some(4),
-        allocation_sequence: 5,
+        allocation_head: FreeQueuePosition {
+            region_index: 1,
+            entry_index: 0,
+        },
+        ready_boundary: FreeQueuePosition {
+            region_index: 1,
+            entry_index: 1,
+        },
+        append_tail: FreeQueuePosition {
+            region_index: 1,
+            entry_index: 1,
+        },
     };
     let mut buffer = [0u8; WalRegionPrologue::ENCODED_LEN];
     prologue.encode_into(&mut buffer, 8).unwrap();
@@ -393,8 +419,18 @@ fn requirement_wal_prologue_checksum_covers_head_region_index() {
 fn requirement_wal_prologue_rejects_out_of_range_head() {
     let prologue = WalRegionPrologue {
         log_head_region_index: 4,
-        allocator_free_list_head: None,
-        allocation_sequence: 0,
+        allocation_head: FreeQueuePosition {
+            region_index: 1,
+            entry_index: 0,
+        },
+        ready_boundary: FreeQueuePosition {
+            region_index: 1,
+            entry_index: 1,
+        },
+        append_tail: FreeQueuePosition {
+            region_index: 1,
+            entry_index: 1,
+        },
     };
     let mut buffer = [0u8; WalRegionPrologue::ENCODED_LEN];
 
@@ -402,62 +438,6 @@ fn requirement_wal_prologue_rejects_out_of_range_head() {
     assert_eq!(
         error,
         DiskError::InvalidWalHeadRegionIndex {
-            region_index: 4,
-            region_count: 4,
-        }
-    );
-}
-
-//= spec/ring/05-disk-format.md#free-pointer-footer
-//= type=test
-//# `RING-FREE-003` Otherwise the footer MUST decode as
-//# `next_tail:u32, footer_checksum:u32`, both little-endian, with
-//# `footer_checksum` equal to CRC-32C over `next_tail`.
-#[test]
-fn requirement_free_pointer_footer_uses_crc32c_for_non_erased_value() {
-    let footer = FreePointerFooter {
-        next_tail: Some(11),
-    };
-    let mut buffer = [0u8; FreePointerFooter::ENCODED_LEN];
-    footer.encode_into(&mut buffer, 0xff).unwrap();
-
-    let expected = crc32(&11u32.to_le_bytes());
-    let mut checksum_bytes = [0u8; size_of::<u32>()];
-    checksum_bytes.copy_from_slice(&buffer[size_of::<u32>()..]);
-    assert_eq!(u32::from_le_bytes(checksum_bytes), expected);
-    assert_eq!(FreePointerFooter::decode(&buffer, 0xff).unwrap(), footer);
-}
-
-//= spec/ring/05-disk-format.md#free-pointer-footer
-//= type=test
-//# RING-FREE-002 If all eight footer bytes equal `erased_byte`, the footer is uninitialized and
-//# represents `next_tail = none`.
-#[test]
-fn requirement_free_pointer_footer_none_uses_erased_bytes() {
-    let footer = FreePointerFooter { next_tail: None };
-    let mut buffer = [0u8; FreePointerFooter::ENCODED_LEN];
-    footer.encode_into(&mut buffer, 0xff).unwrap();
-
-    assert!(buffer.iter().all(|byte| *byte == 0xff));
-    let decoded = FreePointerFooter::decode(&buffer, 0xff).unwrap();
-    assert_eq!(decoded, footer);
-}
-
-//= spec/ring/05-disk-format.md#free-pointer-footer
-//= type=test
-//# `RING-FREE-004` A checksum-valid non-erased footer MUST decode to a
-//# `u32 region_index` strictly less than `region_count`; any other value is
-//# malformed.
-#[test]
-fn requirement_free_pointer_footer_rejects_region_index_at_or_above_region_count() {
-    let footer = FreePointerFooter { next_tail: Some(4) };
-    let mut buffer = [0u8; FreePointerFooter::ENCODED_LEN];
-    footer.encode_into(&mut buffer, 0xff).unwrap();
-
-    let error = FreePointerFooter::decode_with_region_count(&buffer, 0xff, 4).unwrap_err();
-    assert_eq!(
-        error,
-        DiskError::InvalidRegionIndex {
             region_index: 4,
             region_count: 4,
         }

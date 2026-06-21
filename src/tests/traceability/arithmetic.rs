@@ -65,19 +65,19 @@ fn requirement_boundary_sensitive_storage_and_map_lengths_stay_in_range() {
 //# truncate.
 #[test]
 fn requirement_arithmetic_boundary_failures_surface_explicit_error_variants() {
-    let mut flash = MockFlash::<64, 4, 256>::new(0xff);
-    let storage = Storage::<_, 64, 4, 8>::format(
+    let mut flash = MockFlash::<96, 4, 256>::new(0xff);
+    let storage = Storage::<_, 96, 4, 8>::format(
         &mut flash,
         StorageFormatConfig::new(1, 8, 0xa5),
         crate::test_storage_memory(),
     )
     .unwrap();
 
-    let oversized_payload = [0u8; 64];
+    let oversized_payload = [0u8; 96];
     let mut runtime = storage.into_runtime();
-    let mut workspace = StorageWorkspace::<64>::new();
+    let mut workspace = StorageWorkspace::<96>::new();
     assert!(matches!(
-        runtime.write_committed_region::<64, 4, _>(
+        runtime.write_committed_region::<96, 4, _>(
             &mut flash,
             &mut workspace,
             1,

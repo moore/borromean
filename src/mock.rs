@@ -1,6 +1,10 @@
 use heapless::Vec;
 
-use crate::disk::{encode_wal_region_prefix, DiskError, FreePointerFooter, StorageMetadata};
+use crate::disk::{
+    encode_free_space_region_segment, encode_log_region_prefix,
+    free_queue_position_for_contiguous_metadata, DiskError, FreeQueuePosition, FreeSpaceCursors,
+    FreeSpaceEntry, FreeSpaceRegionPrologue, StorageMetadata, MAIN_WAL_V2_FORMAT,
+};
 
 #[cfg(test)]
 use crate::{CollectionId, Header, WalRegionPrologue, WAL_V1_FORMAT};
@@ -96,6 +100,7 @@ pub struct MockFlash<const REGION_SIZE: usize, const REGION_COUNT: usize, const 
     regions: [[u8; REGION_SIZE]; REGION_COUNT],
     erased_byte: u8,
     log: Vec<MockOperation, MAX_LOG>,
+    log_enabled: bool,
 }
 
 impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize>
@@ -109,6 +114,7 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize>
             regions: core::array::from_fn(|_| [erased_byte; REGION_SIZE]),
             erased_byte,
             log: Vec::new(),
+            log_enabled: true,
         }
     }
 
@@ -177,6 +183,14 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize>
     /// Clears the recorded operation log.
     pub fn clear_operations(&mut self) {
         self.log.clear();
+    }
+
+    /// Enables or disables operation recording.
+    pub fn set_operation_logging(&mut self, enabled: bool) {
+        self.log_enabled = enabled;
+        if !enabled {
+            self.log.clear();
+        }
     }
 
     /// Reads formatted storage metadata.
@@ -268,13 +282,6 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize>
         let region_count =
             u32::try_from(REGION_COUNT).map_err(|_| MockFormatError::RegionCountTooLarge)?;
 
-        if region_count < 2 + min_free_regions {
-            return Err(MockFormatError::InsufficientRegions {
-                region_count,
-                min_free_regions,
-            });
-        }
-
         let metadata = StorageMetadata::new(
             region_size,
             region_count,
@@ -284,9 +291,56 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize>
             wal_record_magic,
         )?;
         let wal_record_area_offset = metadata.wal_record_area_offset()?;
+        let free_space_entries_offset =
+            crate::Header::ENCODED_LEN + FreeSpaceRegionPrologue::ENCODED_LEN;
+        let entries_per_metadata_region = REGION_SIZE
+            .checked_sub(free_space_entries_offset)
+            .ok_or(MockFormatError::RegionSizeTooSmall {
+                region_size,
+                min_region_size: u32::try_from(free_space_entries_offset).unwrap_or(u32::MAX),
+            })?
+            / FreeSpaceEntry::ENCODED_LEN;
+        if entries_per_metadata_region == 0 {
+            return Err(MockFormatError::RegionSizeTooSmall {
+                region_size,
+                min_region_size: u32::try_from(
+                    free_space_entries_offset + FreeSpaceEntry::ENCODED_LEN,
+                )
+                .unwrap_or(u32::MAX),
+            });
+        }
+        let mut metadata_region_count = 1u32;
+        loop {
+            if region_count <= 1 + metadata_region_count {
+                return Err(MockFormatError::InsufficientRegions {
+                    region_count,
+                    min_free_regions,
+                });
+            }
+            let free_space_entry_count = region_count - 1 - metadata_region_count;
+            if free_space_entry_count < min_free_regions {
+                return Err(MockFormatError::InsufficientRegions {
+                    region_count,
+                    min_free_regions,
+                });
+            }
+            let capacity = metadata_region_count
+                .checked_mul(
+                    u32::try_from(entries_per_metadata_region)
+                        .map_err(|_| MockFormatError::RegionCountTooLarge)?,
+                )
+                .ok_or(MockFormatError::RegionCountTooLarge)?;
+            if capacity >= free_space_entry_count {
+                break;
+            }
+            metadata_region_count = metadata_region_count
+                .checked_add(1)
+                .ok_or(MockFormatError::RegionCountTooLarge)?;
+        }
+        let free_space_entry_count = region_count - 1 - metadata_region_count;
         let min_region_size_usize = StorageMetadata::ENCODED_LEN
             .max(wal_record_area_offset)
-            .max(FreePointerFooter::ENCODED_LEN);
+            .max(free_space_entries_offset + FreeSpaceEntry::ENCODED_LEN);
         if REGION_SIZE < min_region_size_usize {
             let min_region_size = u32::try_from(min_region_size_usize).unwrap_or(u32::MAX);
             return Err(MockFormatError::RegionSizeTooSmall {
@@ -302,20 +356,62 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize>
         }
 
         let mut prefix = [self.erased_byte; REGION_SIZE];
-        let prefix_len = encode_wal_region_prefix(&mut prefix, metadata, 0, 0)?;
+        let tail = free_queue_position_for_contiguous_metadata(
+            1,
+            metadata_region_count,
+            entries_per_metadata_region,
+            free_space_entry_count,
+        )?;
+        let allocation_head = FreeQueuePosition {
+            region_index: 1,
+            entry_index: 0,
+        };
+        let cursors = FreeSpaceCursors::new(allocation_head, tail, tail);
+        let prefix_len =
+            encode_log_region_prefix(&mut prefix, metadata, 0, MAIN_WAL_V2_FORMAT, 0, cursors)?;
         self.write_region(0, 0, &prefix[..prefix_len])?;
 
-        let footer_offset = REGION_SIZE - FreePointerFooter::ENCODED_LEN;
-        for region_index in 1..region_count {
-            let next_tail = if region_index + 1 < region_count {
+        let mut free_space_region = [self.erased_byte; REGION_SIZE];
+        let mut entries = [0u32; REGION_COUNT];
+        let entry_count = usize::try_from(free_space_entry_count)
+            .map_err(|_| MockFormatError::RegionCountTooLarge)?;
+        for (slot, region_index) in entries[..entry_count]
+            .iter_mut()
+            .zip((1 + metadata_region_count)..region_count)
+        {
+            *slot = region_index;
+        }
+        let tail = free_queue_position_for_contiguous_metadata(
+            1,
+            metadata_region_count,
+            entries_per_metadata_region,
+            free_space_entry_count,
+        )?;
+        let cursors = FreeSpaceCursors::new(allocation_head, tail, tail);
+        for metadata_region_index in 0..metadata_region_count {
+            let region_index = 1 + metadata_region_index;
+            let start = usize::try_from(metadata_region_index)
+                .map_err(|_| MockFormatError::RegionCountTooLarge)?
+                .checked_mul(entries_per_metadata_region)
+                .ok_or(MockFormatError::RegionCountTooLarge)?;
+            let end = start
+                .saturating_add(entries_per_metadata_region)
+                .min(entry_count);
+            let next_metadata_region = if metadata_region_index + 1 < metadata_region_count {
                 Some(region_index + 1)
             } else {
                 None
             };
-            let footer = FreePointerFooter { next_tail };
-            let mut footer_bytes = [0u8; FreePointerFooter::ENCODED_LEN];
-            footer.encode_into(&mut footer_bytes, self.erased_byte)?;
-            self.write_region(region_index, footer_offset, &footer_bytes)?;
+            let free_space_len = encode_free_space_region_segment(
+                &mut free_space_region,
+                metadata,
+                1,
+                region_index,
+                cursors,
+                next_metadata_region,
+                &entries[start..end],
+            )?;
+            self.write_region(region_index, 0, &free_space_region[..free_space_len])?;
         }
 
         self.sync()?;
@@ -323,6 +419,9 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize>
     }
 
     fn log(&mut self, operation: MockOperation) -> Result<(), MockError> {
+        if !self.log_enabled {
+            return Ok(());
+        }
         self.log.push(operation).map_err(|_| MockError::LogFull)
     }
 

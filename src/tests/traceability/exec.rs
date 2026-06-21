@@ -101,7 +101,7 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize> 
 #[test]
 fn requirement_each_fallible_storage_operation_is_drivable_as_one_future() {
     const REGION_SIZE: usize = 512;
-    const REGION_COUNT: usize = 5;
+    const REGION_COUNT: usize = 8;
 
     let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 2048>::new(0xff);
     let mut storage =

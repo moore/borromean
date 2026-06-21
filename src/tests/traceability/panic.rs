@@ -1,5 +1,7 @@
 use super::*;
-use crate::{MapFrontierMemory, StorageMemory, StorageOpenError, StorageRuntime};
+use crate::{
+    FreeQueuePosition, MapFrontierMemory, StorageMemory, StorageOpenError, StorageRuntime,
+};
 
 //= spec/implementation.md#panic-requirements
 //= type=test
@@ -34,8 +36,18 @@ fn requirement_corrupt_storage_inputs_return_errors_instead_of_panicking() {
 
     let prologue = WalRegionPrologue {
         log_head_region_index: 0,
-        allocator_free_list_head: Some(1),
-        allocation_sequence: 0,
+        allocation_head: FreeQueuePosition {
+            region_index: 1,
+            entry_index: 0,
+        },
+        ready_boundary: FreeQueuePosition {
+            region_index: 1,
+            entry_index: 1,
+        },
+        append_tail: FreeQueuePosition {
+            region_index: 1,
+            entry_index: 1,
+        },
     };
     let mut prologue_bytes = [0u8; WalRegionPrologue::ENCODED_LEN];
     prologue
@@ -47,14 +59,30 @@ fn requirement_corrupt_storage_inputs_return_errors_instead_of_panicking() {
         Err(DiskError::InvalidChecksum)
     ));
 
-    let footer = FreePointerFooter { next_tail: Some(2) };
-    let mut footer_bytes = [0u8; FreePointerFooter::ENCODED_LEN];
-    footer
-        .encode_into(&mut footer_bytes, metadata.erased_byte)
+    let free_space_prologue = FreeSpaceRegionPrologue {
+        allocation_head: FreeQueuePosition {
+            region_index: 1,
+            entry_index: 0,
+        },
+        ready_boundary: FreeQueuePosition {
+            region_index: 1,
+            entry_index: 0,
+        },
+        append_tail: FreeQueuePosition {
+            region_index: 1,
+            entry_index: 0,
+        },
+        next_metadata_region: None,
+        entry_count: 0,
+        entries_checksum: 0,
+    };
+    let mut free_space_bytes = [0u8; FreeSpaceRegionPrologue::ENCODED_LEN];
+    free_space_prologue
+        .encode_into(&mut free_space_bytes, metadata.region_count)
         .unwrap();
-    footer_bytes[FreePointerFooter::ENCODED_LEN - 1] ^= 0x01;
+    free_space_bytes[FreeSpaceRegionPrologue::ENCODED_LEN - 1] ^= 0x01;
     assert!(matches!(
-        FreePointerFooter::decode(&footer_bytes, metadata.erased_byte),
+        FreeSpaceRegionPrologue::decode(&free_space_bytes, metadata.region_count),
         Err(DiskError::InvalidChecksum)
     ));
 }

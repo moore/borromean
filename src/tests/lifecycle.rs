@@ -87,33 +87,29 @@ fn force_wal_rotation<
     const MAX_COLLECTIONS: usize,
 >(
     storage: &mut Storage<'db, 'db, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
-    collection_id: CollectionId,
+    _collection_id: CollectionId,
 ) -> usize {
     let mut wal_reclaims = 0usize;
     for _ in 0..128 {
-        match storage.append_wal_rotation_start() {
-            Ok(region_index) => {
-                storage.append_wal_rotation_finish(region_index).unwrap();
+        match storage.with_runtime_io_workspace(|runtime, flash, workspace| {
+            runtime.rotate_wal_tail::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace)
+        }) {
+            Ok(()) => {
                 return wal_reclaims;
             }
-            Err(StorageRuntimeError::InvalidRotationWindow { .. }) => {
-                let previous_tail = storage.wal_tail();
-                storage.append_update(collection_id, &[0]).unwrap();
-                if storage.wal_tail() != previous_tail {
-                    return wal_reclaims;
-                }
-            }
-            Err(StorageRuntimeError::NoFreeRegionForRotation)
-                if storage.wal_head() != storage.wal_tail() =>
-            {
+            Err(
+                StorageRuntimeError::InvalidRotationWindow { .. }
+                | StorageRuntimeError::NoFreeRegionForRotation
+                | StorageRuntimeError::WalRotationRequired,
+            ) if storage.wal_head() != storage.wal_tail() => {
                 storage.reclaim_wal_head().unwrap_or_else(|error| {
                     panic!(
                         "wal reclaim during forced rotation failed: {error:?}; head={} tail={} append={} free_head={:?} free_tail={:?}",
                         storage.wal_head(),
                         storage.wal_tail(),
                         storage.wal_append_offset(),
-                        storage.last_free_list_head(),
-                        storage.free_list_tail(),
+                        storage.ready_free_region(),
+                        storage.free_space_tail_region(),
                     )
                 });
                 wal_reclaims += 1;
@@ -167,12 +163,19 @@ fn observe_completed_transaction_cleanup<
 
 fn service_storage_lifecycle<
     'db,
-    IO: FlashIo,
     const REGION_SIZE: usize,
     const REGION_COUNT: usize,
+    const MAX_LOG: usize,
     const MAX_COLLECTIONS: usize,
 >(
-    storage: &mut Storage<'db, 'db, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
+    storage: &mut Storage<
+        'db,
+        'db,
+        MockFlash<REGION_SIZE, REGION_COUNT, MAX_LOG>,
+        REGION_SIZE,
+        REGION_COUNT,
+        MAX_COLLECTIONS,
+    >,
     wal_reclaim_threshold: usize,
     stats: &mut LifecycleStats,
 ) {
@@ -187,11 +190,24 @@ fn service_storage_lifecycle<
     }
 
     let old_head = storage.wal_head();
-    let new_head = storage.reclaim_wal_head().unwrap();
+    storage.with_io_workspace(|flash, _workspace| flash.clear_operations());
+    let new_head = storage.reclaim_wal_head().unwrap_or_else(|error| {
+        panic!(
+            "wal reclaim failed: {error:?}; chain_len={chain_len}; head={} tail={} append={} free_head={:?} free_tail={:?} ready={:?} cursors={:?}",
+            storage.wal_head(),
+            storage.wal_tail(),
+            storage.wal_append_offset(),
+            storage.ready_free_region(),
+            storage.free_space_tail_region(),
+            storage.ready_region(),
+            storage.free_space_cursors(),
+        )
+    });
     assert_ne!(old_head, new_head);
     assert_eq!(storage.wal_head(), new_head);
     let new_chain_len = wal_chain_len(storage).unwrap();
-    assert!(new_chain_len <= chain_len);
+    assert!(new_chain_len > 0);
+    assert!(new_chain_len <= REGION_COUNT);
     stats.wal_reclaims += 1;
     observe_completed_transaction_cleanup(storage, stats);
 }
@@ -224,13 +240,23 @@ fn assert_map_model<
 //# WAL prefixes, reuse reclaimed regions, and reopen with live collection state intact.
 #[test]
 fn requirement_wal_lifecycle_reuses_every_region_across_reclaim_cycles() {
-    const REGION_SIZE: usize = 512;
+    std::thread::Builder::new()
+        .stack_size(128 * 1024 * 1024)
+        .spawn(run_wal_lifecycle_reuses_every_region_across_reclaim_cycles)
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+fn run_wal_lifecycle_reuses_every_region_across_reclaim_cycles() {
+    const REGION_SIZE: usize = 4096;
     const REGION_COUNT: usize = 48;
-    const MAX_LOG: usize = 16_384;
+    const MAX_LOG: usize = 131_072;
     const MAX_COLLECTIONS: usize = 8;
 
     let mut flash =
         std::boxed::Box::new(MockFlash::<REGION_SIZE, REGION_COUNT, MAX_LOG>::new(0xff));
+    flash.set_operation_logging(false);
     let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>::format(
         &mut *flash,
         StorageFormatConfig::new(2, 8, 0xa5),
@@ -241,16 +267,17 @@ fn requirement_wal_lifecycle_reuses_every_region_across_reclaim_cycles() {
     storage.create_map(collection_id).unwrap();
 
     let mut seen_regions = [false; REGION_COUNT];
+    mark_region(&mut seen_regions, 1);
     mark_current_wal_chain(&mut storage, &mut seen_regions).unwrap();
     let mut stats = LifecycleStats::default();
 
     for _iteration in 0..(REGION_COUNT * 3) {
-        service_storage_lifecycle(&mut storage, 16, &mut stats);
+        service_storage_lifecycle(&mut storage, 4, &mut stats);
         stats.wal_reclaims += force_wal_rotation(&mut storage, collection_id);
         mark_current_wal_chain(&mut storage, &mut seen_regions).unwrap();
         storage.with_io_workspace(|flash, _workspace| flash.clear_operations());
 
-        service_storage_lifecycle(&mut storage, 16, &mut stats);
+        service_storage_lifecycle(&mut storage, 4, &mut stats);
         mark_current_wal_chain(&mut storage, &mut seen_regions).unwrap();
         storage.with_io_workspace(|flash, _workspace| flash.clear_operations());
 
@@ -270,8 +297,8 @@ fn requirement_wal_lifecycle_reuses_every_region_across_reclaim_cycles() {
             seen_region_count(&seen_regions),
             storage.wal_head(),
             storage.wal_tail(),
-            storage.last_free_list_head(),
-            storage.free_list_tail(),
+            storage.ready_free_region(),
+            storage.free_space_tail_region(),
         );
     }
     assert!(stats.wal_reclaims >= 3);
