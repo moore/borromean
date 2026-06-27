@@ -51,8 +51,8 @@ pub enum StartupError {
     },
     /// A replayed WAL head control record used the wrong collection type.
     InvalidWalHeadControlType(u16),
-    /// The free-list chain was malformed.
-    InvalidFreeListChain {
+    /// The free-space metadata chain was malformed.
+    InvalidFreeSpaceMetadataChain {
         /// Region at which the malformed chain was detected.
         region_index: u32,
     },
@@ -121,6 +121,11 @@ pub enum StartupError {
         /// Collection carried by the marker.
         actual: CollectionId,
     },
+    /// A transaction-log range did not enroll or preserve its collection generation.
+    InvalidTransactionEnrollment {
+        /// Collection carried by the private record or enrollment.
+        collection_id: CollectionId,
+    },
     /// Replay reached the WAL end before a transaction terminal marker.
     UnfinishedTransaction(CollectionId),
     /// Startup transaction recovery needed to rotate the WAL but no free region was available.
@@ -132,7 +137,6 @@ pub enum StartupError {
         /// Bytes required for the full rotation sequence.
         rotation_reserve: usize,
     },
-    /// A region being returned to the free list did not have an unwritten footer.
     /// Replay found a live collection type not supported by this build.
     UnsupportedLiveCollectionType(u16),
     /// Formatted metadata does not match this build's transaction slot count.
@@ -230,6 +234,22 @@ impl StartupCollection {
     /// Returns the number of retained updates layered over the basis.
     pub fn pending_update_count(&self) -> usize {
         self.pending_update_count
+    }
+
+    /// Returns a deterministic generation for the committed replay summary.
+    pub(crate) fn committed_generation(&self) -> u64 {
+        let type_part = self.collection_type.map(u64::from).unwrap_or(u64::MAX);
+        let basis_part = match self.basis {
+            StartupCollectionBasis::Empty => 0,
+            StartupCollectionBasis::WalSnapshot => 1,
+            StartupCollectionBasis::Region(region_index) => {
+                2u64 ^ (u64::from(region_index).rotate_left(17))
+            }
+            StartupCollectionBasis::Dropped => 3,
+        };
+        type_part.rotate_left(32)
+            ^ basis_part.rotate_left(8)
+            ^ u64::try_from(self.pending_update_count).unwrap_or(u64::MAX)
     }
 }
 
@@ -395,6 +415,12 @@ struct OpenInlineTransactionReplay {
     expected_encoded_len: u32,
     seen_record_count: u32,
     seen_encoded_len: u32,
+}
+
+#[derive(Debug, Default)]
+struct TransactionLogReplayEnrollment {
+    collection_id: Option<CollectionId>,
+    observed_generation: Option<u64>,
 }
 
 #[derive(Debug, Default)]
@@ -1050,6 +1076,9 @@ fn replay_open_wal_region<
                         }
                     }
                 }
+                if outcome == TransactionLogOutcome::RolledBack {
+                    plan.clear_transaction_recovery_scratch();
+                }
                 offset = next_offset;
                 reload_region = true;
             }
@@ -1261,7 +1290,6 @@ fn classify_replay_record<const REGION_COUNT: usize, const MAX_COLLECTIONS: usiz
                 transaction_log_id,
             )?;
             *open_transaction = None;
-            plan.clear_transaction_recovery_scratch();
             return Ok(ReplayStep::ReplayTransactionLog {
                 transaction_log_id,
                 range,
@@ -1362,6 +1390,90 @@ fn remember_transaction_collection(
     Ok(())
 }
 
+fn collection_generation_in(
+    collections: &[StartupCollection],
+    collection_id: CollectionId,
+) -> Result<u64, StartupError> {
+    collections
+        .iter()
+        .find(|collection| collection.collection_id == collection_id)
+        .map(StartupCollection::committed_generation)
+        .ok_or(StartupError::UnknownCollection(collection_id))
+}
+
+fn validate_transaction_log_private_record<
+    const REGION_COUNT: usize,
+    const MAX_COLLECTIONS: usize,
+>(
+    plan: &StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS>,
+    enrollment: &mut TransactionLogReplayEnrollment,
+    record: WalRecord<'_>,
+) -> Result<(), StartupError> {
+    match record {
+        WalRecord::AddTransactionCollection {
+            collection_id,
+            observed_collection_generation,
+        } => {
+            if collection_id == CollectionId(0) {
+                return Err(StartupError::ReservedCollectionId(collection_id));
+            }
+            let expected_generation =
+                collection_generation_in(&plan.transaction_original_collections, collection_id)
+                    .or_else(|_| {
+                        collection_generation_in(plan.collections.as_slice(), collection_id)
+                    })
+                    .ok();
+            if expected_generation
+                .is_some_and(|expected| observed_collection_generation != expected)
+            {
+                return Err(StartupError::InvalidTransactionEnrollment { collection_id });
+            }
+            match (enrollment.collection_id, enrollment.observed_generation) {
+                (None, None) => {
+                    enrollment.collection_id = Some(collection_id);
+                    enrollment.observed_generation = Some(observed_collection_generation);
+                }
+                (Some(active), Some(active_generation))
+                    if active == collection_id
+                        && active_generation == observed_collection_generation => {}
+                _ => return Err(StartupError::InvalidTransactionEnrollment { collection_id }),
+            }
+            Ok(())
+        }
+        WalRecord::Link { .. } => Ok(()),
+        WalRecord::AllocateRegion { .. }
+        | WalRecord::FreeRegion { .. }
+        | WalRecord::EraseFreeRegionSpan { .. } => {
+            if enrollment.collection_id.is_none() {
+                return Err(StartupError::InvalidTransactionEnrollment {
+                    collection_id: CollectionId(0),
+                });
+            }
+            Ok(())
+        }
+        WalRecord::NewCollection { collection_id, .. }
+        | WalRecord::Update { collection_id, .. }
+        | WalRecord::Snapshot { collection_id, .. }
+        | WalRecord::Head { collection_id, .. }
+        | WalRecord::DropCollection { collection_id } => {
+            if enrollment.collection_id == Some(collection_id) {
+                return Ok(());
+            }
+            Err(StartupError::InvalidTransactionEnrollment { collection_id })
+        }
+        WalRecord::BeginInlineTransaction { .. }
+        | WalRecord::CommitInlineTransaction { .. }
+        | WalRecord::RollbackInlineTransaction { .. }
+        | WalRecord::BeginTransaction { .. }
+        | WalRecord::CommitTransaction { .. }
+        | WalRecord::TransactionFinished { .. }
+        | WalRecord::RollbackTransaction { .. }
+        | WalRecord::WalRecovery => Err(StartupError::InvalidTransactionEnrollment {
+            collection_id: CollectionId(0),
+        }),
+    }
+}
+
 fn transaction_collection_id(
     transaction: &OpenTransactionReplay,
 ) -> Result<CollectionId, StartupError> {
@@ -1436,6 +1548,7 @@ fn load_initial_free_space_from_flash<const REGION_SIZE: usize, IO: FlashIo>(
         heapless::Vec::<u32, { crate::free_space::MAX_FREE_QUEUE_ENTRIES }>::new();
     let mut first_prologue = None;
     let mut region_index = 1;
+    let mut expected_sequence = 0u64;
     let entries_per_region = {
         let entries_offset = Header::ENCODED_LEN
             .checked_add(FreeSpaceRegionPrologue::ENCODED_LEN)
@@ -1461,9 +1574,13 @@ fn load_initial_free_space_from_flash<const REGION_SIZE: usize, IO: FlashIo>(
         let header = Header::decode(&region_bytes[..Header::ENCODED_LEN])?;
         if header.collection_id != CollectionId(0)
             || header.collection_format != FREE_SPACE_V2_FORMAT
+            || header.sequence != expected_sequence
         {
             return Err(StartupError::InvalidFreeSpaceCollection);
         }
+        expected_sequence = expected_sequence
+            .checked_add(1)
+            .ok_or(StartupError::LengthOverflow)?;
 
         let prologue_start = Header::ENCODED_LEN;
         let prologue_end = prologue_start
@@ -2322,6 +2439,7 @@ fn replay_transaction_log_range<
         collection_id: None,
         regions: Vec::new(),
     };
+    let mut enrollment = TransactionLogReplayEnrollment::default();
     push_unique_region(&mut result.regions, range.start.region_index)?;
     if range.start == range.end {
         return Ok(result);
@@ -2383,6 +2501,7 @@ fn replay_transaction_log_range<
                             next_region = Some(next_region_index);
                         }
                         record => {
+                            validate_transaction_log_private_record(plan, &mut enrollment, record)?;
                             if result.collection_id.is_none() {
                                 if let Some(collection_id) =
                                     transaction_record_collection_id(record)

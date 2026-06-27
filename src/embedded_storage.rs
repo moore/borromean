@@ -143,7 +143,7 @@ pub enum EmbeddedStorageFormatError {
         /// Requested minimum number of free regions.
         min_free_regions: u32,
     },
-    /// `REGION_SIZE` is too small for required metadata, WAL, or free-list bytes.
+    /// `REGION_SIZE` is too small for required metadata, WAL, or free-space bytes.
     RegionSizeTooSmall {
         /// Configured region size in bytes.
         region_size: u32,
@@ -423,7 +423,7 @@ where
             0,
         )?;
         let cursors = FreeSpaceCursors::new(allocation_head, tail, tail);
-        self.write_wal_region_prefix(0, metadata, 0, 0, cursors)?;
+        self.write_wal_region_prefix(0, metadata, u64::from(metadata_region_count), 0, cursors)?;
 
         let mut free_space_region = [self.options.erased_byte; REGION_SIZE];
         let mut entries = [0u32; REGION_COUNT];
@@ -459,7 +459,7 @@ where
             let free_space_len = encode_free_space_region_segment(
                 &mut free_space_region,
                 metadata,
-                1,
+                u64::from(metadata_region_index),
                 region_index,
                 cursors,
                 next_metadata_region,

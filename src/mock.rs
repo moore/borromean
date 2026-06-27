@@ -34,7 +34,7 @@ pub enum MockFormatError {
         /// Requested minimum number of free regions.
         min_free_regions: u32,
     },
-    /// `REGION_SIZE` is too small for required metadata, WAL, or free-list bytes.
+    /// `REGION_SIZE` is too small for required metadata, WAL, or free-space bytes.
     RegionSizeTooSmall {
         /// Configured region size in bytes.
         region_size: u32,
@@ -367,8 +367,14 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize>
             entry_index: 0,
         };
         let cursors = FreeSpaceCursors::new(allocation_head, tail, tail);
-        let prefix_len =
-            encode_log_region_prefix(&mut prefix, metadata, 0, MAIN_WAL_V2_FORMAT, 0, cursors)?;
+        let prefix_len = encode_log_region_prefix(
+            &mut prefix,
+            metadata,
+            u64::from(metadata_region_count),
+            MAIN_WAL_V2_FORMAT,
+            0,
+            cursors,
+        )?;
         self.write_region(0, 0, &prefix[..prefix_len])?;
 
         let mut free_space_region = [self.erased_byte; REGION_SIZE];
@@ -405,7 +411,7 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize>
             let free_space_len = encode_free_space_region_segment(
                 &mut free_space_region,
                 metadata,
-                1,
+                u64::from(metadata_region_index),
                 region_index,
                 cursors,
                 next_metadata_region,

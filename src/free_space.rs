@@ -317,6 +317,19 @@ impl FreeSpaceState {
         self.queue.as_slice()
     }
 
+    pub(crate) fn contains_free_region(&self, region_index: u32) -> bool {
+        let Ok(start) = usize::try_from(self.allocation_head) else {
+            return false;
+        };
+        let Ok(end) = usize::try_from(self.append_tail) else {
+            return false;
+        };
+        if start > end || end > self.queue.len() {
+            return false;
+        }
+        self.queue[start..end].contains(&region_index)
+    }
+
     fn position(&self, entry_index: u32) -> FreeQueuePosition {
         if !self.metadata_regions.is_empty() && self.entries_per_region != 0 {
             let segment = entry_index / self.entries_per_region;

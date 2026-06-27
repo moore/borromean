@@ -23,9 +23,9 @@ fn requirement_wal_storage_and_map_logic_are_exercised_through_separate_interfac
     let decoded = decode_record(&physical[..encoded_len], metadata, &mut decode_scratch).unwrap();
     assert_eq!(decoded.record, record);
 
-    let mut flash = MockFlash::<256, 6, 512>::new(0xff);
+    let mut flash = MockFlash::<256, 8, 512>::new(0xff);
     let mut workspace = StorageWorkspace::<256>::new();
-    let mut storage = Storage::<_, 256, 6, 8>::format(
+    let mut storage = Storage::<_, 256, 8, 8>::format(
         &mut flash,
         StorageFormatConfig::new(1, 8, 0xa5),
         crate::test_storage_memory(),
@@ -45,7 +45,7 @@ fn requirement_wal_storage_and_map_logic_are_exercised_through_separate_interfac
 
     drop(storage);
     let mut reopened =
-        Storage::<_, 256, 6, 8>::open(&mut flash, crate::test_storage_memory()).unwrap();
+        Storage::<_, 256, 8, 8>::open(&mut flash, crate::test_storage_memory()).unwrap();
     assert_eq!(
         reopened.collections()[0].basis(),
         StartupCollectionBasis::Region(region_index)

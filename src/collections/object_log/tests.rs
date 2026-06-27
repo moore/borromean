@@ -14,9 +14,9 @@ macro_rules! append_with_scratch {
 }
 
 macro_rules! tx_append_with_scratch {
-    ($tx:expr, $bytes:expr) => {{
+    ($tx:expr, $storage:expr, $bytes:expr) => {{
         let mut large_scratch = [0u8; REGION_SIZE];
-        $tx.append($bytes, &mut large_scratch)
+        $tx.append($storage, $bytes, &mut large_scratch)
     }};
 }
 
@@ -1689,15 +1689,22 @@ fn assert_object_log_replay_ignores_other_collection_records() {
             let mut other_memory = ObjectLogMemory::<REGION_SIZE, 4, 16>::new();
             let mut other = ObjectLog::new(&mut storage, &mut other_memory, b"other").unwrap();
             append_with_scratch!(other, &mut storage, b"beta").unwrap();
-            let _: ObjectLogHandle = other
-                .transaction(&mut storage, |tx| {
-                    tx_append_with_scratch!(tx, b"committed-other")
-                })
-                .unwrap();
-            let failed: Result<(), ObjectLogError> = other.transaction(&mut storage, |tx| {
-                let _ = tx_append_with_scratch!(tx, b"rolled-back-other")?;
+            let mut tx_memory = TransactionMemory::<REGION_COUNT>::new();
+            let _: ObjectLogHandle = {
+                let mut tx = other
+                    .begin_transaction_writer(&mut storage, &mut tx_memory)
+                    .unwrap();
+                let handle = tx_append_with_scratch!(tx, &mut storage, b"committed-other").unwrap();
+                tx.commit(&mut storage).unwrap();
+                handle
+            };
+            let mut tx_memory = TransactionMemory::<REGION_COUNT>::new();
+            let failed: Result<(), ObjectLogError> = (|| {
+                let mut tx = other.begin_transaction_writer(&mut storage, &mut tx_memory)?;
+                let _ = tx_append_with_scratch!(tx, &mut storage, b"rolled-back-other")?;
+                tx.rollback(&mut storage)?;
                 Err(ObjectLogError::InvalidHandle)
-            });
+            })();
             assert!(matches!(failed, Err(ObjectLogError::InvalidHandle)));
             other.flush(&mut storage).unwrap();
             other.collection_id()
@@ -3274,11 +3281,14 @@ fn requirement_object_log_failed_transaction_does_not_publish_planned_handles() 
     let mut log = ObjectLog::new(&mut storage, &mut memory, b"log-meta").unwrap();
     let mut planned = None;
 
-    let result: Result<(), ObjectLogError> = log.transaction(&mut storage, |tx| {
-        let handle = tx_append_with_scratch!(tx, b"staged")?;
+    let mut tx_memory = TransactionMemory::<REGION_COUNT>::new();
+    let result: Result<(), ObjectLogError> = (|| {
+        let mut tx = log.begin_transaction_writer(&mut storage, &mut tx_memory)?;
+        let handle = tx_append_with_scratch!(tx, &mut storage, b"staged")?;
         planned = Some(handle);
+        tx.rollback(&mut storage)?;
         Err(ObjectLogError::InvalidHandle)
-    });
+    })();
     assert!(matches!(result, Err(ObjectLogError::InvalidHandle)));
 
     let planned = planned.unwrap();
@@ -3351,14 +3361,17 @@ fn requirement_object_log_committed_transaction_publishes_handles() {
     let beta = [0x22u8; 32];
     let gamma = [0x33u8; 32];
 
-    let (second, third, fourth) = log
-        .transaction(&mut storage, |tx| {
-            let second = tx_append_with_scratch!(tx, &alpha)?;
-            let third = tx_append_with_scratch!(tx, &beta)?;
-            let fourth = tx_append_with_scratch!(tx, &gamma)?;
-            Ok((second, third, fourth))
-        })
-        .unwrap();
+    let mut tx_memory = TransactionMemory::<REGION_COUNT>::new();
+    let (second, third, fourth) = {
+        let mut tx = log
+            .begin_transaction_writer(&mut storage, &mut tx_memory)
+            .unwrap();
+        let second = tx_append_with_scratch!(tx, &mut storage, &alpha).unwrap();
+        let third = tx_append_with_scratch!(tx, &mut storage, &beta).unwrap();
+        let fourth = tx_append_with_scratch!(tx, &mut storage, &gamma).unwrap();
+        tx.commit(&mut storage).unwrap();
+        (second, third, fourth)
+    };
 
     assert_eq!(log.first_handle(), Some(first));
     assert_eq!(log.next_handle(&mut storage, first).unwrap(), Some(second));
@@ -3414,11 +3427,14 @@ fn requirement_object_log_failed_transaction_rolls_back_allocations() {
     let mut log = ObjectLog::new(&mut storage, &mut memory, b"log-meta").unwrap();
     let mut planned = None;
 
-    let result: Result<(), ObjectLogError> = log.transaction(&mut storage, |tx| {
-        let handle = tx_append_with_scratch!(tx, b"staged")?;
+    let mut tx_memory = TransactionMemory::<REGION_COUNT>::new();
+    let result: Result<(), ObjectLogError> = (|| {
+        let mut tx = log.begin_transaction_writer(&mut storage, &mut tx_memory)?;
+        let handle = tx_append_with_scratch!(tx, &mut storage, b"staged")?;
         planned = Some(handle);
+        tx.rollback(&mut storage)?;
         Err(ObjectLogError::InvalidHandle)
-    });
+    })();
     assert!(matches!(result, Err(ObjectLogError::InvalidHandle)));
 
     let planned = planned.unwrap();
@@ -4459,11 +4475,14 @@ fn requirement_object_log_auxiliary_regions_are_transaction_owned() {
         let aux_image_logical_len = geometry.chunk_logical_capacity * geometry.chunk_slot_count;
         let object = patterned_vec(aux_image_logical_len);
         let mut planned = None;
-        let result: Result<(), ObjectLogError> = log.transaction(&mut storage, |tx| {
-            let handle = tx_append_with_scratch!(tx, &object)?;
+        let mut tx_memory = TransactionMemory::<REGION_COUNT>::new();
+        let result: Result<(), ObjectLogError> = (|| {
+            let mut tx = log.begin_transaction_writer(&mut storage, &mut tx_memory)?;
+            let handle = tx_append_with_scratch!(tx, &mut storage, &object)?;
             planned = Some(handle);
+            tx.rollback(&mut storage)?;
             Err(ObjectLogError::InvalidHandle)
-        });
+        })();
         assert!(matches!(result, Err(ObjectLogError::InvalidHandle)));
         assert_eq!(log.first_handle(), None);
         let mut scratch = std::vec![0u8; object.len()];

@@ -9,7 +9,10 @@ use crate::mode::{CollectionUpdateMode, ReadMode, StorageMode};
 use crate::startup::StartupCollectionBasis;
 use crate::storage::{StorageRuntimeError, StorageVisitError};
 use crate::wal_record::WalRecord;
-use crate::{Collection, CollectionId, CollectionType, Storage, StorageMetadata};
+use crate::{
+    Collection, CollectionId, CollectionType, Storage, StorageMetadata, TransactionMemory,
+    TransactionWriter,
+};
 
 #[cfg(test)]
 mod tests;
@@ -254,61 +257,106 @@ pub struct ObjectLog<
     memory: &'mem mut ObjectLogMemory<REGION_SIZE, MAX_REGIONS, LOG_METADATA_MAX>,
 }
 
-/// Scoped append-only object-log transaction.
-pub struct ObjectLogTransaction<
+/// Explicit object-log transaction backed by [`TransactionWriter`].
+pub struct ObjectLogTransactionWriter<
     'tx,
     'mem,
-    'db,
-    'storage_mem,
-    IO: FlashIo,
     const REGION_SIZE: usize,
     const REGION_COUNT: usize,
-    const MAX_COLLECTIONS: usize,
     const MAX_REGIONS: usize = 16,
     const LOG_METADATA_MAX: usize = 64,
 > {
     log: &'tx mut ObjectLog<'mem, REGION_SIZE, MAX_REGIONS, LOG_METADATA_MAX>,
-    storage: &'tx mut Storage<'db, 'storage_mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
-    allocated_regions: Vec<u32, REGION_COUNT>,
+    writer: TransactionWriter<'tx, REGION_COUNT>,
 }
 
 impl<
         'tx,
         'mem,
-        'db,
-        'storage_mem,
-        IO: FlashIo,
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
-        const MAX_COLLECTIONS: usize,
         const MAX_REGIONS: usize,
         const LOG_METADATA_MAX: usize,
     >
-    ObjectLogTransaction<
-        'tx,
-        'mem,
-        'db,
-        'storage_mem,
-        IO,
-        REGION_SIZE,
-        REGION_COUNT,
-        MAX_COLLECTIONS,
-        MAX_REGIONS,
-        LOG_METADATA_MAX,
-    >
+    ObjectLogTransactionWriter<'tx, 'mem, REGION_SIZE, REGION_COUNT, MAX_REGIONS, LOG_METADATA_MAX>
 {
     /// Appends an object to this transaction and returns its planned stable handle.
-    pub fn append(
+    pub fn append<'db, 'storage_mem, IO: FlashIo, const MAX_COLLECTIONS: usize>(
         &mut self,
+        storage: &mut Storage<'db, 'storage_mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
         bytes: &[u8],
         large_scratch: &mut [u8],
     ) -> Result<ObjectLogHandle, ObjectLogError> {
-        self.log.append_transactional(
-            self.storage,
+        self.writer
+            .require_collection(self.log.collection_id)
+            .map_err(ObjectLogError::from)?;
+        storage.enter_mode(StorageMode::UpdatingCollection(
+            CollectionUpdateMode::Running,
+        ))?;
+        let result = self.log.append_transactional(
+            storage,
             bytes,
             large_scratch,
-            &mut self.allocated_regions,
-        )
+            &mut self.writer.memory.object_log_allocated_regions,
+        );
+        storage.finish_mode();
+        if result.is_err() {
+            let _ = self.rollback_open(storage);
+        }
+        result
+    }
+
+    fn rollback_open<'db, 'storage_mem, IO: FlashIo, const MAX_COLLECTIONS: usize>(
+        &mut self,
+        storage: &mut Storage<'db, 'storage_mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
+    ) -> Result<(), ObjectLogError> {
+        if self.writer.closed {
+            return Ok(());
+        }
+        storage.enter_mode(StorageMode::UpdatingCollection(
+            CollectionUpdateMode::Running,
+        ))?;
+        let allocated_regions = self.writer.memory.object_log_allocated_regions.clone();
+        let result = self.log.rollback_transaction(storage, allocated_regions);
+        storage.finish_mode();
+        storage.restore_transaction_frontier_tracking(self.log.collection_id, self.writer.memory);
+        self.writer.memory.clear();
+        self.writer.closed = true;
+        result
+    }
+
+    /// Commits this object-log transaction and releases the transaction slot.
+    pub fn commit<'db, 'storage_mem, IO: FlashIo, const MAX_COLLECTIONS: usize>(
+        mut self,
+        storage: &mut Storage<'db, 'storage_mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
+    ) -> Result<(), ObjectLogError> {
+        self.writer
+            .require_collection(self.log.collection_id)
+            .map_err(ObjectLogError::from)?;
+        storage.enter_mode(StorageMode::UpdatingCollection(
+            CollectionUpdateMode::Running,
+        ))?;
+        let result: Result<(), StorageRuntimeError> = (|| {
+            storage.commit_transaction_marker(self.log.collection_id)?;
+            self.log.commit_staged_appends();
+            self.log.clear_append_checkpoint();
+            storage.finish_transaction_marker(self.log.collection_id)?;
+            Ok(())
+        })();
+        storage.finish_mode();
+        if result.is_ok() {
+            self.writer.memory.clear();
+            self.writer.closed = true;
+        }
+        result.map_err(ObjectLogError::from)
+    }
+
+    /// Rolls back this object-log transaction and releases the transaction slot.
+    pub fn rollback<'db, 'storage_mem, IO: FlashIo, const MAX_COLLECTIONS: usize>(
+        mut self,
+        storage: &mut Storage<'db, 'storage_mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
+    ) -> Result<(), ObjectLogError> {
+        self.rollback_open(storage)
     }
 }
 
@@ -524,42 +572,37 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const LOG_METADAT
         result
     }
 
-    /// Runs an append-only transaction whose objects become visible at commit.
-    pub fn transaction<
+    /// Begins an explicit object-log transaction.
+    pub fn begin_transaction_writer<
+        'tx,
         'db,
         'storage_mem,
         IO: FlashIo,
-        T,
-        F,
         const REGION_COUNT: usize,
         const MAX_COLLECTIONS: usize,
     >(
-        &mut self,
+        &'tx mut self,
         storage: &mut Storage<'db, 'storage_mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
-        body: F,
-    ) -> Result<T, ObjectLogError>
-    where
-        F: for<'tx> FnOnce(
-            &mut ObjectLogTransaction<
-                'tx,
-                'mem,
-                'db,
-                'storage_mem,
-                IO,
-                REGION_SIZE,
-                REGION_COUNT,
-                MAX_COLLECTIONS,
-                MAX_REGIONS,
-                LOG_METADATA_MAX,
-            >,
-        ) -> Result<T, ObjectLogError>,
-    {
-        storage.enter_mode(StorageMode::UpdatingCollection(
-            CollectionUpdateMode::Running,
-        ))?;
-        let result = self.transaction_inner(storage, body);
-        storage.finish_mode();
-        result
+        memory: &'tx mut TransactionMemory<REGION_COUNT>,
+    ) -> Result<
+        ObjectLogTransactionWriter<
+            'tx,
+            'mem,
+            REGION_SIZE,
+            REGION_COUNT,
+            MAX_REGIONS,
+            LOG_METADATA_MAX,
+        >,
+        ObjectLogError,
+    > {
+        let writer = storage
+            .begin_transaction(self.collection_id, memory)
+            .map_err(ObjectLogError::from)?;
+        if let Err(error) = self.checkpoint_append_state() {
+            let _ = writer.rollback(storage);
+            return Err(error);
+        }
+        Ok(ObjectLogTransactionWriter { log: self, writer })
     }
 
     /// Reads immutable opaque log metadata.
@@ -717,92 +760,6 @@ impl<'mem, const REGION_SIZE: usize, const MAX_REGIONS: usize, const LOG_METADAT
                 self.collection_id,
             )?;
         Ok(handle)
-    }
-
-    fn transaction_inner<
-        'db,
-        'storage_mem,
-        IO: FlashIo,
-        T,
-        F,
-        const REGION_COUNT: usize,
-        const MAX_COLLECTIONS: usize,
-    >(
-        &mut self,
-        storage: &mut Storage<'db, 'storage_mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
-        body: F,
-    ) -> Result<T, ObjectLogError>
-    where
-        F: for<'tx> FnOnce(
-            &mut ObjectLogTransaction<
-                'tx,
-                'mem,
-                'db,
-                'storage_mem,
-                IO,
-                REGION_SIZE,
-                REGION_COUNT,
-                MAX_COLLECTIONS,
-                MAX_REGIONS,
-                LOG_METADATA_MAX,
-            >,
-        ) -> Result<T, ObjectLogError>,
-    {
-        self.checkpoint_append_state()?;
-        storage
-            .memory
-            .state
-            .begin_collection_transaction::<REGION_SIZE, REGION_COUNT, IO>(
-                storage.backing,
-                &mut storage.memory.workspace,
-                self.collection_id,
-            )?;
-
-        let mut transaction = ObjectLogTransaction {
-            log: self,
-            storage,
-            allocated_regions: Vec::new(),
-        };
-        let result = body(&mut transaction);
-        let ObjectLogTransaction {
-            log,
-            storage,
-            allocated_regions,
-        } = transaction;
-
-        match result {
-            Ok(value) => {
-                if let Err(error) = storage
-                    .memory
-                    .state
-                    .commit_collection_transaction::<REGION_SIZE, REGION_COUNT, IO>(
-                        storage.backing,
-                        &mut storage.memory.workspace,
-                        log.collection_id,
-                    )
-                {
-                    return match log.rollback_transaction(storage, allocated_regions) {
-                        Ok(()) => Err(error.into()),
-                        Err(cleanup_error) => Err(cleanup_error),
-                    };
-                }
-                log.commit_staged_appends();
-                log.clear_append_checkpoint();
-                storage
-                    .memory
-                    .state
-                    .finish_collection_transaction::<REGION_SIZE, REGION_COUNT, IO>(
-                        storage.backing,
-                        &mut storage.memory.workspace,
-                        log.collection_id,
-                    )?;
-                Ok(value)
-            }
-            Err(error) => match log.rollback_transaction(storage, allocated_regions) {
-                Ok(()) => Err(error),
-                Err(cleanup_error) => Err(cleanup_error),
-            },
-        }
     }
 
     fn append_transactional<

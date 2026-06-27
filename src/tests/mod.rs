@@ -85,6 +85,108 @@ impl Drop for AllocationTrackingGuard {
     }
 }
 
+fn find_record_in_regions_with_format<
+    const REGION_SIZE: usize,
+    const REGION_COUNT: usize,
+    const MAX_LOG: usize,
+>(
+    flash: &MockFlash<REGION_SIZE, REGION_COUNT, MAX_LOG>,
+    metadata: StorageMetadata,
+    collection_format: u16,
+    record_type: WalRecordType,
+) -> Option<(u32, usize, usize)> {
+    let record_area_offset = metadata.wal_record_area_offset().ok()?;
+    let granule = usize::try_from(metadata.wal_write_granule).ok()?;
+    for region_index in 0..REGION_COUNT {
+        let region_index = u32::try_from(region_index).ok()?;
+        let bytes = flash.region_bytes(region_index).ok()?;
+        let header = Header::decode(&bytes[..Header::ENCODED_LEN]).ok()?;
+        if header.collection_id != CollectionId(0) || header.collection_format != collection_format
+        {
+            continue;
+        }
+        let mut offset = record_area_offset;
+        let mut scratch = [0u8; REGION_SIZE];
+        while offset < REGION_SIZE {
+            match bytes[offset] {
+                byte if byte == metadata.erased_byte => break,
+                byte if byte != metadata.wal_record_magic => {
+                    offset = offset.checked_add(granule)?;
+                }
+                _ => {
+                    let decoded = decode_record(&bytes[offset..], metadata, &mut scratch).ok()?;
+                    if decoded.record.record_type() == record_type {
+                        return Some((region_index, offset, decoded.encoded_len));
+                    }
+                    offset = offset.checked_add(decoded.encoded_len)?;
+                }
+            }
+        }
+    }
+    None
+}
+
+fn count_records_in_regions_with_format<
+    const REGION_SIZE: usize,
+    const REGION_COUNT: usize,
+    const MAX_LOG: usize,
+>(
+    flash: &MockFlash<REGION_SIZE, REGION_COUNT, MAX_LOG>,
+    metadata: StorageMetadata,
+    collection_format: u16,
+    record_type: WalRecordType,
+) -> usize {
+    let mut count = 0usize;
+    let Some(record_area_offset) = metadata.wal_record_area_offset().ok() else {
+        return 0;
+    };
+    let Ok(granule) = usize::try_from(metadata.wal_write_granule) else {
+        return 0;
+    };
+    for region_index in 0..REGION_COUNT {
+        let Ok(region_index) = u32::try_from(region_index) else {
+            return count;
+        };
+        let Ok(bytes) = flash.region_bytes(region_index) else {
+            continue;
+        };
+        let Ok(header) = Header::decode(&bytes[..Header::ENCODED_LEN]) else {
+            continue;
+        };
+        if header.collection_id != CollectionId(0) || header.collection_format != collection_format
+        {
+            continue;
+        }
+        let mut offset = record_area_offset;
+        let mut scratch = [0u8; REGION_SIZE];
+        while offset < REGION_SIZE {
+            match bytes[offset] {
+                byte if byte == metadata.erased_byte => break,
+                byte if byte != metadata.wal_record_magic => {
+                    let Some(next) = offset.checked_add(granule) else {
+                        break;
+                    };
+                    offset = next;
+                }
+                _ => {
+                    let Ok(decoded) = decode_record(&bytes[offset..], metadata, &mut scratch)
+                    else {
+                        break;
+                    };
+                    if decoded.record.record_type() == record_type {
+                        count += 1;
+                    }
+                    let Some(next) = offset.checked_add(decoded.encoded_len) else {
+                        break;
+                    };
+                    offset = next;
+                }
+            }
+        }
+    }
+    count
+}
+
 fn assert_no_alloc<T>(label: &str, operation: impl FnOnce() -> T) -> T {
     let guard = AllocationTrackingGuard::new();
     let result = operation();
@@ -174,6 +276,261 @@ fn active_free_space_entries<
     let start = usize::try_from(allocation_head).unwrap();
     let end = usize::try_from(append_tail).unwrap();
     heapless::Vec::from_slice(&storage.free_space_entries()[start..end]).unwrap()
+}
+
+//= spec/ring/09-implementation-coverage.md#free-space-collection-coverage-targets
+//= type=test
+//# `RING-IMPL-FREE-011` Full transactions MUST import allocator and
+//# collection effects atomically at `commit_transaction`, not at the
+//# physical transaction-log record positions.
+#[test]
+fn requirement_public_transaction_writer_commits_map_updates() {
+    const REGION_SIZE: usize = 512;
+    const REGION_COUNT: usize = 12;
+    const MAX_COLLECTIONS: usize = 8;
+    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 4096>::new(0xff);
+    let mut storage_memory = StorageMemory::<REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>::new();
+    let mut storage = Storage::format(
+        &mut flash,
+        StorageFormatConfig::new(2, 8, 0xa5),
+        &mut storage_memory,
+    )
+    .unwrap();
+    let mut map_memory = LsmMapMemory::<u16, u16, 4>::new();
+    let mut map = LsmMap::<u16, u16, 4>::new(&mut storage, &mut map_memory).unwrap();
+    let mut transaction_memory = TransactionMemory::<REGION_COUNT>::new();
+
+    {
+        let mut transaction = map
+            .begin_transaction_writer(&mut storage, &mut transaction_memory)
+            .unwrap();
+        assert!(!transaction.set(&mut storage, 7, 70).unwrap());
+        transaction.commit(&mut storage).unwrap();
+    }
+
+    assert_eq!(
+        map.get(&mut storage, &7, |_, value| *value).unwrap(),
+        Some(70)
+    );
+}
+
+//= spec/ring/06-startup-replay.md#startup-replay-algorithm
+//= type=test
+//# `RING-STARTUP-029` Startup replay MUST NOT silently apply an
+//# uncommitted transaction-log range or inline transaction range that lacks
+//# a retained commit marker.
+#[test]
+fn requirement_public_transaction_writer_rolls_back_map_updates() {
+    const REGION_SIZE: usize = 512;
+    const REGION_COUNT: usize = 12;
+    const MAX_COLLECTIONS: usize = 8;
+    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 4096>::new(0xff);
+    let mut storage_memory = StorageMemory::<REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>::new();
+    let collection_id = {
+        let mut storage = Storage::format(
+            &mut flash,
+            StorageFormatConfig::new(2, 8, 0xa5),
+            &mut storage_memory,
+        )
+        .unwrap();
+        let mut map_memory = LsmMapMemory::<u16, u16, 4>::new();
+        let mut map = LsmMap::<u16, u16, 4>::new(&mut storage, &mut map_memory).unwrap();
+        let mut transaction_memory = TransactionMemory::<REGION_COUNT>::new();
+        {
+            let mut transaction = map
+                .begin_transaction_writer(&mut storage, &mut transaction_memory)
+                .unwrap();
+            assert!(!transaction.set(&mut storage, 9, 90).unwrap());
+            transaction.rollback(&mut storage).unwrap();
+        }
+        assert_eq!(map.get(&mut storage, &9, |_, value| *value).unwrap(), None);
+        map.collection_id()
+    };
+
+    let mut reopen_memory = StorageMemory::<REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>::new();
+    let mut reopened = Storage::open(&mut flash, &mut reopen_memory).unwrap();
+    let mut reopened_map_memory = LsmMapMemory::<u16, u16, 4>::new();
+    let mut reopened_map =
+        LsmMap::<u16, u16, 4>::open(collection_id, &mut reopened, &mut reopened_map_memory)
+            .unwrap();
+    assert_eq!(
+        reopened_map
+            .get(&mut reopened, &9, |_, value| *value)
+            .unwrap(),
+        None
+    );
+}
+
+//= spec/ring/04-wal-records.md#wal-record-types
+//= type=test
+//# `RING-WAL-PAYLOAD-014` `add_transaction_collection` Transaction-log-only record. Enrolls
+//# `collection_id` in the open transaction for that transaction log.
+#[test]
+fn requirement_public_transaction_writer_emits_transaction_enrollment() {
+    const REGION_SIZE: usize = 512;
+    const REGION_COUNT: usize = 12;
+    const MAX_COLLECTIONS: usize = 8;
+    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 4096>::new(0xff);
+    let mut storage_memory = StorageMemory::<REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>::new();
+    let mut storage = Storage::format(
+        &mut flash,
+        StorageFormatConfig::new(2, 8, 0xa5),
+        &mut storage_memory,
+    )
+    .unwrap();
+    let mut map_memory = LsmMapMemory::<u16, u16, 4>::new();
+    let mut map = LsmMap::<u16, u16, 4>::new(&mut storage, &mut map_memory).unwrap();
+    let mut transaction_memory = TransactionMemory::<REGION_COUNT>::new();
+
+    let mut transaction = map
+        .begin_transaction_writer(&mut storage, &mut transaction_memory)
+        .unwrap();
+    assert!(!transaction.set(&mut storage, 9, 90).unwrap());
+    transaction.rollback(&mut storage).unwrap();
+    let metadata = storage.metadata();
+    drop(storage);
+
+    assert_eq!(
+        count_records_in_regions_with_format(
+            &flash,
+            metadata,
+            crate::disk::TRANSACTION_LOG_V2_FORMAT,
+            WalRecordType::AddTransactionCollection,
+        ),
+        1
+    );
+}
+
+//= spec/ring/06-startup-replay.md#startup-replay-algorithm
+//= type=test
+//# `RING-STARTUP-022` On
+//# `begin_transaction(transaction_log_id, start)`: create an active full
+//# transaction descriptor for `transaction_log_id` at `start`. If that
+//# transaction log already has an open descriptor, return an error.
+#[test]
+fn requirement_public_transaction_writer_drop_leaves_slot_busy_until_explicit_rollback() {
+    const REGION_SIZE: usize = 512;
+    const REGION_COUNT: usize = 12;
+    const MAX_COLLECTIONS: usize = 8;
+    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 4096>::new(0xff);
+    let mut storage_memory = StorageMemory::<REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>::new();
+    let mut storage = Storage::format(
+        &mut flash,
+        StorageFormatConfig::new(2, 8, 0xa5),
+        &mut storage_memory,
+    )
+    .unwrap();
+    let mut map_memory = LsmMapMemory::<u16, u16, 4>::new();
+    let mut map = LsmMap::<u16, u16, 4>::new(&mut storage, &mut map_memory).unwrap();
+    let mut transaction_memory = TransactionMemory::<REGION_COUNT>::new();
+
+    {
+        let transaction = map
+            .begin_transaction_writer(&mut storage, &mut transaction_memory)
+            .unwrap();
+        drop(transaction);
+    }
+
+    assert!(matches!(
+        storage.begin_transaction(map.collection_id(), &mut transaction_memory),
+        Err(StorageRuntimeError::TransactionAlreadyOpen(_))
+    ));
+    storage
+        .rollback_transaction(map.collection_id(), &mut transaction_memory)
+        .unwrap();
+    let transaction = map
+        .begin_transaction_writer(&mut storage, &mut transaction_memory)
+        .unwrap();
+    transaction.rollback(&mut storage).unwrap();
+}
+
+//= spec/ring/04-wal-records.md#ordering-and-validity
+//= type=test
+//# `RING-WAL-VALID-025`
+//# `transaction_finished(transaction_log_id, range)` is valid only after a
+//# retained matching `commit_transaction(transaction_log_id, range)` and
+//# after cleanup for that committed range is complete.
+#[test]
+fn requirement_public_object_log_transaction_writer_commits_appends() {
+    const REGION_SIZE: usize = 512;
+    const REGION_COUNT: usize = 12;
+    const MAX_COLLECTIONS: usize = 8;
+    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 4096>::new(0xff);
+    let mut storage_memory = StorageMemory::<REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>::new();
+    let mut storage = Storage::format(
+        &mut flash,
+        StorageFormatConfig::new(2, 8, 0xa5),
+        &mut storage_memory,
+    )
+    .unwrap();
+    let mut log_memory = ObjectLogMemory::<REGION_SIZE>::new();
+    let mut log = ObjectLog::<REGION_SIZE>::new(&mut storage, &mut log_memory, b"meta").unwrap();
+    let mut transaction_memory = TransactionMemory::<REGION_COUNT>::new();
+    let mut large_scratch = [0u8; REGION_SIZE];
+    let handle = {
+        let mut transaction = log
+            .begin_transaction_writer(&mut storage, &mut transaction_memory)
+            .unwrap();
+        let handle = transaction
+            .append(&mut storage, b"committed", &mut large_scratch)
+            .unwrap();
+        transaction.commit(&mut storage).unwrap();
+        handle
+    };
+
+    assert_eq!(log.first_handle(), Some(handle));
+    assert_eq!(
+        log.get(&mut storage, handle, &mut large_scratch, |bytes| bytes
+            .to_vec())
+            .unwrap(),
+        b"committed".to_vec()
+    );
+}
+
+//= spec/ring/07-reclaim.md#transaction-cleanup-recovery
+//= type=test
+//# `RING-TX-RECOVERY-005` On rollback, any region popped by
+//# `allocate_region` in the uncommitted range MUST be returned to the
+//# dirty range with a durable `free_region` record, because foreground code
+//# may have partially written it before the rollback decision.
+#[test]
+fn requirement_public_object_log_transaction_writer_rolls_back_appends() {
+    const REGION_SIZE: usize = 512;
+    const REGION_COUNT: usize = 12;
+    const MAX_COLLECTIONS: usize = 8;
+    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 4096>::new(0xff);
+    let mut storage_memory = StorageMemory::<REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>::new();
+    let mut storage = Storage::format(
+        &mut flash,
+        StorageFormatConfig::new(2, 8, 0xa5),
+        &mut storage_memory,
+    )
+    .unwrap();
+    let mut log_memory = ObjectLogMemory::<REGION_SIZE>::new();
+    let mut log = ObjectLog::<REGION_SIZE>::new(&mut storage, &mut log_memory, b"meta").unwrap();
+    let mut transaction_memory = TransactionMemory::<REGION_COUNT>::new();
+    let mut large_scratch = [0u8; REGION_SIZE];
+    {
+        let mut transaction = log
+            .begin_transaction_writer(&mut storage, &mut transaction_memory)
+            .unwrap();
+        let _handle = transaction
+            .append(&mut storage, b"rolled back", &mut large_scratch)
+            .unwrap();
+        transaction.rollback(&mut storage).unwrap();
+    }
+
+    assert_eq!(log.first_handle(), None);
+    let mut reopened_memory = StorageMemory::<REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>::new();
+    let mut reopened = Storage::open(&mut flash, &mut reopened_memory).unwrap();
+    let mut reopened_log_memory = ObjectLogMemory::<REGION_SIZE>::new();
+    let reopened_log = ObjectLog::<REGION_SIZE>::open(
+        log.collection_id(),
+        &mut reopened,
+        &mut reopened_log_memory,
+    )
+    .unwrap();
+    assert_eq!(reopened_log.first_handle(), None);
 }
 
 //= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
@@ -867,7 +1224,7 @@ fn requirement_storage_open_future_drop_before_completion_leaves_store_openable(
 //= spec/implementation.md#operation-future-regression-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-101` Storage WAL-head reclaim futures MUST poll to completion, update WAL
-//# head to the reclaimed continuation, and append the old WAL prefix to the free-list tail.
+//# head to the reclaimed continuation, and append the old WAL prefix to the free-space tail.
 #[test]
 fn requirement_storage_reclaim_wal_head_future_polls_to_completion() {
     let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
@@ -2693,8 +3050,8 @@ fn replace_map_and_reopen_after_cleanup<'db>(
 
 //= spec/map.md#map-storage-integration-requirements
 //= type=test
-//# `RING-IMPL-REGRESSION-114` Reopening after replacement with an empty free list MUST
-//# initialize free-list head from the recovered reclaimed region.
+//# `RING-IMPL-REGRESSION-114` Reopening after replacement with an empty free-space collection MUST
+//# initialize the free-space tail from the recovered reclaimed region.
 #[test]
 fn requirement_storage_reopen_after_replacement_initializes_allocator_from_recovered_free_list_head(
 ) {
@@ -2707,8 +3064,8 @@ fn requirement_storage_reopen_after_replacement_initializes_allocator_from_recov
 
 //= spec/map.md#map-storage-integration-requirements
 //= type=test
-//# `RING-IMPL-REGRESSION-115` Reopening after replacement with an empty free list MUST reconstruct
-//# free-list tail from the recovered reclaimed region.
+//# `RING-IMPL-REGRESSION-115` Reopening after replacement with an empty free-space collection MUST
+//# reconstruct the free-space tail from the recovered reclaimed region.
 #[test]
 fn requirement_storage_reopen_after_replacement_reconstructs_free_space_tail_region() {
     let mut flash = MockFlash::<512, 10, 2048>::new(0xff);
@@ -3172,7 +3529,7 @@ fn requirement_storage_drop_map_starts_reclaim_for_committed_region_basis() {
 //# region free until the committed collection state no longer references
 //# that region.
 #[test]
-fn requirement_storage_drop_map_records_free_region_after_drop_commit() {
+fn requirement_storage_drop_map_records_free_region_after_drop_inline_commit() {
     let mut flash = MockFlash::<512, 7, 2048>::new(0xff);
     let mut workspace = StorageWorkspace::<512>::new();
     let mut storage = Storage::<_, 512, 7>::format(
@@ -3196,27 +3553,28 @@ fn requirement_storage_drop_map_records_free_region_after_drop_commit() {
 
     storage.drop_map(CollectionId(19)).unwrap();
 
+    let mut begin_inline_seen_at = None;
     let mut drop_seen_at = None;
-    let mut commit_seen_at = None;
     let mut free_seen_at = None;
+    let mut commit_inline_seen_at = None;
     let mut record_index = 0usize;
     storage
         .with_runtime_io_workspace(|runtime, flash, workspace| {
             runtime.visit_wal_records::<512, _, (), _>(flash, workspace, |_flash, record| {
                 match record {
+                    crate::WalRecord::BeginInlineTransaction { .. } => {
+                        begin_inline_seen_at = Some(record_index);
+                    }
                     crate::WalRecord::DropCollection {
                         collection_id: CollectionId(19),
                     } => {
                         drop_seen_at = Some(record_index);
                     }
-                    crate::WalRecord::CommitTransaction {
-                        transaction_log_id: 0,
-                        ..
-                    } => {
-                        commit_seen_at = Some(record_index);
-                    }
                     crate::WalRecord::FreeRegion { .. } => {
                         free_seen_at = Some(record_index);
+                    }
+                    crate::WalRecord::CommitInlineTransaction { .. } => {
+                        commit_inline_seen_at = Some(record_index);
                     }
                     _ => {}
                 }
@@ -3226,11 +3584,70 @@ fn requirement_storage_drop_map_records_free_region_after_drop_commit() {
         })
         .unwrap();
 
+    let begin_inline_seen_at = begin_inline_seen_at.unwrap();
     let drop_seen_at = drop_seen_at.unwrap();
-    let commit_seen_at = commit_seen_at.unwrap();
     let free_seen_at = free_seen_at.unwrap();
-    assert!(drop_seen_at < commit_seen_at);
-    assert!(commit_seen_at < free_seen_at);
+    let commit_inline_seen_at = commit_inline_seen_at.unwrap();
+    assert!(begin_inline_seen_at < drop_seen_at);
+    assert!(drop_seen_at < free_seen_at);
+    assert!(free_seen_at < commit_inline_seen_at);
+}
+
+//= spec/ring/06-startup-replay.md#startup-replay-algorithm
+//= type=test
+//# `RING-STARTUP-016` Inline transaction body records are validated when encountered in the
+//# main WAL but ignored until the matching `commit_inline_transaction` is durable.
+#[test]
+fn requirement_storage_drop_map_inline_body_without_commit_replays_as_uncommitted() {
+    let mut flash = MockFlash::<512, 12, 4096>::new(0xff);
+    let mut storage = Storage::<_, 512, 12>::format(
+        &mut flash,
+        StorageFormatConfig::new(1, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
+
+    storage.create_map(CollectionId(20)).unwrap();
+    let mut map_buffer = [0u8; 512];
+    let mut map = MapFrontier::<i32, i32, 4>::new(
+        CollectionId(20),
+        &mut map_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
+    map.set_in_memory(8, 80).unwrap();
+    storage.flush_map::<_, _, 4>(&mut map).unwrap();
+    storage.drop_map(CollectionId(20)).unwrap();
+
+    let metadata = storage.metadata();
+    drop(storage);
+    let (commit_region, commit_offset, _) = find_record_in_regions_with_format(
+        &flash,
+        metadata,
+        crate::disk::MAIN_WAL_V2_FORMAT,
+        WalRecordType::CommitInlineTransaction,
+    )
+    .unwrap();
+    flash
+        .write_region(commit_region, commit_offset, &[metadata.erased_byte])
+        .unwrap();
+
+    let mut reopened =
+        Storage::<_, 512, 12>::open(&mut flash, crate::test_storage_memory()).unwrap();
+    let mut reopened_buffer = [0u8; 512];
+    let reopened_map = reopened
+        .open_map::<i32, i32, 4>(
+            CollectionId(20),
+            &mut reopened_buffer,
+            crate::test_map_frontier_memory(),
+        )
+        .unwrap();
+    assert_eq!(
+        reopened
+            .with_io_workspace(|flash, workspace| reopened_map.get::<512, _>(flash, workspace, &8))
+            .unwrap(),
+        Some(80)
+    );
 }
 
 //= spec/map.md#map-storage-integration-requirements

@@ -314,7 +314,7 @@ reuse one `Storage` context across sequential operations.
 4. `RING-IMPL-REGRESSION-100` Dropping a partially polled storage open future MUST leave the store
    openable with unchanged recovered state.
 5. `RING-IMPL-REGRESSION-101` Storage WAL-head reclaim futures MUST poll to completion, update WAL
-   head to the reclaimed continuation, and append the old WAL prefix to the free-list tail.
+   head to the reclaimed continuation, and append the old WAL prefix to the free-space tail.
 6. `RING-IMPL-REGRESSION-102` Storage WAL-head reclaim futures MUST yield between reclaim phases
    before completing with updated WAL head.
 7. `RING-IMPL-REGRESSION-103` Dropping a WAL-head reclaim future after reclaim begins MUST leave

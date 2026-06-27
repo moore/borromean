@@ -266,7 +266,7 @@ fn requirement_format_empty_store_initializes_region_zero_with_wal_header_and_pr
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
 
     let header = Header::decode(&flash.region_bytes(0).unwrap()[..Header::ENCODED_LEN]).unwrap();
-    assert_eq!(header.sequence, 0);
+    assert_eq!(header.sequence, 1);
     assert_eq!(header.collection_id, CollectionId(0));
     assert_eq!(header.collection_format, WAL_V1_FORMAT);
 
@@ -292,7 +292,7 @@ fn requirement_format_empty_store_initializes_region_zero_with_wal_header_and_pr
 //# `RING-FORMAT-STORAGE-POST-003` The free-space collection MUST contain every region after
 //# the initial free-space metadata chain in ascending region-index order.
 #[test]
-fn requirement_format_empty_store_populates_free_list_in_ascending_order() {
+fn requirement_format_empty_store_populates_free_space_collection_in_ascending_order() {
     let mut flash = MockFlash::<96, 4, 32>::new(0xff);
     let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
 

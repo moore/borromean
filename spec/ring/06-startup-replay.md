@@ -129,12 +129,14 @@ before reaching the known tail, return an error.
    referenced transaction log, except initialized target regions use
    `collection_format = transaction_log_v2`.
 6. `RING-STARTUP-006` Initialize the free-space collection from the
-materialized `free_space_v2` metadata region chain named by the
-effective log prologue checkpoint. Validate each
-`FreeSpaceRegionPrologue`, each `FreeSpaceEntry`, and the cursor
-invariant `allocation_head <= ready_boundary <= append_tail`. The
-materialized queue supplies the initial FIFO entries and cursor
-positions; later retained WAL allocator commands update that state.
+materialized `free_space_v2` metadata region chain rooted at canonical
+region `1`; the effective log prologue cursors name positions within
+that chain, not an alternate root. Validate each metadata header's
+strictly increasing chain-local sequence, each `FreeSpaceRegionPrologue`,
+each `FreeSpaceEntry`, and the cursor invariant
+`allocation_head <= ready_boundary <= append_tail`. The materialized
+queue supplies the initial FIFO entries and cursor positions; later
+retained WAL allocator commands update that state.
 7. `RING-STARTUP-007` Parse records in WAL order: region order, then
 offset order. Record parsing begins only at offsets aligned to
 `wal_write_granule` and greater than or equal to

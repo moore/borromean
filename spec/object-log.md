@@ -382,10 +382,10 @@ aligned with object records without exposing raw offsets to callers.
 
 Whole regions that fall before the new head are returned to Borromean storage.
 They are not reused in place by the object log. A later append will allocate
-from the storage free list like any other collection operation, which preserves
-the storage engine's wear-leveling behavior. If the same physical region is
-allocated again later, the object log assigns a new sequence, so stale handles
-do not alias new data.
+from the storage free-space collection like any other collection operation,
+which preserves the storage engine's wear-leveling behavior. If the same
+physical region is allocated again later, the object log assigns a new
+sequence, so stale handles do not alias new data.
 
 Large-object truncation uses the public `LargeRecordEntry` handle as the
 boundary. Retaining that boundary retains its auxiliary chain and any private

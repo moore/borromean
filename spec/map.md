@@ -435,7 +435,7 @@ segment bytes, planning, writing, manifest commit, lookup, and reclaim.
 9. `RING-IMPL-REGRESSION-024` Frontier run planning MUST count every committed run payload segment
    required for frontier contents that exceed one run-region payload.
 10. `RING-IMPL-REGRESSION-025` Reclaiming map run regions MUST move all tracked run-chain regions to
-    the storage free-list tail.
+    the storage free-space tail.
 11. `RING-IMPL-REGRESSION-026` Committing a map manifest MUST reclaim the previous manifest region
     and retain only run-chain descriptors in the manifest state.
 12. `RING-IMPL-REGRESSION-027` Flushing a map to storage MUST commit a manifest-backed run-chain
@@ -474,10 +474,12 @@ discarded depending on whether the live basis was already detached.
    ready_region, and preserve flushed key/value lookups.
 5. `RING-IMPL-REGRESSION-113` Reopening after a map replacement flush MUST complete transaction
    cleanup of the replaced region and preserve the replacement map value.
-6. `RING-IMPL-REGRESSION-114` Reopening after replacement with an empty free list MUST initialize
-   free-list head from the recovered reclaimed region.
-7. `RING-IMPL-REGRESSION-115` Reopening after replacement with an empty free list MUST reconstruct
-   free-list tail from the recovered reclaimed region.
+6. `RING-IMPL-REGRESSION-114` Reopening after replacement with an
+   empty free-space collection MUST initialize the free-space tail from
+   the recovered reclaimed region.
+7. `RING-IMPL-REGRESSION-115` Reopening after replacement with an
+   empty free-space collection MUST reconstruct the free-space tail
+   from the recovered reclaimed region.
 8. `RING-IMPL-REGRESSION-116` Map flush MUST complete detached transaction cleanup before
    allocating from the minimum free-region reserve.
 9. `RING-IMPL-REGRESSION-117` Reopening after a premature cleanup marker before replacement

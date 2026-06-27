@@ -366,6 +366,73 @@ fn requirement_finished_transaction_releases_slot_but_retains_log_reference() {
     ));
 }
 
+//= spec/ring/07-reclaim.md#transaction-log-reclaim-eligibility
+//= type=test
+//# `RING-TXLOG-RECLAIM-004` After transaction-log reclaim, startup MUST recover the same
+//# transaction-log cursors, live-prefix boundaries, imported committed collection state,
+//# rollback state, and allocator state as before reclaim.
+#[test]
+fn requirement_retained_transaction_log_retirement_skips_already_free_regions() {
+    let mut flash = MockFlash::<128, 4, 128>::new(0xff);
+    let mut workspace = StorageWorkspace::<128>::new();
+    let mut state = super::format::<128, 4, _, 8>(&mut flash, &mut workspace, 1, 8, 0xa5).unwrap();
+    let region_index = state.free_space.next_ready_region().unwrap();
+    let active_count_before = state
+        .free_space
+        .entries()
+        .iter()
+        .copied()
+        .skip(usize::try_from(state.free_space.allocation_head()).unwrap())
+        .take(
+            usize::try_from(state.free_space.ready_count() + state.free_space.dirty_count())
+                .unwrap(),
+        )
+        .filter(|entry| *entry == region_index)
+        .count();
+    let offset = u32::try_from(state.metadata().wal_record_area_offset().unwrap()).unwrap();
+    let range = TransactionLogRange {
+        start: LogPosition {
+            region_index,
+            offset,
+        },
+        end: LogPosition {
+            region_index,
+            offset,
+        },
+    };
+    let mut regions = Vec::new();
+    regions.push(region_index).unwrap();
+    state
+        .retained_transaction_logs
+        .push(RetainedTransactionLog {
+            transaction_log_id: 0,
+            range,
+            regions,
+            outcome: TransactionLogOutcome::Finished,
+        })
+        .unwrap();
+
+    state
+        .retire_completed_transaction_logs_with_rotation::<128, 4, _>(&mut flash, &mut workspace)
+        .unwrap();
+
+    let active_count_after = state
+        .free_space
+        .entries()
+        .iter()
+        .copied()
+        .skip(usize::try_from(state.free_space.allocation_head()).unwrap())
+        .take(
+            usize::try_from(state.free_space.ready_count() + state.free_space.dirty_count())
+                .unwrap(),
+        )
+        .filter(|entry| *entry == region_index)
+        .count();
+    assert_eq!(active_count_before, 1);
+    assert_eq!(active_count_after, active_count_before);
+    assert!(state.retained_transaction_logs.is_empty());
+}
+
 //= spec/ring/07-reclaim.md#wal-reclaim-eligibility
 //= type=test
 //# `RING-WAL-RECLAIM-011` Main-WAL transaction-control and inline

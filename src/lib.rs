@@ -434,6 +434,209 @@ impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_COLLECTIONS:
     }
 }
 
+/// Caller-owned scratch and bookkeeping for an explicit transaction.
+pub struct TransactionMemory<const REGION_COUNT: usize> {
+    collection_id: Option<CollectionId>,
+    pub(crate) dirty_frontier_was_active: bool,
+    pub(crate) object_log_allocated_regions: Vec<u32, REGION_COUNT>,
+}
+
+impl<const REGION_COUNT: usize> TransactionMemory<REGION_COUNT> {
+    /// Allocates transaction memory.
+    pub fn new() -> Self {
+        Self {
+            collection_id: None,
+            dirty_frontier_was_active: false,
+            object_log_allocated_regions: Vec::new(),
+        }
+    }
+
+    fn begin(&mut self, collection_id: CollectionId, dirty_frontier_was_active: bool) {
+        self.collection_id = Some(collection_id);
+        self.dirty_frontier_was_active = dirty_frontier_was_active;
+        self.object_log_allocated_regions.clear();
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.collection_id = None;
+        self.dirty_frontier_was_active = false;
+        self.object_log_allocated_regions.clear();
+    }
+
+    fn require_collection(&self, collection_id: CollectionId) -> Result<(), StorageRuntimeError> {
+        match self.collection_id {
+            Some(active) if active == collection_id => Ok(()),
+            Some(active) => Err(StorageRuntimeError::TransactionMismatch {
+                expected: active,
+                actual: collection_id,
+            }),
+            None => Err(StorageRuntimeError::TransactionNotOpen(collection_id)),
+        }
+    }
+}
+
+impl<const REGION_COUNT: usize> Default for TransactionMemory<REGION_COUNT> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Explicit writer for one caller-visible transaction.
+///
+/// Dropping this value does not perform rollback because rollback writes to
+/// flash. Call [`TransactionWriter::commit`], [`TransactionWriter::rollback`],
+/// or [`Storage::rollback_transaction`] with the same [`TransactionMemory`] to
+/// release the transaction slot.
+pub struct TransactionWriter<'tx, const REGION_COUNT: usize> {
+    pub(crate) memory: &'tx mut TransactionMemory<REGION_COUNT>,
+    collection_id: CollectionId,
+    pub(crate) closed: bool,
+}
+
+impl<'tx, const REGION_COUNT: usize> TransactionWriter<'tx, REGION_COUNT> {
+    /// Returns the collection this transaction is scoped to.
+    pub fn collection_id(&self) -> CollectionId {
+        self.collection_id
+    }
+
+    pub(crate) fn require_collection(
+        &self,
+        collection_id: CollectionId,
+    ) -> Result<(), StorageRuntimeError> {
+        if self.closed {
+            return Err(StorageRuntimeError::TransactionNotOpen(collection_id));
+        }
+        if self.collection_id != collection_id {
+            return Err(StorageRuntimeError::TransactionMismatch {
+                expected: self.collection_id,
+                actual: collection_id,
+            });
+        }
+        self.memory.require_collection(collection_id)
+    }
+
+    /// Commits the transaction and releases the transaction slot.
+    pub fn commit<
+        'db,
+        'mem,
+        IO: FlashIo,
+        const REGION_SIZE: usize,
+        const MAX_COLLECTIONS: usize,
+    >(
+        mut self,
+        storage: &mut Storage<'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
+    ) -> Result<(), StorageRuntimeError> {
+        self.require_collection(self.collection_id)?;
+        storage.commit_transaction_inner(self.collection_id, self.memory)?;
+        self.closed = true;
+        Ok(())
+    }
+
+    /// Rolls back the transaction and releases the transaction slot.
+    pub fn rollback<
+        'db,
+        'mem,
+        IO: FlashIo,
+        const REGION_SIZE: usize,
+        const MAX_COLLECTIONS: usize,
+    >(
+        mut self,
+        storage: &mut Storage<'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
+    ) -> Result<(), StorageRuntimeError> {
+        self.require_collection(self.collection_id)?;
+        storage.rollback_transaction_inner(self.collection_id, self.memory)?;
+        self.closed = true;
+        Ok(())
+    }
+}
+
+/// Explicit map transaction backed by [`TransactionWriter`].
+pub struct MapTransactionWriter<
+    'tx,
+    'map,
+    K,
+    V,
+    const REGION_COUNT: usize,
+    const MAX_RUNS: usize = DEFAULT_MAX_RUNS,
+> where
+    K: LsmKey,
+    V: LsmValue,
+{
+    map: &'tx mut LsmMap<'map, K, V, MAX_RUNS>,
+    writer: TransactionWriter<'tx, REGION_COUNT>,
+}
+
+impl<'tx, 'map, K, V, const REGION_COUNT: usize, const MAX_RUNS: usize>
+    MapTransactionWriter<'tx, 'map, K, V, REGION_COUNT, MAX_RUNS>
+where
+    K: LsmKey,
+    V: LsmValue,
+{
+    /// Returns the collection this transaction is scoped to.
+    pub fn collection_id(&self) -> CollectionId {
+        self.writer.collection_id()
+    }
+
+    /// Sets `key` to `value` inside the transaction.
+    pub fn set<'db, 'mem, IO: FlashIo, const REGION_SIZE: usize, const MAX_COLLECTIONS: usize>(
+        &mut self,
+        storage: &mut Storage<'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
+        key: K,
+        value: V,
+    ) -> Result<bool, LsmMapError> {
+        self.writer
+            .require_collection(self.map.collection_id)
+            .map_err(MapStorageError::from)?;
+        self.map.set(storage, key, value)
+    }
+
+    /// Deletes `key` inside the transaction.
+    pub fn delete<
+        'db,
+        'mem,
+        IO: FlashIo,
+        const REGION_SIZE: usize,
+        const MAX_COLLECTIONS: usize,
+    >(
+        &mut self,
+        storage: &mut Storage<'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
+        key: K,
+    ) -> Result<bool, LsmMapError> {
+        self.writer
+            .require_collection(self.map.collection_id)
+            .map_err(MapStorageError::from)?;
+        self.map.delete(storage, key)
+    }
+
+    /// Commits the transaction and releases the transaction slot.
+    pub fn commit<
+        'db,
+        'mem,
+        IO: FlashIo,
+        const REGION_SIZE: usize,
+        const MAX_COLLECTIONS: usize,
+    >(
+        self,
+        storage: &mut Storage<'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
+    ) -> Result<(), LsmMapError> {
+        self.writer.commit(storage).map_err(MapStorageError::from)
+    }
+
+    /// Rolls back the transaction and releases the transaction slot.
+    pub fn rollback<
+        'db,
+        'mem,
+        IO: FlashIo,
+        const REGION_SIZE: usize,
+        const MAX_COLLECTIONS: usize,
+    >(
+        self,
+        storage: &mut Storage<'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
+    ) -> Result<(), LsmMapError> {
+        self.writer.rollback(storage).map_err(MapStorageError::from)
+    }
+}
+
 /// Errors returned while opening storage through [`Storage::open`] or
 /// [`Storage::open_future`].
 #[derive(Debug)]
@@ -1321,6 +1524,156 @@ impl<
         memory.mode = StorageMode::Idle;
 
         Ok(Self { backing, memory })
+    }
+
+    fn validate_transaction_collection(
+        &self,
+        collection_id: CollectionId,
+    ) -> Result<(), StorageRuntimeError> {
+        let Some(collection) = self
+            .memory
+            .state
+            .collections()
+            .iter()
+            .find(|collection| collection.collection_id() == collection_id)
+        else {
+            return Err(StorageRuntimeError::UnknownCollection(collection_id));
+        };
+        if collection.basis() == StartupCollectionBasis::Dropped {
+            return Err(StorageRuntimeError::DroppedCollection(collection_id));
+        }
+        Ok(())
+    }
+
+    /// Begins an explicit transaction for one collection.
+    ///
+    /// The returned writer must be closed explicitly with commit or rollback.
+    /// If it is dropped, the transaction slot remains busy until
+    /// [`Storage::rollback_transaction`] is called with the same transaction
+    /// memory.
+    pub fn begin_transaction<'tx>(
+        &mut self,
+        collection_id: CollectionId,
+        memory: &'tx mut TransactionMemory<REGION_COUNT>,
+    ) -> Result<TransactionWriter<'tx, REGION_COUNT>, StorageRuntimeError> {
+        self.validate_transaction_collection(collection_id)?;
+        let dirty_frontier_was_active =
+            dirty_frontier_is_active_in(&self.memory.dirty_frontiers, collection_id);
+        self.run_storage_operation(
+            StorageMode::UpdatingCollection(CollectionUpdateMode::Running),
+            |this| {
+                this.memory
+                    .state
+                    .begin_collection_transaction::<REGION_SIZE, REGION_COUNT, IO>(
+                        this.backing,
+                        &mut this.memory.workspace,
+                        collection_id,
+                    )
+            },
+        )?;
+        memory.begin(collection_id, dirty_frontier_was_active);
+        Ok(TransactionWriter {
+            memory,
+            collection_id,
+            closed: false,
+        })
+    }
+
+    pub(crate) fn commit_transaction_marker(
+        &mut self,
+        collection_id: CollectionId,
+    ) -> Result<(), StorageRuntimeError> {
+        self.memory
+            .state
+            .commit_collection_transaction::<REGION_SIZE, REGION_COUNT, IO>(
+                self.backing,
+                &mut self.memory.workspace,
+                collection_id,
+            )
+    }
+
+    pub(crate) fn finish_transaction_marker(
+        &mut self,
+        collection_id: CollectionId,
+    ) -> Result<(), StorageRuntimeError> {
+        self.memory
+            .state
+            .finish_collection_transaction::<REGION_SIZE, REGION_COUNT, IO>(
+                self.backing,
+                &mut self.memory.workspace,
+                collection_id,
+            )
+    }
+
+    pub(crate) fn restore_transaction_frontier_tracking(
+        &mut self,
+        collection_id: CollectionId,
+        memory: &TransactionMemory<REGION_COUNT>,
+    ) {
+        self.invalidate_map_frontier_buffer(collection_id);
+        if memory.dirty_frontier_was_active {
+            let _ = mark_dirty_frontier_in(&mut self.memory.dirty_frontiers, collection_id);
+        } else {
+            self.clear_dirty_frontier(collection_id);
+        }
+    }
+
+    fn commit_transaction_inner(
+        &mut self,
+        collection_id: CollectionId,
+        memory: &mut TransactionMemory<REGION_COUNT>,
+    ) -> Result<(), StorageRuntimeError> {
+        memory.require_collection(collection_id)?;
+        self.run_storage_operation(
+            StorageMode::UpdatingCollection(CollectionUpdateMode::Running),
+            |this| {
+                this.commit_transaction_marker(collection_id)?;
+                this.finish_transaction_marker(collection_id)
+            },
+        )?;
+        memory.clear();
+        Ok(())
+    }
+
+    fn rollback_transaction_inner(
+        &mut self,
+        collection_id: CollectionId,
+        memory: &mut TransactionMemory<REGION_COUNT>,
+    ) -> Result<(), StorageRuntimeError> {
+        memory.require_collection(collection_id)?;
+        self.run_storage_operation(
+            StorageMode::UpdatingCollection(CollectionUpdateMode::Running),
+            |this| {
+                this.memory
+                    .state
+                    .rollback_collection_transaction::<REGION_SIZE, REGION_COUNT, IO>(
+                        this.backing,
+                        &mut this.memory.workspace,
+                        collection_id,
+                    )
+            },
+        )?;
+        self.restore_transaction_frontier_tracking(collection_id, memory);
+        memory.clear();
+        Ok(())
+    }
+
+    /// Commits an explicit transaction after its writer has been dropped.
+    pub fn commit_transaction(
+        &mut self,
+        collection_id: CollectionId,
+        memory: &mut TransactionMemory<REGION_COUNT>,
+    ) -> Result<(), StorageRuntimeError> {
+        self.commit_transaction_inner(collection_id, memory)
+    }
+
+    /// Rolls back an explicit transaction after its writer has been dropped.
+    pub fn rollback_transaction(
+        &mut self,
+        collection_id: CollectionId,
+        memory: &mut TransactionMemory<REGION_COUNT>,
+    ) -> Result<(), StorageRuntimeError> {
+        self.rollback_transaction_inner(collection_id, memory)
     }
 
     fn clear_dirty_frontier(&mut self, collection_id: CollectionId) {
@@ -2447,6 +2800,26 @@ where
             .add_nanos(StoragePerfTimer::FullWritePath, write_timer.elapsed_nanos());
         storage.finish_mode();
         result
+    }
+
+    /// Begins an explicit map transaction.
+    pub fn begin_transaction_writer<
+        'tx,
+        'db,
+        'mem,
+        IO: FlashIo,
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        const MAX_COLLECTIONS: usize,
+    >(
+        &'tx mut self,
+        storage: &mut Storage<'db, 'mem, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
+        memory: &'tx mut TransactionMemory<REGION_COUNT>,
+    ) -> Result<MapTransactionWriter<'tx, 'map, K, V, REGION_COUNT, MAX_RUNS>, LsmMapError> {
+        let writer = storage
+            .begin_transaction(self.collection_id, memory)
+            .map_err(MapStorageError::from)?;
+        Ok(MapTransactionWriter { map: self, writer })
     }
 
     /// Compacts selected committed runs and reports whether a replacement manifest was committed.

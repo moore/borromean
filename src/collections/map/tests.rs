@@ -3155,7 +3155,7 @@ fn requirement_frontier_run_planning_counts_all_committed_payload_segments() {
 //= spec/map.md#run-manifest-and-committed-map-region-requirements
 //= type=test
 //# `RING-IMPL-REGRESSION-025` Reclaiming map run regions MUST move all tracked run-chain regions to
-//# the storage free-list tail.
+//# the storage free-space tail.
 #[test]
 fn requirement_reclaim_run_regions_moves_run_segments_to_free_space_tail_region() {
     const REGION_SIZE: usize = 256;
