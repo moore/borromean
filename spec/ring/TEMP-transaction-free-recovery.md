@@ -1,167 +1,292 @@
 # Temporary Note: Transaction Recovery And Log-Based Free Space
 
-This note captures the current design discussion before it is folded
-back into the numbered ring specification chapters.
+This note captures the current transaction/free-space recovery model
+before it is folded back into the numbered ring specification chapters.
 
-## Problem
+## Modeling Rule
 
-The free-space collection is log based. A free region is not marked by
-local state in the freed region itself. Whether a region is free is
-known only by replaying the materialized free-space checkpoint plus the
-retained allocator records in WAL order.
+The Quint model treats every action as one durable WAL command plus the
+semantic replay effect of that command.
 
-This matters during recovery. If startup recovery appends a
-`free_region(R)` record and then crashes before appending the terminal
-transaction marker, the next startup must not append a second
-`free_region(R)`.
+Online execution and crash replay must use the same transition:
 
-## Core Model
+```text
+online:
+    construct WAL command -> make command durable -> apply command
 
-Allocator commands have global effects in the main WAL order.
+startup replay:
+    read durable WAL command -> apply command
+```
 
-An `allocate_region` record immediately consumes a ready entry from the
-global free-space collection when that allocator command is replayed.
-The allocated region may then be owned by a transaction, a private log
-rotation, or another privileged storage-core operation.
+Under this rule, a crash cut is any prefix of the action trace. The
+model does not need a stored WAL-command list, replay cursors, an
+`Opening` mode, or an explicit `Crash` action. If every allowed action
+preserves the invariants, then every recovered crash prefix preserves
+the invariants.
 
-A transaction does not make old committed regions free inside the
-transaction log. The transaction commit atomically changes the visible
-collection state at the main WAL `commit_transaction` record. Only after
-that commit is durable can old committed regions be detached and freed.
-Those frees are ordinary main-WAL `free_region` records appended after
-`commit_transaction` and before `transaction_finished`.
+This is an abstraction boundary. It does not prove byte-level WAL
+scanning, record decoding, WAL-head selection, or torn-record recovery.
+It proves the semantic transaction/allocator protocol assuming replay
+and foreground apply share one command implementation.
 
-This implies a two-stage free model. A transaction may record that a
-region should be freed if the transaction commits, but that record is a
-transaction-private free intent, not an allocator command. It must not
-append to the global free-space collection and must not advance
-`append_tail` during transaction replay before the main-WAL commit.
-After `commit_transaction` is durable, recovery or foreground cleanup
-turns those committed free intents into ordinary main-WAL `free_region`
-records before `transaction_finished`.
+The model lives at:
 
-This avoids forcing each collection to keep a separate long-lived list
-of detached regions until some later collection phase. The transaction
-log carries the bounded cleanup intent list while the transaction is
-open or committed-but-unfinished. Once `transaction_finished` is
-durable, the intents are no longer needed.
+```text
+models/transaction_free_recovery.qnt
+```
 
-Because of this split, "cleanup" has two distinct meanings:
+## Replayed State
 
-1. Rollback cleanup before commit: return transaction-owned allocations
-   that already affected the global allocator.
-2. Post-commit free completion: append main-WAL frees for regions that
-   became detached when the committed transaction swapped the collection
-   state.
+The model state is the replayed semantic state after the durable WAL
+prefix:
+
+- `storage: StorageState`: replayed implementation state.
+- `live: Set[int]`: semantic/oracle state for all committed collection
+  contents modeled here.
+
+`StorageState` carries:
+
+- `freeQueue`: the allocator queue.
+- `allocationHead`: first active ready entry.
+- `readyBoundary`: first dirty entry.
+- `appendTail`: one past the last active free entry.
+- `regions: List[RegionHeader]`: abstract decoded header state,
+  indexed by physical region id.
+- `nextSequence`: the next sequence assigned when a valid region header
+  is written.
+- `collectionGenerations: List[int]`: per-collection generation heads.
+- `transactions: List[TxState]`: two fixed transaction slots indexed
+  by `0` and `1`.
+
+The model intentionally keeps `live` global in this step. It represents
+allocator ownership across the modeled collections, not the exact
+per-collection object graph. Per-collection conflict behavior is modeled
+by `storage.collectionGenerations`; wrong-collection free selection is
+deferred to a later, higher-fidelity model.
+
+The active free range is:
+
+```text
+freeQueue[allocationHead, appendTail)
+```
+
+The ready sub-range is:
+
+```text
+freeQueue[allocationHead, readyBoundary)
+```
+
+The dirty sub-range is:
+
+```text
+freeQueue[readyBoundary, appendTail)
+```
+
+Allocator cursor safety is:
+
+```text
+0 <= allocationHead <= readyBoundary <= appendTail <= freeQueue.length
+```
+
+## Transaction State
+
+Each transaction slot carries:
+
+- `phase`
+- `collectionIndex`
+- `observedGeneration`
+- `allocations: List[int]`
+- `freeIntents: List[RegionRef]`
+- `rollbackAllocations: List[RegionRef]`
+
+`RegionRef` is:
+
+```text
+{ region, sequence }
+```
+
+The lifecycle is:
+
+```text
+TxIdle -> TxOpen -> TxCommittedCleanup -> TxIdle
+TxIdle -> TxOpen -> TxRollbackPreparing -> TxRolledBackCleanup -> TxIdle
+```
+
+`CommitTransaction` and `RollbackTransaction` do not clear the
+transaction lists. Only `FinishTransaction` clears `allocations`,
+`freeIntents`, and `rollbackAllocations`. Rollback cleanup uses
+`rollbackAllocations`, which are explicit records written during
+rollback preparation.
+
+Each non-idle transaction is bound to exactly one collection. This
+models the production "add collection to transaction" path at the
+granularity needed here: two transactions can commit independently when
+their `collectionIndex` values differ, while same-collection stale
+commits are rejected by generation checks.
+
+Transaction allocation lists are retained provenance until
+`FinishTransaction`. Before commit or rollback they are private and must
+not overlap `live` or active free space. After commit they overlap
+`live`. After rollback cleanup starts they may overlap active free space
+as individual rollback allocation records are freed.
+
+Cleanup progress is not tracked by a retained progress list. Instead,
+cleanup checks the allocator and the region header sequence:
+
+1. If the target region is already active-free, the obligation is done.
+2. If the target region is not active-free and its valid header still
+   matches the retained sequence, cleanup may append `free_region`.
+3. If the target region is not active-free and the header no longer
+   matches the retained sequence, the old obligation is obsolete and
+   must not append another free record.
+
+This avoids the crash race where a separate cleanup-progress list would
+need its own recovery protocol.
+
+## Command Semantics
+
+`BeginTransaction(tx)` selects a collection, records that collection's
+current generation in the selected slot, and enters `TxOpen`.
+
+`AllocateInTransaction(tx)` consumes the current ready entry by
+advancing `allocationHead` and records only the region index in that
+transaction's `allocations` list. Allocation does not assign a sequence,
+does not write a header, and does not modify `regions`. Ready free
+regions are already erased before allocation.
+
+`WriteTransactionAllocationHeader(tx)` writes one missing allocation
+header for a transaction-owned region. This is the sequence-assignment
+point: it writes `validHeader(nextSequence)` and advances
+`nextSequence`. `CommitTransaction` requires every retained allocation
+to have a valid header before publishing it into `live`.
+
+`StageFreeIntent(tx)` records a transaction-private free intent using
+the sequence currently stored in `storage.regions[region]`. The region
+is chosen from the global semantic `live` set in this model step. The
+transaction's `collectionIndex` still controls generation conflict
+behavior. Staging the free intent does not append to `freeQueue`, does
+not advance `appendTail`, and has no allocator effect before commit.
+
+`CommitTransaction(tx)` requires:
+
+```text
+tx.observedGeneration == storage.collectionGenerations[tx.collectionIndex]
+all allocation headers are valid
+all free-intent headers match
+```
+
+It atomically updates:
+
+```text
+live = (live - tx.freeIntents.region) union tx.allocations.region
+storage.collectionGenerations[tx.collectionIndex] += 1
+tx.phase = TxCommittedCleanup
+```
+
+`StartRollbackPreparation(tx)` records the decision to roll back but
+does not write the durable rollback marker. This is the safe window
+where all transaction-owned allocation headers can be forced: the
+regions are still private to the transaction and cannot have been
+reallocated.
+
+`RecordRollbackAllocation(tx)` records one rollback cleanup obligation
+as `{ region, sequence }` after that allocated region has a valid
+header. These records are written before the durable rollback marker, so
+recovery after the marker can clean up from durable transaction records
+instead of inferring obligations from raw allocation entries.
+
+`RollbackTransaction(tx)` requires every raw allocation to have a
+rollback allocation record, and requires those records to still match
+their region headers. It then enters `TxRolledBackCleanup` without
+changing `live`.
+
+`FreeCommittedIntent(tx)` appends one committed free intent only if the
+target is not active-free and still has the expected valid header
+sequence.
+
+`FreeRolledBackAllocation(tx)` applies the same rule to one explicit
+rollback allocation record.
+
+`FinishTransaction(tx)` is allowed only when every relevant cleanup
+obligation is either active-free or no longer header-matching. It then
+resets the slot to `TxIdle`.
+
+`AllocateDirectlyLive` models a non-transaction WAL allocation that
+immediately becomes committed live ownership. It consumes one ready free
+entry, writes `validHeader(nextSequence)`, advances `nextSequence`, and
+adds the region to `live`.
+
+`FreeDirectLive` models a non-transaction WAL free of a committed live
+region. It removes the region from `live` and appends it to the dirty
+free range. The model excludes regions retained by unfinished
+transactions from this direct free action, because those retained
+records remain provenance until `transaction_finished`.
+
+`EraseOneDirty` invalidates the region header for the entry becoming
+ready-free, matching the requirement that ready free space has been
+erased.
+
+## Important Recovery Point
+
+Cleanup must be idempotent without a separate cleanup-progress log.
+
+It is not enough to ask whether a cleanup target is currently present
+in the active free range. A recovery pass may have already appended
+`free_region(R)`, then `erase_free_region_span` may make `R` ready, and
+a later allocator command may reallocate `R` before
+`transaction_finished` is durable.
+
+In that state, `R` is no longer active-free, but cleanup for the old
+transaction is already complete. Repeating `free_region(R)` would be a
+double free of a region that may now belong to another owner.
+
+The retained `{ region, sequence }` reference handles this case. For
+committed frees, the reference comes from `freeIntents`. For rollback,
+the reference comes from explicit `rollbackAllocations` records written
+before the rollback marker. After reallocation, the active header
+sequence is different from the retained cleanup reference, so cleanup
+must not append another `free_region`.
 
 ## Invariants
 
-1. The free-space collection is reconstructed by replaying the
-   materialized checkpoint and retained WAL allocator records.
-2. Replay builds enough free-space membership state to answer whether a
-   region is already present in the active free-space collection.
-3. A durable `free_region(R)` is the progress record for freeing `R`.
-   No separate per-region free marker exists.
-4. A recovery path that wants to free `R` must skip the append if `R` is
-   already present in the recovered active free-space collection.
-5. A recovery path must also skip the append if the same recovery pass
-   has already observed or appended `free_region(R)`.
-6. A region may appear at most once in the active free-space collection.
-7. Transaction-log records do not apply allocator-effective frees.
-   Actual free-space mutation for freed regions happens only through
-   main-WAL `free_region` records.
-8. A committed transaction is not complete until every required
-   post-commit main-WAL free is durable and
-   `transaction_finished(transaction_log_id, range)` is durable.
-9. An uncommitted transaction never frees old committed collection
-   regions. It can only require rollback cleanup for regions it
-   allocated.
-10. A committed transaction must retain enough replay information to
-    derive post-commit free obligations until `transaction_finished` is
-    durable.
-11. A main-WAL `free_region` command in a transaction log is invalid.
-    Allowing it would let an uncommitted transaction free a region that
-    remains live in the committed collection state, and rollback would
-    not make that earlier free safe.
-12. A transaction-private free-intent record is valid only inside a
-    transaction range. It has no allocator effect before commit. On
-    rollback it is ignored. After commit it becomes a cleanup obligation
-    that must be satisfied by a main-WAL `free_region`.
+The model checks:
 
-## Startup Replay Shape
+1. Allocator cursors remain ordered.
+2. Active free entries have no duplicates.
+3. `live` does not overlap active free-space membership.
+4. Live regions have valid headers.
+5. Ready free regions do not have valid headers.
+6. Open or rollback-preparing transaction allocations do not overlap
+   live or active-free regions.
+7. Committed transaction allocations are in `live` while retained as
+   provenance until finish.
+8. Outstanding transaction allocations across the two slots do not
+   overlap.
+9. Open transaction free intents remain live, header-matching, and have
+   no allocator effect.
+10. Pending committed cleanup intents are detached from live state.
+11. Pending rollback allocations are not live.
+12. Free intents are not shared between transaction slots.
+13. Rollback cleanup has an explicit rollback record for every raw
+    transaction allocation.
+14. Idle transactions have no collection; non-idle transactions name a
+    valid modeled collection.
+15. Every region is accounted for by `live`, active free state, or
+    retained transaction regions. Retained transaction regions include
+    transaction allocations and pending committed free-intent cleanup.
 
-Startup first reconstructs the free-space collection from the
-checkpoint and retained WAL records. When replay sees the first retained
-`free_region` after the checkpoint, it validates that the record appends
-at the current `append_tail`. Each following retained free must advance
-the append position exactly once. During this pass, startup can maintain
-a bounded membership set keyed by region index.
+## Unsafe Comparison Paths
 
-After allocator replay, recovery can test a cleanup target with:
+The model also contains unsafe actions used only with `unsafeStep`:
 
-```text
-already_done =
-    region is present in recovered active free-space membership
-    or region was observed/appended in this recovery pass
-```
+- `UnsafeFreeIntentBeforeCommit`
+- `UnsafeCommittedCleanupWithoutMembershipCheck`
+- `UnsafeRollbackCleanupWithoutMembershipCheck`
+- `UnsafeCommitWithoutGenerationCheck`
 
-If `already_done` is true, recovery must not append another
-`free_region` for that region.
-
-## Transaction Crash Cuts
-
-### Before `commit_transaction`
-
-The visible collection state is still the old committed state. Old
-committed regions remain live and must not be freed.
-
-Any transaction-owned allocation that reached the global allocator must
-be returned to the dirty free-space range with a main-WAL
-`free_region`. Recovery then appends
-`rollback_transaction(transaction_log_id, range)`.
-
-If recovery crashes after one rollback `free_region` but before the
-rollback marker, the next startup sees the free in the recovered
-free-space collection and skips that allocation before appending any
-remaining missing frees.
-
-### After `commit_transaction` Before `transaction_finished`
-
-The transaction's new collection state is visible. The commit point is
-the atomic state swap.
-
-Startup must preserve the committed state, scan the committed
-transaction range for free intents, append any missing main-WAL
-`free_region` records for those intents, and then append
-`transaction_finished(transaction_log_id, range)`.
-
-If recovery crashes after freeing some detached regions but before
-`transaction_finished`, the next startup sees those regions in the
-recovered free-space collection and appends only the missing frees.
-
-### After `transaction_finished`
-
-All rollback or post-commit free obligations are complete. Startup must
-not repeat transaction recovery for that range.
-
-## Transaction Segment Layout
-
-The transaction segment must not contain allocator-effective free
-records. It may contain transaction-private free intents. It also needs
-to represent transaction-private collection changes and
-transaction-owned allocations.
-
-Transaction-log writes occur when committing or when an in-memory
-frontier is full. At those points the writer already knows the boundary
-between data records and transaction bookkeeping. If the physical
-layout uses one side for data records and the other side for allocation
-or bookkeeping records, the commit descriptor should record the exact
-ranges. Recovery should not infer the boundary heuristically.
-
-The commit descriptor may therefore carry enough layout information to
-scan only the transaction-owned allocation records needed for rollback
-recovery and the transaction-private free-intent records needed for
-post-commit cleanup.
+The unsafe run is expected to violate `safety`; for example, early
+freeing of a transaction-private free intent can place a still-live
+region into the active free range.
 
 ## Current Implementation Risk
 
@@ -170,55 +295,46 @@ The current implementation allows `append_free_region(collection_id !=
 open transaction log before the transaction has committed. It also
 applies that private record to runtime free-space state immediately.
 
-That behavior is unsafe under the model in this note. Before
-`commit_transaction`, the old committed collection state is still
-visible and may still reference the region named by that private
-`FreeRegion`. If the transaction rolls back, the attempted free was
-never valid as a global allocator fact. Therefore transaction-log
-`FreeRegion` should be rejected rather than treated as staged cleanup.
-A separate transaction-private free-intent record can safely represent
-the staged cleanup because it has no allocator effect until after
-commit.
+That behavior is unsafe under this model. Before
+`commit_transaction`, old committed collection state is still visible
+and may still reference the region named by the private `FreeRegion`.
+If the transaction rolls back, that earlier allocator effect was never
+valid.
 
-The replacement rule is simple:
+The replacement rule is:
 
-1. Before commit, do not free old committed regions.
-2. On rollback, free only transaction-owned allocations in the main WAL.
-3. After commit, scan committed free intents and free them in the main
-   WAL before `transaction_finished`.
-
-## Open Questions
-
-1. Should duplicate free-region membership be enforced directly in the
-   shared allocator replay helper, not only by transaction recovery
-   bookkeeping?
-2. What is the exact bounded representation for recovered free-space
-   membership: bitset by region index, sorted bounded vector, or
-   existing queue scan?
-3. What should the transaction-private free-intent record be named and
-   encoded as?
-4. Should the transaction commit descriptor explicitly name the
-   allocation-record and free-intent ranges, or is scanning the full
-   committed range acceptable under the configured bounds?
+1. Before commit, record only transaction-private free intents with the
+   current region sequence.
+2. On rollback, first force headers for all transaction-owned
+   allocations.
+3. Then write explicit `rollback_allocation(region, sequence)` records
+   for each allocation.
+4. Then write the durable rollback marker.
+5. Rollback cleanup frees only rollback allocation records that still
+   have the retained sequence and are not already active-free.
+6. After commit, cleanup frees committed free intents that still have
+   the retained sequence and are not already active-free.
+7. `transaction_finished` clears the retained transaction refs.
 
 ## Model Checking
 
-The first Quint model for this design lives at
-`models/transaction_free_recovery.qnt`.
+Typecheck:
 
-Run the safe transition relation with:
+```sh
+quint typecheck models/transaction_free_recovery.qnt
+```
+
+Safe randomized simulation:
 
 ```sh
 quint run models/transaction_free_recovery.qnt \
   --backend=typescript \
   --invariant=safety \
-  --max-samples=1000 \
-  --max-steps=16
+  --max-samples=2000 \
+  --max-steps=30
 ```
 
-The model also includes `unsafeStep`, which adds the current unsafe
-behavior where a transaction-private free mutates the global allocator
-before commit. This should violate `safety`:
+Unsafe comparison, expected to fail:
 
 ```sh
 quint run models/transaction_free_recovery.qnt \
@@ -226,5 +342,16 @@ quint run models/transaction_free_recovery.qnt \
   --step=unsafeStep \
   --invariant=safety \
   --max-samples=200 \
-  --max-steps=6
+  --max-steps=12
+```
+
+Two-collection commit reachability, expected to fail the negative
+invariant:
+
+```sh
+quint run models/transaction_free_recovery.qnt \
+  --backend=typescript \
+  --invariant=noTwoDifferentCollectionsCommitted \
+  --max-samples=5000 \
+  --max-steps=10
 ```
