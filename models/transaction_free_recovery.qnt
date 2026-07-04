@@ -151,13 +151,6 @@ module transaction_free_recovery {
     CollectionIndexSet.forall(i =>
       collectionLiveAt(collections, i).intersect(regions) == Set())
 
-  pure def regionInSomeCollectionLive(
-    collections: List[CollectionState],
-    region: int,
-  ): bool =
-    CollectionIndexSet.exists(i =>
-      region.in(collectionLiveAt(collections, i)))
-
   pure def updateTransactions(
     transactions: List[TxState],
     index: int,
@@ -634,29 +627,11 @@ module transaction_free_recovery {
   val readyFreeList =
     storage.freeQueue.slice(storage.allocationHead, storage.readyBoundary)
 
-  val dirtyFreeList =
-    storage.freeQueue.slice(storage.readyBoundary, storage.appendTail)
-
   val activeFreeSet =
     intListToSet(activeFreeList)
 
   val readyFreeSet =
     intListToSet(readyFreeList)
-
-  val dirtyFreeSet =
-    intListToSet(dirtyFreeList)
-
-  val pendingCommittedCleanupSet =
-    storage.transactions.foldl(Set(), (acc, tx) =>
-      acc.union(
-        txPendingCommittedCleanupSet(activeFreeSet, storage.regions, tx)))
-
-  val outstandingAllocSet =
-    storage.transactions.foldl(Set(), (acc, tx) =>
-      acc.union(txOutstandingAllocSet(activeFreeSet, storage.regions, tx)))
-
-  val retainedTransactionRegionSet =
-    outstandingAllocSet.union(pendingCommittedCleanupSet)
 
   action init = all {
     storage' = InitialStorage,
@@ -1276,14 +1251,32 @@ module transaction_free_recovery {
         ) == Set()
       ))
 
-  // Every modeled region is accounted for by exactly one ownership category:
-  // committed live, allocator-free, private/pending allocation, or committed
-  // free cleanup.
+  // Every modeled region is accounted for by at least one ownership category.
+  // Other invariants make these categories disjoint where safety requires it.
   val allRegionsAccountedFor =
     Regions.forall(region =>
-      regionInSomeCollectionLive(storage.collections, region)
+      // 1. committed live in some collection
+      CollectionIndexSet.exists(collectionIndex =>
+        region.in(collectionLiveAt(storage.collections, collectionIndex)))
+      // 2. allocator-free
       or region.in(activeFreeSet)
-      or region.in(retainedTransactionRegionSet))
+      // 3. transaction-private allocation or rollback cleanup obligation
+      or TransactionIndexSet.exists(txIndex =>
+        region.in(
+          txOutstandingAllocSet(
+            activeFreeSet,
+            storage.regions,
+            storage.transactions.nth(txIndex),
+          )))
+      // 4. committed free intent awaiting cleanup
+      or TransactionIndexSet.exists(txIndex =>
+        region.in(
+          txPendingCommittedCleanupSet(
+            activeFreeSet,
+            storage.regions,
+            storage.transactions.nth(txIndex),
+          )
+        )))
 
   // Negative reachability helper, not part of safety. Running this as an
   // invariant should fail once two different collection transactions can commit
