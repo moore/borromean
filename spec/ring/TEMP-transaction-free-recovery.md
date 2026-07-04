@@ -255,8 +255,8 @@ collection generation.
 retained-reference rule: append only when the target is not active-free
 and the retained rollback allocation reference still matches the valid
 region header; otherwise skip. In both cases it advances
-`cleanupIndex`. Rollback allocations are not globally live as an
-inductive invariant of pending rollback cleanup.
+`cleanupIndex`. Rollback allocations are not live in the transaction's
+collection as an inductive invariant of pending rollback cleanup.
 
 `FinishCommit(tx)` is allowed only when `cleanupIndex` has reached the
 end of `freeIntents`. `FinishRollback(tx)` is allowed only when
@@ -273,11 +273,12 @@ that collection's live set, and bumps that collection generation.
 `FreeDirectLive` models a non-transaction WAL free of a committed live
 region from one selected collection. It removes the region from that
 collection's live set, appends it to the dirty free range, and bumps
-that collection generation. The model excludes outstanding
-transaction-owned allocation cleanup obligations and pending committed
-free-intent cleanup obligations from this direct free action; it does
-not exclude regions merely because another open transaction has staged a
-private free intent for them.
+that collection generation. Because the action chooses from collection
+live, disjointness from active free space, outstanding transaction
+allocations, and pending committed cleanup is maintained by the safety
+invariants rather than by direct action guards. It does not exclude
+regions merely because another open transaction has staged a private
+free intent for them.
 
 `EraseOneDirty` invalidates the region header for the entry becoming
 ready-free, matching the requirement that ready free space has been
@@ -325,7 +326,8 @@ The model checks:
 9. Pending committed cleanup intents are detached from collection live
    state and remain outside active free space until cleanup appends them
    or the retained header reference becomes obsolete.
-10. Pending rollback allocations are not globally live.
+10. Pending rollback allocations are not live in their transaction's
+    collection.
 11. Rollback cleanup has an explicit rollback record for every raw
     transaction allocation.
 12. Idle transactions have no collection; non-idle transactions name a
