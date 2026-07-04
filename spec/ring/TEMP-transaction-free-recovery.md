@@ -41,8 +41,6 @@ The model state is the replayed semantic state after the durable WAL
 prefix:
 
 - `storage: StorageState`: replayed implementation state.
-- `live: Set[int]`: semantic/oracle state for all committed collection
-  contents modeled here.
 
 `StorageState` carries:
 
@@ -54,15 +52,22 @@ prefix:
   indexed by physical region id.
 - `nextSequence`: the next sequence assigned when a valid region header
   is written.
-- `collectionGenerations: List[int]`: per-collection generation heads.
+- `collections: List[CollectionState]`: committed collection state.
 - `transactions: List[TxState]`: two fixed transaction slots indexed
   by `0` and `1`.
 
-The model intentionally keeps `live` global in this step. It represents
-allocator ownership across the modeled collections, not the exact
-per-collection object graph. Per-collection conflict behavior is modeled
-by `storage.collectionGenerations`; wrong-collection free selection is
-deferred to a later, higher-fidelity model.
+`CollectionState` carries:
+
+- `live: Set[int]`: committed live regions for the collection.
+- `generation: int`: the collection generation head.
+
+The model keeps committed live membership per collection. Allocator
+invariants use the union of `storage.collections[*].live`, while
+transaction operations select and mutate only the collection named by
+the transaction slot. No region may be live in more than one collection.
+A live region does not need a valid header; headers are sequence
+references for durable cleanup obligations, not the source of live
+ownership.
 
 The active free range is:
 
@@ -126,9 +131,11 @@ commits are rejected by generation checks.
 
 Transaction allocation lists are retained provenance until
 `FinishTransaction`. Before commit or rollback they are private and must
-not overlap `live` or active free space. After commit they overlap
-`live`. After rollback cleanup starts they may overlap active free space
-as individual rollback allocation records are freed.
+not overlap the global live set or active free space. After commit,
+allocations become ordinary committed collection live regions; a later
+transaction may detach them before the earlier transaction reaches
+`FinishTransaction`. After rollback cleanup starts they may overlap
+active free space as individual rollback allocation records are freed.
 
 Cleanup progress is not tracked by a retained progress list. Instead,
 cleanup checks the allocator and the region header sequence:
@@ -157,29 +164,37 @@ regions are already erased before allocation.
 `WriteTransactionAllocationHeader(tx)` writes one missing allocation
 header for a transaction-owned region. This is the sequence-assignment
 point: it writes `validHeader(nextSequence)` and advances
-`nextSequence`. `CommitTransaction` requires every retained allocation
-to have a valid header before publishing it into `live`.
+`nextSequence`. Durable rollback needs these headers before writing
+explicit rollback allocation records. Commit can publish transaction
+allocations into the collection live set without allocation headers.
 
-`StageFreeIntent(tx)` records a transaction-private free intent using
-the sequence currently stored in `storage.regions[region]`. The region
-is chosen from the global semantic `live` set in this model step. The
-transaction's `collectionIndex` still controls generation conflict
-behavior. Staging the free intent does not append to `freeQueue`, does
-not advance `appendTail`, and has no allocator effect before commit.
+`StageFreeIntent(tx)` records a transaction-private free intent for a
+region chosen from the live set for the transaction's collection,
+excluding only regions already staged by that same transaction. If the
+live region already has a valid header, the action records that
+sequence. If it does not, the action writes `validHeader(nextSequence)`,
+advances `nextSequence`, and records the new sequence. Another
+transaction may stage an intent for the same region; generation checks
+and retained sequence references decide which later actions are valid.
+Staging does not require the transaction's observed generation to still
+be current; commit is the authoritative generation conflict check.
+Staging the free intent does not append to `freeQueue`, does not advance
+`appendTail`, and has no allocator effect before commit.
 
 `CommitTransaction(tx)` requires:
 
 ```text
-tx.observedGeneration == storage.collectionGenerations[tx.collectionIndex]
-all allocation headers are valid
+tx.observedGeneration == storage.collections[tx.collectionIndex].generation
 all free-intent headers match
 ```
 
 It atomically updates:
 
 ```text
-live = (live - tx.freeIntents.region) union tx.allocations.region
-storage.collectionGenerations[tx.collectionIndex] += 1
+storage.collections[tx.collectionIndex].live =
+    (storage.collections[tx.collectionIndex].live - tx.freeIntents.region)
+    union tx.allocations.region
+storage.collections[tx.collectionIndex].generation += 1
 tx.phase = TxCommittedCleanup
 ```
 
@@ -198,11 +213,11 @@ instead of inferring obligations from raw allocation entries.
 `RollbackTransaction(tx)` requires every raw allocation to have a
 rollback allocation record, and requires those records to still match
 their region headers. It then enters `TxRolledBackCleanup` without
-changing `live`.
+changing collection live state.
 
 `FreeCommittedIntent(tx)` appends one committed free intent only if the
-target is not active-free and still has the expected valid header
-sequence.
+intent has a resolved sequence, the target is not active-free, and the
+target still has the expected valid header sequence.
 
 `FreeRolledBackAllocation(tx)` applies the same rule to one explicit
 rollback allocation record.
@@ -212,15 +227,18 @@ obligation is either active-free or no longer header-matching. It then
 resets the slot to `TxIdle`.
 
 `AllocateDirectlyLive` models a non-transaction WAL allocation that
-immediately becomes committed live ownership. It consumes one ready free
-entry, writes `validHeader(nextSequence)`, advances `nextSequence`, and
-adds the region to `live`.
+immediately becomes committed live ownership for one selected
+collection. It consumes one ready free entry, writes
+`validHeader(nextSequence)`, advances `nextSequence`, adds the region to
+that collection's live set, and bumps that collection generation.
 
 `FreeDirectLive` models a non-transaction WAL free of a committed live
-region. It removes the region from `live` and appends it to the dirty
-free range. The model excludes regions retained by unfinished
-transactions from this direct free action, because those retained
-records remain provenance until `transaction_finished`.
+region from one selected collection. It removes the region from that
+collection's live set, appends it to the dirty free range, and bumps
+that collection generation. The model excludes outstanding
+transaction-owned allocation cleanup obligations from this direct free
+action; it does not exclude regions merely because another open
+transaction has staged a private free intent for them.
 
 `EraseOneDirty` invalidates the region header for the entry becoming
 ready-free, matching the requirement that ready free space has been
@@ -253,27 +271,28 @@ The model checks:
 
 1. Allocator cursors remain ordered.
 2. Active free entries have no duplicates.
-3. `live` does not overlap active free-space membership.
-4. Live regions have valid headers.
+3. No region is live in more than one modeled collection.
+4. The union of collection live sets does not overlap active
+   free-space membership.
 5. Ready free regions do not have valid headers.
 6. Open or rollback-preparing transaction allocations do not overlap
-   live or active-free regions.
-7. Committed transaction allocations are in `live` while retained as
-   provenance until finish.
-8. Outstanding transaction allocations across the two slots do not
+   the global live set or active-free regions.
+7. Outstanding transaction allocations across the two slots do not
    overlap.
-9. Open transaction free intents remain live, header-matching, and have
-   no allocator effect.
-10. Pending committed cleanup intents are detached from live state.
-11. Pending rollback allocations are not live.
-12. Free intents are not shared between transaction slots.
-13. Rollback cleanup has an explicit rollback record for every raw
+8. Current open transaction free intents remain live in that
+   transaction's collection, remain header-matching, and have no
+   allocator effect. Stale open transactions may retain obsolete free
+   intents because they can no longer commit.
+9. Pending committed cleanup intents are detached from global live
+    state.
+10. Pending rollback allocations are not globally live.
+11. Rollback cleanup has an explicit rollback record for every raw
     transaction allocation.
-14. Idle transactions have no collection; non-idle transactions name a
+12. Idle transactions have no collection; non-idle transactions name a
     valid modeled collection.
-15. Every region is accounted for by `live`, active free state, or
-    retained transaction regions. Retained transaction regions include
-    transaction allocations and pending committed free-intent cleanup.
+13. Every region is accounted for by collection live state, active free
+    state, outstanding transaction allocations, or pending committed
+    free-intent cleanup.
 
 ## Unsafe Comparison Paths
 
@@ -303,8 +322,8 @@ valid.
 
 The replacement rule is:
 
-1. Before commit, record only transaction-private free intents with the
-   current region sequence.
+1. Before commit, record only transaction-private free intents with a
+   sequence resolved by writing or observing the current region header.
 2. On rollback, first force headers for all transaction-owned
    allocations.
 3. Then write explicit `rollback_allocation(region, sequence)` records
@@ -352,6 +371,17 @@ invariant:
 quint run models/transaction_free_recovery.qnt \
   --backend=typescript \
   --invariant=noTwoDifferentCollectionsCommitted \
+  --max-samples=5000 \
+  --max-steps=10
+```
+
+Same-collection duplicate free-intent reachability, expected to fail
+the negative invariant:
+
+```sh
+quint run models/transaction_free_recovery.qnt \
+  --backend=typescript \
+  --invariant=noTwoSameCollectionOpenTransactionsStagedSameFreeIntent \
   --max-samples=5000 \
   --max-steps=10
 ```

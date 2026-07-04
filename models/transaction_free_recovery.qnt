@@ -33,6 +33,11 @@ module transaction_free_recovery {
     rollbackAllocations: List[RegionRef],
   }
 
+  type CollectionState = {
+    live: Set[int],
+    generation: int,
+  }
+
   type StorageState = {
     freeQueue: List[int],
     allocationHead: int,
@@ -40,7 +45,7 @@ module transaction_free_recovery {
     appendTail: int,
     regions: List[RegionHeader],
     nextSequence: int,
-    collectionGenerations: List[int],
+    collections: List[CollectionState],
     transactions: List[TxState],
   }
 
@@ -71,30 +76,76 @@ module transaction_free_recovery {
     RegionIndexes.foldl([], (acc, i) =>
       acc.append(if (i == region) { header } else { headers.nth(i) }))
 
-  pure def replaceCollectionGeneration(
-    collectionGenerations: List[int],
+  pure def collectionState(live: Set[int], generation: int): CollectionState = {
+    live: live,
+    generation: generation,
+  }
+
+  pure def collectionAt(
+    collections: List[CollectionState],
     collectionIndex: int,
-    generation: int,
-  ): List[int] =
+  ): CollectionState =
+    if (collectionIndex == 0) {
+      collections.nth(0)
+    } else if (collectionIndex == 1) {
+      collections.nth(1)
+    } else {
+      collectionState(Set(), -1)
+    }
+
+  pure def collectionLiveAt(
+    collections: List[CollectionState],
+    collectionIndex: int,
+  ): Set[int] =
+    collectionAt(collections, collectionIndex).live
+
+  pure def collectionGenerationAt(
+    collections: List[CollectionState],
+    collectionIndex: int,
+  ): int =
+    collectionAt(collections, collectionIndex).generation
+
+  pure def replaceCollection(
+    collections: List[CollectionState],
+    collectionIndex: int,
+    nextCollection: CollectionState,
+  ): List[CollectionState] =
     CollectionIndexes.foldl([], (acc, i) =>
       acc.append(
         if (i == collectionIndex) {
-          generation
+          nextCollection
         } else {
-          collectionGenerations.nth(i)
+          collections.nth(i)
         }))
 
-  pure def collectionGenerationAt(
-    collectionGenerations: List[int],
+  pure def replaceCollectionLive(
+    collections: List[CollectionState],
     collectionIndex: int,
-  ): int =
-    if (collectionIndex == 0) {
-      collectionGenerations.nth(0)
-    } else if (collectionIndex == 1) {
-      collectionGenerations.nth(1)
-    } else {
-      -1
-    }
+    nextLive: Set[int],
+  ): List[CollectionState] =
+    replaceCollection(
+      collections,
+      collectionIndex,
+      collectionState(
+        nextLive,
+        collectionGenerationAt(collections, collectionIndex),
+      ),
+    )
+
+  pure def replaceCollectionGeneration(
+    collections: List[CollectionState],
+    collectionIndex: int,
+    generation: int,
+  ): List[CollectionState] =
+    replaceCollection(
+      collections,
+      collectionIndex,
+      collectionState(collectionLiveAt(collections, collectionIndex), generation),
+    )
+
+  pure def globalLiveSet(collections: List[CollectionState]): Set[int] =
+    CollectionIndexes.foldl(Set(), (acc, i) =>
+      acc.union(collectionLiveAt(collections, i)))
 
   pure def updateTransactions(
     transactions: List[TxState],
@@ -213,9 +264,12 @@ module transaction_free_recovery {
   pure def refListEntriesInRegions(refs: List[RegionRef]): bool =
     refs.indices().forall(i => refs.nth(i).region.in(Regions))
 
+  pure def refResolved(ref: RegionRef): bool =
+    0 <= ref.sequence
+
   pure def refListSequencesOK(refs: List[RegionRef], nextSequence: int): bool =
     refs.indices().forall(i =>
-      0 <= refs.nth(i).sequence and refs.nth(i).sequence < nextSequence)
+      refResolved(refs.nth(i)) and refs.nth(i).sequence < nextSequence)
 
   pure def noDuplicateRefRegions(refs: List[RegionRef]): bool =
     refs.indices().forall(i =>
@@ -249,6 +303,13 @@ module transaction_free_recovery {
       tx.collectionIndex.in(CollectionIndexSet)
     }
 
+  pure def txGenerationCurrent(
+    collections: List[CollectionState],
+    tx: TxState,
+  ): bool =
+    tx.observedGeneration
+      == collectionGenerationAt(collections, tx.collectionIndex)
+
   pure def txIdleStateOK(tx: TxState): bool =
     (tx.phase == TxIdle).implies(
       tx.collectionIndex == NoCollection
@@ -265,6 +326,7 @@ module transaction_free_recovery {
 
   pure def headerMatches(headers: List[RegionHeader], entry: RegionRef): bool =
     entry.region.in(Regions)
+    and refResolved(entry)
     and headers.nth(entry.region).valid
     and headers.nth(entry.region).sequence == entry.sequence
 
@@ -273,12 +335,6 @@ module transaction_free_recovery {
     refs: List[RegionRef],
   ): bool =
     refs.indices().forall(i => headerMatches(headers, refs.nth(i)))
-
-  pure def allocatedRegionsHaveHeaders(
-    headers: List[RegionHeader],
-    allocations: List[int],
-  ): bool =
-    allocations.indices().forall(i => headers.nth(allocations.nth(i)).valid)
 
   pure def allAllocationsHaveRollbackRecords(tx: TxState): bool =
     txAllocSet(tx).subseteq(txRollbackAllocSet(tx))
@@ -341,7 +397,7 @@ module transaction_free_recovery {
     appendTail: int,
     regions: List[RegionHeader],
     nextSequence: int,
-    collectionGenerations: List[int],
+    collections: List[CollectionState],
     transactions: List[TxState],
   ): StorageState = {
     freeQueue: freeQueue,
@@ -350,7 +406,7 @@ module transaction_free_recovery {
     appendTail: appendTail,
     regions: regions,
     nextSequence: nextSequence,
-    collectionGenerations: collectionGenerations,
+    collections: collections,
     transactions: transactions,
   }
 
@@ -366,7 +422,7 @@ module transaction_free_recovery {
       state.appendTail,
       state.regions,
       state.nextSequence,
-      state.collectionGenerations,
+      state.collections,
       updateTransactions(state.transactions, txIndex, nextTx),
     )
 
@@ -383,7 +439,7 @@ module transaction_free_recovery {
       state.appendTail,
       state.regions,
       state.nextSequence,
-      state.collectionGenerations,
+      state.collections,
       updateTransactions(state.transactions, txIndex, nextTx),
     )
 
@@ -400,14 +456,14 @@ module transaction_free_recovery {
       state.appendTail,
       replaceRegionHeader(state.regions, region, header),
       nextSequence,
-      state.collectionGenerations,
+      state.collections,
       state.transactions,
     )
 
-  pure def storageWithCollectionGenerationAndTransaction(
+  pure def storageWithCollectionAndTransaction(
     state: StorageState,
     collectionIndex: int,
-    generation: int,
+    nextCollection: CollectionState,
     txIndex: int,
     nextTx: TxState,
   ): StorageState =
@@ -418,12 +474,24 @@ module transaction_free_recovery {
       state.appendTail,
       state.regions,
       state.nextSequence,
-      replaceCollectionGeneration(
-        state.collectionGenerations,
-        collectionIndex,
-        generation,
-      ),
+      replaceCollection(state.collections, collectionIndex, nextCollection),
       updateTransactions(state.transactions, txIndex, nextTx),
+    )
+
+  pure def storageWithCollection(
+    state: StorageState,
+    collectionIndex: int,
+    nextCollection: CollectionState,
+  ): StorageState =
+    storageState(
+      state.freeQueue,
+      state.allocationHead,
+      state.readyBoundary,
+      state.appendTail,
+      state.regions,
+      state.nextSequence,
+      replaceCollection(state.collections, collectionIndex, nextCollection),
+      state.transactions,
     )
 
   pure def storageWithFreeAppend(
@@ -437,13 +505,15 @@ module transaction_free_recovery {
       state.appendTail + 1,
       state.regions,
       state.nextSequence,
-      state.collectionGenerations,
+      state.collections,
       state.transactions,
     )
 
-  pure def storageWithDirectLiveAllocation(
+  pure def storageWithDirectLiveAllocationAndCollection(
     state: StorageState,
     region: int,
+    collectionIndex: int,
+    nextCollection: CollectionState,
   ): StorageState =
     storageState(
       state.freeQueue,
@@ -456,7 +526,7 @@ module transaction_free_recovery {
         validHeader(state.nextSequence),
       ),
       state.nextSequence + 1,
-      state.collectionGenerations,
+      replaceCollection(state.collections, collectionIndex, nextCollection),
       state.transactions,
     )
 
@@ -475,11 +545,14 @@ module transaction_free_recovery {
         invalidHeader(state.regions.nth(region).sequence),
       ),
       state.nextSequence,
-      state.collectionGenerations,
+      state.collections,
       state.transactions,
     )
 
-  pure val InitialLive = Set(0, 1)
+  pure val InitialCollections = [
+    collectionState(Set(0), 0),
+    collectionState(Set(1), 0),
+  ]
   pure val InitialFreeQueue = [2, 3, 4, 5]
   pure val InitialRegions = [
     validHeader(0),
@@ -490,7 +563,6 @@ module transaction_free_recovery {
     invalidHeader(0),
   ]
   pure val InitialNextSequence = 2
-  pure val InitialCollectionGenerations = [0, 0]
   pure val InitialStorage =
     storageState(
       InitialFreeQueue,
@@ -499,20 +571,14 @@ module transaction_free_recovery {
       InitialFreeQueue.length(),
       InitialRegions,
       InitialNextSequence,
-      InitialCollectionGenerations,
+      InitialCollections,
       InitialTransactions,
     )
 
   // Replayed implementation state. This is the state foreground apply and WAL
-  // replay reconstruct: allocator cursors, headers, collection generations,
-  // and retained transaction records.
+  // replay reconstruct: allocator cursors, headers, committed collection
+  // state, and retained transaction records.
   var storage: StorageState
-
-  // Semantic/oracle state for all committed collection contents modeled here.
-  // Per-collection live membership is intentionally abstracted away in this
-  // step; collection-specific conflict behavior is modeled by
-  // storage.collectionGenerations.
-  var live: Set[int]
 
   val activeFreeList =
     storage.freeQueue.slice(storage.allocationHead, storage.appendTail)
@@ -532,38 +598,28 @@ module transaction_free_recovery {
   val dirtyFreeSet =
     intListToSet(dirtyFreeList)
 
-  val allTxFreeIntentSet =
-    storage.transactions.foldl(Set(), (acc, tx) =>
-      acc.union(txFreeIntentSet(tx)))
-
   val pendingCommittedCleanupSet =
     storage.transactions.foldl(Set(), (acc, tx) =>
       acc.union(
         txPendingCommittedCleanupSet(activeFreeSet, storage.regions, tx)))
 
-  val retainedTransactionAllocSet =
-    storage.transactions.foldl(Set(), (acc, tx) =>
-      if (tx.phase == TxIdle) {
-        acc
-      } else {
-        acc.union(txAllocSet(tx))
-      })
-
-  val retainedTransactionRegionSet =
-    retainedTransactionAllocSet.union(pendingCommittedCleanupSet)
-
   val outstandingAllocSet =
     storage.transactions.foldl(Set(), (acc, tx) =>
       acc.union(txOutstandingAllocSet(activeFreeSet, storage.regions, tx)))
 
+  val retainedTransactionRegionSet =
+    outstandingAllocSet.union(pendingCommittedCleanupSet)
+
+  val globalLive =
+    globalLiveSet(storage.collections)
+
   val accountedRegions =
-    live
+    globalLive
       .union(activeFreeSet)
       .union(retainedTransactionRegionSet)
 
   action init = all {
     storage' = InitialStorage,
-    live' = InitialLive,
   }
 
   // main_wal begin_transaction(tx, collection, observed_generation)
@@ -574,13 +630,12 @@ module transaction_free_recovery {
     val nextTx =
       openTx(
         collectionIndex,
-        collectionGenerationAt(storage.collectionGenerations, collectionIndex),
+        collectionGenerationAt(storage.collections, collectionIndex),
       )
     all {
       currentTx.phase == TxIdle,
 
       storage' = storageWithTransaction(storage, txIndex, nextTx),
-      live' = live,
     }
   }
 
@@ -601,12 +656,12 @@ module transaction_free_recovery {
           txIndex,
           nextTx,
         ),
-      live' = live,
     }
   }
 
-  // collection write of the header for one transaction-owned allocation.
-  // Commit and durable rollback both require these headers to be present.
+  // Collection write of the header for one transaction-owned allocation.
+  // Durable rollback needs explicit allocation sequence references; commit
+  // can publish live ownership without allocation headers.
   action WriteTransactionAllocationHeader = {
     nondet txIndex = TransactionIndexSet.oneOf()
     val currentTx = storage.transactions.nth(txIndex)
@@ -623,38 +678,43 @@ module transaction_free_recovery {
           validHeader(storage.nextSequence),
           storage.nextSequence + 1,
         ),
-      live' = live,
     }
   }
 
-  // transaction_log free_intent(tx, region, sequence)
-  //
-  // The model keeps one global live set for allocator ownership. The selected
-  // transaction still carries a collection index, so generation conflict checks
-  // are collection-specific even though wrong-collection free selection is out
-  // of scope for this model step.
+  // transaction_log free_intent(tx, region, sequence). If the live region does
+  // not already have a valid header, staging writes one before recording the
+  // retained sequence reference.
   action StageFreeIntent = {
     nondet txIndex = TransactionIndexSet.oneOf()
     val currentTx = storage.transactions.nth(txIndex)
     nondet region =
-      live
-        .exclude(allTxFreeIntentSet)
-        .exclude(retainedTransactionAllocSet)
+      collectionLiveAt(storage.collections, currentTx.collectionIndex)
+        .exclude(txFreeIntentSet(currentTx))
         .oneOf()
+    val existingHeader = storage.regions.nth(region)
+    val nextStorageWithHeader =
+      if (existingHeader.valid) {
+        storage
+      } else {
+        storageWithRegionHeaderAndNextSequence(
+          storage,
+          region,
+          validHeader(storage.nextSequence),
+          storage.nextSequence + 1,
+        )
+      }
     val freeIntent =
-      regionRef(region, storage.regions.nth(region).sequence)
+      regionRef(region, nextStorageWithHeader.regions.nth(region).sequence)
     val nextTx = txAddFreeIntent(currentTx, freeIntent)
     all {
       currentTx.phase == TxOpen,
-      currentTx.observedGeneration
-        == collectionGenerationAt(
-          storage.collectionGenerations,
-          currentTx.collectionIndex,
-        ),
-      storage.regions.nth(region).valid,
 
-      storage' = storageWithTransaction(storage, txIndex, nextTx),
-      live' = live,
+      storage' =
+        storageWithTransaction(
+          nextStorageWithHeader,
+          txIndex,
+          nextTx,
+        ),
     }
   }
 
@@ -664,32 +724,36 @@ module transaction_free_recovery {
     val currentTx = storage.transactions.nth(txIndex)
     val allocs = txAllocSet(currentTx)
     val freeIntents = txFreeIntentSet(currentTx)
+    val currentLive =
+      collectionLiveAt(storage.collections, currentTx.collectionIndex)
+    val nextLive =
+      currentLive.exclude(freeIntents).union(allocs)
     val nextTx = txCommitted(currentTx)
     val nextGeneration =
       collectionGenerationAt(
-        storage.collectionGenerations,
+        storage.collections,
         currentTx.collectionIndex,
       ) + 1
+    val nextCollection =
+      collectionState(nextLive, nextGeneration)
     all {
       currentTx.phase == TxOpen,
       currentTx.observedGeneration
         == collectionGenerationAt(
-          storage.collectionGenerations,
+          storage.collections,
           currentTx.collectionIndex,
         ),
-      freeIntents.subseteq(live),
-      allocatedRegionsHaveHeaders(storage.regions, currentTx.allocations),
+      freeIntents.subseteq(currentLive),
       allRefsHeaderMatch(storage.regions, currentTx.freeIntents),
 
       storage' =
-        storageWithCollectionGenerationAndTransaction(
+        storageWithCollectionAndTransaction(
           storage,
           currentTx.collectionIndex,
-          nextGeneration,
+          nextCollection,
           txIndex,
           nextTx,
         ),
-      live' = live.exclude(freeIntents).union(allocs),
     }
   }
 
@@ -703,7 +767,6 @@ module transaction_free_recovery {
       currentTx.phase == TxOpen,
 
       storage' = storageWithTransaction(storage, txIndex, nextTx),
-      live' = live,
     }
   }
 
@@ -725,7 +788,6 @@ module transaction_free_recovery {
       not(region.in(txRollbackAllocSet(currentTx))),
 
       storage' = storageWithTransaction(storage, txIndex, nextTx),
-      live' = live,
     }
   }
 
@@ -740,7 +802,6 @@ module transaction_free_recovery {
       allRefsHeaderMatch(storage.regions, currentTx.rollbackAllocations),
 
       storage' = storageWithTransaction(storage, txIndex, nextTx),
-      live' = live,
     }
   }
 
@@ -752,12 +813,12 @@ module transaction_free_recovery {
     val freeIntent = currentTx.freeIntents.nth(freeIntentIndex)
     all {
       currentTx.phase == TxCommittedCleanup,
+      refResolved(freeIntent),
       not(freeIntent.region.in(activeFreeSet)),
       headerMatches(storage.regions, freeIntent),
-      not(freeIntent.region.in(live)),
+      not(freeIntent.region.in(globalLive)),
 
       storage' = storageWithFreeAppend(storage, freeIntent.region),
-      live' = live,
     }
   }
 
@@ -774,10 +835,9 @@ module transaction_free_recovery {
       currentTx.phase == TxRolledBackCleanup,
       not(rollbackAllocation.region.in(activeFreeSet)),
       headerMatches(storage.regions, rollbackAllocation),
-      not(rollbackAllocation.region.in(live)),
+      not(rollbackAllocation.region.in(globalLive)),
 
       storage' = storageWithFreeAppend(storage, rollbackAllocation.region),
-      live' = live,
     }
   }
 
@@ -805,33 +865,55 @@ module transaction_free_recovery {
       ),
 
       storage' = storageWithTransaction(storage, txIndex, EmptyTx),
-      live' = live,
     }
   }
 
   // main_wal allocate_region(region, allocation_head_after) for a direct
   // committed allocation outside a transaction.
   action AllocateDirectlyLive = {
+    nondet collectionIndex = CollectionIndexSet.oneOf()
     val region = storage.freeQueue.nth(storage.allocationHead)
+    val nextGeneration =
+      collectionGenerationAt(storage.collections, collectionIndex) + 1
+    val nextLive =
+      collectionLiveAt(storage.collections, collectionIndex).union(Set(region))
+    val nextCollection =
+      collectionState(nextLive, nextGeneration)
     all {
       storage.allocationHead < storage.readyBoundary,
 
-      storage' = storageWithDirectLiveAllocation(storage, region),
-      live' = live.union(Set(region)),
+      storage' =
+        storageWithDirectLiveAllocationAndCollection(
+          storage,
+          region,
+          collectionIndex,
+          nextCollection,
+        ),
     }
   }
 
   // main_wal free_region(region, append_tail_after) for a direct committed
   // free outside a transaction.
   action FreeDirectLive = {
-    nondet region = live.oneOf()
+    nondet collectionIndex = CollectionIndexSet.oneOf()
+    nondet region =
+      collectionLiveAt(storage.collections, collectionIndex).oneOf()
+    val nextGeneration =
+      collectionGenerationAt(storage.collections, collectionIndex) + 1
+    val nextLive =
+      collectionLiveAt(storage.collections, collectionIndex).exclude(Set(region))
+    val nextCollection =
+      collectionState(nextLive, nextGeneration)
     all {
       not(region.in(activeFreeSet)),
-      not(region.in(retainedTransactionAllocSet)),
-      not(region.in(allTxFreeIntentSet)),
+      not(region.in(outstandingAllocSet)),
 
-      storage' = storageWithFreeAppend(storage, region),
-      live' = live.exclude(Set(region)),
+      storage' =
+        storageWithCollection(
+          storageWithFreeAppend(storage, region),
+          collectionIndex,
+          nextCollection,
+        ),
     }
   }
 
@@ -843,7 +925,6 @@ module transaction_free_recovery {
 
       storage' =
         storageWithReadyBoundaryAndInvalidHeader(storage, region),
-      live' = live,
     }
   }
 
@@ -858,7 +939,6 @@ module transaction_free_recovery {
       currentTx.phase == TxOpen,
 
       storage' = storageWithFreeAppend(storage, freeIntent.region),
-      live' = live,
     }
   }
 
@@ -874,7 +954,6 @@ module transaction_free_recovery {
       currentTx.phase == TxCommittedCleanup,
 
       storage' = storageWithFreeAppend(storage, obligation.region),
-      live' = live,
     }
   }
 
@@ -892,7 +971,6 @@ module transaction_free_recovery {
       currentTx.phase == TxRolledBackCleanup,
 
       storage' = storageWithFreeAppend(storage, obligation.region),
-      live' = live,
     }
   }
 
@@ -903,33 +981,35 @@ module transaction_free_recovery {
     val currentTx = storage.transactions.nth(txIndex)
     val allocs = txAllocSet(currentTx)
     val freeIntents = txFreeIntentSet(currentTx)
+    val currentLive =
+      collectionLiveAt(storage.collections, currentTx.collectionIndex)
+    val nextLive =
+      currentLive.exclude(freeIntents).union(allocs)
     val nextTx = txCommitted(currentTx)
     val nextGeneration =
       collectionGenerationAt(
-        storage.collectionGenerations,
+        storage.collections,
         currentTx.collectionIndex,
       ) + 1
+    val nextCollection =
+      collectionState(nextLive, nextGeneration)
     all {
       currentTx.phase == TxOpen,
-      freeIntents.subseteq(live),
-      allocatedRegionsHaveHeaders(storage.regions, currentTx.allocations),
       allRefsHeaderMatch(storage.regions, currentTx.freeIntents),
 
       storage' =
-        storageWithCollectionGenerationAndTransaction(
+        storageWithCollectionAndTransaction(
           storage,
           currentTx.collectionIndex,
-          nextGeneration,
+          nextCollection,
           txIndex,
           nextTx,
         ),
-      live' = live.exclude(freeIntents).union(allocs),
     }
   }
 
   action Stutter = all {
     storage' = storage,
-    live' = live,
   }
 
   action step = any {
@@ -960,16 +1040,17 @@ module transaction_free_recovery {
 
   val typeOK =
     storage.freeQueue.indices().forall(i => storage.freeQueue.nth(i).in(Regions))
-    and live.subseteq(Regions)
+    and storage.collections.length() == 2
+    and CollectionIndexSet.forall(i =>
+      collectionLiveAt(storage.collections, i).subseteq(Regions))
+    and CollectionIndexSet.forall(i =>
+      0 <= collectionGenerationAt(storage.collections, i))
     and storage.regions.length() == 6
     and storage.regions.indices().forall(i =>
       0 <= storage.regions.nth(i).sequence)
     and storage.regions.indices().forall(i =>
       storage.regions.nth(i).sequence < storage.nextSequence)
     and storage.transactions.length() == 2
-    and storage.collectionGenerations.length() == 2
-    and storage.collectionGenerations.indices().forall(i =>
-      0 <= storage.collectionGenerations.nth(i))
     and 0 <= storage.nextSequence
     and storage.transactions.indices().forall(i =>
       txEntriesOK(storage.transactions.nth(i), storage.nextSequence))
@@ -989,12 +1070,16 @@ module transaction_free_recovery {
   val activeFreeNoDuplicates =
     noDuplicates(activeFreeList)
 
-  val liveNotFree =
-    live.intersect(activeFreeSet) == Set()
+  val collectionOwnershipUnique =
+    CollectionIndexSet.forall(i =>
+      CollectionIndexSet.forall(j =>
+        i == j
+        or collectionLiveAt(storage.collections, i).intersect(
+          collectionLiveAt(storage.collections, j)
+        ) == Set()))
 
-  val liveHeadersValid =
-    Regions.forall(region =>
-      region.in(live).implies(storage.regions.nth(region).valid))
+  val liveNotFree =
+    globalLive.intersect(activeFreeSet) == Set()
 
   val readyFreeHeadersErased =
     Regions.forall(region =>
@@ -1006,16 +1091,10 @@ module transaction_free_recovery {
         storage.transactions.nth(i).phase == TxOpen
         or storage.transactions.nth(i).phase == TxRollbackPreparing
       ).implies(
-        txAllocSet(storage.transactions.nth(i)).intersect(live) == Set()
+        txAllocSet(storage.transactions.nth(i)).intersect(globalLive) == Set()
         and txAllocSet(
           storage.transactions.nth(i)
         ).intersect(activeFreeSet) == Set()))
-
-  val txCommittedAllocationsLive =
-    TransactionIndexSet.forall(i =>
-      (
-        storage.transactions.nth(i).phase == TxCommittedCleanup
-      ).implies(txAllocSet(storage.transactions.nth(i)).subseteq(live)))
 
   val txOpenAllocationsDoNotOverlap =
     TransactionIndexSet.forall(i =>
@@ -1050,14 +1129,23 @@ module transaction_free_recovery {
         storage.transactions.nth(i).phase == TxOpen
         or storage.transactions.nth(i).phase == TxRollbackPreparing
       ).implies(
-        txFreeIntentSet(storage.transactions.nth(i)).subseteq(live)
-        and txFreeIntentSet(
-          storage.transactions.nth(i)
-        ).intersect(activeFreeSet) == Set()
-        and allRefsHeaderMatch(
-          storage.regions,
-          storage.transactions.nth(i).freeIntents,
-        )))
+        txGenerationCurrent(
+          storage.collections,
+          storage.transactions.nth(i),
+        ).implies(
+          txFreeIntentSet(storage.transactions.nth(i)).subseteq(
+            collectionLiveAt(
+              storage.collections,
+              storage.transactions.nth(i).collectionIndex,
+            )
+          )
+          and txFreeIntentSet(
+            storage.transactions.nth(i)
+          ).intersect(activeFreeSet) == Set()
+          and allRefsHeaderMatch(
+            storage.regions,
+            storage.transactions.nth(i).freeIntents,
+          ))))
 
   val committedCleanupIntentsDetached =
     TransactionIndexSet.forall(i =>
@@ -1068,7 +1156,7 @@ module transaction_free_recovery {
           activeFreeSet,
           storage.regions,
           storage.transactions.nth(i),
-        ).intersect(live) == Set()))
+        ).intersect(globalLive) == Set()))
 
   val rollbackAllocationsNotLive =
     TransactionIndexSet.forall(i =>
@@ -1079,7 +1167,7 @@ module transaction_free_recovery {
           activeFreeSet,
           storage.regions,
           storage.transactions.nth(i),
-        ).intersect(live) == Set()))
+        ).intersect(globalLive) == Set()))
 
   val committedCleanupObligationsProgress =
     TransactionIndexSet.forall(i =>
@@ -1090,7 +1178,7 @@ module transaction_free_recovery {
           activeFreeSet,
           storage.regions,
           storage.transactions.nth(i),
-        ).intersect(live) == Set()
+        ).intersect(globalLive) == Set()
       ))
 
   val rollbackCleanupObligationsProgress =
@@ -1104,15 +1192,8 @@ module transaction_free_recovery {
           activeFreeSet,
           storage.regions,
           storage.transactions.nth(i),
-        ).intersect(live) == Set()
+        ).intersect(globalLive) == Set()
       ))
-
-  val freeIntentSlotsDoNotOverlap =
-    TransactionIndexSet.forall(i =>
-      TransactionIndexSet.forall(j =>
-        i == j or txFreeIntentSet(
-          storage.transactions.nth(i)
-        ).intersect(txFreeIntentSet(storage.transactions.nth(j))) == Set()))
 
   val allRegionsAccountedFor =
     accountedRegions == Regions
@@ -1130,21 +1211,35 @@ module transaction_free_recovery {
   val noTwoDifferentCollectionsCommitted =
     not(twoDifferentCollectionsCommitted)
 
+  // Negative reachability helper, not part of safety. Running this as an
+  // invariant should fail once two same-collection transactions can stage the
+  // same private free intent without relying on global transaction knowledge.
+  val twoSameCollectionOpenTransactionsStagedSameFreeIntent =
+    storage.transactions.nth(0).phase == TxOpen
+    and storage.transactions.nth(1).phase == TxOpen
+    and storage.transactions.nth(0).collectionIndex
+      == storage.transactions.nth(1).collectionIndex
+    and not(
+      txFreeIntentSet(storage.transactions.nth(0)).intersect(
+        txFreeIntentSet(storage.transactions.nth(1))
+      ) == Set())
+
+  val noTwoSameCollectionOpenTransactionsStagedSameFreeIntent =
+    not(twoSameCollectionOpenTransactionsStagedSameFreeIntent)
+
   val safety =
     typeOK
     and cursorOrderOK
     and activeFreeNoDuplicates
+    and collectionOwnershipUnique
     and liveNotFree
-    and liveHeadersValid
     and readyFreeHeadersErased
     and txOpenAllocationsOwned
-    and txCommittedAllocationsLive
     and txOpenAllocationsDoNotOverlap
     and txOpenFreeIntentsRemainLive
     and committedCleanupIntentsDetached
     and rollbackAllocationsNotLive
     and committedCleanupObligationsProgress
     and rollbackCleanupObligationsProgress
-    and freeIntentSlotsDoNotOverlap
     and allRegionsAccountedFor
 }
