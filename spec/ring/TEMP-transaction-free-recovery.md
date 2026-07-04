@@ -118,10 +118,12 @@ TxIdle -> TxOpen -> TxCommittedCleanup -> TxIdle
 TxIdle -> TxOpen -> TxRollbackPreparing -> TxRolledBackCleanup -> TxIdle
 ```
 
-`CommitTransaction` and `RollbackTransaction` do not clear the
-transaction lists. They enter cleanup with `cleanupIndex = 0`. Only
-`FinishTransaction` clears `allocations`, `freeIntents`, and
-`rollbackAllocations`. Rollback cleanup uses `rollbackAllocations`,
+`CommitTransaction`, `StartRollbackPreparation`, and
+`RollbackTransaction` do not clear the transaction lists. They reset
+`cleanupIndex = 0` when entering a scan phase: committed cleanup,
+rollback-allocation recording, or rollback cleanup. Only
+`FinishCommit` and `FinishRollback` clear `allocations`, `freeIntents`,
+and `rollbackAllocations`. Rollback cleanup uses `rollbackAllocations`,
 which are explicit records written during rollback preparation.
 
 Each non-idle transaction is bound to exactly one collection. This
@@ -130,19 +132,19 @@ granularity needed here: two transactions can commit independently when
 their `collectionIndex` values differ, while same-collection stale
 commits are rejected by generation checks.
 
-Transaction allocation lists are retained provenance until
-`FinishTransaction`. Before commit or rollback they are private and must
+Transaction allocation lists are retained provenance until `FinishCommit`
+or `FinishRollback`. Before commit or rollback they are private and must
 not overlap the global live set or active free space. After commit,
 allocations become ordinary committed collection live regions; a later
-transaction may detach them before the earlier transaction reaches
-`FinishTransaction`. After rollback cleanup starts they may overlap
-active free space as individual rollback allocation records are freed.
+transaction may detach them before the earlier transaction finishes.
+After rollback cleanup starts they may overlap active free space as
+individual rollback allocation records are freed.
 
-Cleanup is modeled as an ordered scan over the relevant retained list.
-`cleanupIndex` is model/runtime control state for the current cleanup
-pass, not a durable cleanup-progress log. Each cleanup step examines the
-current list entry, performs the retained-reference check, and then
-advances `cleanupIndex`.
+Rollback-allocation recording and cleanup are modeled as ordered scans
+over the relevant retained list. `cleanupIndex` is model/runtime control
+state for the current scan, not a durable progress log. Each scan step
+examines the current list entry, performs the relevant header or
+retained-reference check, and then advances `cleanupIndex`.
 
 For each entry, cleanup checks the allocator and the region header
 sequence:
@@ -220,18 +222,22 @@ where all transaction-owned allocation headers can be forced: the
 regions are still private to the transaction and cannot have been
 reallocated.
 
-`RecordRollbackAllocation(tx)` records one rollback cleanup obligation
-as `{ region, sequence }` after that allocated region has a valid
-header. These records are written before the durable rollback marker, so
-recovery after the marker can clean up from durable transaction records
-instead of inferring obligations from raw allocation entries.
+`RecordRollbackAllocation(tx)` processes
+`tx.allocations[tx.cleanupIndex]`. Once that allocated region has a
+valid header, it records one rollback cleanup obligation as
+`{ region, sequence }` and advances `cleanupIndex`. These records are
+written before the durable rollback marker, so recovery after the marker
+can clean up from durable transaction records instead of inferring
+obligations from raw allocation entries.
 
-`RollbackTransaction(tx)` requires every raw allocation to have a
-rollback allocation record. It does not re-check those retained headers
-at the rollback marker; in this model, rollback allocation records are
-written while transaction allocations are private, so the header match
-is inductively preserved until rollback. It then enters
-`TxRolledBackCleanup` without changing collection live state.
+`RollbackTransaction(tx)` is allowed only when `cleanupIndex` has
+reached the end of `allocations`, which means every raw allocation has
+been scanned into `rollbackAllocations`. It does not re-check those
+retained headers at the rollback marker; in this model, rollback
+allocation records are written while transaction allocations are
+private, so the header match is inductively preserved until rollback. It
+then resets `cleanupIndex` and enters `TxRolledBackCleanup` without
+changing collection live state.
 
 `FreeCommittedIntent(tx)` processes
 `tx.freeIntents[tx.cleanupIndex]`. If the target is not active-free and
@@ -252,9 +258,11 @@ region header; otherwise skip. In both cases it advances
 `cleanupIndex`. Rollback allocations are not globally live as an
 inductive invariant of pending rollback cleanup.
 
-`FinishTransaction(tx)` is allowed only when `cleanupIndex` has reached
-the end of the relevant cleanup list. It then resets the slot to
-`TxIdle`.
+`FinishCommit(tx)` is allowed only when `cleanupIndex` has reached the
+end of `freeIntents`. `FinishRollback(tx)` is allowed only when
+`cleanupIndex` has reached the end of `rollbackAllocations`. Both model
+the same durable `transaction_finished(tx)` command shape and reset the
+slot to `TxIdle`.
 
 `AllocateDirectlyLive` models a non-transaction WAL allocation that
 immediately becomes committed live ownership for one selected
@@ -322,8 +330,8 @@ The model checks:
     transaction allocation.
 12. Idle transactions have no collection; non-idle transactions name a
     valid modeled collection.
-13. `cleanupIndex` is zero outside cleanup phases and bounded by the
-    active cleanup list while in cleanup.
+13. `cleanupIndex` is zero outside scan phases and bounded by the
+    active list while recording rollback allocations or running cleanup.
 14. Every region is accounted for by collection live state, active free
     state, outstanding transaction allocations, or pending committed
     free-intent cleanup.
@@ -365,8 +373,8 @@ The replacement rule is:
 4. Then write the durable rollback marker.
 5. Rollback cleanup frees only rollback allocation records that still
    have the retained sequence and are not already active-free.
-6. After commit, cleanup frees committed free intents that are still
-   collection-live, still have the retained sequence, and are not
+6. After commit, cleanup frees committed free intents that are detached
+   from collection live, still have the retained sequence, and are not
    already active-free.
 7. `transaction_finished` clears the retained transaction refs.
 

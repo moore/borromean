@@ -340,7 +340,10 @@ module transaction_free_recovery {
       and tx.rollbackAllocations.length() == 0)
 
   pure def txCleanupIndexOK(tx: TxState): bool =
-    if (tx.phase == TxCommittedCleanup) {
+    if (tx.phase == TxRollbackPreparing) {
+      0 <= tx.cleanupIndex
+      and tx.cleanupIndex <= tx.allocations.length()
+    } else if (tx.phase == TxCommittedCleanup) {
       0 <= tx.cleanupIndex
       and tx.cleanupIndex <= tx.freeIntents.length()
     } else if (tx.phase == TxRolledBackCleanup) {
@@ -799,16 +802,15 @@ module transaction_free_recovery {
   action RecordRollbackAllocation = {
     nondet txIndex = TransactionIndexSet.oneOf()
     val currentTx = storage.transactions.nth(txIndex)
-    nondet allocationIndex = currentTx.allocations.indices().oneOf()
-    val region = currentTx.allocations.nth(allocationIndex)
+    val region = currentTx.allocations.nth(currentTx.cleanupIndex)
     val rollbackAllocation =
       regionRef(region, storage.regions.nth(region).sequence)
     val nextTx =
-      txAddRollbackAllocation(currentTx, rollbackAllocation)
+      txAdvanceCleanup(txAddRollbackAllocation(currentTx, rollbackAllocation))
     all {
       currentTx.phase == TxRollbackPreparing,
+      currentTx.cleanupIndex < currentTx.allocations.length(),
       storage.regions.nth(region).valid,
-      not(region.in(txRollbackAllocSet(currentTx))),
 
       storage' = storageWithTransaction(storage, txIndex, nextTx),
     }
@@ -821,7 +823,7 @@ module transaction_free_recovery {
     val nextTx = txRolledBack(currentTx)
     all {
       currentTx.phase == TxRollbackPreparing,
-      allAllocationsHaveRollbackRecords(currentTx),
+      currentTx.cleanupIndex == currentTx.allocations.length(),
 
       storage' = storageWithTransaction(storage, txIndex, nextTx),
     }
@@ -881,20 +883,27 @@ module transaction_free_recovery {
     }
   }
 
-  // main_wal transaction_finished(tx). This is the only action that clears
-  // retained transaction allocation/free-intent state.
-  action FinishTransaction = {
+  // main_wal transaction_finished(tx) after committed-free cleanup. This is
+  // one of the only actions that clears retained transaction state.
+  action FinishCommit = {
     nondet txIndex = TransactionIndexSet.oneOf()
     val currentTx = storage.transactions.nth(txIndex)
     all {
-      (
-        currentTx.phase == TxCommittedCleanup
-        and currentTx.cleanupIndex == currentTx.freeIntents.length()
-      )
-      or (
-        currentTx.phase == TxRolledBackCleanup
-        and currentTx.cleanupIndex == currentTx.rollbackAllocations.length()
-      ),
+      currentTx.phase == TxCommittedCleanup,
+      currentTx.cleanupIndex == currentTx.freeIntents.length(),
+
+      storage' = storageWithTransaction(storage, txIndex, EmptyTx),
+    }
+  }
+
+  // main_wal transaction_finished(tx) after rollback cleanup. This is one of
+  // the only actions that clears retained transaction state.
+  action FinishRollback = {
+    nondet txIndex = TransactionIndexSet.oneOf()
+    val currentTx = storage.transactions.nth(txIndex)
+    all {
+      currentTx.phase == TxRolledBackCleanup,
+      currentTx.cleanupIndex == currentTx.rollbackAllocations.length(),
 
       storage' = storageWithTransaction(storage, txIndex, EmptyTx),
     }
@@ -1055,7 +1064,8 @@ module transaction_free_recovery {
     RollbackTransaction,
     FreeCommittedIntent,
     FreeRolledBackAllocation,
-    FinishTransaction,
+    FinishCommit,
+    FinishRollback,
     AllocateDirectlyLive,
     FreeDirectLive,
     EraseOneDirty,
