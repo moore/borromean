@@ -51,13 +51,15 @@ module transaction_free_recovery {
   }
 
   pure val NoCollection = -1
+
+  // *Indexes lists are ordered rebuild lists used with foldl([], ...).
   pure val RegionIndexes = [0, 1, 2, 3, 4, 5]
   pure val TransactionIndexes = [0, 1]
   pure val CollectionIndexes = [0, 1]
 
+  // Regions is the modeled region universe. Dynamic list index sets should
+  // come from .indices() on the current list state.
   pure val Regions = Set(0, 1, 2, 3, 4, 5)
-  pure val TransactionIndexSet = Set(0, 1)
-  pure val CollectionIndexSet = Set(0, 1)
 
   pure def validHeader(sequence: int): RegionHeader = {
     valid: true,
@@ -86,10 +88,8 @@ module transaction_free_recovery {
     collections: List[CollectionState],
     collectionIndex: int,
   ): CollectionState =
-    if (collectionIndex == 0) {
-      collections.nth(0)
-    } else if (collectionIndex == 1) {
-      collections.nth(1)
+    if (collectionIndex.in(collections.indices())) {
+      collections.nth(collectionIndex)
     } else {
       collectionState(Set(), -1)
     }
@@ -148,7 +148,7 @@ module transaction_free_recovery {
     collections: List[CollectionState],
     regions: Set[int],
   ): bool =
-    CollectionIndexSet.forall(i =>
+    collections.indices().forall(i =>
       collectionLiveAt(collections, i).intersect(regions) == Set())
 
   pure def updateTransactions(
@@ -324,12 +324,15 @@ module transaction_free_recovery {
     // Rollback records may only describe this transaction's allocations.
     and txRollbackAllocSet(tx).subseteq(txAllocSet(tx))
 
-  pure def txCollectionOK(tx: TxState): bool =
+  pure def txCollectionOK(
+    tx: TxState,
+    collections: List[CollectionState],
+  ): bool =
     // Idle slots have no collection; every non-idle slot names a modeled one.
     if (tx.phase == TxIdle) {
       tx.collectionIndex == NoCollection
     } else {
-      tx.collectionIndex.in(CollectionIndexSet)
+      tx.collectionIndex.in(collections.indices())
     }
 
   pure def txGenerationCurrent(
@@ -639,8 +642,8 @@ module transaction_free_recovery {
 
   // main_wal begin_transaction(tx, collection, observed_generation)
   action BeginTransaction = {
-    nondet txIndex = TransactionIndexSet.oneOf()
-    nondet collectionIndex = CollectionIndexSet.oneOf()
+    nondet txIndex = storage.transactions.indices().oneOf()
+    nondet collectionIndex = storage.collections.indices().oneOf()
     val currentTx = storage.transactions.nth(txIndex)
     val nextTx =
       openTx(
@@ -656,7 +659,7 @@ module transaction_free_recovery {
 
   // transaction_log allocate_region(tx, region, allocation_head_after)
   action AllocateInTransaction = {
-    nondet txIndex = TransactionIndexSet.oneOf()
+    nondet txIndex = storage.transactions.indices().oneOf()
     val currentTx = storage.transactions.nth(txIndex)
     val region = storage.freeQueue.nth(storage.allocationHead)
     val nextTx = txAddAllocation(currentTx, region)
@@ -678,7 +681,7 @@ module transaction_free_recovery {
   // Durable rollback needs explicit allocation sequence references; commit
   // can publish live ownership without allocation headers.
   action WriteTransactionAllocationHeader = {
-    nondet txIndex = TransactionIndexSet.oneOf()
+    nondet txIndex = storage.transactions.indices().oneOf()
     val currentTx = storage.transactions.nth(txIndex)
     nondet allocationIndex = currentTx.allocations.indices().oneOf()
     val region = currentTx.allocations.nth(allocationIndex)
@@ -700,7 +703,7 @@ module transaction_free_recovery {
   // not already have a valid header, staging writes one before recording the
   // retained sequence reference.
   action StageFreeIntent = {
-    nondet txIndex = TransactionIndexSet.oneOf()
+    nondet txIndex = storage.transactions.indices().oneOf()
     val currentTx = storage.transactions.nth(txIndex)
     nondet region =
       collectionLiveAt(storage.collections, currentTx.collectionIndex)
@@ -735,7 +738,7 @@ module transaction_free_recovery {
 
   // main_wal commit_transaction(tx)
   action CommitTransaction = {
-    nondet txIndex = TransactionIndexSet.oneOf()
+    nondet txIndex = storage.transactions.indices().oneOf()
     val currentTx = storage.transactions.nth(txIndex)
     val allocs = txAllocSet(currentTx)
     val freeIntents = txFreeIntentSet(currentTx)
@@ -773,7 +776,7 @@ module transaction_free_recovery {
   // main_wal rollback_decided(tx). This is not the durable rollback marker; it
   // opens the safe window where private allocation headers can be forced.
   action StartRollbackPreparation = {
-    nondet txIndex = TransactionIndexSet.oneOf()
+    nondet txIndex = storage.transactions.indices().oneOf()
     val currentTx = storage.transactions.nth(txIndex)
     val nextTx = txRollbackPreparing(currentTx)
     all {
@@ -787,7 +790,7 @@ module transaction_free_recovery {
   // are written while allocations are still private, before the durable main
   // WAL rollback marker makes rollback cleanup recoverable.
   action RecordRollbackAllocation = {
-    nondet txIndex = TransactionIndexSet.oneOf()
+    nondet txIndex = storage.transactions.indices().oneOf()
     val currentTx = storage.transactions.nth(txIndex)
     val region = currentTx.allocations.nth(currentTx.cleanupIndex)
     val rollbackAllocation =
@@ -805,7 +808,7 @@ module transaction_free_recovery {
 
   // main_wal rollback_transaction(tx), after rollback cleanup is still pending.
   action RollbackTransaction = {
-    nondet txIndex = TransactionIndexSet.oneOf()
+    nondet txIndex = storage.transactions.indices().oneOf()
     val currentTx = storage.transactions.nth(txIndex)
     val nextTx = txRolledBack(currentTx)
     all {
@@ -818,7 +821,7 @@ module transaction_free_recovery {
 
   // main_wal free_region(region, append_tail_after) for a committed free intent.
   action FreeCommittedIntent = {
-    nondet txIndex = TransactionIndexSet.oneOf()
+    nondet txIndex = storage.transactions.indices().oneOf()
     val currentTx = storage.transactions.nth(txIndex)
     val freeIntent = currentTx.freeIntents.nth(currentTx.cleanupIndex)
     val nextTx = txAdvanceCleanup(currentTx)
@@ -845,7 +848,7 @@ module transaction_free_recovery {
   // main_wal free_region(region, append_tail_after) for a rolled-back
   // transaction allocation.
   action FreeRolledBackAllocation = {
-    nondet txIndex = TransactionIndexSet.oneOf()
+    nondet txIndex = storage.transactions.indices().oneOf()
     val currentTx = storage.transactions.nth(txIndex)
     val rollbackAllocation =
       currentTx.rollbackAllocations.nth(currentTx.cleanupIndex)
@@ -873,7 +876,7 @@ module transaction_free_recovery {
   // main_wal transaction_finished(tx) after committed-free cleanup. This is
   // one of the only actions that clears retained transaction state.
   action FinishCommit = {
-    nondet txIndex = TransactionIndexSet.oneOf()
+    nondet txIndex = storage.transactions.indices().oneOf()
     val currentTx = storage.transactions.nth(txIndex)
     all {
       currentTx.phase == TxCommittedCleanup,
@@ -886,7 +889,7 @@ module transaction_free_recovery {
   // main_wal transaction_finished(tx) after rollback cleanup. This is one of
   // the only actions that clears retained transaction state.
   action FinishRollback = {
-    nondet txIndex = TransactionIndexSet.oneOf()
+    nondet txIndex = storage.transactions.indices().oneOf()
     val currentTx = storage.transactions.nth(txIndex)
     all {
       currentTx.phase == TxRolledBackCleanup,
@@ -899,7 +902,7 @@ module transaction_free_recovery {
   // main_wal allocate_region(region, allocation_head_after) for a direct
   // committed allocation outside a transaction.
   action AllocateDirectlyLive = {
-    nondet collectionIndex = CollectionIndexSet.oneOf()
+    nondet collectionIndex = storage.collections.indices().oneOf()
     val region = storage.freeQueue.nth(storage.allocationHead)
     val nextGeneration =
       collectionGenerationAt(storage.collections, collectionIndex) + 1
@@ -923,7 +926,7 @@ module transaction_free_recovery {
   // main_wal free_region(region, append_tail_after) for a direct committed
   // free outside a transaction.
   action FreeDirectLive = {
-    nondet collectionIndex = CollectionIndexSet.oneOf()
+    nondet collectionIndex = storage.collections.indices().oneOf()
     nondet region =
       collectionLiveAt(storage.collections, collectionIndex).oneOf()
     val nextGeneration =
@@ -956,7 +959,7 @@ module transaction_free_recovery {
   // Unsafe comparison: a transaction-private free intent mutates the global
   // allocator before the transaction commits.
   action UnsafeFreeIntentBeforeCommit = {
-    nondet txIndex = TransactionIndexSet.oneOf()
+    nondet txIndex = storage.transactions.indices().oneOf()
     val currentTx = storage.transactions.nth(txIndex)
     nondet freeIntentIndex = currentTx.freeIntents.indices().oneOf()
     val freeIntent = currentTx.freeIntents.nth(freeIntentIndex)
@@ -971,7 +974,7 @@ module transaction_free_recovery {
   // checking whether the region is already in the active free-space range or
   // still has the expected sequence in its valid header.
   action UnsafeCommittedCleanupWithoutMembershipCheck = {
-    nondet txIndex = TransactionIndexSet.oneOf()
+    nondet txIndex = storage.transactions.indices().oneOf()
     val currentTx = storage.transactions.nth(txIndex)
     nondet obligationIndex = currentTx.freeIntents.indices().oneOf()
     val obligation = currentTx.freeIntents.nth(obligationIndex)
@@ -986,7 +989,7 @@ module transaction_free_recovery {
   // whether the region is already active-free or still has the expected
   // rollback-allocation sequence.
   action UnsafeRollbackCleanupWithoutMembershipCheck = {
-    nondet txIndex = TransactionIndexSet.oneOf()
+    nondet txIndex = storage.transactions.indices().oneOf()
     val currentTx = storage.transactions.nth(txIndex)
     nondet obligationIndex =
       currentTx.rollbackAllocations.indices().oneOf()
@@ -1002,7 +1005,7 @@ module transaction_free_recovery {
   // Unsafe comparison: a stale transaction commits without the collection
   // generation conflict check.
   action UnsafeCommitWithoutGenerationCheck = {
-    nondet txIndex = TransactionIndexSet.oneOf()
+    nondet txIndex = storage.transactions.indices().oneOf()
     val currentTx = storage.transactions.nth(txIndex)
     val allocs = txAllocSet(currentTx)
     val freeIntents = txFreeIntentSet(currentTx)
@@ -1070,15 +1073,15 @@ module transaction_free_recovery {
   val typeOK =
     // The allocator queue only contains modeled region identifiers.
     storage.freeQueue.indices().forall(i => storage.freeQueue.nth(i).in(Regions))
-    // The model always has exactly the two collections named by
-    // CollectionIndexes.
+    // The model has exactly two collection slots; storage.collections.indices()
+    // is the source of truth for valid collection indexes.
     and storage.collections.length() == 2
     // Collection live sets cannot mention regions outside the modeled domain.
-    and CollectionIndexSet.forall(i =>
+    and storage.collections.indices().forall(i =>
       collectionLiveAt(storage.collections, i).subseteq(Regions))
     // Collection generations are monotone counters in the modeled nonnegative
     // range.
-    and CollectionIndexSet.forall(i =>
+    and storage.collections.indices().forall(i =>
       0 <= collectionGenerationAt(storage.collections, i))
     // The model always has exactly one header slot per modeled region.
     and storage.regions.length() == 6
@@ -1088,8 +1091,8 @@ module transaction_free_recovery {
     // Existing headers never use a sequence that has not been allocated yet.
     and storage.regions.indices().forall(i =>
       storage.regions.nth(i).sequence < storage.nextSequence)
-    // The model always has exactly the two transaction slots named by
-    // TransactionIndexes.
+    // The model has exactly two transaction slots; storage.transactions.indices()
+    // is the source of truth for valid transaction indexes.
     and storage.transactions.length() == 2
     // The next sequence allocator stays in the modeled nonnegative range.
     and 0 <= storage.nextSequence
@@ -1098,7 +1101,7 @@ module transaction_free_recovery {
       txEntriesOK(storage.transactions.nth(i), storage.nextSequence))
     // Each transaction phase has the expected collection binding shape.
     and storage.transactions.indices().forall(i =>
-      txCollectionOK(storage.transactions.nth(i)))
+      txCollectionOK(storage.transactions.nth(i), storage.collections))
     // Idle transaction slots are fully empty, not just marked idle.
     and storage.transactions.indices().forall(i =>
       txIdleStateOK(storage.transactions.nth(i)))
@@ -1122,8 +1125,8 @@ module transaction_free_recovery {
 
   // Committed collection ownership is exclusive across collections.
   val collectionOwnershipUnique =
-    CollectionIndexSet.forall(i =>
-      CollectionIndexSet.forall(j =>
+    storage.collections.indices().forall(i =>
+      storage.collections.indices().forall(j =>
         i == j
         or collectionLiveAt(storage.collections, i).intersect(
           collectionLiveAt(storage.collections, j)
@@ -1140,7 +1143,7 @@ module transaction_free_recovery {
 
   // Open or rollback-preparing allocations are private: not live and not free.
   val txOpenAllocationsOwned =
-    TransactionIndexSet.forall(i =>
+    storage.transactions.indices().forall(i =>
       (
         storage.transactions.nth(i).phase == TxOpen
         or storage.transactions.nth(i).phase == TxRollbackPreparing
@@ -1155,8 +1158,8 @@ module transaction_free_recovery {
 
   // Private/pending allocation ownership is exclusive across transaction slots.
   val txOutstandingAllocationsDoNotOverlap =
-    TransactionIndexSet.forall(i =>
-      TransactionIndexSet.forall(j =>
+    storage.transactions.indices().forall(i =>
+      storage.transactions.indices().forall(j =>
         i == j or
           txOutstandingAllocSet(
             activeFreeSet,
@@ -1174,7 +1177,7 @@ module transaction_free_recovery {
   // still live in their own collection. Stale transactions may retain obsolete
   // intents because commit is blocked by the generation check.
   val txOpenFreeIntentsRemainLive =
-    TransactionIndexSet.forall(i =>
+    storage.transactions.indices().forall(i =>
       (
         storage.transactions.nth(i).phase == TxOpen
         or storage.transactions.nth(i).phase == TxRollbackPreparing
@@ -1197,7 +1200,7 @@ module transaction_free_recovery {
   // After commit, pending free intents are no longer collection-live; they are
   // in the retained cleanup state until cleanup appends or the header changes.
   val committedCleanupIntentsDetached =
-    TransactionIndexSet.forall(i =>
+    storage.transactions.indices().forall(i =>
       (
         storage.transactions.nth(i).phase == TxCommittedCleanup
       ).implies(
@@ -1214,7 +1217,7 @@ module transaction_free_recovery {
   // transaction's collection; pending rollback obligations must not still be
   // live in that collection.
   val rollbackAllocationsNotLiveInCollection =
-    TransactionIndexSet.forall(i =>
+    storage.transactions.indices().forall(i =>
       (
         storage.transactions.nth(i).phase == TxRolledBackCleanup
       ).implies(
@@ -1233,7 +1236,7 @@ module transaction_free_recovery {
   // rollback record and any still-pending rollback obligation is not live in
   // this transaction's collection.
   val rollbackCleanupObligationsProgress =
-    TransactionIndexSet.forall(i =>
+    storage.transactions.indices().forall(i =>
       (
         storage.transactions.nth(i).phase == TxRolledBackCleanup
       ).implies(
@@ -1256,12 +1259,12 @@ module transaction_free_recovery {
   val allRegionsAccountedFor =
     Regions.forall(region =>
       // 1. committed live in some collection
-      CollectionIndexSet.exists(collectionIndex =>
+      storage.collections.indices().exists(collectionIndex =>
         region.in(collectionLiveAt(storage.collections, collectionIndex)))
       // 2. allocator-free
       or region.in(activeFreeSet)
       // 3. transaction-private allocation or rollback cleanup obligation
-      or TransactionIndexSet.exists(txIndex =>
+      or storage.transactions.indices().exists(txIndex =>
         region.in(
           txOutstandingAllocSet(
             activeFreeSet,
@@ -1269,7 +1272,7 @@ module transaction_free_recovery {
             storage.transactions.nth(txIndex),
           )))
       // 4. committed free intent awaiting cleanup
-      or TransactionIndexSet.exists(txIndex =>
+      or storage.transactions.indices().exists(txIndex =>
         region.in(
           txPendingCommittedCleanupSet(
             activeFreeSet,
