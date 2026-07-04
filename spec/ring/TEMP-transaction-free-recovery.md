@@ -61,11 +61,11 @@ prefix:
 - `live: Set[int]`: committed live regions for the collection.
 - `generation: int`: the collection generation head.
 
-The model keeps committed live membership per collection. Allocator
-invariants use the union of `storage.collections[*].live`, while
-transaction operations select and mutate only the collection named by
-the transaction slot. No region may be live in more than one collection.
-A live region does not need a valid header; headers are sequence
+The model keeps committed live membership per collection. Invariants
+quantify over `storage.collections[*].live` directly, and transaction
+operations select and mutate only the collection named by the
+transaction slot. No region may be live in more than one collection. A
+live region does not need a valid header; headers are sequence
 references for durable cleanup obligations, not the source of live
 ownership.
 
@@ -134,7 +134,7 @@ commits are rejected by generation checks.
 
 Transaction allocation lists are retained provenance until `FinishCommit`
 or `FinishRollback`. Before commit or rollback they are private and must
-not overlap the global live set or active free space. After commit,
+not overlap any collection live set or active free space. After commit,
 allocations become ordinary committed collection live regions; a later
 transaction may detach them before the earlier transaction finishes.
 After rollback cleanup starts they may overlap active free space as
@@ -312,11 +312,10 @@ The model checks:
 1. Allocator cursors remain ordered.
 2. Active free entries have no duplicates.
 3. No region is live in more than one modeled collection.
-4. The union of collection live sets does not overlap active
-   free-space membership.
+4. No collection live set overlaps active free-space membership.
 5. Ready free regions do not have valid headers.
 6. Open or rollback-preparing transaction allocations do not overlap
-   the global live set or active-free regions.
+   any collection live set or active-free regions.
 7. Outstanding transaction allocations across the two slots do not
    overlap.
 8. Current open transaction free intents that are still actionable

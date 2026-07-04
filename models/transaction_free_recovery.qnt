@@ -144,9 +144,19 @@ module transaction_free_recovery {
       collectionState(collectionLiveAt(collections, collectionIndex), generation),
     )
 
-  pure def globalLiveSet(collections: List[CollectionState]): Set[int] =
-    CollectionIndexes.foldl(Set(), (acc, i) =>
-      acc.union(collectionLiveAt(collections, i)))
+  pure def collectionLivesDisjointFrom(
+    collections: List[CollectionState],
+    regions: Set[int],
+  ): bool =
+    CollectionIndexSet.forall(i =>
+      collectionLiveAt(collections, i).intersect(regions) == Set())
+
+  pure def regionInSomeCollectionLive(
+    collections: List[CollectionState],
+    region: int,
+  ): bool =
+    CollectionIndexSet.exists(i =>
+      region.in(collectionLiveAt(collections, i)))
 
   pure def updateTransactions(
     transactions: List[TxState],
@@ -648,14 +658,6 @@ module transaction_free_recovery {
   val retainedTransactionRegionSet =
     outstandingAllocSet.union(pendingCommittedCleanupSet)
 
-  val globalLive =
-    globalLiveSet(storage.collections)
-
-  val accountedRegions =
-    globalLive
-      .union(activeFreeSet)
-      .union(retainedTransactionRegionSet)
-
   action init = all {
     storage' = InitialStorage,
   }
@@ -1154,7 +1156,7 @@ module transaction_free_recovery {
 
   // A region cannot be both committed-live and allocator-free.
   val liveNotFree =
-    globalLive.intersect(activeFreeSet) == Set()
+    collectionLivesDisjointFrom(storage.collections, activeFreeSet)
 
   // Ready free regions have been erased, so their old sequence headers are invalid.
   val readyFreeHeadersErased =
@@ -1168,7 +1170,10 @@ module transaction_free_recovery {
         storage.transactions.nth(i).phase == TxOpen
         or storage.transactions.nth(i).phase == TxRollbackPreparing
       ).implies(
-        txAllocSet(storage.transactions.nth(i)).intersect(globalLive) == Set()
+        collectionLivesDisjointFrom(
+          storage.collections,
+          txAllocSet(storage.transactions.nth(i)),
+        )
         and txAllocSet(
           storage.transactions.nth(i)
         ).intersect(activeFreeSet) == Set()))
@@ -1221,11 +1226,14 @@ module transaction_free_recovery {
       (
         storage.transactions.nth(i).phase == TxCommittedCleanup
       ).implies(
-        txPendingCommittedCleanupSet(
-          activeFreeSet,
-          storage.regions,
-          storage.transactions.nth(i),
-        ).intersect(globalLive) == Set()))
+        collectionLivesDisjointFrom(
+          storage.collections,
+          txPendingCommittedCleanupSet(
+            activeFreeSet,
+            storage.regions,
+            storage.transactions.nth(i),
+          ),
+        )))
 
   // Rolled-back allocation cleanup only concerns private allocations for this
   // transaction's collection; pending rollback obligations must not still be
@@ -1272,7 +1280,10 @@ module transaction_free_recovery {
   // committed live, allocator-free, private/pending allocation, or committed
   // free cleanup.
   val allRegionsAccountedFor =
-    accountedRegions == Regions
+    Regions.forall(region =>
+      regionInSomeCollectionLive(storage.collections, region)
+      or region.in(activeFreeSet)
+      or region.in(retainedTransactionRegionSet))
 
   // Negative reachability helper, not part of safety. Running this as an
   // invariant should fail once two different collection transactions can commit
