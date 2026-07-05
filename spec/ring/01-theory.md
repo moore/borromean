@@ -168,6 +168,15 @@ pre-commit recovery has already cleaned up an abandoned transaction,
 replay records that fact with
 `rollback_transaction(transaction_log_id, range)`.
 
+This rollback contract is intentionally limited to volatile collection state
+and regions allocated by the transaction. A collection transaction may update
+in-memory private frontier state and may write transaction-owned regions
+because rollback can discard the former and return the latter to the dirty
+free-space range. It must not durably mutate a preexisting collection-owned
+region unless the collection defines an explicit durable undo protocol for that
+mutation. Otherwise a rollback could not distinguish the region's public
+pre-transaction contents from private uncommitted contents.
+
 The storage system also keeps a storage-private free-space collection of
 regions that are available to satisfy new allocations. This collection
 is FIFO (first in, first out), to support wear leveling. It is replayed

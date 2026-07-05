@@ -446,18 +446,28 @@ checkpoint gives rollback a clear state to restore without forcing a partially
 filled data region to be flushed just to create a rollback boundary.
 
 A transaction may span more than one frontier region. When the active frontier
-does not have room for the next transactional object, the object log may write
-that closed frontier to its reserved region and continue in another reserved
-region. That write does not publish the transaction: reads, traversal, and
-truncation still stop at committed bounds until the commit record is durable.
-If cleanup must return a transaction-reserved region to storage, rollback
-erases or otherwise prepares it before freeing it. If power is lost during
-cleanup, startup recovery skips the uncommitted object-log updates, returns
-any remaining transaction allocations to storage, and records rollback
-completion.
+does not have room for the next transactional object, the object log may
+materialize the closed frontier only when the target ordinary data region was
+reserved by the transaction. A frontier whose target region existed before the
+transaction may still receive planned in-memory records, but the transaction
+must fail and roll back instead of forcing that preexisting region to be
+written. This preserves stable planned handles while keeping rollback limited
+to volatile frontier state and transaction-reserved regions. If cleanup must
+return a transaction-reserved region to storage, rollback erases or otherwise
+prepares it before freeing it. If power is lost during cleanup, startup
+recovery skips the uncommitted object-log updates, returns any remaining
+transaction allocations to storage, and records rollback completion.
 
 1. `RING-OBJECT-012` Scoped append transactions MUST keep appended
 objects invisible until the durable commit record.
 2. `RING-OBJECT-013` Failed or uncommitted append transactions MUST roll
 back cleanly by discarding staged object-log state and returning
 transaction-reserved regions to storage without making planned handles live.
+3. `RING-OBJECT-032` During an append transaction, object-log frontier
+materialization MUST write only transaction-reserved ordinary data regions. If
+the active frontier's reserved data region existed before the transaction began
+and the next append would require materializing that frontier, the append
+transaction MUST fail and roll back rather than writing the preexisting
+reserved region. The transaction MAY still append planned records to the
+in-memory frontier and MAY write large-object auxiliary regions or later
+ordinary regions that were allocated by the transaction.

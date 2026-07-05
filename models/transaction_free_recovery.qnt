@@ -1,6 +1,13 @@
 // Semantic model for allocator WAL commands, transaction-owned allocations,
 // transaction-private free intents, and transaction cleanup.
 //
+// The collection payload semantics are intentionally abstracted away. The
+// model assumes any collection effect that must be undone before transaction
+// commit is either volatile frontier state or a write to a transaction-owned
+// region. It does not model durable mutation of preexisting collection-owned
+// regions, because that requires a collection-specific undo rule rather than
+// allocator-only recovery.
+//
 // The trace is the durable WAL prefix. Each action models both making one WAL
 // command durable and applying that command to replayed runtime state. A crash
 // cut is therefore any prefix of the action trace: online apply and crash
