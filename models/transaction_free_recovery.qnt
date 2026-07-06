@@ -21,7 +21,18 @@ module transaction_free_recovery {
     | TxCommittedCleanup
     | TxRolledBackCleanup
 
-  type RegionRef = {
+  // Vocabulary used throughout the model:
+  //
+  // - A physical region is a bare region index. Collection live sets and the
+  //   active free-space range own physical regions.
+  // - A logical region is a physical region plus the sequence recorded in that
+  //   region's current valid header. Free and cleanup authority is modeled as
+  //   a logical region so old cleanup evidence cannot free a later reuse of
+  //   the same physical region.
+  // - Transaction allocation lists start as physical regions. Rollback
+  //   preparation turns them into logical cleanup refs after headers are
+  //   written.
+  type LogicalRegionRef = {
     region: int,
     sequence: int,
   }
@@ -37,8 +48,8 @@ module transaction_free_recovery {
     observedGeneration: int,
     cleanupIndex: int,
     allocations: List[int],
-    freeIntents: List[RegionRef],
-    rollbackAllocations: List[RegionRef],
+    freeIntents: List[LogicalRegionRef],
+    rollbackAllocations: List[LogicalRegionRef],
   }
 
   type CollectionState = {
@@ -166,7 +177,7 @@ module transaction_free_recovery {
     TransactionIndexes.foldl([], (acc, i) =>
       acc.append(if (i == index) { updatedTx } else { transactions.nth(i) }))
 
-  pure def regionRef(region: int, sequence: int): RegionRef = {
+  pure def logicalRegionRef(region: int, sequence: int): LogicalRegionRef = {
     region: region,
     sequence: sequence,
   }
@@ -177,8 +188,8 @@ module transaction_free_recovery {
     observedGeneration: int,
     cleanupIndex: int,
     allocations: List[int],
-    freeIntents: List[RegionRef],
-    rollbackAllocations: List[RegionRef],
+    freeIntents: List[LogicalRegionRef],
+    rollbackAllocations: List[LogicalRegionRef],
   ): TxState = {
     phase: phase,
     collectionIndex: collectionIndex,
@@ -208,7 +219,10 @@ module transaction_free_recovery {
       tx.rollbackAllocations,
     )
 
-  pure def txAddFreeIntent(tx: TxState, freeIntent: RegionRef): TxState =
+  pure def txAddFreeIntent(
+    tx: TxState,
+    freeIntent: LogicalRegionRef,
+  ): TxState =
     txState(
       tx.phase,
       tx.collectionIndex,
@@ -221,7 +235,7 @@ module transaction_free_recovery {
 
   pure def txAddRollbackAllocation(
     tx: TxState,
-    rollbackAllocation: RegionRef,
+    rollbackAllocation: LogicalRegionRef,
   ): TxState =
     txState(
       tx.phase,
@@ -288,20 +302,28 @@ module transaction_free_recovery {
       regions.indices().forall(j =>
         (i == j).or(not(regions.nth(i) == regions.nth(j)))))
 
-  pure def refRegionSet(refs: List[RegionRef]): Set[int] =
+  pure def logicalRefRegionSet(refs: List[LogicalRegionRef]): Set[int] =
     refs.foldl(Set(), (acc, entry) => acc.union(Set(entry.region)))
 
-  pure def refListEntriesInRegions(refs: List[RegionRef]): bool =
+  pure def logicalRefListEntriesInRegions(
+    refs: List[LogicalRegionRef],
+  ): bool =
     refs.indices().forall(i => refs.nth(i).region.in(Regions))
 
-  pure def refResolved(ref: RegionRef): bool =
+  pure def logicalRefResolved(ref: LogicalRegionRef): bool =
     0 <= ref.sequence
 
-  pure def refListSequencesOK(refs: List[RegionRef], nextSequence: int): bool =
+  pure def logicalRefListSequencesOK(
+    refs: List[LogicalRegionRef],
+    nextSequence: int,
+  ): bool =
     refs.indices().forall(i =>
-      refResolved(refs.nth(i)) and refs.nth(i).sequence < nextSequence)
+      logicalRefResolved(refs.nth(i))
+      and refs.nth(i).sequence < nextSequence)
 
-  pure def noDuplicateRefRegions(refs: List[RegionRef]): bool =
+  pure def noDuplicateLogicalRefRegions(
+    refs: List[LogicalRegionRef],
+  ): bool =
     refs.indices().forall(i =>
       refs.indices().forall(j =>
         i == j or not(refs.nth(i).region == refs.nth(j).region)))
@@ -310,24 +332,24 @@ module transaction_free_recovery {
     intListToSet(tx.allocations)
 
   pure def txFreeIntentSet(tx: TxState): Set[int] =
-    refRegionSet(tx.freeIntents)
+    logicalRefRegionSet(tx.freeIntents)
 
   pure def txRollbackAllocSet(tx: TxState): Set[int] =
-    refRegionSet(tx.rollbackAllocations)
+    logicalRefRegionSet(tx.rollbackAllocations)
 
   pure def txEntriesOK(tx: TxState, nextSequence: int): bool =
     // Every raw transaction allocation names one modeled region.
     intListEntriesInRegions(tx.allocations)
     // Every retained free/rollback reference names one modeled region.
-    and refListEntriesInRegions(tx.freeIntents)
-    and refListEntriesInRegions(tx.rollbackAllocations)
+    and logicalRefListEntriesInRegions(tx.freeIntents)
+    and logicalRefListEntriesInRegions(tx.rollbackAllocations)
     // Every retained reference uses an assigned, non-future sequence.
-    and refListSequencesOK(tx.freeIntents, nextSequence)
-    and refListSequencesOK(tx.rollbackAllocations, nextSequence)
+    and logicalRefListSequencesOK(tx.freeIntents, nextSequence)
+    and logicalRefListSequencesOK(tx.rollbackAllocations, nextSequence)
     // A transaction may not retain duplicate ownership/cleanup entries.
     and noDuplicates(tx.allocations)
-    and noDuplicateRefRegions(tx.freeIntents)
-    and noDuplicateRefRegions(tx.rollbackAllocations)
+    and noDuplicateLogicalRefRegions(tx.freeIntents)
+    and noDuplicateLogicalRefRegions(tx.rollbackAllocations)
     // Rollback records may only describe this transaction's allocations.
     and txRollbackAllocSet(tx).subseteq(txAllocSet(tx))
 
@@ -382,36 +404,47 @@ module transaction_free_recovery {
       or tx.phase == TxCommittedCleanup
     ).implies(tx.rollbackAllocations.length() == 0)
 
-  pure def headerMatches(headers: List[RegionHeader], entry: RegionRef): bool =
+  pure def logicalRefMatchesHeader(
+    headers: List[RegionHeader],
+    entry: LogicalRegionRef,
+  ): bool =
     entry.region.in(Regions)
-    and refResolved(entry)
+    and logicalRefResolved(entry)
     and headers.nth(entry.region).valid
     and headers.nth(entry.region).sequence == entry.sequence
 
-  pure def allRefsHeaderMatch(
+  pure def allLogicalRefsHeaderMatch(
     headers: List[RegionHeader],
-    refs: List[RegionRef],
+    refs: List[LogicalRegionRef],
   ): bool =
-    refs.indices().forall(i => headerMatches(headers, refs.nth(i)))
+    refs.indices().forall(i => logicalRefMatchesHeader(headers, refs.nth(i)))
 
   pure def allAllocationsHaveRollbackRecords(tx: TxState): bool =
     txAllocSet(tx).subseteq(txRollbackAllocSet(tx))
 
-  pure def cleanupDone(
+  pure def logicalCleanupDone(
     activeFree: Set[int],
     headers: List[RegionHeader],
-    entry: RegionRef,
+    entry: LogicalRegionRef,
   ): bool =
     entry.region.in(activeFree)
-    or not(headerMatches(headers, entry))
+    or not(logicalRefMatchesHeader(headers, entry))
 
-  pure def pendingCleanupRegionSet(
+  pure def logicalFreeMayAppend(
     activeFree: Set[int],
     headers: List[RegionHeader],
-    refs: List[RegionRef],
+    entry: LogicalRegionRef,
+  ): bool =
+    not(entry.region.in(activeFree))
+    and logicalRefMatchesHeader(headers, entry)
+
+  pure def pendingLogicalCleanupRegionSet(
+    activeFree: Set[int],
+    headers: List[RegionHeader],
+    refs: List[LogicalRegionRef],
   ): Set[int] =
     refs.foldl(Set(), (acc, entry) =>
-      if (cleanupDone(activeFree, headers, entry)) {
+      if (logicalCleanupDone(activeFree, headers, entry)) {
         acc
       } else {
         acc.union(Set(entry.region))
@@ -423,7 +456,7 @@ module transaction_free_recovery {
     tx: TxState,
   ): Set[int] =
     if (tx.phase == TxCommittedCleanup) {
-      pendingCleanupRegionSet(activeFree, headers, tx.freeIntents)
+      pendingLogicalCleanupRegionSet(activeFree, headers, tx.freeIntents)
     } else {
       Set()
     }
@@ -436,10 +469,18 @@ module transaction_free_recovery {
     if (tx.phase == TxOpen or tx.phase == TxRollbackPreparing) {
       txAllocSet(tx)
     } else if (tx.phase == TxRolledBackCleanup) {
-      pendingCleanupRegionSet(activeFree, headers, tx.rollbackAllocations)
+      pendingLogicalCleanupRegionSet(activeFree, headers, tx.rollbackAllocations)
     } else {
       Set()
     }
+
+  pure def txCurrentRecoverySet(
+    activeFree: Set[int],
+    headers: List[RegionHeader],
+    tx: TxState,
+  ): Set[int] =
+    txOutstandingAllocSet(activeFree, headers, tx)
+      .union(txPendingCommittedCleanupSet(activeFree, headers, tx))
 
   pure def storageState(
     freeQueue: List[int],
@@ -729,7 +770,7 @@ module transaction_free_recovery {
         )
       }
     val freeIntent =
-      regionRef(region, nextStorageWithHeader.regions.nth(region).sequence)
+      logicalRegionRef(region, nextStorageWithHeader.regions.nth(region).sequence)
     val nextTx = txAddFreeIntent(currentTx, freeIntent)
     all {
       currentTx.phase == TxOpen,
@@ -801,7 +842,7 @@ module transaction_free_recovery {
     val currentTx = storage.transactions.nth(txIndex)
     val region = currentTx.allocations.nth(currentTx.cleanupIndex)
     val rollbackAllocation =
-      regionRef(region, storage.regions.nth(region).sequence)
+      logicalRegionRef(region, storage.regions.nth(region).sequence)
     val nextTx =
       txAdvanceCleanup(txAddRollbackAllocation(currentTx, rollbackAllocation))
     all {
@@ -833,8 +874,7 @@ module transaction_free_recovery {
     val freeIntent = currentTx.freeIntents.nth(currentTx.cleanupIndex)
     val nextTx = txAdvanceCleanup(currentTx)
     val shouldAppend =
-      not(freeIntent.region.in(activeFreeSet))
-      and headerMatches(storage.regions, freeIntent)
+      logicalFreeMayAppend(activeFreeSet, storage.regions, freeIntent)
     all {
       currentTx.phase == TxCommittedCleanup,
       currentTx.cleanupIndex < currentTx.freeIntents.length(),
@@ -861,8 +901,7 @@ module transaction_free_recovery {
       currentTx.rollbackAllocations.nth(currentTx.cleanupIndex)
     val nextTx = txAdvanceCleanup(currentTx)
     val shouldAppend =
-      not(rollbackAllocation.region.in(activeFreeSet))
-      and headerMatches(storage.regions, rollbackAllocation)
+      logicalFreeMayAppend(activeFreeSet, storage.regions, rollbackAllocation)
     all {
       currentTx.phase == TxRolledBackCleanup,
       currentTx.cleanupIndex < currentTx.rollbackAllocations.length(),
@@ -930,12 +969,35 @@ module transaction_free_recovery {
     }
   }
 
-  // main_wal free_region(region, append_tail_after) for a direct committed
-  // free outside a transaction.
+  // main_wal free_region(region, sequence, append_tail_after) for a direct
+  // committed free outside a transaction. Direct frees are logically
+  // authorized too: if the live physical region does not already have a valid
+  // header, the free first assigns a sequence and then publishes exactly one
+  // physical free entry for that logical region.
   action FreeDirectLive = {
     nondet collectionIndex = storage.collections.indices().oneOf()
     nondet region =
       collectionLiveAt(storage.collections, collectionIndex).oneOf()
+    val existingHeader = storage.regions.nth(region)
+    val nextStorageWithHeader =
+      if (existingHeader.valid) {
+        storage
+      } else {
+        storageWithRegionHeaderAndNextSequence(
+          storage,
+          region,
+          validHeader(storage.nextSequence),
+          storage.nextSequence + 1,
+        )
+      }
+    val logicalFree =
+      logicalRegionRef(region, nextStorageWithHeader.regions.nth(region).sequence)
+    val shouldAppend =
+      logicalFreeMayAppend(
+        activeFreeSet,
+        nextStorageWithHeader.regions,
+        logicalFree,
+      )
     val nextGeneration =
       collectionGenerationAt(storage.collections, collectionIndex) + 1
     val nextLive =
@@ -944,11 +1006,19 @@ module transaction_free_recovery {
       collectionState(nextLive, nextGeneration)
     all {
       storage' =
-        storageWithCollection(
-          storageWithFreeAppend(storage, region),
-          collectionIndex,
-          nextCollection,
-        ),
+        if (shouldAppend) {
+          storageWithCollection(
+            storageWithFreeAppend(nextStorageWithHeader, logicalFree.region),
+            collectionIndex,
+            nextCollection,
+          )
+        } else {
+          storageWithCollection(
+            nextStorageWithHeader,
+            collectionIndex,
+            nextCollection,
+          )
+        },
     }
   }
 
@@ -1126,11 +1196,9 @@ module transaction_free_recovery {
     and storage.readyBoundary <= storage.appendTail
     and storage.appendTail <= storage.freeQueue.length()
 
-  // No region appears twice in active allocator free space.
-  val activeFreeNoDuplicates =
-    noDuplicates(activeFreeList)
-
-  // Committed collection ownership is exclusive across collections.
+  // Committed collection ownership is exclusive across collections. This is a
+  // physical-region ownership invariant: a collection live set contains region
+  // indexes, not logical refs.
   val collectionOwnershipUnique =
     storage.collections.indices().forall(i =>
       storage.collections.indices().forall(j =>
@@ -1139,8 +1207,9 @@ module transaction_free_recovery {
           collectionLiveAt(storage.collections, j)
         ) == Set()))
 
-  // A region cannot be both committed-live and allocator-free.
-  val liveNotFree =
+  // Core invariant: no physical region can be both committed-live and in the
+  // active free-space range.
+  val noLiveFreeOverlap =
     collectionLivesDisjointFrom(storage.collections, activeFreeSet)
 
   // Ready free regions have been erased, so their old sequence headers are invalid.
@@ -1148,8 +1217,11 @@ module transaction_free_recovery {
     Regions.forall(region =>
       region.in(readyFreeSet).implies(not(storage.regions.nth(region).valid)))
 
-  // Open or rollback-preparing allocations are private: not live and not free.
-  val txOpenAllocationsOwned =
+  // Core invariant: a transaction allocation cannot become collection-live
+  // before commit, and rollback cleanup obligations cannot be live after the
+  // rollback marker. Raw allocations are physical until rollback preparation
+  // records logical cleanup refs for them.
+  val noPrematurePublication =
     storage.transactions.indices().forall(i =>
       (
         storage.transactions.nth(i).phase == TxOpen
@@ -1162,28 +1234,45 @@ module transaction_free_recovery {
         and txAllocSet(
           storage.transactions.nth(i)
         ).intersect(activeFreeSet) == Set()))
-
-  // Private/pending allocation ownership is exclusive across transaction slots.
-  val txOutstandingAllocationsDoNotOverlap =
+    and
     storage.transactions.indices().forall(i =>
-      storage.transactions.indices().forall(j =>
-        i == j or
+      (
+        storage.transactions.nth(i).phase == TxRolledBackCleanup
+      ).implies(
+        collectionLivesDisjointFrom(
+          storage.collections,
           txOutstandingAllocSet(
             activeFreeSet,
             storage.regions,
             storage.transactions.nth(i),
+          ),
+        )))
+
+  // Current recovery ownership is exclusive across transaction slots. Retained
+  // cleanup evidence that is already active-free is not part of this set; it is
+  // completed evidence kept until transaction_finished.
+  val txCurrentRecoverySetsDoNotOverlap =
+    storage.transactions.indices().forall(i =>
+      storage.transactions.indices().forall(j =>
+        i == j or
+          txCurrentRecoverySet(
+            activeFreeSet,
+            storage.regions,
+            storage.transactions.nth(i),
           ).intersect(
-            txOutstandingAllocSet(
+            txCurrentRecoverySet(
               activeFreeSet,
               storage.regions,
               storage.transactions.nth(j),
             )
           ) == Set()))
 
-  // Current open transactions only retain actionable free intents for regions
-  // still live in their own collection. Stale transactions may retain obsolete
-  // intents because commit is blocked by the generation check.
-  val txOpenFreeIntentsRemainLive =
+  // Core invariant: cleanup refs are phase-safe. Before the terminal marker
+  // that authorizes cleanup, current free-intent refs stay out of active free
+  // space and rollback-allocation refs still name private allocations. Stale
+  // open transactions may retain obsolete free intents, but their generation
+  // mismatch blocks commit before those refs can authorize cleanup.
+  val cleanupRefsPhaseSafe =
     storage.transactions.indices().forall(i =>
       (
         storage.transactions.nth(i).phase == TxOpen
@@ -1193,7 +1282,7 @@ module transaction_free_recovery {
           storage.collections,
           storage.transactions.nth(i),
         ).implies(
-          pendingCleanupRegionSet(
+          pendingLogicalCleanupRegionSet(
             activeFreeSet,
             storage.regions,
             storage.transactions.nth(i).freeIntents,
@@ -1202,11 +1291,23 @@ module transaction_free_recovery {
               storage.collections,
               storage.transactions.nth(i).collectionIndex,
             )
-          ))))
-
-  // After commit, pending free intents are no longer collection-live; they are
-  // in the retained cleanup state until cleanup appends or the header changes.
-  val committedCleanupIntentsDetached =
+          )
+          and txFreeIntentSet(
+            storage.transactions.nth(i)
+          ).intersect(activeFreeSet) == Set()
+        )))
+    and
+    storage.transactions.indices().forall(i =>
+      (
+        storage.transactions.nth(i).phase == TxRollbackPreparing
+      ).implies(
+        txRollbackAllocSet(
+          storage.transactions.nth(i)
+        ).intersect(activeFreeSet) == Set()
+      ))
+    // After commit, still-pending free intents are detached from live state
+    // until cleanup publishes exactly one free or the logical ref is obsolete.
+    and
     storage.transactions.indices().forall(i =>
       (
         storage.transactions.nth(i).phase == TxCommittedCleanup
@@ -1219,69 +1320,90 @@ module transaction_free_recovery {
             storage.transactions.nth(i),
           ),
         )))
-
-  // Rolled-back allocation cleanup only concerns private allocations for this
-  // transaction's collection; pending rollback obligations must not still be
-  // live in that collection.
-  val rollbackAllocationsNotLiveInCollection =
-    storage.transactions.indices().forall(i =>
-      (
-        storage.transactions.nth(i).phase == TxRolledBackCleanup
-      ).implies(
-        txOutstandingAllocSet(
-          activeFreeSet,
-          storage.regions,
-          storage.transactions.nth(i),
-        ).intersect(
-          collectionLiveAt(
-            storage.collections,
-            storage.transactions.nth(i).collectionIndex,
-          )
-        ) == Set()))
-
-  // Once rollback cleanup begins, every raw allocation has an explicit retained
-  // rollback record and any still-pending rollback obligation is not live in
-  // this transaction's collection.
-  val rollbackCleanupObligationsProgress =
+    // After rollback, every allocation has a logical cleanup ref and still-
+    // pending rollback obligations are detached from all collection live sets.
+    and
     storage.transactions.indices().forall(i =>
       (
         storage.transactions.nth(i).phase == TxRolledBackCleanup
       ).implies(
         allAllocationsHaveRollbackRecords(storage.transactions.nth(i))
         and
-        txOutstandingAllocSet(
-          activeFreeSet,
-          storage.regions,
-          storage.transactions.nth(i),
-        ).intersect(
-          collectionLiveAt(
-            storage.collections,
-            storage.transactions.nth(i).collectionIndex,
-          )
-        ) == Set()
+        collectionLivesDisjointFrom(
+          storage.collections,
+          txOutstandingAllocSet(
+            activeFreeSet,
+            storage.regions,
+            storage.transactions.nth(i),
+          ),
+        )
       ))
 
-  // Every modeled region is accounted for by at least one ownership category.
-  // Other invariants make these categories disjoint where safety requires it.
-  val allRegionsAccountedFor =
+  // Core invariant: no double free. Active free space is a physical-region set
+  // represented as a list slice, so duplicate entries would publish the same
+  // physical free twice. Cleanup actions also use logicalFreeMayAppend, which
+  // refuses to append when the physical region is already active-free.
+  val noDoubleFree =
+    noDuplicates(activeFreeList)
+    and storage.transactions.indices().forall(i =>
+      txCurrentRecoverySet(
+        activeFreeSet,
+        storage.regions,
+        storage.transactions.nth(i),
+      ).intersect(activeFreeSet) == Set())
+    and txCurrentRecoverySetsDoNotOverlap
+
+  // Core invariant: retained logical cleanup refs are well formed, and a ref
+  // can be pending cleanup only while it still matches the current valid
+  // header. If the physical region is already active-free, the retained ref is
+  // completed evidence; if the header changed, the ref is obsolete evidence.
+  val logicalCleanupRefsValid =
+    storage.transactions.indices().forall(i =>
+      txEntriesOK(storage.transactions.nth(i), storage.nextSequence))
+    and storage.transactions.indices().forall(i =>
+      storage.transactions.nth(i).freeIntents.indices().forall(j =>
+        storage.transactions.nth(i).freeIntents.nth(j).region.in(
+          txPendingCommittedCleanupSet(
+            activeFreeSet,
+            storage.regions,
+            storage.transactions.nth(i),
+          )
+        ).implies(
+          logicalRefMatchesHeader(
+            storage.regions,
+            storage.transactions.nth(i).freeIntents.nth(j),
+          )
+        )))
+    and storage.transactions.indices().forall(i =>
+      storage.transactions.nth(i).rollbackAllocations.indices().forall(j =>
+        storage.transactions.nth(i).rollbackAllocations.nth(j).region.in(
+          txOutstandingAllocSet(
+            activeFreeSet,
+            storage.regions,
+            storage.transactions.nth(i),
+          )
+        ).implies(
+          logicalRefMatchesHeader(
+            storage.regions,
+            storage.transactions.nth(i).rollbackAllocations.nth(j),
+          )
+        )))
+
+  // Core invariant: no modeled physical region leaks. Each region is reachable
+  // from live state, active free space, or unfinished transaction/recovery
+  // state. Completed retained cleanup evidence is not needed for reachability
+  // once the physical region is active-free.
+  val noLeaks =
     Regions.forall(region =>
       // 1. committed live in some collection
       storage.collections.indices().exists(collectionIndex =>
         region.in(collectionLiveAt(storage.collections, collectionIndex)))
       // 2. allocator-free
       or region.in(activeFreeSet)
-      // 3. transaction-private allocation or rollback cleanup obligation
+      // 3. transaction-private allocation or unfinished cleanup/recovery
       or storage.transactions.indices().exists(txIndex =>
         region.in(
-          txOutstandingAllocSet(
-            activeFreeSet,
-            storage.regions,
-            storage.transactions.nth(txIndex),
-          )))
-      // 4. committed free intent awaiting cleanup
-      or storage.transactions.indices().exists(txIndex =>
-        region.in(
-          txPendingCommittedCleanupSet(
+          txCurrentRecoverySet(
             activeFreeSet,
             storage.regions,
             storage.transactions.nth(txIndex),
@@ -1320,15 +1442,12 @@ module transaction_free_recovery {
   val safety =
     typeOK
     and cursorOrderOK
-    and activeFreeNoDuplicates
     and collectionOwnershipUnique
-    and liveNotFree
+    and noLiveFreeOverlap
     and readyFreeHeadersErased
-    and txOpenAllocationsOwned
-    and txOutstandingAllocationsDoNotOverlap
-    and txOpenFreeIntentsRemainLive
-    and committedCleanupIntentsDetached
-    and rollbackAllocationsNotLiveInCollection
-    and rollbackCleanupObligationsProgress
-    and allRegionsAccountedFor
+    and noPrematurePublication
+    and cleanupRefsPhaseSafe
+    and noDoubleFree
+    and logicalCleanupRefsValid
+    and noLeaks
 }
