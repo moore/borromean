@@ -601,27 +601,6 @@ module transaction_free_recovery {
       state.transactions,
     )
 
-  pure def storageWithDirectLiveAllocationAndCollection(
-    state: StorageState,
-    region: int,
-    collectionIndex: int,
-    nextCollection: CollectionState,
-  ): StorageState =
-    storageState(
-      state.freeQueue,
-      state.allocationHead + 1,
-      state.readyBoundary,
-      state.appendTail,
-      replaceRegionHeader(
-        state.regions,
-        region,
-        validHeader(state.nextSequence),
-      ),
-      state.nextSequence + 1,
-      replaceCollection(state.collections, collectionIndex, nextCollection),
-      state.transactions,
-    )
-
   pure def storageWithReadyBoundaryAndInvalidHeader(
     state: StorageState,
     region: int,
@@ -945,83 +924,6 @@ module transaction_free_recovery {
     }
   }
 
-  // main_wal allocate_region(region, allocation_head_after) for a direct
-  // committed allocation outside a transaction.
-  action AllocateDirectlyLive = {
-    nondet collectionIndex = storage.collections.indices().oneOf()
-    val region = storage.freeQueue.nth(storage.allocationHead)
-    val nextGeneration =
-      collectionGenerationAt(storage.collections, collectionIndex) + 1
-    val nextLive =
-      collectionLiveAt(storage.collections, collectionIndex).union(Set(region))
-    val nextCollection =
-      collectionState(nextLive, nextGeneration)
-    all {
-      storage.allocationHead < storage.readyBoundary,
-
-      storage' =
-        storageWithDirectLiveAllocationAndCollection(
-          storage,
-          region,
-          collectionIndex,
-          nextCollection,
-        ),
-    }
-  }
-
-  // main_wal free_region(region, sequence, append_tail_after) for a direct
-  // committed free outside a transaction. Direct frees are logically
-  // authorized too: if the live physical region does not already have a valid
-  // header, the free first assigns a sequence and then publishes exactly one
-  // physical free entry for that logical region.
-  action FreeDirectLive = {
-    nondet collectionIndex = storage.collections.indices().oneOf()
-    nondet region =
-      collectionLiveAt(storage.collections, collectionIndex).oneOf()
-    val existingHeader = storage.regions.nth(region)
-    val nextStorageWithHeader =
-      if (existingHeader.valid) {
-        storage
-      } else {
-        storageWithRegionHeaderAndNextSequence(
-          storage,
-          region,
-          validHeader(storage.nextSequence),
-          storage.nextSequence + 1,
-        )
-      }
-    val logicalFree =
-      logicalRegionRef(region, nextStorageWithHeader.regions.nth(region).sequence)
-    val shouldAppend =
-      logicalFreeMayAppend(
-        activeFreeSet,
-        nextStorageWithHeader.regions,
-        logicalFree,
-      )
-    val nextGeneration =
-      collectionGenerationAt(storage.collections, collectionIndex) + 1
-    val nextLive =
-      collectionLiveAt(storage.collections, collectionIndex).exclude(Set(region))
-    val nextCollection =
-      collectionState(nextLive, nextGeneration)
-    all {
-      storage' =
-        if (shouldAppend) {
-          storageWithCollection(
-            storageWithFreeAppend(nextStorageWithHeader, logicalFree.region),
-            collectionIndex,
-            nextCollection,
-          )
-        } else {
-          storageWithCollection(
-            nextStorageWithHeader,
-            collectionIndex,
-            nextCollection,
-          )
-        },
-    }
-  }
-
   // main_wal erase_free_region_span(1, ready_boundary_after)
   action EraseOneDirty = {
     val region = storage.freeQueue.nth(storage.readyBoundary)
@@ -1129,8 +1031,6 @@ module transaction_free_recovery {
     FreeRolledBackAllocation,
     FinishCommit,
     FinishRollback,
-    AllocateDirectlyLive,
-    FreeDirectLive,
     EraseOneDirty,
     Stutter,
   }
