@@ -14,6 +14,8 @@
 // replay are intentionally the same transition relation in this model.
 
 module transaction_free_recovery {
+  ////// Model vocabulary and bounded domains //////
+
   type TxPhase =
     | TxIdle
     | TxOpen
@@ -93,6 +95,8 @@ module transaction_free_recovery {
 
   pure val Regions = Set(0, 1, 2, 3, 4, 5)
 
+  ////// Model state constructors and transition helpers //////
+
   pure def collectionState(live: Set[int], generation: int): CollectionState = {
     live: live,
     generation: generation,
@@ -132,13 +136,6 @@ module transaction_free_recovery {
         } else {
           collections.nth(i)
         }))
-
-  pure def collectionLivesDisjointFrom(
-    collections: List[CollectionState],
-    regions: Set[int],
-  ): bool =
-    collections.indices().forall(i =>
-      collectionLiveAt(collections, i).intersect(regions) == Set())
 
   pure def updateTransactions(
     transactions: List[TxState],
@@ -266,14 +263,6 @@ module transaction_free_recovery {
   pure def intListToSet(regions: List[int]): Set[int] =
     regions.foldl(Set(), (acc, region) => acc.union(Set(region)))
 
-  pure def intListEntriesInRegions(regions: List[int]): bool =
-    regions.indices().forall(i => regions.nth(i).in(Regions))
-
-  pure def noDuplicates(regions: List[int]): bool =
-    regions.indices().forall(i =>
-      regions.indices().forall(j =>
-        (i == j).or(not(regions.nth(i) == regions.nth(j)))))
-
   pure def txAllocSet(tx: TxState): Set[int] =
     intListToSet(tx.allocations)
 
@@ -288,124 +277,6 @@ module transaction_free_recovery {
 
   pure def txInCleanup(tx: TxState): bool =
     tx.phase == TxCommittedCleanup or tx.phase == TxRolledBackCleanup
-
-  pure def cleanupListLength(tx: TxState): int =
-    if (tx.phase == TxCommittedCleanup) {
-      tx.freeIntents.length()
-    } else if (tx.phase == TxRolledBackCleanup) {
-      tx.rollbackAllocations.length()
-    } else {
-      0
-    }
-
-  pure def cleanupListEntryAt(tx: TxState, index: int): int =
-    if (tx.phase == TxCommittedCleanup) {
-      tx.freeIntents.nth(index)
-    } else {
-      tx.rollbackAllocations.nth(index)
-    }
-
-  pure def cleanupPrefixMatchesQueue(
-    freeQueue: List[int],
-    tx: TxState,
-  ): bool =
-    if (txInCleanup(tx)) {
-      tx.cleanupStartTail + tx.cleanupIndex <= freeQueue.length()
-      and RegionIndexes.indices().forall(offset =>
-        if (
-          offset < tx.cleanupIndex
-          and offset < cleanupListLength(tx)
-          and tx.cleanupStartTail + offset < freeQueue.length()
-        ) {
-          freeQueue.nth(tx.cleanupStartTail + offset)
-            == cleanupListEntryAt(tx, offset)
-        } else {
-          true
-        })
-    } else {
-      true
-    }
-
-  pure def txEntriesOK(tx: TxState): bool =
-    // Every transaction-owned list names modeled physical regions.
-    intListEntriesInRegions(tx.allocations)
-    and intListEntriesInRegions(tx.freeIntents)
-    and intListEntriesInRegions(tx.rollbackAllocations)
-    // A transaction may not retain duplicate ownership/cleanup entries.
-    and noDuplicates(tx.allocations)
-    and noDuplicates(tx.freeIntents)
-    and noDuplicates(tx.rollbackAllocations)
-    // Rollback records may only describe this transaction's allocations.
-    and txRollbackAllocSet(tx).subseteq(txAllocSet(tx))
-
-  pure def txCollectionOK(
-    tx: TxState,
-    collections: List[CollectionState],
-  ): bool =
-    // Idle slots have no collection; every non-idle slot names a modeled one.
-    if (tx.phase == TxIdle) {
-      tx.collectionIndex == NoCollection
-    } else {
-      tx.collectionIndex.in(collections.indices())
-    }
-
-  pure def txGenerationCurrent(
-    collections: List[CollectionState],
-    tx: TxState,
-  ): bool =
-    tx.observedGeneration
-      == collectionGenerationAt(collections, tx.collectionIndex)
-
-  pure def txIdleStateOK(tx: TxState): bool =
-    // An idle slot must not retain provenance or scan state from old work.
-    (tx.phase == TxIdle).implies(
-      tx.collectionIndex == NoCollection
-      and tx.observedGeneration == 0
-      and tx.cleanupIndex == 0
-      and tx.cleanupStartTail == 0
-      and tx.allocations.length() == 0
-      and tx.freeIntents.length() == 0
-      and tx.rollbackAllocations.length() == 0)
-
-  pure def txCleanupIndexOK(tx: TxState): bool =
-    // The scan cursor is bounded by the list being scanned, and is zero when
-    // the phase does not have an active scan.
-    if (tx.phase == TxRollbackPreparing) {
-      0 <= tx.cleanupIndex
-      and tx.cleanupIndex <= tx.allocations.length()
-    } else if (tx.phase == TxCommittedCleanup) {
-      0 <= tx.cleanupIndex
-      and tx.cleanupIndex <= tx.freeIntents.length()
-    } else if (tx.phase == TxRolledBackCleanup) {
-      0 <= tx.cleanupIndex
-      and tx.cleanupIndex <= tx.rollbackAllocations.length()
-    } else {
-      tx.cleanupIndex == 0
-    }
-
-  pure def txCleanupStartTailOK(
-    tx: TxState,
-    appendTail: int,
-    freeQueueLength: int,
-  ): bool =
-    0 <= tx.cleanupStartTail
-    and tx.cleanupStartTail <= freeQueueLength
-    and
-    if (txInCleanup(tx)) {
-      tx.cleanupStartTail <= appendTail
-    } else {
-      tx.cleanupStartTail == 0
-    }
-
-  pure def txRollbackRecordsPhaseOK(tx: TxState): bool =
-    // Rollback records exist only after rollback preparation has started.
-    (
-      tx.phase == TxOpen
-      or tx.phase == TxCommittedCleanup
-    ).implies(tx.rollbackAllocations.length() == 0)
-
-  pure def allAllocationsHaveRollbackRecords(tx: TxState): bool =
-    txAllocSet(tx).subseteq(txRollbackAllocSet(tx))
 
   pure def txPendingCommittedCleanupSet(tx: TxState): Set[int] =
     if (tx.phase == TxCommittedCleanup) {
@@ -536,6 +407,8 @@ module transaction_free_recovery {
       state.collections,
       state.transactions,
     )
+
+  ////// Replayed model state and transition actions //////
 
   pure val InitialCollections = [
     collectionState(Set(0), 0),
@@ -806,6 +679,28 @@ module transaction_free_recovery {
     storage' = storageWithReadyBoundary(storage),
   }
 
+  action Stutter = all {
+    storage' = storage,
+  }
+
+  action step = any {
+    BeginTransaction,
+    AllocateInTransaction,
+    StageFreeIntent,
+    CommitTransaction,
+    StartRollbackPreparation,
+    RecordRollbackAllocation,
+    RollbackTransaction,
+    FreeCommittedIntent,
+    FreeRolledBackAllocation,
+    FinishCommit,
+    FinishRollback,
+    EraseOneDirty,
+    Stutter,
+  }
+
+  ////// Unsafe comparison actions //////
+
   // Unsafe comparison: a transaction-private free intent mutates the global
   // allocator before the transaction commits.
   action UnsafeFreeIntentBeforeCommit = {
@@ -901,26 +796,6 @@ module transaction_free_recovery {
     }
   }
 
-  action Stutter = all {
-    storage' = storage,
-  }
-
-  action step = any {
-    BeginTransaction,
-    AllocateInTransaction,
-    StageFreeIntent,
-    CommitTransaction,
-    StartRollbackPreparation,
-    RecordRollbackAllocation,
-    RollbackTransaction,
-    FreeCommittedIntent,
-    FreeRolledBackAllocation,
-    FinishCommit,
-    FinishRollback,
-    EraseOneDirty,
-    Stutter,
-  }
-
   action unsafeStep = any {
     step,
     UnsafeFreeIntentBeforeCommit,
@@ -929,6 +804,146 @@ module transaction_free_recovery {
     UnsafeEraseDuringCleanup,
     UnsafeCommitWithoutGenerationCheck,
   }
+
+  ////// Invariant support helpers //////
+
+  // These helpers do not define model transitions. They only classify or check
+  // replayed state for the invariants below.
+
+  pure def collectionLivesDisjointFrom(
+    collections: List[CollectionState],
+    regions: Set[int],
+  ): bool =
+    collections.indices().forall(i =>
+      collectionLiveAt(collections, i).intersect(regions) == Set())
+
+  pure def intListEntriesInRegions(regions: List[int]): bool =
+    regions.indices().forall(i => regions.nth(i).in(Regions))
+
+  pure def noDuplicates(regions: List[int]): bool =
+    regions.indices().forall(i =>
+      regions.indices().forall(j =>
+        (i == j).or(not(regions.nth(i) == regions.nth(j)))))
+
+  pure def allAllocationsHaveRollbackRecords(tx: TxState): bool =
+    txAllocSet(tx).subseteq(txRollbackAllocSet(tx))
+
+  pure def cleanupListLength(tx: TxState): int =
+    if (tx.phase == TxCommittedCleanup) {
+      tx.freeIntents.length()
+    } else if (tx.phase == TxRolledBackCleanup) {
+      tx.rollbackAllocations.length()
+    } else {
+      0
+    }
+
+  pure def cleanupListEntryAt(tx: TxState, index: int): int =
+    if (tx.phase == TxCommittedCleanup) {
+      tx.freeIntents.nth(index)
+    } else {
+      tx.rollbackAllocations.nth(index)
+    }
+
+  pure def cleanupPrefixMatchesQueue(
+    freeQueue: List[int],
+    tx: TxState,
+  ): bool =
+    if (txInCleanup(tx)) {
+      tx.cleanupStartTail + tx.cleanupIndex <= freeQueue.length()
+      and RegionIndexes.indices().forall(offset =>
+        if (
+          offset < tx.cleanupIndex
+          and offset < cleanupListLength(tx)
+          and tx.cleanupStartTail + offset < freeQueue.length()
+        ) {
+          freeQueue.nth(tx.cleanupStartTail + offset)
+            == cleanupListEntryAt(tx, offset)
+        } else {
+          true
+        })
+    } else {
+      true
+    }
+
+  pure def txEntriesOK(tx: TxState): bool =
+    // Every transaction-owned list names modeled physical regions.
+    intListEntriesInRegions(tx.allocations)
+    and intListEntriesInRegions(tx.freeIntents)
+    and intListEntriesInRegions(tx.rollbackAllocations)
+    // A transaction may not retain duplicate ownership/cleanup entries.
+    and noDuplicates(tx.allocations)
+    and noDuplicates(tx.freeIntents)
+    and noDuplicates(tx.rollbackAllocations)
+    // Rollback records may only describe this transaction's allocations.
+    and txRollbackAllocSet(tx).subseteq(txAllocSet(tx))
+
+  pure def txCollectionOK(
+    tx: TxState,
+    collections: List[CollectionState],
+  ): bool =
+    // Idle slots have no collection; every non-idle slot names a modeled one.
+    if (tx.phase == TxIdle) {
+      tx.collectionIndex == NoCollection
+    } else {
+      tx.collectionIndex.in(collections.indices())
+    }
+
+  pure def txGenerationCurrent(
+    collections: List[CollectionState],
+    tx: TxState,
+  ): bool =
+    tx.observedGeneration
+      == collectionGenerationAt(collections, tx.collectionIndex)
+
+  pure def txIdleStateOK(tx: TxState): bool =
+    // An idle slot must not retain provenance or scan state from old work.
+    (tx.phase == TxIdle).implies(
+      tx.collectionIndex == NoCollection
+      and tx.observedGeneration == 0
+      and tx.cleanupIndex == 0
+      and tx.cleanupStartTail == 0
+      and tx.allocations.length() == 0
+      and tx.freeIntents.length() == 0
+      and tx.rollbackAllocations.length() == 0)
+
+  pure def txCleanupIndexOK(tx: TxState): bool =
+    // The scan cursor is bounded by the list being scanned, and is zero when
+    // the phase does not have an active scan.
+    if (tx.phase == TxRollbackPreparing) {
+      0 <= tx.cleanupIndex
+      and tx.cleanupIndex <= tx.allocations.length()
+    } else if (tx.phase == TxCommittedCleanup) {
+      0 <= tx.cleanupIndex
+      and tx.cleanupIndex <= tx.freeIntents.length()
+    } else if (tx.phase == TxRolledBackCleanup) {
+      0 <= tx.cleanupIndex
+      and tx.cleanupIndex <= tx.rollbackAllocations.length()
+    } else {
+      tx.cleanupIndex == 0
+    }
+
+  pure def txCleanupStartTailOK(
+    tx: TxState,
+    appendTail: int,
+    freeQueueLength: int,
+  ): bool =
+    0 <= tx.cleanupStartTail
+    and tx.cleanupStartTail <= freeQueueLength
+    and
+    if (txInCleanup(tx)) {
+      tx.cleanupStartTail <= appendTail
+    } else {
+      tx.cleanupStartTail == 0
+    }
+
+  pure def txRollbackRecordsPhaseOK(tx: TxState): bool =
+    // Rollback records exist only after rollback preparation has started.
+    (
+      tx.phase == TxOpen
+      or tx.phase == TxCommittedCleanup
+    ).implies(tx.rollbackAllocations.length() == 0)
+
+  ////// Core invariants //////
 
   // Structural well-formedness for the bounded model state. These checks are
   // not the allocator safety argument by themselves; they make sure every list,
@@ -1190,6 +1205,8 @@ module transaction_free_recovery {
       // 3. transaction-private allocation or unfinished cleanup/recovery
       or storage.transactions.indices().exists(txIndex =>
         region.in(txCurrentRecoverySet(storage.transactions.nth(txIndex)))))
+
+  ////// Reachability helpers and exported invariants //////
 
   // Positive reachability helper: serialized cleanup should prevent two
   // different collection transactions from both being in committed cleanup.
