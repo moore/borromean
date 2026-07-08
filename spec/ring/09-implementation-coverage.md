@@ -30,23 +30,34 @@ helpers.
    cleanup records for regions still reachable from live collection
    state.
 7. `RING-IMPL-REGRESSION-069` Appending a new collection and update
-   MUST refresh runtime collection state and pending update count.
-8. `RING-IMPL-REGRESSION-070` Appending a snapshot MUST move the
-   collection to WAL snapshot basis and clear prior pending updates.
+   MUST write and sync the WAL records, then apply those decoded
+   records through the same `ApplyWalRecord` transition used by startup
+   replay to update runtime collection state and pending update count.
+8. `RING-IMPL-REGRESSION-070` Appending a snapshot MUST apply the
+   decoded record through `ApplyWalRecord` to move the collection to
+   WAL snapshot basis and clear prior pending updates.
 9. `RING-IMPL-REGRESSION-071` Appending head and drop records MUST
-   refresh runtime basis to committed region and then dropped tombstone
-   while reducing tracked live collection count.
+   apply those decoded records through `ApplyWalRecord` to move the
+   runtime basis to committed region and then dropped tombstone while
+   reducing tracked live collection count.
 10. `RING-IMPL-REGRESSION-072` Appending WAL recovery MUST clear
-    pending recovery boundary and advance append offset; appending
-    allocator records MUST refresh free-space cursors.
-11. `RING-IMPL-REGRESSION-133` Control-record appends MUST refresh the
-    in-memory runtime state without reopening and replaying the WAL.
+    pending recovery boundary and advance append offset through
+    `ApplyWalRecord`; appending allocator records MUST update
+    free-space cursors through the same `ApplyWalRecord` transition
+    used by startup replay.
+11. `RING-IMPL-REGRESSION-133` Control-record appends MUST update
+    in-memory runtime state by applying the decoded record through
+    `ApplyWalRecord` after sync; they MUST NOT require rereading the
+    WAL bytes.
 12. `RING-IMPL-REGRESSION-134` Completing transaction cleanup MUST
-    refresh `append_tail` from `free_region(region_index,
-    append_tail_after)` without reopening the store.
+    update `append_tail` by applying the decoded
+    `free_region(region_index, append_tail_after)` record through
+    `ApplyWalRecord` after sync, without rereading the store.
 13. `RING-IMPL-REGRESSION-073` WAL rotation start/finish appends MUST
-    reserve the next ready region with `allocate_region`, advance
-    `allocation_head`, move WAL tail to the new region, and clear the
+    reserve the next ready region with `allocate_region`, apply the
+    decoded allocation through `ApplyWalRecord` to advance
+    `allocation_head`, apply the decoded `link` through
+    `ApplyWalRecord`, move WAL tail to the new region, and clear the
     matching storage-core private allocation reservation.
 14. `RING-IMPL-REGRESSION-074` WAL rotation MUST initialize the new WAL
     region at `max_seen_sequence + 1` and update runtime
@@ -106,7 +117,8 @@ helpers.
 33. `RING-IMPL-REGRESSION-093` Storage facade accessors MUST reflect
     underlying runtime state and tracked collection metadata.
 34. `RING-IMPL-REGRESSION-094` Storage facade raw WAL wrapper methods
-    MUST update runtime collection, allocator, and transaction state.
+    MUST update runtime collection, allocator, and transaction state by
+    applying decoded records through `ApplyWalRecord`.
 35. `RING-IMPL-REGRESSION-095` Storage facade WAL recovery append MUST
     reject recovery records when no recovery boundary is pending.
 36. `RING-IMPL-REGRESSION-096` Storage facade recovery status MUST
@@ -147,8 +159,9 @@ helpers.
 45. `RING-IMPL-REGRESSION-104` Storage append operations MUST persist
     new collection and update records so reopening through flash
     restores the collection and pending update state.
-46. `RING-IMPL-REGRESSION-105` WAL-head reclaim MUST update runtime WAL
-    head and tail to a fresh continuation region.
+46. `RING-IMPL-REGRESSION-105` WAL-head reclaim MUST apply copied,
+    rewritten, and WAL-head control records through `ApplyWalRecord` so
+    runtime WAL head and tail move to the fresh continuation region.
 47. `RING-IMPL-REGRESSION-106` WAL-head reclaim MUST rewrite a live
     `EmptyClean` map as a WAL snapshot basis while preserving pending
     updates.
@@ -167,6 +180,16 @@ helpers.
 52. `RING-IMPL-REGRESSION-111` WAL-head reclaim capacity stress MUST
     reclaim a bounded WAL prefix when the full chain is longer than the
     cleanup batch capacity.
+53. `RING-IMPL-REGRESSION-135` Foreground append helpers and startup
+    replay MUST call the same `ApplyWalRecord` transition
+    implementation for replay-visible collection, allocator, WAL-chain,
+    and transaction records.
+54. `RING-IMPL-REGRESSION-136` Tests MUST compare live in-memory state
+    after appending representative records with state recovered by
+    reopening and replaying the same WAL prefix. Coverage MUST include
+    collection create/update/snapshot/head/drop, allocator
+    allocate/free/erase, WAL link/head control, and transaction begin,
+    commit, rollback, cleanup free, and finish records.
 
 ## Free-Space Collection Coverage Targets
 

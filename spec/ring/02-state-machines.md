@@ -255,12 +255,17 @@ a later rotation finish may consume from `Idle`.
   transactions before exposing recovered runtime state.
 - `Finish`: expose a `Storage` context whose mode is `Idle`.
 
-`ApplyWalRecord` is the shared transition table for durable WAL record
-effects. It is used when startup replays records, when a foreground
-operation appends and syncs a record, when recovery decides whether a
-record still carries live state, and when WAL-head reclaim preserves
-or rewrites live records. The table describes the replay-visible
-effect after a record is durable:
+`ApplyWalRecord` is the shared implementation boundary for durable WAL
+record effects. It takes the current stable runtime or replay state, a
+validated decoded WAL record, and the replay context needed to
+interpret that record, such as main WAL order, transaction-log range,
+inline-transaction body, recovery path, or WAL-head reclaim
+preservation. It is used when startup replays records, when a
+foreground operation appends and syncs a record, when recovery writes a
+missing record, and when WAL-head reclaim preserves or rewrites live
+records. Foreground code may pass the already-decoded record object
+after sync; it need not read the record back from media. The table
+describes the replay-visible effect after a record is durable:
 
 | WAL record | `ApplyWalRecord` effect |
 | --- | --- |
@@ -298,12 +303,15 @@ The main operation modes are transition sequences over the same table:
   collection state, but it does not append records or change durable
   state.
 - `CreatingCollection(CollectionCreateMode)` reserves a new collection
-  id, appends and syncs `new_collection`, applies the `EmptyClean`
-  transition, and returns a collection handle for the new empty basis.
+  id, appends and syncs `new_collection`, applies that decoded record
+  through `ApplyWalRecord`, and returns a collection handle for the new
+  empty basis.
 - `UpdatingCollection(CollectionUpdateMode)` validates a live
-  collection, encodes and appends a collection-defined `update`, applies
-  that update to the volatile frontier, and leaves the collection in
-  the matching dirty state.
+  collection, encodes, appends, and syncs a collection-defined
+  `update`, then applies that decoded record through `ApplyWalRecord`.
+  Any resident volatile frontier update uses the same
+  collection-defined update logic that replay uses when rebuilding that
+  frontier from retained updates.
 - `AppendingWal(WalAppendMode)` validates the source state, ensures the
   tail has room or asks `RotatingWal` to make room, writes and syncs one
   WAL record, then applies `ApplyWalRecord` to the stable runtime
@@ -312,17 +320,19 @@ The main operation modes are transition sequences over the same table:
   or erase maintenance if needed, preserves the ready-region reserve,
   writes and syncs `allocate_region(region_index,
   allocation_head_after)` inside the active full transaction, bounded
-  inline transaction, or privileged storage-core operation, then records
-  either a transaction-owned user allocation or a storage-core private
+  inline transaction, or privileged storage-core operation, then applies
+  that decoded record through `ApplyWalRecord` to record either a
+  transaction-owned user allocation or a storage-core private
   allocation reservation.
 - `WritingCommittedRegion(CommittedRegionWriteMode)` reserves a region,
   erases and writes a committed-region header plus payload, syncs the
   region, appends and syncs the user `head` record, then applies that
-  head transition.
+  decoded `head` record through `ApplyWalRecord`.
 - `RotatingWal(WalRotationMode)` writes and syncs a privileged
   `allocate_region` in the reserved tail window, writes and syncs
-  `link`, initializes and syncs the new WAL region, then makes the
-  linked region the append tail.
+  `link`, applies each decoded durable record through `ApplyWalRecord`,
+  initializes and syncs the new WAL region, then exposes the linked
+  region as the append tail.
 - `ReclaimingWalHead(WalHeadReclaimMode)` plans the old and new WAL
   heads, preserves free-space collection cursor state, copies or
   rewrites live records from the old head, commits the new WAL head, and
@@ -335,18 +345,22 @@ The main operation modes are transition sequences over the same table:
   finish records in replay order.
 - `SnapshottingCollection(CollectionSnapshotMode)` serializes the
   collection's current logical state into a WAL `snapshot`, appends and
-  syncs that record, clears superseded post-basis updates, and returns
+  syncs that record, then applies that decoded record through
+  `ApplyWalRecord` to clear superseded post-basis updates and return
   the collection to a clean WAL-snapshot basis.
 - `FlushingCollection(CollectionFlushMode)` writes collection-defined
   committed state into one or more allocated regions, appends and syncs
-  the user `head`, clears superseded post-basis updates, and uses a
-  collection transaction when old basis regions must be freed.
+  the user `head`, then applies that decoded record through
+  `ApplyWalRecord`. It uses a collection transaction when old basis
+  regions must be freed.
 - `CompactingCollection(CollectionCompactionMode)` reads the current
   committed layout, writes replacement committed layout, commits a new
-  user `head`, and frees committed regions made stale by the compaction
-  during transaction cleanup. The logical collection state remains clean.
+  user `head`, applies that decoded record through `ApplyWalRecord`,
+  and frees committed regions made stale by the compaction during
+  transaction cleanup. The logical collection state remains clean.
 - `DroppingCollection(CollectionDropMode)` appends and syncs
-  `drop_collection`, clears volatile collection state, and frees old
+  `drop_collection`, applies that decoded record through
+  `ApplyWalRecord`, clears volatile collection state, and frees old
   basis regions through transaction cleanup when needed.
 
 State-machine operations are named transition labels. Diagrams and
@@ -444,14 +458,29 @@ before beginning their transition sequence.
 state MUST be represented as a named transition edge with defined
 preconditions, durable effect, runtime effect, replay effect, and
 crash-cut result.
-5. `RING-MACHINE-005` Normal foreground operation, startup replay, and
-crash recovery MUST use the same `ApplyWalRecord` semantics for every
-retained durable WAL record.
-6. `RING-MACHINE-006` Startup and recovery modes MUST compose the same
+5. `RING-MACHINE-005` Normal foreground operation, startup replay,
+crash recovery, and WAL-head reclaim MUST use the same
+`ApplyWalRecord` implementation for every replay-visible WAL record.
+6. `RING-MACHINE-006` Stable runtime state for replay-visible
+collection, allocator, WAL-chain, and transaction state MUST NOT
+advance until the corresponding WAL record is durable. After that
+durability boundary, stable runtime state MUST be updated by applying
+the validated decoded record through `ApplyWalRecord`.
+7. `RING-MACHINE-007` Foreground append paths MAY perform append-time
+validation before writing and MAY pass the already-decoded record to
+`ApplyWalRecord` after sync. They MUST NOT maintain an alternate
+post-sync state mutation path that can diverge from startup replay.
+8. `RING-MACHINE-008` Active operation progress MAY hold planned,
+scratch, or private interstitial state before durability. Physical
+region writes, erases, or initialization MAY happen before the WAL
+record that publishes them, but stable replay-visible state MUST remain
+unchanged until the publish record is durable and applied through
+`ApplyWalRecord`.
+9. `RING-MACHINE-009` Startup and recovery modes MUST compose the same
 collection, allocator, WAL-chain, and transaction submachine
 transitions used by normal operation rather than defining separate
 incompatible transition rules.
-7. `RING-MACHINE-007` State-machine transition rules MUST use named
+10. `RING-MACHINE-010` State-machine transition rules MUST use named
 operation identifiers, and each named operation MUST define its source
 state, active mode, durable edge sequence, and target state or runtime
 effect.

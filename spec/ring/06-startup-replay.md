@@ -21,7 +21,8 @@ Mechanism review:
   recovery boundary, close incomplete transaction work, or re-publish
   idempotent allocator cleanup.
 - **Replay effect**: retained WAL records are applied by the same
-  `ApplyWalRecord` table used by foreground operation.
+  `ApplyWalRecord` implementation boundary used by foreground
+  operation after a WAL record is synced.
 - **Crash cuts**: opening can be retried after reset because every
   recovery write either preserves the previous replay result or moves to
   another replayable prefix.
@@ -30,9 +31,10 @@ Mechanism review:
 
 Startup recovery is the concrete `Opening(OpenMode)` procedure. It
 reconstructs stable runtime state by scanning durable media, walking the
-private log chains, and applying each retained WAL record through
-`ApplyWalRecord`. The detailed steps below define validation,
-discovery, and recovery behavior that surrounds those shared per-record
+private log chains, and applying each retained WAL record through the
+same `ApplyWalRecord` transition implementation used by foreground
+append paths. The detailed steps below define validation, discovery,
+and recovery behavior that surrounds those shared per-record
 transitions.
 
 Startup recovery reconstructs these things:
