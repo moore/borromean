@@ -19,7 +19,6 @@ module transaction_free_recovery {
   type TxPhase =
     | TxIdle
     | TxOpen
-    | TxRollbackPreparing
     | TxCommittedCleanup
     | TxRolledBackCleanup
 
@@ -29,10 +28,7 @@ module transaction_free_recovery {
   //   -> BeginTransaction -> TxOpen
   // TxOpen
   //   -> CommitTransaction -> TxCommittedCleanup
-  //   -> StartRollbackPreparation -> TxRollbackPreparing
-  // TxRollbackPreparing
-  //   -> RecordRollbackAllocation* -> RollbackTransaction
-  //   -> TxRolledBackCleanup
+  //   -> RollbackTransaction -> TxRolledBackCleanup
   // TxCommittedCleanup
   //   -> FreeCommittedIntent* -> FinishCommit -> TxIdle
   // TxRolledBackCleanup
@@ -48,7 +44,7 @@ module transaction_free_recovery {
   // - A cleanup free reference is a free-log slot. In the implementation this
   //   is a `(free_log_region, offset)` pair; in this bounded model it is the
   //   integer queue position `cleanupStartTail + cleanupIndex`.
-  // - Transaction free intents and rollback-allocation cleanup records retain
+  // - Transaction free intents and transaction-owned allocations retain
   //   physical regions. Cleanup idempotence comes from the ordered free slot,
   //   not from a logical region sequence header.
   type TxState = {
@@ -57,9 +53,8 @@ module transaction_free_recovery {
     observedGeneration: int,
     cleanupIndex: int,
     cleanupStartTail: int,
-    allocations: List[int],
+    allocatedRegions: List[int],
     freeIntents: List[int],
-    rollbackAllocations: List[int],
   }
 
   type CollectionState = {
@@ -151,27 +146,25 @@ module transaction_free_recovery {
     observedGeneration: int,
     cleanupIndex: int,
     cleanupStartTail: int,
-    allocations: List[int],
+    allocatedRegions: List[int],
     freeIntents: List[int],
-    rollbackAllocations: List[int],
   ): TxState = {
     phase: phase,
     collectionIndex: collectionIndex,
     observedGeneration: observedGeneration,
     cleanupIndex: cleanupIndex,
     cleanupStartTail: cleanupStartTail,
-    allocations: allocations,
+    allocatedRegions: allocatedRegions,
     freeIntents: freeIntents,
-    rollbackAllocations: rollbackAllocations,
   }
 
   pure val EmptyTx =
-    txState(TxIdle, NoCollection, 0, 0, 0, [], [], [])
+    txState(TxIdle, NoCollection, 0, 0, 0, [], [])
 
   pure val InitialTransactions = [EmptyTx, EmptyTx]
 
   pure def openTx(collectionIndex: int, observedGeneration: int): TxState =
-    txState(TxOpen, collectionIndex, observedGeneration, 0, 0, [], [], [])
+    txState(TxOpen, collectionIndex, observedGeneration, 0, 0, [], [])
 
   pure def txAddAllocation(tx: TxState, allocation: int): TxState =
     txState(
@@ -180,9 +173,8 @@ module transaction_free_recovery {
       tx.observedGeneration,
       tx.cleanupIndex,
       tx.cleanupStartTail,
-      tx.allocations.append(allocation),
+      tx.allocatedRegions.append(allocation),
       tx.freeIntents,
-      tx.rollbackAllocations,
     )
 
   pure def txAddFreeIntent(tx: TxState, freeIntent: int): TxState =
@@ -192,36 +184,8 @@ module transaction_free_recovery {
       tx.observedGeneration,
       tx.cleanupIndex,
       tx.cleanupStartTail,
-      tx.allocations,
+      tx.allocatedRegions,
       tx.freeIntents.append(freeIntent),
-      tx.rollbackAllocations,
-    )
-
-  pure def txAddRollbackAllocation(
-    tx: TxState,
-    rollbackAllocation: int,
-  ): TxState =
-    txState(
-      tx.phase,
-      tx.collectionIndex,
-      tx.observedGeneration,
-      tx.cleanupIndex,
-      tx.cleanupStartTail,
-      tx.allocations,
-      tx.freeIntents,
-      tx.rollbackAllocations.append(rollbackAllocation),
-    )
-
-  pure def txRollbackPreparing(tx: TxState): TxState =
-    txState(
-      TxRollbackPreparing,
-      tx.collectionIndex,
-      tx.observedGeneration,
-      0,
-      0,
-      tx.allocations,
-      tx.freeIntents,
-      tx.rollbackAllocations,
     )
 
   pure def txCommitted(tx: TxState, cleanupStartTail: int): TxState =
@@ -231,9 +195,8 @@ module transaction_free_recovery {
       tx.observedGeneration,
       0,
       cleanupStartTail,
-      tx.allocations,
+      tx.allocatedRegions,
       tx.freeIntents,
-      tx.rollbackAllocations,
     )
 
   pure def txRolledBack(tx: TxState, cleanupStartTail: int): TxState =
@@ -243,9 +206,8 @@ module transaction_free_recovery {
       tx.observedGeneration,
       0,
       cleanupStartTail,
-      tx.allocations,
+      tx.allocatedRegions,
       tx.freeIntents,
-      tx.rollbackAllocations,
     )
 
   pure def txAdvanceCleanup(tx: TxState): TxState =
@@ -255,22 +217,18 @@ module transaction_free_recovery {
       tx.observedGeneration,
       tx.cleanupIndex + 1,
       tx.cleanupStartTail,
-      tx.allocations,
+      tx.allocatedRegions,
       tx.freeIntents,
-      tx.rollbackAllocations,
     )
 
   pure def intListToSet(regions: List[int]): Set[int] =
     regions.foldl(Set(), (acc, region) => acc.union(Set(region)))
 
   pure def txAllocSet(tx: TxState): Set[int] =
-    intListToSet(tx.allocations)
+    intListToSet(tx.allocatedRegions)
 
   pure def txFreeIntentSet(tx: TxState): Set[int] =
     intListToSet(tx.freeIntents)
-
-  pure def txRollbackAllocSet(tx: TxState): Set[int] =
-    intListToSet(tx.rollbackAllocations)
 
   pure def pendingRegionSet(regions: List[int], cleanupIndex: int): Set[int] =
     intListToSet(regions.slice(cleanupIndex, regions.length()))
@@ -286,10 +244,10 @@ module transaction_free_recovery {
     }
 
   pure def txOutstandingAllocSet(tx: TxState): Set[int] =
-    if (tx.phase == TxOpen or tx.phase == TxRollbackPreparing) {
+    if (tx.phase == TxOpen) {
       txAllocSet(tx)
     } else if (tx.phase == TxRolledBackCleanup) {
-      pendingRegionSet(tx.rollbackAllocations, tx.cleanupIndex)
+      pendingRegionSet(tx.allocatedRegions, tx.cleanupIndex)
     } else {
       Set()
     }
@@ -539,46 +497,15 @@ module transaction_free_recovery {
     }
   }
 
-  // transaction_log rollback_decided(tx). This is not the durable rollback
-  // marker; it opens the safe window where private allocation cleanup records
-  // can be forced.
-  action StartRollbackPreparation = {
-    nondet txIndex = storage.transactions.indices().oneOf()
-    val currentTx = storage.transactions.nth(txIndex)
-    val nextTx = txRollbackPreparing(currentTx)
-    all {
-      currentTx.phase == TxOpen,
-
-      storage' = storageWithTransaction(storage, txIndex, nextTx),
-    }
-  }
-
-  // transaction_log rollback_allocation(tx, region). These records are written
-  // while allocations are still private, before the durable main-WAL rollback
-  // marker makes rollback cleanup recoverable.
-  action RecordRollbackAllocation = {
-    nondet txIndex = storage.transactions.indices().oneOf()
-    val currentTx = storage.transactions.nth(txIndex)
-    val region = currentTx.allocations.nth(currentTx.cleanupIndex)
-    val nextTx =
-      txAdvanceCleanup(txAddRollbackAllocation(currentTx, region))
-    all {
-      currentTx.phase == TxRollbackPreparing,
-      currentTx.cleanupIndex < currentTx.allocations.length(),
-
-      storage' = storageWithTransaction(storage, txIndex, nextTx),
-    }
-  }
-
   // main_wal rollback_transaction(tx), after rollback cleanup is still pending.
+  // Transaction-owned allocations become the retained cleanup list directly.
   action RollbackTransaction = {
     nondet txIndex = storage.transactions.indices().oneOf()
     val currentTx = storage.transactions.nth(txIndex)
     val nextTx = txRolledBack(currentTx, storage.appendTail)
     all {
       walUnlocked(storage),
-      currentTx.phase == TxRollbackPreparing,
-      currentTx.cleanupIndex == currentTx.allocations.length(),
+      currentTx.phase == TxOpen,
 
       storage' =
         storageWithWalCleanupOwner(
@@ -617,18 +544,18 @@ module transaction_free_recovery {
     nondet txIndex = storage.transactions.indices().oneOf()
     val currentTx = storage.transactions.nth(txIndex)
     val freeSlot = currentTx.cleanupStartTail + currentTx.cleanupIndex
-    val rollbackAllocation =
-      currentTx.rollbackAllocations.nth(currentTx.cleanupIndex)
+    val allocatedRegion =
+      currentTx.allocatedRegions.nth(currentTx.cleanupIndex)
     val nextTx = txAdvanceCleanup(currentTx)
     all {
       currentTx.phase == TxRolledBackCleanup,
       walOwnedBy(storage, txIndex),
-      currentTx.cleanupIndex < currentTx.rollbackAllocations.length(),
+      currentTx.cleanupIndex < currentTx.allocatedRegions.length(),
       storage.appendTail == freeSlot,
 
       storage' =
         storageWithTransaction(
-          storageWithFreeAppend(storage, rollbackAllocation),
+          storageWithFreeAppend(storage, allocatedRegion),
           txIndex,
           nextTx,
         ),
@@ -661,7 +588,7 @@ module transaction_free_recovery {
     all {
       currentTx.phase == TxRolledBackCleanup,
       walOwnedBy(storage, txIndex),
-      currentTx.cleanupIndex == currentTx.rollbackAllocations.length(),
+      currentTx.cleanupIndex == currentTx.allocatedRegions.length(),
 
       storage' =
         storageWithWalCleanupOwner(
@@ -688,8 +615,6 @@ module transaction_free_recovery {
     AllocateInTransaction,
     StageFreeIntent,
     CommitTransaction,
-    StartRollbackPreparation,
-    RecordRollbackAllocation,
     RollbackTransaction,
     FreeCommittedIntent,
     FreeRolledBackAllocation,
@@ -735,9 +660,9 @@ module transaction_free_recovery {
     nondet txIndex = storage.transactions.indices().oneOf()
     val currentTx = storage.transactions.nth(txIndex)
     nondet obligationIndex =
-      currentTx.rollbackAllocations.indices().oneOf()
+      currentTx.allocatedRegions.indices().oneOf()
     val obligation =
-      currentTx.rollbackAllocations.nth(obligationIndex)
+      currentTx.allocatedRegions.nth(obligationIndex)
     all {
       currentTx.phase == TxRolledBackCleanup,
 
@@ -825,14 +750,11 @@ module transaction_free_recovery {
       regions.indices().forall(j =>
         (i == j).or(not(regions.nth(i) == regions.nth(j)))))
 
-  pure def allAllocationsHaveRollbackRecords(tx: TxState): bool =
-    txAllocSet(tx).subseteq(txRollbackAllocSet(tx))
-
   pure def cleanupListLength(tx: TxState): int =
     if (tx.phase == TxCommittedCleanup) {
       tx.freeIntents.length()
     } else if (tx.phase == TxRolledBackCleanup) {
-      tx.rollbackAllocations.length()
+      tx.allocatedRegions.length()
     } else {
       0
     }
@@ -841,7 +763,7 @@ module transaction_free_recovery {
     if (tx.phase == TxCommittedCleanup) {
       tx.freeIntents.nth(index)
     } else {
-      tx.rollbackAllocations.nth(index)
+      tx.allocatedRegions.nth(index)
     }
 
   pure def cleanupPrefixMatchesQueue(
@@ -867,15 +789,11 @@ module transaction_free_recovery {
 
   pure def txEntriesOK(tx: TxState): bool =
     // Every transaction-owned list names modeled physical regions.
-    intListEntriesInRegions(tx.allocations)
+    intListEntriesInRegions(tx.allocatedRegions)
     and intListEntriesInRegions(tx.freeIntents)
-    and intListEntriesInRegions(tx.rollbackAllocations)
     // A transaction may not retain duplicate ownership/cleanup entries.
-    and noDuplicates(tx.allocations)
+    and noDuplicates(tx.allocatedRegions)
     and noDuplicates(tx.freeIntents)
-    and noDuplicates(tx.rollbackAllocations)
-    // Rollback records may only describe this transaction's allocations.
-    and txRollbackAllocSet(tx).subseteq(txAllocSet(tx))
 
   pure def txCollectionOK(
     tx: TxState,
@@ -902,22 +820,18 @@ module transaction_free_recovery {
       and tx.observedGeneration == 0
       and tx.cleanupIndex == 0
       and tx.cleanupStartTail == 0
-      and tx.allocations.length() == 0
-      and tx.freeIntents.length() == 0
-      and tx.rollbackAllocations.length() == 0)
+      and tx.allocatedRegions.length() == 0
+      and tx.freeIntents.length() == 0)
 
   pure def txCleanupIndexOK(tx: TxState): bool =
     // The scan cursor is bounded by the list being scanned, and is zero when
     // the phase does not have an active scan.
-    if (tx.phase == TxRollbackPreparing) {
-      0 <= tx.cleanupIndex
-      and tx.cleanupIndex <= tx.allocations.length()
-    } else if (tx.phase == TxCommittedCleanup) {
+    if (tx.phase == TxCommittedCleanup) {
       0 <= tx.cleanupIndex
       and tx.cleanupIndex <= tx.freeIntents.length()
     } else if (tx.phase == TxRolledBackCleanup) {
       0 <= tx.cleanupIndex
-      and tx.cleanupIndex <= tx.rollbackAllocations.length()
+      and tx.cleanupIndex <= tx.allocatedRegions.length()
     } else {
       tx.cleanupIndex == 0
     }
@@ -935,13 +849,6 @@ module transaction_free_recovery {
     } else {
       tx.cleanupStartTail == 0
     }
-
-  pure def txRollbackRecordsPhaseOK(tx: TxState): bool =
-    // Rollback records exist only after rollback preparation has started.
-    (
-      tx.phase == TxOpen
-      or tx.phase == TxCommittedCleanup
-    ).implies(tx.rollbackAllocations.length() == 0)
 
   ////// Core invariants //////
 
@@ -989,9 +896,6 @@ module transaction_free_recovery {
         storage.appendTail,
         storage.freeQueue.length(),
       ))
-    // Rollback records cannot appear before a transaction starts rollback.
-    and storage.transactions.indices().forall(i =>
-      txRollbackRecordsPhaseOK(storage.transactions.nth(i)))
 
   // Allocator cursors maintain the consumed/ready/dirty/unused queue partition.
   val cursorOrderOK =
@@ -1069,7 +973,6 @@ module transaction_free_recovery {
     storage.transactions.indices().forall(i =>
       (
         storage.transactions.nth(i).phase == TxOpen
-        or storage.transactions.nth(i).phase == TxRollbackPreparing
       ).implies(
         collectionLivesDisjointFrom(
           storage.collections,
@@ -1104,14 +1007,13 @@ module transaction_free_recovery {
           ) == Set()))
 
   // Current free-intent refs stay live in the transaction's collection and out
-  // of unconsumed free space until commit or rollback preparation changes the
-  // transaction phase. Stale transactions may retain old intents; the
-  // generation check blocks their commit.
+  // of unconsumed free space until commit or rollback changes the transaction
+  // phase. Stale transactions may retain old intents; the generation check
+  // blocks their commit.
   val openFreeIntentsStayLiveAndNotFree =
     storage.transactions.indices().forall(i =>
       (
         storage.transactions.nth(i).phase == TxOpen
-        or storage.transactions.nth(i).phase == TxRollbackPreparing
       ).implies(
         txGenerationCurrent(
           storage.collections,
@@ -1130,18 +1032,6 @@ module transaction_free_recovery {
           ).intersect(unconsumedFreeSet) == Set()
         )))
 
-  // Rollback-allocation records written before the durable rollback marker are
-  // still private transaction evidence and cannot already be free.
-  val rollbackPreparationRefsNotFree =
-    storage.transactions.indices().forall(i =>
-      (
-        storage.transactions.nth(i).phase == TxRollbackPreparing
-      ).implies(
-        txRollbackAllocSet(
-          storage.transactions.nth(i)
-        ).intersect(unconsumedFreeSet) == Set()
-      ))
-
   // After commit, still-pending cleanup entries are detached from collection
   // live state until cleanup writes their indexed free slots.
   val committedCleanupPendingRefsNotLive =
@@ -1154,16 +1044,13 @@ module transaction_free_recovery {
           txPendingCommittedCleanupSet(storage.transactions.nth(i)),
         )))
 
-  // After rollback, every allocation has an explicit rollback record and
-  // still-pending rollback cleanup entries are detached from collection live
-  // state.
+  // After rollback, still-pending transaction-owned allocations are detached
+  // from collection live state until cleanup writes their indexed free slots.
   val rolledBackCleanupPendingAllocationsNotLive =
     storage.transactions.indices().forall(i =>
       (
         storage.transactions.nth(i).phase == TxRolledBackCleanup
       ).implies(
-        allAllocationsHaveRollbackRecords(storage.transactions.nth(i))
-        and
         collectionLivesDisjointFrom(
           storage.collections,
           txOutstandingAllocSet(storage.transactions.nth(i)),
@@ -1176,7 +1063,6 @@ module transaction_free_recovery {
   // indexed free slots.
   val cleanupRefsPhaseSafe =
     openFreeIntentsStayLiveAndNotFree
-    and rollbackPreparationRefsNotFree
     and committedCleanupPendingRefsNotLive
     and rolledBackCleanupPendingAllocationsNotLive
 
