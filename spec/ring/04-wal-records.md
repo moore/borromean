@@ -219,7 +219,14 @@ the payload.
 encode `payload_len = 0`.
 6. `RING-WAL-LAYOUT-006` Payload bytes are encoded canonically by
 record type:
-`update` and `snapshot` payloads are opaque collection-defined bytes;
+user-collection `update` and `snapshot` payloads are opaque
+collection-defined bytes;
+`snapshot(collection_id = 0, collection_type = free_space_v2)` payload
+is `allocation_head:FreeQueuePosition,
+ready_boundary:FreeQueuePosition, append_tail:FreeQueuePosition,
+entry_count:u32, entries:[u32; entry_count]`, where `entries` contains
+the region indexes for logical positions
+`[allocation_head, append_tail)`;
 `head` payload is `region_index:u32`;
 `allocate_region` payload is
 `region_index:u32, allocation_head_after:FreeQueuePosition`;
@@ -258,7 +265,10 @@ Collection-local mutation delta. Applied in WAL order during replay.
 3. `RING-WAL-PAYLOAD-003` `snapshot`
 Full logical state for one collection at a point in time, tagged with
 the collection type for that snapshot basis. Supersedes older `update`
-records for that collection that appear before the snapshot.
+records for that collection that appear before the snapshot. For
+`collection_id = 0` the only valid snapshot collection type is
+`free_space_v2`; its payload is the complete free-space collection
+state needed to rebuild the allocator without older allocator records.
 
 4. `RING-WAL-PAYLOAD-004` `allocate_region`
 When applied, pops the current ready entry from the free-space
@@ -272,11 +282,15 @@ storage-core operation.
 5. `RING-WAL-PAYLOAD-005` `head`
 Commits a collection to a durable region head. Payload contains the
 target `region_index`. The record also carries the collection type for
-that durable region basis. When `collection_id = 0`, this record
-commits a new WAL head region; there is no distinct WAL-head record
-type. For user collections, Borromean core validates that the target
-region header has the same `collection_id`; the collection
-implementation owns the interpretation of its `collection_format`.
+that durable region basis. When `collection_id = 0` and
+`collection_type = main_wal_v2`, this record commits a new WAL head
+region; there is no distinct WAL-head record type. When
+`collection_id = 0` and `collection_type = free_space_v2`, this record
+commits a materialized free-space basis rooted at the target
+`free_space_v2` metadata region. For user collections, Borromean core
+validates that the target region header has the same `collection_id`;
+the collection implementation owns the interpretation of its
+`collection_format`.
 
 6. `RING-WAL-PAYLOAD-006` `drop_collection`
 Durably tombstones a user collection. The record detaches that
@@ -413,11 +427,21 @@ record alone.
 only if the target region header has the same `collection_id`. Replay
 does not revalidate every append-time reachability check for that
 target; this is an intentional application of the checksum trust model.
-9. `RING-WAL-VALID-009` For the WAL (`collection_id = 0`), `head`
-records are valid only if their `collection_type` is the WAL collection
-type. Startup uses them only during WAL-head discovery from the tail
-region; they do not create ordinary collection replay state during the
-main replay pass.
+9. `RING-WAL-VALID-009` For storage-private records
+(`collection_id = 0`), `update` records are invalid. `snapshot` records
+are valid only with `collection_type = free_space_v2` and a
+self-contained free-space snapshot payload whose
+`allocation_head <= ready_boundary <= append_tail`, whose `entry_count`
+equals `append_tail - allocation_head`, and whose entries contain valid
+non-duplicate region indexes. `head` records are valid only with
+`collection_type = main_wal_v2` or `collection_type = free_space_v2`.
+A `main_wal_v2` head is used only during WAL-head discovery from the
+tail region, and its target region MUST have a valid header with
+`collection_id = 0` and `collection_format = main_wal_v2`. A
+`free_space_v2` head is a free-space durable basis; its target region
+MUST have a valid header with `collection_id = 0` and
+`collection_format = free_space_v2`, and the materialized chain MUST
+satisfy the free-space collection region rules.
 10. `RING-WAL-VALID-010` A `link` is only valid as the last complete
 record in a private log region. During log-chain traversal, a `link` in
 a reachable non-tail log region is valid only if its target has a valid
@@ -608,8 +632,8 @@ free-space entry MUST first make
 `allocate_region(region_index, allocation_head_after)` durable in the
 main WAL, in an inline transaction, or in a reachable
 transaction-log range. The log segment prologue supplies the
-free-space cursor checkpoint before later complete allocator commands
-are applied.
+free-space cursor checkpoint; the retained free-space basis supplies
+the queue entries before later complete allocator commands are applied.
 5. `RING-REPLAY-ASSUME-005` If replay ends with an unmatched
 storage-core `allocate_region` in the WAL-rotation reserve window, that
 region is treated as a private log rotation target instead of being

@@ -243,7 +243,9 @@ own rules.
 `collection_format` values under `collection_id = 0`:
 `main_wal_v2` for the main WAL, `transaction_log_v2` for transaction
 logs, and `free_space_v2` for free-space collection metadata. These
-identifiers are not user-definable.
+identifiers are not user-definable. `main_wal_v2` and `free_space_v2`
+are also the storage-private `collection_type` values used by WAL
+records that name `collection_id = 0`.
 11. `RING-FORMAT-011` Per-region format evolution remains allowed because region headers
 carry `collection_format` independently of the collection's stable
 type.

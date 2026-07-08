@@ -355,10 +355,11 @@ metadata.
 `free_space_v2` metadata chain. In chain order, their headers MUST use
 strictly increasing `sequence` values starting at `0`. The chain's
 `FreeSpaceRegionPrologue` values MUST set `allocation_head`,
-`ready_boundary`, and `append_tail` so every non-reserved data region
-after the metadata chain is in the ready range. Its `FreeSpaceEntry`
-arrays MUST list those ready regions in ascending region-index order.
-Sync every initialized free-space metadata region.
+`ready_boundary`, `append_tail`, and `first_queue_position` so every
+non-reserved data region after the metadata chain is in the ready range
+at consecutive logical free-queue positions starting at `0`. Its
+`FreeSpaceEntry` arrays MUST list those ready regions in ascending
+region-index order. Sync every initialized free-space metadata region.
 4. `RING-FORMAT-STORAGE-004` Initialize region `0` as main WAL:
 write a valid `Header` with `collection_id = 0`,
 `collection_format = main_wal_v2`, and
@@ -412,17 +413,17 @@ free-space metadata chain beginning at region `1`.
 2. Main WAL chain walk yields a single-region chain (`head = tail = 0`).
 3. No main WAL records or transaction-log records are replayed.
 4. Replay loads the free-space collection from the initial metadata
-chain: all entries after that chain are ready, no entries are dirty,
-and no entries have been allocated.
+chain as the bootstrap basis: all entries after that chain are ready,
+no entries are dirty, and no entries have been allocated.
 5. Normal replay reconstruction then yields no tracked user
 collections, no pending updates, no transaction recovery work, no
 storage-core private allocation reservation, and a ready range that
 satisfies `min_free_regions`.
 
-This is not a special-case bootstrap. Replay starts with the
-free-space cursor checkpoint in the effective main WAL head segment's
-`LogRegionPrologue`, validates the materialized `free_space_v2`
-metadata, and then applies later complete `free_region`,
+This is not a special-case bootstrap. Replay starts with the initial
+free-space basis, validates the effective main WAL head segment's
+free-space cursor checkpoint against that basis, and then applies later
+retained free-space basis records and complete `free_region`,
 `erase_free_region_span`, and `allocate_region` decisions.
 
 ```mermaid

@@ -44,8 +44,8 @@ Startup recovery reconstructs these things:
    with committed updates that must be materialized at open.
 3. `RING-STARTUP-RESULT-003` Free-space collection state:
    `allocation_head`, `ready_boundary`, `append_tail`, and the FIFO
-   entries reachable from the materialized `free_space_v2` metadata
-   regions plus retained WAL commands.
+   entries recovered from the latest retained free-space basis plus
+   later allocator WAL commands.
 4. `RING-STARTUP-RESULT-004` Any storage-core private allocation
    reservation, if a private-log rotation allocation was durable but not
    yet consumed by `link`.
@@ -85,11 +85,12 @@ descriptor requires it.
 4. `RING-STARTUP-004` Read and validate the `LogRegionPrologue` stored
 at the start of the main WAL tail region's user-data area. Use its
 `log_head_region_index` as the initial WAL-head candidate and its
-free-space cursor checkpoint as the allocator baseline for this WAL
-chain. Then scan that tail region using the aligned candidate-start and
-record-validation rules defined below, and let the last valid
-`head(collection_id = 0, collection_type = wal, region_index)` record
-override the head candidate.
+free-space cursor checkpoint to validate the free-space basis and
+allocator records for this WAL chain. Then scan that tail region using
+the aligned candidate-start and record-validation rules defined below,
+and let the last valid
+`head(collection_id = 0, collection_type = main_wal_v2, region_index)`
+record override the head candidate.
 5. `RING-STARTUP-005` Walk the WAL region chain from the resulting WAL
 head to tail using `link` records. If a `link` is missing or invalid
 before reaching the known tail, return an error.
@@ -130,14 +131,15 @@ before reaching the known tail, return an error.
    referenced transaction log, except initialized target regions use
    `collection_format = transaction_log_v2`.
 6. `RING-STARTUP-006` Initialize the free-space collection from the
-materialized `free_space_v2` metadata region chain rooted at canonical
-region `1`; the effective log prologue cursors name positions within
-that chain, not an alternate root. Validate each metadata header's
-strictly increasing chain-local sequence, each `FreeSpaceRegionPrologue`,
-each `FreeSpaceEntry`, and the cursor invariant
-`allocation_head <= ready_boundary <= append_tail`. The materialized
-queue supplies the initial FIFO entries and cursor positions; later
-retained WAL allocator commands update that state.
+initial formatted `free_space_v2` metadata chain rooted at region `1`.
+This is only the bootstrap basis. During WAL replay, a retained
+`snapshot(collection_id = 0, collection_type = free_space_v2, ...)` or
+`head(collection_id = 0, collection_type = free_space_v2, ...)` record
+replaces that basis and discards older allocator update records.
+Validate each materialized metadata header, each
+`FreeSpaceRegionPrologue`, each `FreeSpaceEntry`, the logical coverage
+of `[allocation_head, append_tail)`, and the cursor invariant
+`allocation_head <= ready_boundary <= append_tail`.
 7. `RING-STARTUP-007` Parse records in WAL order: region order, then
 offset order. Record parsing begins only at offsets aligned to
 `wal_write_granule` and greater than or equal to
@@ -178,12 +180,18 @@ position, and start with no pending updates.
 is not tracked or is tracked as `Dropped`, return an error. Otherwise
 append to `pending_updates` for that collection.
 11. `RING-STARTUP-011` On
-`snapshot(collection_id, collection_type)`: if `collection_id` is not
-tracked, create replay state because older basis records may have been
-reclaimed and set tracked `collection_type` from this record. If the
-collection is dropped or this record's type conflicts with the tracked
-type, return an error. Set collection state to `WALSnapshotClean`, set
-`basis_pos`, and clear older pending updates for that collection.
+`snapshot(collection_id, collection_type)`: if `collection_id = 0`,
+require `collection_type = free_space_v2`, validate the self-contained
+free-space snapshot payload, replace the free-space durable basis with
+that snapshot, and discard older allocator update records.
+
+    For a user collection, if `collection_id` is not tracked, create
+    replay state because older basis records may have been reclaimed
+    and set tracked `collection_type` from this record. If the
+    collection is dropped or this record's type conflicts with the
+    tracked type, return an error. Set collection state to
+    `WALSnapshotClean`, set `basis_pos`, and clear older pending updates
+    for that collection.
 12. `RING-STARTUP-012` On
 `free_region(region_index, append_tail_after)`: verify that
 `region_index` is detached from live reachability, is not already in the
@@ -240,10 +248,16 @@ publishes in body order.
 known uncommitted inline range and do not apply the body records.
 19. `RING-STARTUP-019` On
 `head(collection_id, collection_type, region_index)`: if
-`collection_id = 0`, this is a WAL-head control record. Its replay
-effect was already consumed while determining the WAL-head candidate
-from the tail region. If `collection_type != wal`, return an error;
-otherwise ignore this record during the main per-record replay pass.
+`collection_id = 0` and `collection_type = main_wal_v2`, this is a
+WAL-head control record. Its replay effect was already consumed while
+determining the WAL-head candidate from the tail region; ignore this
+record during the main per-record replay pass.
+
+    If `collection_id = 0` and `collection_type = free_space_v2`,
+    validate the target materialized free-space metadata chain, replace
+    the free-space durable basis with that chain, and discard older
+    allocator update records. Any other `collection_id = 0` head record
+    is invalid.
 
     For user collections, create replay state if older records may have
     been reclaimed, validate type consistency, reject dropped
@@ -407,7 +421,7 @@ validation helpers.
     WAL chain.
 17. `RING-IMPL-REGRESSION-062` Opening a freshly formatted store MUST
     initialize free-space cursors and queue entries from the formatted
-    `free_space_v2` metadata region.
+    `free_space_v2` bootstrap basis.
 
 ```mermaid
 %%{init: {"flowchart": {"wrappingWidth": 180}} }%%
@@ -421,7 +435,7 @@ flowchart TD
     ChainOk{"`WAL chain valid?`"}
     Rotate{"`Incomplete private-log rotation?`"}
     RecoverRotate["`Recover missing link or finish target log init`"]
-    ReadFree["`Load materialized free-space collection`"]
+    ReadFree["`Load free-space bootstrap basis`"]
     Replay["`Replay reachable WAL records and committed ranges`"]
     Rebuild["`Rebuild collection and free-space state`"]
     FinishTransactions["`Finish or roll back incomplete transactions`"]
@@ -457,7 +471,8 @@ discovered during region scan, but it cannot win WAL-tail selection
 unless the monotonic sequence rule has already been violated.
 5. `RING-BOOTSTRAP-005` Startup derives the WAL head only from the
 selected tail's `LogRegionPrologue` plus any later
-`head(collection_id = 0, ...)` records found in that same tail region.
+`head(collection_id = 0, collection_type = main_wal_v2, ...)` records
+found in that same tail region.
 Stale headers in free-space member regions therefore do not influence
 WAL-head recovery once they lose tail selection.
 
@@ -496,8 +511,7 @@ pub struct WalPosition {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FreeQueuePosition {
-  pub metadata_region: RegionIndex,
-  pub entry_index: u32,
+  pub queue_index: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

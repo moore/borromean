@@ -68,11 +68,11 @@ whose meaning is defined by the corresponding collection-specific
 specification; those bytes are opaque to Borromean core. Collection ids
 are opaque 64-bit nonces that are assigned when
 a collection is created by `new_collection(collection_id,
-collection_type)`. Collection
-id `0` is reserved for the WAL; all user collection ids are nonzero
-and are not recycled. Borromean core also reserves
-`collection_type = wal` for `collection_id = 0`; user collections must
-not use that collection type.
+collection_type)`. Collection id `0` is reserved for storage-private
+state; all user collection ids are nonzero and are not recycled.
+Borromean core also reserves `collection_type = main_wal_v2` and
+`collection_type = free_space_v2` for `collection_id = 0`; user
+collections must not use those collection types.
 
 A collection may be removed durably by appending
 `drop_collection(collection_id)` to the WAL. Once that record is
@@ -146,7 +146,7 @@ means the logical oldest live WAL region in the chain; new WAL records
 are always appended at the WAL tail.
 
 If reclaim advances the WAL head, a normal
-`head(collection_id = 0, collection_type = wal, region_index =
+`head(collection_id = 0, collection_type = main_wal_v2, region_index =
 new_head)` control record is appended in the current WAL tail before
 the old WAL head becomes unreachable. The WAL does not have a separate
 WAL-only head-record type; it uses the same `head` record as every
@@ -177,11 +177,20 @@ region unless the collection defines an explicit durable undo protocol for that
 mutation. Otherwise a rollback could not distinguish the region's public
 pre-transaction contents from private uncommitted contents.
 
-The storage system also keeps a storage-private free-space collection of
-regions that are available to satisfy new allocations. This collection
-is FIFO (first in, first out), to support wear leveling. It is replayed
-from WAL allocator commands and materialized free-space collection
-regions; free regions themselves do not store allocator links.
+The storage system also keeps a storage-private free-space collection
+of regions that are available to satisfy new allocations. It is a WAL
+sub-collection under `collection_id = 0` and
+`collection_type = free_space_v2`, with the same basis/frontier shape
+as ordinary collections but storage-defined update records. Its durable
+basis may be the initial formatted state, a retained
+`snapshot(collection_id = 0, collection_type = free_space_v2, ...)`
+record, or a retained
+`head(collection_id = 0, collection_type = free_space_v2, ...)` record
+that points at a materialized `free_space_v2` metadata chain. WAL
+snapshots and materialized metadata are alternative durable bases;
+neither requires the other to be written first. The post-basis frontier
+is made of retained allocator records. Free regions themselves do not
+store allocator links.
 
 The free-space collection has three replay-visible cursors:
 `allocation_head`, `ready_boundary`, and `append_tail`, with the
@@ -192,16 +201,18 @@ may be allocated without running erase inline. Entries from
 `ready_boundary` up to `append_tail` name dirty regions that must be
 erased before they can be allocated.
 
-Freeing a region appends `free_region(region_index, append_tail_after)`,
-which adds a detached region at `append_tail` as dirty. Erase
-maintenance erases a bounded dirty span and then appends
+The free-space collection is FIFO (first in, first out), to support
+wear leveling. Freeing a region appends
+`free_region(region_index, append_tail_after)`, which adds a detached
+region at `append_tail` as dirty. Erase maintenance erases a bounded
+dirty span and then appends
 `erase_free_region_span(count, ready_boundary_after)`, which publishes
 the ready-boundary advance. Allocation appends
 `allocate_region(region_index, allocation_head_after)`, which consumes
 the current ready entry and reserves that region. These commands are
-self-checking cursor transitions: replay validates the named region or
-cursor update against the current free-space collection state before
-applying it.
+self-checking cursor transitions in the free-space frontier: replay
+validates the named region or cursor update against the current
+free-space collection state before applying it.
 
 Ordinary user/data allocations are transaction-owned. If the enclosing
 transaction commits, the allocator pop and collection state update
@@ -271,12 +282,13 @@ independently.
 log-structured state: new durable collection state is written to WAL
 records or fresh committed regions, and live committed collection
 regions MUST NOT be rewritten in place.
-3. `RING-CORE-003` Borromean MUST reserve `collection_id = 0` for the
-WAL, and all user collection identifiers MUST be nonzero stable 64-bit
-nonces that are never recycled.
+3. `RING-CORE-003` Borromean MUST reserve `collection_id = 0` for
+storage-private state, and all user collection identifiers MUST be
+nonzero stable 64-bit nonces that are never recycled.
 4. `RING-CORE-004` Borromean core MUST reserve
-`collection_type = wal` for `collection_id = 0`, and user collections
-MUST NOT use that collection type.
+`collection_type = main_wal_v2` and
+`collection_type = free_space_v2` for `collection_id = 0`, and user
+collections MUST NOT use those collection types.
 5. `RING-CORE-005` For user collections, append-time validity MUST
 require a successful earlier
 `new_collection(collection_id, collection_type)` before any later
@@ -290,14 +302,18 @@ durable MUST tombstone that collection, MUST forbid later WAL records
 for that `collection_id`, and MUST make older durable bytes reclaimable
 once they are no longer physically reachable from live state.
 8. `RING-CORE-008` Borromean MUST model WAL-head movement as ordinary
-`head(collection_id = 0, collection_type = wal, region_index = ...)`
-records rather than a WAL-specific head record type.
+`head(collection_id = 0, collection_type = main_wal_v2,
+region_index = ...)` records rather than a WAL-specific head record
+type.
 9. `RING-CORE-009` Any multi-step collection operation that commits a
 new durable basis and frees old regions MUST be tracked as either a
 bounded inline transaction or a transaction-log-backed transaction with
 durable begin, commit, cleanup, and terminal markers.
-10. `RING-CORE-010` The storage-private free-space collection MUST be
-FIFO so allocations consume the oldest ready free regions first.
+10. `RING-CORE-010` The storage-private free-space collection MUST be a
+`collection_id = 0`, `collection_type = free_space_v2` WAL
+sub-collection whose retained state is the latest free-space basis plus
+later allocator update records. It MUST be FIFO so allocations consume
+the oldest ready free regions first.
 11. `RING-CORE-011` Any operation that writes a newly allocated region
 MUST first durably reserve that region with
 `allocate_region(region_index, allocation_head_after)` in an enclosing

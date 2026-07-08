@@ -43,9 +43,9 @@ boundaries, and WAL-chain reachability produced by `ApplyWalRecord`.
 Per-collection cutoff:
 
 These cutoff terms apply only to user collections (`collection_id !=
-0`). WAL-head bootstrap records for `collection_id = 0` are governed
-separately below because startup reconstructs them only from the current
-WAL tail region.
+0`). Storage-private records for `collection_id = 0` are governed
+separately below because the main WAL head and free-space collection
+have storage-defined basis rules.
 
 1. Let `H(c)` be the current clean durable-basis state for collection
    `c` (`EmptyClean`, `WALSnapshotClean`, `RegionClean`, or `Dropped`).
@@ -62,20 +62,23 @@ collection_type)` record:
 live only if it is the basis decision at `D(c)` for a collection whose
 logical head `H(c)` is `EmptyClean`; otherwise reclaimable.
 2. `RING-WAL-RECLAIM-002` `head(collection_id = 0, collection_type =
-wal, region_index)` record:
+main_wal_v2, region_index)` record:
 live only if startup would currently use it as the effective WAL-head
 override for the current tail region. Any earlier such control record,
 or any such record in a non-tail WAL region, is reclaimable once the
 same effective WAL head is preserved by a later tail-local control
 record or by the current tail region's `LogRegionPrologue`.
 3. `RING-WAL-RECLAIM-003` `head(collection_id, collection_type,
-region_index)` record for a user collection:
-live only if it is the decision record at `D(c)` for a collection whose
-logical head `H(c)` is `RegionClean`; older `head(...)` records are
-reclaimable.
+region_index)` record for a user collection or for
+`collection_id = 0, collection_type = free_space_v2`:
+for a user collection, live only if it is the decision record at
+`D(c)` for a collection whose logical head `H(c)` is `RegionClean`;
+for `free_space_v2`, live only if it is the latest retained
+free-space basis. Older `head(...)` records are reclaimable.
 4. `RING-WAL-RECLAIM-004` `snapshot` record:
 live only if it is the decision record at `D(c)` for a collection whose
-logical head `H(c)` is `WALSnapshotClean`; otherwise reclaimable.
+logical head `H(c)` is `WALSnapshotClean`, or if it is the latest
+retained `free_space_v2` basis; otherwise reclaimable.
 5. `RING-WAL-RECLAIM-005` `drop_collection(collection_id)` record:
 live only if it is the decision record at `D(c)` for a collection whose
 logical head `H(c)` is `Dropped`; older `drop_collection(...)` records
@@ -88,19 +91,19 @@ live only while required to maintain a valid private-log chain from
 current head to current tail.
 8. `RING-WAL-RECLAIM-008` `free_region(region_index,
 append_tail_after)` record:
-live while replay still needs it after the retained log-segment
-prologue checkpoint to reconstruct the newest `append_tail` position
-and dirty-range membership.
+live while replay still needs it after the latest retained free-space
+basis to reconstruct the newest `append_tail` position and dirty-range
+membership.
 9. `RING-WAL-RECLAIM-009` `erase_free_region_span(count,
 ready_boundary_after)` record:
-live while replay still needs it after the retained prologue checkpoint
-to reconstruct the newest `ready_boundary`.
+live while replay still needs it after the latest retained free-space
+basis to reconstruct the newest `ready_boundary`.
 10. `RING-WAL-RECLAIM-010` `allocate_region(region_index,
 allocation_head_after)` record:
-live while replay still needs it after the retained prologue checkpoint
-to reconstruct the newest `allocation_head`, or while a storage-core
-private allocation reservation is still needed to recover an incomplete
-private-log rotation.
+live while replay still needs it after the latest retained free-space
+basis to reconstruct the newest `allocation_head`, or while a
+storage-core private allocation reservation is still needed to recover
+an incomplete private-log rotation.
 11. `RING-WAL-RECLAIM-011` Main-WAL transaction-control and inline
 transaction-control records are live while startup replay still needs
 them to import a committed range, prove rollback was decided, finish
@@ -130,8 +133,8 @@ WAL-region reclaim postconditions:
 
 1. `RING-WAL-RECLAIM-POST-001` A collection's `H(c)`, `B(c)`, and live
 post-basis updates MUST NOT depend on bytes in the reclaimed region.
-2. `RING-WAL-RECLAIM-POST-002` The recovered free-space cursors MUST
-match pre-reclaim allocator state.
+2. `RING-WAL-RECLAIM-POST-002` The recovered free-space basis,
+frontier entries, and cursors MUST match pre-reclaim allocator state.
 3. `RING-WAL-RECLAIM-POST-003` The recovered storage-core private
 allocation reservation, if any, MUST match pre-reclaim allocator state.
 4. `RING-WAL-RECLAIM-POST-004` Transaction recovery state that replay
@@ -139,8 +142,8 @@ would continue MUST match pre-reclaim crash-recovery state.
 5. `RING-WAL-RECLAIM-POST-005` Startup MUST recover the same effective
 WAL head after reclaim as before reclaim, using the current tail
 region's `LogRegionPrologue` plus the last valid tail-local
-`head(collection_id = 0, collection_type = wal, region_index = ...)`
-override, if any.
+`head(collection_id = 0, collection_type = main_wal_v2,
+region_index = ...)` override, if any.
 6. `RING-WAL-RECLAIM-POST-006` WAL chain integrity MUST remain valid
 with no broken `link` path.
 7. `RING-WAL-RECLAIM-POST-007` The reclaimed region MUST be appended to
@@ -156,9 +159,9 @@ Safety invariant:
 
 1. `RING-WAL-RECLAIM-SAFE-001` Reclaim MUST NOT change replay result:
 the recovered collection submachine state and pending updates for every
-collection, the recovered free-space cursors, storage-core private
-allocation reservation, and transaction recovery state after reclaim
-must match the pre-reclaim logical state.
+collection, the recovered free-space basis and frontier, storage-core
+private allocation reservation, and transaction recovery state after
+reclaim must match the pre-reclaim logical state.
 
 ## Transaction-Log Reclaim Eligibility
 
@@ -225,9 +228,11 @@ Procedure:
 
 1. `RING-FREE-REGION-001` Establish `region_index` as detached from all
 live reachability. Do not erase it.
-2. `RING-FREE-REGION-002` Ensure the current free-space metadata
-frontier has room for one more dirty entry, materializing or
-checkpointing a new `free_space_v2` metadata region if needed.
+2. `RING-FREE-REGION-002` Ensure the in-memory free-space frontier has
+room for one more dirty entry. If WAL reclaim or rotation needs a
+shorter allocator history before this append, first preserve the
+current free-space state with either a `free_space_v2` WAL snapshot or
+a materialized `free_space_v2` head.
 3. `RING-FREE-REGION-003` Append and sync
 `free_region(region_index, append_tail_after)`.
 4. `RING-FREE-REGION-004` Update runtime `append_tail =

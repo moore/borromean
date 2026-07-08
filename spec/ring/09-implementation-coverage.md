@@ -172,7 +172,9 @@ helpers.
 
 1. `RING-IMPL-FREE-001` Startup replay MUST recover
 `allocation_head`, `ready_boundary`, and `append_tail` from
-`free_space_v2` metadata and retained allocator WAL commands.
+the latest retained free-space basis, whether initial formatted state,
+`free_space_v2` WAL snapshot, or materialized `free_space_v2` head, plus
+later retained allocator WAL commands.
 2. `RING-IMPL-FREE-002` Replay MUST reject any allocator command whose
 self-checking cursor does not match the current free-space cursor.
 3. `RING-IMPL-FREE-003` Replay MUST reject cursor states that violate
@@ -204,8 +206,9 @@ ignore body effects before commit.
 effects atomically at `commit_transaction`, while transaction-owned
 allocation pops remain private until commit publishes them or rollback
 cleanup frees them.
-12. `RING-IMPL-FREE-012` Free-space metadata materialization MUST keep
-allocator links and cursors out of freed data regions.
+12. `RING-IMPL-FREE-012` Free-space snapshots and metadata
+materialization MUST keep allocator links and cursors out of freed data
+regions.
 13. `RING-IMPL-FREE-013` Transaction-private frees MUST be recorded as
 `free_intent` records before commit and MUST NOT append `free_region` or
 advance `append_tail` before commit.

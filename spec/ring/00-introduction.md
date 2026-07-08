@@ -87,9 +87,12 @@ Glossary:
   also be replayed over that basis. A dirty collection may also have
   those updates loaded into an in-memory frontier.
 - **Free-space collection**: the storage-private allocator collection
-  that records free regions in FIFO order. Its `allocation_head`,
-  `ready_boundary`, and `append_tail` split the queue into allocated,
-  ready, and dirty ranges.
+  under `collection_id = 0` and `collection_type = free_space_v2`.
+  Its durable basis may be the initial formatted state, a WAL snapshot,
+  or materialized `free_space_v2` metadata. Retained allocator records
+  after that basis form its in-memory frontier. Its `allocation_head`,
+  `ready_boundary`, and `append_tail` split the FIFO queue into
+  allocated, ready, and dirty ranges.
 - **Ready range**: the free-space collection entries from
   `allocation_head` to `ready_boundary`. These entries name erased
   regions that may be allocated without running erase inline.

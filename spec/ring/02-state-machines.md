@@ -141,7 +141,8 @@ The stable runtime state contains:
 - Transaction-log positions: for each configured transaction log, its
   head, tail, append offset, live-prefix boundary, and whether an
   active or recovery transaction descriptor currently references it.
-- Free-space collection position: durable `allocation_head`,
+- Free-space collection state: retained free-space durable basis,
+  post-basis allocator frontier, durable `allocation_head`,
   `ready_boundary`, and `append_tail` cursors, plus any storage-core
   allocation reservation that has been popped from the ready range but
   not yet consumed by a durable private-log `link`.
@@ -265,12 +266,13 @@ effect after a record is durable:
 | --- | --- |
 | `new_collection(collection_id, collection_type)` | Create a collection entry and move its collection submachine from `NoCollection` to `EmptyClean`. |
 | `update(collection_id, payload)` | Require an existing non-dropped collection, retain the update after that collection's current durable basis, and move `EmptyClean` to `EmptyDirty`, `WALSnapshotClean` to `WALSnapshotDirty`, or `RegionClean` to `RegionDirty`; an already dirty collection remains in the matching dirty state. |
-| `snapshot(collection_id, collection_type, payload)` | If this is the first retained basis record for the collection, create replay state and set the collection type from this record; otherwise require `collection_type` to match the replay-tracked type. Move the collection submachine to `WALSnapshotClean` and discard older pending updates for that collection. |
+| `snapshot(collection_id, collection_type, payload)` | For a user collection, if this is the first retained basis record, create replay state and set the collection type from this record; otherwise require `collection_type` to match the replay-tracked type. Move the collection submachine to `WALSnapshotClean` and discard older pending updates for that collection. For `collection_id = 0, collection_type = free_space_v2`, replace the free-space durable basis with the self-contained snapshot and discard older allocator update records. |
 | `free_region(region_index, append_tail_after)` | Append `region_index` as a dirty entry at the current `append_tail` and advance `append_tail` to `append_tail_after`. During transaction cleanup, the append must be the cleanup owner's next ordered cleanup slot. |
 | `erase_free_region_span(count, ready_boundary_after)` | Publish that the next `count` dirty entries starting at the current `ready_boundary` have been erased, then advance `ready_boundary` to `ready_boundary_after`. This transition is blocked while a transaction owns main-WAL cleanup. |
 | `allocate_region(region_index, allocation_head_after)` | Pop the current ready entry, require it to name `region_index`, advance `allocation_head` to `allocation_head_after`, and, inside a full transaction, record a transaction-owned allocation. A transaction-owned allocation is not collection-live before commit; on rollback the retained allocation list is returned by ordered cleanup. In a privileged storage-core operation, the pop becomes a replayable private allocation reservation immediately. |
 | `head(collection_id, collection_type, region_index)` for a user collection | Create or validate the collection type, move the collection submachine to `RegionClean`, and discard older pending updates for that collection. |
-| `head(collection_id = 0, collection_type = wal, region_index)` | As a WAL-chain control record, update the effective WAL head in foreground operation. During startup, the last valid tail-local control record selects the effective WAL head before main replay; during the main user-collection replay pass it has no collection-basis effect. |
+| `head(collection_id = 0, collection_type = main_wal_v2, region_index)` | As a WAL-chain control record, update the effective WAL head in foreground operation. During startup, the last valid tail-local control record selects the effective WAL head before main replay; during the main replay pass it has no collection-basis effect. |
+| `head(collection_id = 0, collection_type = free_space_v2, region_index)` | Replace the free-space durable basis with the materialized `free_space_v2` metadata chain rooted at `region_index` and discard older allocator update records. |
 | `link(next_region_index, expected_sequence)` | Preserve private-log reachability and consume a matching storage-core allocation reservation for the linked log region. |
 | `drop_collection(collection_id)` | Move the collection submachine to `Dropped`, clear retained pending updates and volatile frontier state, and leave the collection id reserved. |
 | `begin_transaction(transaction_log_id, start)` | Open a transaction descriptor for one transaction log starting at `start`. |
@@ -404,7 +406,7 @@ Named durable edges for replay-visible durable writes:
 | `CommitRegionHead` | Write and sync a user-collection `head`. | `ApplyWalRecord`, `RING-ORDER-004`, `RING-CRASH-007` through `RING-CRASH-009` |
 | `RotateWalLink` | Write and sync WAL `link`. | `ApplyWalRecord`, `RING-ORDER-005`, `RING-CRASH-010` through `RING-CRASH-012` |
 | `InitializeRotatedWalRegion` | Erase, initialize, and sync the linked WAL region. | `RING-ORDER-005`, `WAL Region Prologue`, startup rotation recovery |
-| `CommitWalHeadControl` | Write and sync `head(collection_id = 0, collection_type = wal, ...)`. | `ApplyWalRecord`, WAL reclaim postconditions, startup WAL-head discovery |
+| `CommitWalHeadControl` | Write and sync `head(collection_id = 0, collection_type = main_wal_v2, ...)`. | `ApplyWalRecord`, WAL reclaim postconditions, startup WAL-head discovery |
 | `CopyRetainedWalRecord` | Copy and sync a retained WAL record into the new WAL head during WAL-head reclaim. | `ApplyWalRecord`, WAL reclaim liveness rules |
 | `RewriteRetainedEmptyBasis` | Write and sync a retained `snapshot` basis that represents an empty live collection whose original `new_collection` record would otherwise be reclaimed. | `ApplyWalRecord`, WAL reclaim liveness rules |
 | `BeginTransaction` | Write and sync main-WAL `begin_transaction(transaction_log_id, start)`. | `ApplyWalRecord`, transaction recovery |

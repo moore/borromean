@@ -55,8 +55,8 @@ data section. For user collections, the meaning of non-log
 spec reserves three canonical core-defined format identifiers for
 private storage regions: `main_wal_v2` for the ordinary WAL,
 `transaction_log_v2` for transaction-log chains, and `free_space_v2` for
-materialized free-space collection metadata. No user collection may use
-any of those identifiers. Storing the format in each region still allows
+materialized free-space collection state. No user collection may use any
+of those identifiers. Storing the format in each region still allows
 per-collection format evolution over time.
 
 Free regions are defined by membership in the storage-private
@@ -139,15 +139,16 @@ encoded little-endian.
 `min_free_regions: u32`, `transaction_log_count: u32`,
 `transaction_log_id: u32`, `offset: u32`,
 `wal_write_granule: u32`, `collection_id: u64`, `sequence: u64`,
-`free_queue_position_entry_index: u32`, `free_space_entry_count: u32`,
+`free_queue_position: u64`, `free_space_entry_count: u32`,
 `observed_collection_generation: u64`,
 `payload_len: u32`, `collection_type: u16`,
 `collection_format: u16`, `erased_byte: u8`, and
 `wal_record_magic: u8`.
 3. `RING-DISK-003` `collection_type` is a stable global `u16`
 namespace recorded durably in WAL records. Borromean core reserves
-`0x0000` for `wal`, `0x0001` for `channel`, `0x0002` for `map`,
-`0x0003..0x00ff` for future core-defined collection types,
+`0x0000` for `main_wal_v2`, `0x0001` for `channel`,
+`0x0002` for `map`, `0x0003` for `free_space_v2`,
+`0x0004..0x00ff` for future core-defined collection types,
 `0x0100..0x7fff` for public extension collection types, and
 `0x8000..0xffff` for private deployment-local collection types that are
 not required to interoperate across deployments.
@@ -291,14 +292,14 @@ padding.
 
 ```rust
 struct FreeQueuePosition {
-  region_index: u32,
-  entry_index: u32,
+  queue_index: u64,
 }
 
 struct FreeSpaceRegionPrologue {
   allocation_head: FreeQueuePosition,
   ready_boundary: FreeQueuePosition,
   append_tail: FreeQueuePosition,
+  first_queue_position: FreeQueuePosition,
   next_metadata_region: OptRegionIndex,
   entry_count: u32,
   entries_checksum: u32,
@@ -310,22 +311,27 @@ struct FreeSpaceEntry {
 }
 ```
 
-`FreeQueuePosition` names an entry slot in the materialized
-free-space collection. `region_index` names a `free_space_v2` metadata
-region, and `entry_index` names the zero-based entry slot within that
-region's free-space entry area. The ordering of positions is the FIFO
-ordering reached by following `next_metadata_region` links and then
-increasing `entry_index` within each metadata region.
+`FreeQueuePosition` is a logical monotonic FIFO position. The next
+queue position after position `p` is `p + 1`; positions do not name
+physical metadata regions or entry slots.
 
 `FreeSpaceRegionPrologue` is present only in `free_space_v2` metadata
 regions. Its three queue positions checkpoint the allocator cursors for
 the materialized free-space collection state represented by that
-metadata chain. `next_metadata_region` links one free-space metadata
-region to the next metadata region; it never links through a freed data
-region. `entry_count` names how many `FreeSpaceEntry` values in this
-metadata region are initialized. `entries_checksum` validates those
-entries. `FreeSpaceEntry` stores the physical region index for one
-free-space FIFO entry.
+metadata chain. `first_queue_position` is the logical queue position of
+this metadata region's first `FreeSpaceEntry`; subsequent initialized
+entries occupy consecutive positions. `next_metadata_region` links one
+free-space metadata region to the next metadata region; it never links
+through a freed data region. In a materialized free-space basis, the
+chain rooted by the retained free-space `head` record, or by the
+initial formatted root before any retained free-space basis exists,
+contains exactly the logical positions
+`[allocation_head, append_tail)`. Entries in
+`[allocation_head, ready_boundary)` are ready; entries in
+`[ready_boundary, append_tail)` are dirty. `entry_count` names how many
+`FreeSpaceEntry` values in this metadata region are initialized.
+`entries_checksum` validates those entries. `FreeSpaceEntry` stores the
+physical region index for one free-space FIFO entry.
 
 1. `RING-FREE-001` `FreeQueuePosition` MUST be encoded as the exact byte
 sequence of the fields shown above, in that order, with no implicit
@@ -338,11 +344,11 @@ sequence of the fields shown above, in that order, with no implicit
 padding.
 4. `RING-FREE-004` `prologue_checksum` MUST be CRC-32C over
 `allocation_head`, `ready_boundary`, `append_tail`,
-`next_metadata_region`, `entry_count`, and `entries_checksum` in
-on-disk order.
+`first_queue_position`, `next_metadata_region`, `entry_count`, and
+`entries_checksum` in on-disk order.
 5. `RING-FREE-005` The cursor invariant
 `allocation_head <= ready_boundary <= append_tail` MUST hold in the
-materialized free-space collection order.
+logical free-space collection order.
 6. `RING-FREE-006` Every `FreeSpaceEntry.region_index` and every
 present `next_metadata_region` MUST name a region index strictly less
 than `region_count`.
@@ -356,6 +362,11 @@ number of `FreeSpaceEntry` values that fit after
 encoded bytes of the first `entry_count` `FreeSpaceEntry` values in
 that metadata region. Bytes after those entries are reserved and MUST
 be ignored by replay.
+10. `RING-FREE-010` A materialized free-space basis MUST cover exactly
+the logical positions `[allocation_head, append_tail)`. The first
+metadata region's `first_queue_position` MUST equal `allocation_head`,
+and each following metadata region's `first_queue_position` MUST equal
+the previous region's `first_queue_position + entry_count`.
 
 ## Log Region Prologue
 
@@ -387,10 +398,11 @@ value during recovery.
 
 `allocation_head`, `ready_boundary`, and `append_tail` checkpoint the
 free-space collection cursors that were current when the log segment
-was initialized. Replay uses this checkpoint as the baseline allocator
-state at the start of the segment, then applies complete later
-free-space collection commands. A torn or truncated allocator command
-after the checkpoint does not advance the recovered cursors.
+was initialized. The checkpoint is not a complete free-space basis
+because it does not carry queue entries. Replay uses it to validate the
+retained free-space basis and later complete free-space collection
+commands. A torn or truncated allocator command after the checkpoint
+does not advance the recovered cursors.
 
 `prologue_checksum` validates the logical prologue contents. It covers
 `log_head_region_index`, `allocation_head`, `ready_boundary`, and
@@ -405,10 +417,8 @@ implicit padding.
 3. `RING-PROLOGUE-003` `log_head_region_index` MUST be strictly less
 than `region_count`.
 4. `RING-PROLOGUE-004` The checkpointed free-space cursors MUST satisfy
-`allocation_head <= ready_boundary <= append_tail` in the materialized
-free-space collection order, and each cursor MUST name either a valid
-entry position in a `free_space_v2` metadata region or the canonical
-empty tail position of that materialized queue.
+`allocation_head <= ready_boundary <= append_tail` in logical
+free-space collection order.
 
 Let `wal_record_area_offset` be the first offset within a private log region
 that is both greater than or equal to the end of `Header` plus
