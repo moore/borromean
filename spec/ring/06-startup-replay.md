@@ -56,8 +56,7 @@ Startup recovery reconstructs these things:
 6. `RING-STARTUP-RESULT-006` Transaction-log cursors,
    live-prefix boundaries, active transaction descriptors, inline
    transaction descriptors, transaction-owned allocations, free intents,
-   rollback allocation records, cleanup owner, cleanup cursor, and
-   incomplete recovery work.
+   cleanup owner, cleanup cursor, and incomplete recovery work.
 7. `RING-STARTUP-RESULT-007` Transaction rollback, cleanup, and finish
    records written during recovery, if recovery needed to close an
    incomplete full or inline transaction range.
@@ -166,7 +165,7 @@ free-space collection queue and cursors; optional storage-core private
 allocation reservation; transaction-log cursors and live-prefix
 boundaries; full transaction descriptors with enrolled collections,
 observed generations, transaction-owned allocations, free intents,
-rollback allocation records, cleanup start tail, and cleanup cursor;
+cleanup start tail, and cleanup cursor;
 inline transaction descriptors; the main-WAL cleanup owner; and the
 replay local WAL-recovery boundary.
 9. `RING-STARTUP-009` On
@@ -221,9 +220,9 @@ range. Records inside an imported committed range publish collection
 effects at the main-WAL commit record's replay position, while
 transaction-owned allocation pops remain part of allocator cursor
 recovery. Records inside an uncommitted rollback range are scanned for
-transaction-owned allocations, free intents, rollback allocation
-records, and cleanup progress, but their collection mutations and free
-intents do not become visible collection or allocator state.
+transaction-owned allocations, free intents, and cleanup progress, but
+their collection mutations and free intents do not become visible
+collection or allocator state.
 16. `RING-STARTUP-016` Inline transaction body records are validated
 when encountered in the main WAL but ignored until the matching
 `commit_inline_transaction` is durable. If replay reaches WAL end with a
@@ -284,30 +283,30 @@ cleanup is owned by this transaction until a matching
 scanning a transaction range: record the collection as enrolled in the
 range. `free_intent(collection_id, region_index)` records a
 transaction-private free obligation for the enrolled collection.
-`rollback_allocation(region_index)` records one transaction-owned
-allocation that rollback cleanup must later free. During recovery of a
-committed range, the stored collection generation is not rechecked
-because the retained main-WAL commit record is durable evidence that
-foreground conflict checking succeeded before commit.
+Transaction-owned allocations are retained from
+`allocate_region(region_index, allocation_head_after)` records in the
+same range. During recovery of a committed range, the stored collection
+generation is not rechecked because the retained main-WAL commit record
+is durable evidence that foreground conflict checking succeeded before
+commit.
 25. `RING-STARTUP-025` On
 `rollback_transaction(transaction_log_id, range)`: scan the referenced
-range, confirm that every transaction-owned allocation has a durable
-`rollback_allocation` record, do not apply collection mutations or free
+range, retain its transaction-owned allocations from its
+`allocate_region` records, do not apply collection mutations or free
 intents from the range, set cleanup start tail to the current
-`append_tail`, and record that ordered rollback-allocation cleanup is
-owned by this transaction until a matching `transaction_finished` is
-retained.
+`append_tail`, and record that ordered rollback cleanup for those
+allocations is owned by this transaction until a matching
+`transaction_finished` is retained.
 26. `RING-STARTUP-026` On `wal_recovery()`: if
 `pending_wal_recovery_boundary` is clear, return an error. Otherwise
 clear the boundary.
 27. `RING-STARTUP-027` If replay reaches WAL end with an active full
 transaction descriptor and no durable `commit_transaction`, run
 idempotent rollback recovery for that transaction-log range. Recovery
-MUST write missing `rollback_allocation(region_index)` records for
-every transaction-owned allocation, append
-`rollback_transaction(transaction_log_id, range)`, append ordered
-cleanup `free_region` records for the rollback allocations, and append
-`transaction_finished(transaction_log_id, range)`.
+MUST retain transaction-owned allocations from `allocate_region`
+records, append `rollback_transaction(transaction_log_id, range)`,
+append ordered cleanup `free_region` records for those allocations, and
+append `transaction_finished(transaction_log_id, range)`.
 28. `RING-STARTUP-028` If replay reaches WAL end after
 `commit_transaction(transaction_log_id, range)` but before
 `transaction_finished(transaction_log_id, range)`, or after

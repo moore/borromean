@@ -52,10 +52,10 @@ helpers.
     region at `max_seen_sequence + 1` and update runtime
     `max_seen_sequence`.
 15. `RING-IMPL-REGRESSION-075` Reopening with incomplete transaction
-    allocation state MUST write missing rollback allocation records,
-    return allocated regions to the dirty range through ordered cleanup,
-    write `transaction_finished`, and leave no abandoned private
-    allocation reservation live.
+    allocation state MUST return transaction-owned allocated regions to
+    the dirty range through ordered cleanup, write
+    `transaction_finished`, and leave no abandoned private allocation
+    reservation live.
 16. `RING-IMPL-REGRESSION-076` Allocation cleanup MUST reject region
     indexes or cleanup slots that do not match the current transaction
     recovery state or storage-core private allocation reservation.
@@ -186,9 +186,9 @@ dirty and allow erase maintenance to repeat.
 6. `RING-IMPL-FREE-006` If `erase_free_region_span` is durable,
 startup MUST advance `ready_boundary` and make the span allocatable.
 7. `RING-IMPL-FREE-007` If `allocate_region` is durable but the
-enclosing transaction is not committed, rollback recovery MUST write a
-`rollback_allocation` record for the region before returning it to the
-dirty range.
+enclosing transaction is not committed, rollback recovery MUST retain
+the region as a transaction-owned allocation and return it to the dirty
+range through ordered cleanup after the rollback marker is durable.
 8. `RING-IMPL-FREE-008` If a transaction commit or rollback marker is
 durable but cleanup is unfinished, startup MUST preserve the committed
 or rolled-back transaction state, finish ordered cleanup frees, and then
@@ -209,14 +209,14 @@ allocator links and cursors out of freed data regions.
 13. `RING-IMPL-FREE-013` Transaction-private frees MUST be recorded as
 `free_intent` records before commit and MUST NOT append `free_region` or
 advance `append_tail` before commit.
-14. `RING-IMPL-FREE-014` Rollback recovery MUST write exactly one
-`rollback_allocation` record for each transaction-owned allocation
-before appending `rollback_transaction`.
+14. `RING-IMPL-FREE-014` Rollback recovery MUST derive its cleanup list
+from transaction-owned `allocate_region` records and MUST append
+`rollback_transaction` before cleanup frees.
 15. `RING-IMPL-FREE-015` Transaction cleanup MUST append cleanup
 `free_region` records in retained-list order and require each
 `append_tail_after` to match the next cleanup slot.
 16. `RING-IMPL-FREE-016` Erase maintenance MUST NOT advance
 `ready_boundary` while a transaction owns cleanup.
 17. `RING-IMPL-FREE-017` Rollback cleanup MUST finish with
-`transaction_finished` after every rollback allocation has been returned
-to the dirty range.
+`transaction_finished` after every transaction-owned allocation has been
+returned to the dirty range.
