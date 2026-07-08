@@ -539,14 +539,14 @@ module transaction_free_recovery {
     }
   }
 
-  // main_wal rollback_decided(tx). This is not the durable rollback marker; it
-  // opens the safe window where private allocation cleanup records can be forced.
+  // transaction_log rollback_decided(tx). This is not the durable rollback
+  // marker; it opens the safe window where private allocation cleanup records
+  // can be forced.
   action StartRollbackPreparation = {
     nondet txIndex = storage.transactions.indices().oneOf()
     val currentTx = storage.transactions.nth(txIndex)
     val nextTx = txRollbackPreparing(currentTx)
     all {
-      walUnlocked(storage),
       currentTx.phase == TxOpen,
 
       storage' = storageWithTransaction(storage, txIndex, nextTx),
