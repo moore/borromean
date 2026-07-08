@@ -21,10 +21,28 @@ module transaction_free_recovery {
     | TxCommittedCleanup
     | TxRolledBackCleanup
 
+  // Transaction phase shape:
+  //
+  // TxIdle
+  //   -> BeginTransaction -> TxOpen
+  // TxOpen
+  //   -> CommitTransaction -> TxCommittedCleanup
+  //   -> StartRollbackPreparation -> TxRollbackPreparing
+  // TxRollbackPreparing
+  //   -> RecordRollbackAllocation* -> RollbackTransaction
+  //   -> TxRolledBackCleanup
+  // TxCommittedCleanup
+  //   -> FreeCommittedIntent* -> FinishCommit -> TxIdle
+  // TxRolledBackCleanup
+  //   -> FreeRolledBackAllocation* -> FinishRollback -> TxIdle
+  //
+  // CommitTransaction and RollbackTransaction acquire walCleanupOwner.
+  // FinishCommit and FinishRollback release it.
+
   // Vocabulary used throughout the model:
   //
   // - A physical region is a bare region index. Collection live sets and the
-  //   active free-space range own physical regions.
+  //   unconsumed free-space range own physical regions.
   // - A cleanup free reference is a free-log slot. In the implementation this
   //   is a `(free_log_region, offset)` pair; in this bounded model it is the
   //   integer queue position `cleanupStartTail + cleanupIndex`.
@@ -49,6 +67,11 @@ module transaction_free_recovery {
 
   type StorageState = {
     freeQueue: List[int],
+    // Free-queue partitions:
+    // - [0, allocationHead): consumed historical prefix.
+    // - [allocationHead, readyBoundary): allocatable ready range.
+    // - [readyBoundary, appendTail): dirty appended range, not allocatable yet.
+    // - [appendTail, freeQueue.length()): unused tail in the modeled list.
     allocationHead: int,
     readyBoundary: int,
     appendTail: int,
@@ -109,31 +132,6 @@ module transaction_free_recovery {
         } else {
           collections.nth(i)
         }))
-
-  pure def replaceCollectionLive(
-    collections: List[CollectionState],
-    collectionIndex: int,
-    nextLive: Set[int],
-  ): List[CollectionState] =
-    replaceCollection(
-      collections,
-      collectionIndex,
-      collectionState(
-        nextLive,
-        collectionGenerationAt(collections, collectionIndex),
-      ),
-    )
-
-  pure def replaceCollectionGeneration(
-    collections: List[CollectionState],
-    collectionIndex: int,
-    generation: int,
-  ): List[CollectionState] =
-    replaceCollection(
-      collections,
-      collectionIndex,
-      collectionState(collectionLiveAt(collections, collectionIndex), generation),
-    )
 
   pure def collectionLivesDisjointFrom(
     collections: List[CollectionState],
@@ -313,13 +311,14 @@ module transaction_free_recovery {
   ): bool =
     if (txInCleanup(tx)) {
       tx.cleanupStartTail + tx.cleanupIndex <= freeQueue.length()
-      and Regions.forall(i =>
+      and RegionIndexes.indices().forall(offset =>
         if (
-          i < tx.cleanupIndex
-          and i < cleanupListLength(tx)
-          and tx.cleanupStartTail + i < freeQueue.length()
+          offset < tx.cleanupIndex
+          and offset < cleanupListLength(tx)
+          and tx.cleanupStartTail + offset < freeQueue.length()
         ) {
-          freeQueue.nth(tx.cleanupStartTail + i) == cleanupListEntryAt(tx, i)
+          freeQueue.nth(tx.cleanupStartTail + offset)
+            == cleanupListEntryAt(tx, offset)
         } else {
           true
         })
@@ -426,6 +425,12 @@ module transaction_free_recovery {
 
   pure def txCurrentRecoverySet(tx: TxState): Set[int] =
     txOutstandingAllocSet(tx).union(txPendingCommittedCleanupSet(tx))
+
+  pure def walUnlocked(state: StorageState): bool =
+    state.walCleanupOwner == NoTransaction
+
+  pure def walOwnedBy(state: StorageState, txIndex: int): bool =
+    state.walCleanupOwner == txIndex
 
   pure def storageState(
     freeQueue: List[int],
@@ -553,11 +558,14 @@ module transaction_free_recovery {
   // retained transaction records.
   var storage: StorageState
 
-  val activeFreeList =
+  // Free entries that have not been consumed by allocation. This includes both
+  // ready entries and dirty cleanup appends that cannot be allocated until
+  // readyBoundary advances.
+  val unconsumedFreeList =
     storage.freeQueue.slice(storage.allocationHead, storage.appendTail)
 
-  val activeFreeSet =
-    intListToSet(activeFreeList)
+  val unconsumedFreeSet =
+    intListToSet(unconsumedFreeList)
 
   action init = all {
     storage' = InitialStorage,
@@ -574,7 +582,7 @@ module transaction_free_recovery {
         collectionGenerationAt(storage.collections, collectionIndex),
       )
     all {
-      storage.walCleanupOwner == NoTransaction,
+      walUnlocked(storage),
       currentTx.phase == TxIdle,
 
       storage' = storageWithTransaction(storage, txIndex, nextTx),
@@ -636,7 +644,7 @@ module transaction_free_recovery {
     val nextCollection =
       collectionState(nextLive, nextGeneration)
     all {
-      storage.walCleanupOwner == NoTransaction,
+      walUnlocked(storage),
       currentTx.phase == TxOpen,
       currentTx.observedGeneration
         == collectionGenerationAt(
@@ -665,7 +673,7 @@ module transaction_free_recovery {
     val currentTx = storage.transactions.nth(txIndex)
     val nextTx = txRollbackPreparing(currentTx)
     all {
-      storage.walCleanupOwner == NoTransaction,
+      walUnlocked(storage),
       currentTx.phase == TxOpen,
 
       storage' = storageWithTransaction(storage, txIndex, nextTx),
@@ -695,7 +703,7 @@ module transaction_free_recovery {
     val currentTx = storage.transactions.nth(txIndex)
     val nextTx = txRolledBack(currentTx, storage.appendTail)
     all {
-      storage.walCleanupOwner == NoTransaction,
+      walUnlocked(storage),
       currentTx.phase == TxRollbackPreparing,
       currentTx.cleanupIndex == currentTx.allocations.length(),
 
@@ -717,7 +725,7 @@ module transaction_free_recovery {
     val nextTx = txAdvanceCleanup(currentTx)
     all {
       currentTx.phase == TxCommittedCleanup,
-      storage.walCleanupOwner == txIndex,
+      walOwnedBy(storage, txIndex),
       currentTx.cleanupIndex < currentTx.freeIntents.length(),
       storage.appendTail == freeSlot,
 
@@ -741,7 +749,7 @@ module transaction_free_recovery {
     val nextTx = txAdvanceCleanup(currentTx)
     all {
       currentTx.phase == TxRolledBackCleanup,
-      storage.walCleanupOwner == txIndex,
+      walOwnedBy(storage, txIndex),
       currentTx.cleanupIndex < currentTx.rollbackAllocations.length(),
       storage.appendTail == freeSlot,
 
@@ -761,7 +769,7 @@ module transaction_free_recovery {
     val currentTx = storage.transactions.nth(txIndex)
     all {
       currentTx.phase == TxCommittedCleanup,
-      storage.walCleanupOwner == txIndex,
+      walOwnedBy(storage, txIndex),
       currentTx.cleanupIndex == currentTx.freeIntents.length(),
 
       storage' =
@@ -779,7 +787,7 @@ module transaction_free_recovery {
     val currentTx = storage.transactions.nth(txIndex)
     all {
       currentTx.phase == TxRolledBackCleanup,
-      storage.walCleanupOwner == txIndex,
+      walOwnedBy(storage, txIndex),
       currentTx.cleanupIndex == currentTx.rollbackAllocations.length(),
 
       storage' =
@@ -792,7 +800,7 @@ module transaction_free_recovery {
 
   // main_wal erase_free_region_span(1, ready_boundary_after)
   action EraseOneDirty = all {
-    storage.walCleanupOwner == NoTransaction,
+    walUnlocked(storage),
     storage.readyBoundary < storage.appendTail,
 
     storage' = storageWithReadyBoundary(storage),
@@ -848,7 +856,7 @@ module transaction_free_recovery {
     nondet txIndex = storage.transactions.indices().oneOf()
     val currentTx = storage.transactions.nth(txIndex)
     all {
-      storage.walCleanupOwner == txIndex,
+      walOwnedBy(storage, txIndex),
       txInCleanup(currentTx),
       storage.readyBoundary == currentTx.cleanupStartTail,
       storage.readyBoundary < storage.appendTail,
@@ -970,7 +978,7 @@ module transaction_free_recovery {
     and storage.transactions.indices().forall(i =>
       txRollbackRecordsPhaseOK(storage.transactions.nth(i)))
 
-  // Allocator cursors maintain the ready/dirty/active queue partition.
+  // Allocator cursors maintain the consumed/ready/dirty/unused queue partition.
   val cursorOrderOK =
     0 <= storage.allocationHead
     and storage.allocationHead <= storage.readyBoundary
@@ -989,14 +997,14 @@ module transaction_free_recovery {
         ) == Set()))
 
   // Core invariant: no physical region can be both committed-live and in the
-  // active free-space range.
+  // unconsumed free-space range.
   val noLiveFreeOverlap =
-    collectionLivesDisjointFrom(storage.collections, activeFreeSet)
+    collectionLivesDisjointFrom(storage.collections, unconsumedFreeSet)
 
   // Core invariant: the storage WAL cleanup lock names exactly the transaction
   // currently in the serialized main-WAL cleanup section.
-  val cleanupExclusive =
-    if (storage.walCleanupOwner == NoTransaction) {
+  val walCleanupOwnerMatchesCleanupPhase =
+    if (walUnlocked(storage)) {
       storage.transactions.indices().forall(i =>
         not(txInCleanup(storage.transactions.nth(i))))
     } else if (storage.walCleanupOwner.in(storage.transactions.indices())) {
@@ -1012,7 +1020,7 @@ module transaction_free_recovery {
   // slots written since cleanup started are exactly the processed prefix of
   // the retained cleanup list.
   val cleanupTailOrdered =
-    if (storage.walCleanupOwner == NoTransaction) {
+    if (walUnlocked(storage)) {
       true
     } else if (storage.walCleanupOwner.in(storage.transactions.indices())) {
       txInCleanup(storage.transactions.nth(storage.walCleanupOwner)).implies(
@@ -1029,7 +1037,7 @@ module transaction_free_recovery {
 
   // Core invariant: cleanup frees remain dirty until transaction_finished.
   val cleanupReadyBoundaryFrozen =
-    if (storage.walCleanupOwner == NoTransaction) {
+    if (walUnlocked(storage)) {
       true
     } else if (storage.walCleanupOwner.in(storage.transactions.indices())) {
       txInCleanup(storage.transactions.nth(storage.walCleanupOwner)).implies(
@@ -1054,7 +1062,7 @@ module transaction_free_recovery {
         )
         and txAllocSet(
           storage.transactions.nth(i)
-        ).intersect(activeFreeSet) == Set()))
+        ).intersect(unconsumedFreeSet) == Set()))
     and
     storage.transactions.indices().forall(i =>
       (
@@ -1080,11 +1088,11 @@ module transaction_free_recovery {
             )
           ) == Set()))
 
-  // Core invariant: cleanup refs are phase-safe. Before the terminal marker
-  // that authorizes cleanup, current free-intent refs stay out of active free
-  // space. After commit/rollback, still-pending cleanup suffixes are detached
-  // from live state until cleanup writes their indexed free slots.
-  val cleanupRefsPhaseSafe =
+  // Current free-intent refs stay live in the transaction's collection and out
+  // of unconsumed free space until commit or rollback preparation changes the
+  // transaction phase. Stale transactions may retain old intents; the
+  // generation check blocks their commit.
+  val openFreeIntentsStayLiveAndNotFree =
     storage.transactions.indices().forall(i =>
       (
         storage.transactions.nth(i).phase == TxOpen
@@ -1104,18 +1112,24 @@ module transaction_free_recovery {
           )
           and txFreeIntentSet(
             storage.transactions.nth(i)
-          ).intersect(activeFreeSet) == Set()
+          ).intersect(unconsumedFreeSet) == Set()
         )))
-    and
+
+  // Rollback-allocation records written before the durable rollback marker are
+  // still private transaction evidence and cannot already be free.
+  val rollbackPreparationRefsNotFree =
     storage.transactions.indices().forall(i =>
       (
         storage.transactions.nth(i).phase == TxRollbackPreparing
       ).implies(
         txRollbackAllocSet(
           storage.transactions.nth(i)
-        ).intersect(activeFreeSet) == Set()
+        ).intersect(unconsumedFreeSet) == Set()
       ))
-    and
+
+  // After commit, still-pending cleanup entries are detached from collection
+  // live state until cleanup writes their indexed free slots.
+  val committedCleanupPendingRefsNotLive =
     storage.transactions.indices().forall(i =>
       (
         storage.transactions.nth(i).phase == TxCommittedCleanup
@@ -1124,7 +1138,11 @@ module transaction_free_recovery {
           storage.collections,
           txPendingCommittedCleanupSet(storage.transactions.nth(i)),
         )))
-    and
+
+  // After rollback, every allocation has an explicit rollback record and
+  // still-pending rollback cleanup entries are detached from collection live
+  // state.
+  val rolledBackCleanupPendingAllocationsNotLive =
     storage.transactions.indices().forall(i =>
       (
         storage.transactions.nth(i).phase == TxRolledBackCleanup
@@ -1137,28 +1155,38 @@ module transaction_free_recovery {
         )
       ))
 
-  // Core invariant: no double free. Active free space is a physical-region set
-  // represented as a list slice, so duplicate entries would publish the same
-  // physical free twice.
+  // Core invariant: cleanup refs are phase-safe. Before the terminal marker
+  // that authorizes cleanup, refs stay private. After commit/rollback,
+  // still-pending cleanup suffixes are detached until cleanup writes their
+  // indexed free slots.
+  val cleanupRefsPhaseSafe =
+    openFreeIntentsStayLiveAndNotFree
+    and rollbackPreparationRefsNotFree
+    and committedCleanupPendingRefsNotLive
+    and rolledBackCleanupPendingAllocationsNotLive
+
+  // Core invariant: no double free. Unconsumed free space is a physical-region
+  // set represented as a list slice, so duplicate entries would publish the
+  // same physical free twice.
   val noDoubleFree =
-    noDuplicates(activeFreeList)
+    noDuplicates(unconsumedFreeList)
     and storage.transactions.indices().forall(i =>
       txCurrentRecoverySet(
         storage.transactions.nth(i),
-      ).intersect(activeFreeSet) == Set())
+      ).intersect(unconsumedFreeSet) == Set())
     and txCurrentRecoverySetsDoNotOverlap
 
   // Core invariant: no modeled physical region leaks. Each region is reachable
-  // from live state, active free space, or unfinished transaction/recovery
+  // from live state, unconsumed free space, or unfinished transaction/recovery
   // state. Completed cleanup refs are not needed for reachability once their
-  // physical region is active-free.
+  // physical region is unconsumed-free.
   val noLeaks =
     Regions.forall(region =>
       // 1. committed live in some collection
       storage.collections.indices().exists(collectionIndex =>
         region.in(collectionLiveAt(storage.collections, collectionIndex)))
       // 2. allocator-free
-      or region.in(activeFreeSet)
+      or region.in(unconsumedFreeSet)
       // 3. transaction-private allocation or unfinished cleanup/recovery
       or storage.transactions.indices().exists(txIndex =>
         region.in(txCurrentRecoverySet(storage.transactions.nth(txIndex)))))
@@ -1196,7 +1224,7 @@ module transaction_free_recovery {
     and cursorOrderOK
     and collectionOwnershipUnique
     and noLiveFreeOverlap
-    and cleanupExclusive
+    and walCleanupOwnerMatchesCleanupPhase
     and cleanupTailOrdered
     and cleanupReadyBoundaryFrozen
     and noPrematurePublication
