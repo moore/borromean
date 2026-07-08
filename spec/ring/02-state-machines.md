@@ -158,8 +158,12 @@ The stable runtime state contains:
   generation before commit.
 - Optional transaction descriptors: transaction log id, transaction-log
   range start, enrolled collections with their observed committed
-  generation values and private frontier buffers, commit/rollback
-  state, and any pending cleanup/recovery range.
+  generation values and private frontier buffers, transaction-owned
+  allocations, transaction-private free intents, rollback allocation
+  records, commit/rollback phase, cleanup cursor, cleanup start tail,
+  and any pending cleanup/recovery range. The storage-level cleanup
+  owner, when present, names the only transaction allowed to append
+  cleanup frees or finish cleanup in the main WAL.
 - The `pending_wal_recovery_boundary` flag used when valid tail
   records were found after a torn or corrupt tail span.
 
@@ -262,9 +266,9 @@ effect after a record is durable:
 | `new_collection(collection_id, collection_type)` | Create a collection entry and move its collection submachine from `NoCollection` to `EmptyClean`. |
 | `update(collection_id, payload)` | Require an existing non-dropped collection, retain the update after that collection's current durable basis, and move `EmptyClean` to `EmptyDirty`, `WALSnapshotClean` to `WALSnapshotDirty`, or `RegionClean` to `RegionDirty`; an already dirty collection remains in the matching dirty state. |
 | `snapshot(collection_id, collection_type, payload)` | If this is the first retained basis record for the collection, create replay state and set the collection type from this record; otherwise require `collection_type` to match the replay-tracked type. Move the collection submachine to `WALSnapshotClean` and discard older pending updates for that collection. |
-| `free_region(region_index, append_tail_after)` | Append `region_index` as a dirty entry at the current `append_tail` and advance `append_tail` to `append_tail_after`. |
-| `erase_free_region_span(count, ready_boundary_after)` | Publish that the next `count` dirty entries starting at the current `ready_boundary` have been erased, then advance `ready_boundary` to `ready_boundary_after`. |
-| `allocate_region(region_index, allocation_head_after)` | Pop the current ready entry, require it to name `region_index`, and advance `allocation_head` to `allocation_head_after`. In a full or inline transaction, the pop is visible only when the transaction commits; on rollback the popped region returns to the dirty range. In a privileged storage-core operation, the pop becomes a replayable private allocation reservation immediately. |
+| `free_region(region_index, append_tail_after)` | Append `region_index` as a dirty entry at the current `append_tail` and advance `append_tail` to `append_tail_after`. During transaction cleanup, the append must be the cleanup owner's next ordered cleanup slot. |
+| `erase_free_region_span(count, ready_boundary_after)` | Publish that the next `count` dirty entries starting at the current `ready_boundary` have been erased, then advance `ready_boundary` to `ready_boundary_after`. This transition is blocked while a transaction owns main-WAL cleanup. |
+| `allocate_region(region_index, allocation_head_after)` | Pop the current ready entry, require it to name `region_index`, advance `allocation_head` to `allocation_head_after`, and, inside a full transaction, record a transaction-owned allocation. A transaction-owned allocation is not collection-live before commit; on rollback it is returned by ordered cleanup after an explicit `rollback_allocation` record. In a privileged storage-core operation, the pop becomes a replayable private allocation reservation immediately. |
 | `head(collection_id, collection_type, region_index)` for a user collection | Create or validate the collection type, move the collection submachine to `RegionClean`, and discard older pending updates for that collection. |
 | `head(collection_id = 0, collection_type = wal, region_index)` | As a WAL-chain control record, update the effective WAL head in foreground operation. During startup, the last valid tail-local control record selects the effective WAL head before main replay; during the main user-collection replay pass it has no collection-basis effect. |
 | `link(next_region_index, expected_sequence)` | Preserve private-log reachability and consume a matching storage-core allocation reservation for the linked log region. |
@@ -272,11 +276,13 @@ effect after a record is durable:
 | `begin_transaction(transaction_log_id, start)` | Open a transaction descriptor for one transaction log starting at `start`. |
 | `begin_inline_transaction(record_count, encoded_len)` | Main-WAL-only bounded transaction for short storage-internal atomic groups; records inside it are ignored until a matching inline commit is durable. |
 | `add_transaction_collection(collection_id, observed_generation)` | In a transaction log, enroll `collection_id`, copy its frontier into a private transaction buffer, and remember the observed committed generation for conflict checks. |
-| `commit_transaction(transaction_log_id, range)` | In the main WAL, freeze and import `range` from `transaction_log_id` at this commit position; after the record is durable, private frontiers for enrolled collections may be atomically installed as visible state. |
+| `free_intent(collection_id, region_index)` | In a transaction log, record a transaction-private intent to free a region that is still live in the enrolled collection. It has no allocator effect before commit. |
+| `rollback_allocation(region_index)` | In a transaction log, record that the transaction-owned allocation named by `region_index` must be returned to free space if the transaction rolls back. The first rollback allocation record makes the transaction non-committable. |
+| `commit_transaction(transaction_log_id, range)` | In the main WAL, freeze and import `range` from `transaction_log_id` at this commit position. The imported private frontiers become visible, transaction-owned allocations become collection-owned, free intents are detached from collection live state as pending cleanup obligations, and the transaction becomes the main-WAL cleanup owner at the current `append_tail`. |
 | `commit_inline_transaction(record_count)` | Atomically apply the bounded inline range that began at the matching `begin_inline_transaction`. |
 | `rollback_inline_transaction(record_count)` | Record that an uncommitted inline range was cleaned up and remains non-visible. |
-| `transaction_finished(transaction_log_id, range)` | Close a committed transaction after cleanup is complete and release this transaction-log range reference for garbage collection. |
-| `rollback_transaction(transaction_log_id, range)` | Mark a transaction-log range non-visible after rollback recovery has cleaned transaction-owned storage effects. |
+| `transaction_finished(transaction_log_id, range)` | Close a committed or rolled-back transaction after its ordered cleanup is complete, release the main-WAL cleanup owner, and release this transaction-log range reference for garbage collection. |
+| `rollback_transaction(transaction_log_id, range)` | In the main WAL, mark a transaction-log range non-visible after every transaction-owned allocation in the range has a durable `rollback_allocation` record. The transaction becomes the main-WAL cleanup owner at the current `append_tail`; rollback allocation cleanup remains pending until `transaction_finished`. |
 | `wal_recovery()` | Clear the WAL recovery boundary opened by a prior torn or corrupt tail span. |
 
 The main operation modes are transition sequences over the same table:
@@ -323,9 +329,9 @@ The main operation modes are transition sequences over the same table:
   transaction-log-backed cleanup transaction for private log storage.
 - `TransactionRecovery(TransactionRecoveryMode)` scans incomplete or
   unfinished transaction-log ranges during open, selects rollback
-  recovery or committed cleanup recovery based on retained main-WAL
-  transaction records, and writes the matching terminal transaction
-  marker.
+  preparation, rollback cleanup, or committed cleanup recovery based on
+  retained main-WAL transaction records, and writes the missing
+  rollback, cleanup, and finish records in replay order.
 - `SnapshottingCollection(CollectionSnapshotMode)` serializes the
   collection's current logical state into a WAL `snapshot`, appends and
   syncs that record, clears superseded post-basis updates, and returns
@@ -370,12 +376,14 @@ inside that transition.
 | `BeginTransaction` | `Transacting(TransactionMode)` | `Idle` with an available transaction log | `BeginTransaction` | transaction descriptor opens for one transaction log |
 | `BeginInlineTransaction` | `Transacting(TransactionMode)` | no active full transaction and enough reserved main-WAL tail space | `BeginInlineTransaction` | bounded inline transaction opens in the main WAL |
 | `AddTransactionCollection` | `Transacting(TransactionMode)` | open transaction descriptor and live collection | `AddTransactionCollection` | collection enrolled with private frontier buffer and observed generation |
+| `StageFreeIntent` | `Transacting(TransactionMode)` | open transaction descriptor and enrolled live collection region | `StageFreeIntent` | free intent is retained in the transaction and has no allocator effect |
+| `RecordRollbackAllocation` | `Transacting(TransactionMode)` or `TransactionRecovery(TransactionRecoveryMode)` | open transaction descriptor with an unrecorded transaction-owned allocation | `RecordRollbackAllocation` | allocation is retained as a rollback cleanup obligation |
 | `CommitTransaction` | `Transacting(TransactionMode)` | open transaction descriptor with no generation conflicts | `CommitTransaction` | referenced transaction-log range becomes visible atomically |
 | `CommitInlineTransaction` | `Transacting(TransactionMode)` | open inline transaction whose bounded range is complete | `CommitInlineTransaction` | bounded inline range becomes visible atomically |
 | `RollbackInlineTransaction` | `Transacting(TransactionMode)` or `TransactionRecovery(TransactionRecoveryMode)` | open or recovering uncommitted inline transaction | `RollbackInlineTransaction` | bounded inline range remains non-visible after cleanup |
-| `RollbackTransaction` | `Transacting(TransactionMode)` or `TransactionRecovery(TransactionRecoveryMode)` | open or recovering uncommitted transaction | `RollbackTransaction` | transaction-log range remains non-visible after cleanup |
-| `FreeRegion` | transaction cleanup mode | region detached from all live references | `AppendFreeRegion` | region enters the dirty range of the free-space collection |
-| `EraseFreeRegionSpan` | `AllocatingRegion(AllocationMode)` or storage maintenance mode | dirty range is non-empty and erase work is allowed | `EraseFreeRegionSpan` | dirty entries become ready entries |
+| `RollbackTransaction` | `Transacting(TransactionMode)` or `TransactionRecovery(TransactionRecoveryMode)` | open or recovering uncommitted transaction with rollback records for every allocation | `RollbackTransaction` | transaction-log range remains non-visible and rollback cleanup becomes owned by the transaction |
+| `FreeRegion` | transaction cleanup mode | cleanup owner names the transaction and the next cleanup obligation is detached from live references | `AppendFreeRegion` | region enters the dirty range of the free-space collection at the ordered cleanup slot |
+| `EraseFreeRegionSpan` | `AllocatingRegion(AllocationMode)` or storage maintenance mode | dirty range is non-empty, erase work is allowed, and no transaction owns cleanup | `EraseFreeRegionSpan` | dirty entries become ready entries |
 | `ReclaimWalHead` | `ReclaimingWalHead(WalHeadReclaimMode)` | reclaimable WAL head | transaction edges, preservation edges, `CommitWalHeadControl`, cleanup frees | WAL head moves and old head enters the free-space collection |
 | `CommitWalRecovery` | `AppendingWal(WalAppendMode)` | pending WAL recovery boundary | `CommitWalRecoveryBoundary` | boundary cleared so normal append may resume |
 | `AppendRawWalRecord` | `AppendingWal(WalAppendMode)` | valid record-specific source state | one record-specific durable edge from the table below | `ApplyWalRecord` effect for that record |
@@ -404,6 +412,8 @@ Named durable edges for replay-visible durable writes:
 | `BeginTransaction` | Write and sync main-WAL `begin_transaction(transaction_log_id, start)`. | `ApplyWalRecord`, transaction recovery |
 | `BeginInlineTransaction` | Write and sync main-WAL `begin_inline_transaction(record_count, encoded_len)`. | `ApplyWalRecord`, transaction recovery |
 | `AddTransactionCollection` | Write and sync transaction-log `add_transaction_collection(collection_id, observed_generation)`. | `ApplyWalRecord`, transaction private frontier state |
+| `StageFreeIntent` | Write and sync transaction-log `free_intent(collection_id, region_index)`. | `ApplyWalRecord`, transaction private free-intent state |
+| `RecordRollbackAllocation` | Write and sync transaction-log `rollback_allocation(region_index)`. | `ApplyWalRecord`, transaction rollback cleanup state |
 | `CommitTransaction` | Write and sync main-WAL `commit_transaction(transaction_log_id, range)`. | `ApplyWalRecord`, transaction recovery |
 | `CommitInlineTransaction` | Write and sync main-WAL `commit_inline_transaction(record_count)`. | `ApplyWalRecord`, transaction recovery |
 | `FinishTransaction` | Write and sync main-WAL `transaction_finished(transaction_log_id, range)`. | `ApplyWalRecord`, transaction recovery |

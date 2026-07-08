@@ -52,11 +52,13 @@ helpers.
     region at `max_seen_sequence + 1` and update runtime
     `max_seen_sequence`.
 15. `RING-IMPL-REGRESSION-075` Reopening with incomplete transaction
-    allocation state MUST return allocated regions to the dirty range
-    and leave no abandoned private allocation reservation live.
+    allocation state MUST write missing rollback allocation records,
+    return allocated regions to the dirty range through ordered cleanup,
+    write `transaction_finished`, and leave no abandoned private
+    allocation reservation live.
 16. `RING-IMPL-REGRESSION-076` Allocation cleanup MUST reject region
-    indexes that do not match the current transaction recovery state or
-    storage-core private allocation reservation.
+    indexes or cleanup slots that do not match the current transaction
+    recovery state or storage-core private allocation reservation.
 17. `RING-IMPL-REGRESSION-077` Normal WAL append capacity MUST exclude
     a logical reserve large enough for the rotation allocation plus
     rotation-link record.
@@ -127,13 +129,14 @@ helpers.
     transaction and ignore non-visible allocator records from other
     ranges.
 41. `RING-IMPL-REGRESSION-151` Startup replay MUST publish committed
-    transaction intervals atomically: after `transaction_finished`,
-    transaction collection mutations from the committed range are
-    imported and visible in replayed collection state.
+    transaction intervals atomically: after `commit_transaction`,
+    transaction collection mutations and transaction-owned allocations
+    from the committed range are imported and visible in replayed
+    collection state.
 42. `RING-IMPL-REGRESSION-152` Post-commit transaction cleanup recovery
-    MUST preserve committed collection state, recover the cleanup free
-    by appending a dirty free-space entry, and remain stable across
-    reopen.
+    MUST preserve committed collection state, recover cleanup frees in
+    retained free-intent order, append dirty free-space entries at the
+    expected cleanup slots, and remain stable across reopen.
 43. `RING-IMPL-REGRESSION-153` Map replacement-flush cleanup MUST make
     the replaced committed map region part of the recovered free-space
     collection after cleanup completes.
@@ -183,11 +186,13 @@ dirty and allow erase maintenance to repeat.
 6. `RING-IMPL-FREE-006` If `erase_free_region_span` is durable,
 startup MUST advance `ready_boundary` and make the span allocatable.
 7. `RING-IMPL-FREE-007` If `allocate_region` is durable but the
-enclosing transaction is not committed, rollback recovery MUST return
-the region to the dirty range.
-8. `RING-IMPL-FREE-008` If a transaction commit is durable but cleanup
-is unfinished, startup MUST import the committed range, finish cleanup
-frees, and then write the terminal marker.
+enclosing transaction is not committed, rollback recovery MUST write a
+`rollback_allocation` record for the region before returning it to the
+dirty range.
+8. `RING-IMPL-FREE-008` If a transaction commit or rollback marker is
+durable but cleanup is unfinished, startup MUST preserve the committed
+or rolled-back transaction state, finish ordered cleanup frees, and then
+write `transaction_finished`.
 9. `RING-IMPL-FREE-009` Ready-region reserve pressure MUST stop
 ordinary allocation while still allowing erase maintenance, recovery
 terminals, WAL rotation, transaction-log growth, and allocator metadata
@@ -195,8 +200,23 @@ maintenance to make forward progress.
 10. `RING-IMPL-FREE-010` Inline transactions MUST apply allocator and
 collection effects atomically after `commit_inline_transaction` and
 ignore body effects before commit.
-11. `RING-IMPL-FREE-011` Full transactions MUST import allocator and
-collection effects atomically at `commit_transaction`, not at the
-physical transaction-log record positions.
+11. `RING-IMPL-FREE-011` Full transactions MUST import collection
+effects atomically at `commit_transaction`, while transaction-owned
+allocation pops remain private until commit publishes them or rollback
+cleanup frees them.
 12. `RING-IMPL-FREE-012` Free-space metadata materialization MUST keep
 allocator links and cursors out of freed data regions.
+13. `RING-IMPL-FREE-013` Transaction-private frees MUST be recorded as
+`free_intent` records before commit and MUST NOT append `free_region` or
+advance `append_tail` before commit.
+14. `RING-IMPL-FREE-014` Rollback recovery MUST write exactly one
+`rollback_allocation` record for each transaction-owned allocation
+before appending `rollback_transaction`.
+15. `RING-IMPL-FREE-015` Transaction cleanup MUST append cleanup
+`free_region` records in retained-list order and require each
+`append_tail_after` to match the next cleanup slot.
+16. `RING-IMPL-FREE-016` Erase maintenance MUST NOT advance
+`ready_boundary` while a transaction owns cleanup.
+17. `RING-IMPL-FREE-017` Rollback cleanup MUST finish with
+`transaction_finished` after every rollback allocation has been returned
+to the dirty range.

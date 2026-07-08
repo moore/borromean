@@ -27,10 +27,13 @@ Mechanism review:
 
 All main WAL records are append-only and ordered by physical write
 order within the main WAL region chain. Transaction-log records use the
-same physical record framing and validation rules, but their collection
-and allocator effects are private to the transaction until a retained
+same physical record framing and validation rules. Collection mutation
+effects and `free_intent` records are private until a retained
 `commit_transaction` record in the main WAL imports a frozen
-transaction-log range.
+transaction-log range. Transaction-log `allocate_region` records advance
+the free-space allocation cursor when durable, but the popped regions
+remain transaction-owned until commit publishes them or rollback cleanup
+returns them.
 
 Inline transactions are bounded main-WAL ranges for short
 storage-internal atomic groups. Records inside an inline transaction
@@ -153,12 +156,14 @@ Each logical WAL record encodes the following fields:
 `link`, `erase_free_region_span`, `begin_inline_transaction`,
 `commit_inline_transaction`, `wal_recovery`, `free_region`,
 `begin_transaction`, `commit_transaction`, `transaction_finished`,
-`rollback_transaction`, `add_transaction_collection`, or
-`rollback_inline_transaction`.
+`rollback_transaction`, `add_transaction_collection`,
+`rollback_inline_transaction`, `free_intent`, or
+`rollback_allocation`.
 2. `RING-WAL-FIELD-002` `collection_id`: required for
-`new_collection`, `update`, `snapshot`, `head`, `drop_collection`, and
-`add_transaction_collection`; omitted for allocator commands, log
-control records, and transaction control records.
+`new_collection`, `update`, `snapshot`, `head`, `drop_collection`,
+`add_transaction_collection`, and `free_intent`; omitted for allocator
+commands, log control records, rollback allocation records, and
+transaction control records.
 3. `RING-WAL-FIELD-003` `collection_type`: required for
 `new_collection`, `snapshot`, and `head`; omitted for all other record
 types.
@@ -201,7 +206,9 @@ codes:
 `transaction_finished = 0x0f`,
 `rollback_transaction = 0x10`,
 `add_transaction_collection = 0x11`,
-`rollback_inline_transaction = 0x12`.
+`rollback_inline_transaction = 0x12`,
+`free_intent = 0x13`,
+`rollback_allocation = 0x14`.
 2. `RING-WAL-LAYOUT-002` The logical field order before byte-stuffing
 MUST be exactly the order shown above.
 3. `RING-WAL-LAYOUT-003` `payload_len` MUST equal the number of
@@ -236,6 +243,8 @@ are `record_count:u32`;
 `transaction_log_id:u32, range:TransactionLogRange`;
 `add_transaction_collection` payload is
 `observed_collection_generation:u64`;
+`free_intent` and `rollback_allocation` payloads are
+`region_index:u32`;
 `new_collection`, `drop_collection`, and `wal_recovery` payloads are
 empty.
 
@@ -339,27 +348,47 @@ Main-WAL-only record. The payload is
 `transaction_log_id:u32, range:TransactionLogRange`. It freezes the
 named range in that transaction log and imports that range into
 main-WAL replay at the position of this commit record. Before this
-marker, recovery rolls back transaction-private changes. After this
-marker, recovery preserves the imported collection and allocator state
-and finishes cleanup.
+marker, recovery keeps transaction-private collection changes and free
+intents non-visible and rolls back transaction-owned allocations through
+the rollback protocol. After this marker, recovery preserves imported
+collection state, publishes transaction-owned allocations, detaches
+transaction free intents from collection live state, and finishes
+ordered free-intent cleanup before the transaction is finished.
 
 16. `RING-WAL-PAYLOAD-016` `transaction_finished`
 Main-WAL-only record. The payload is
 `transaction_log_id:u32, range:TransactionLogRange`. It records that the
-committed transaction's cleanup and recovery obligations are complete,
-so transaction-log garbage collection may release this reference when
-no retained record or active descriptor points to the same range.
+transaction's committed or rolled-back cleanup and recovery obligations
+are complete, so transaction-log garbage collection may release this
+reference when no retained record or active descriptor points to the
+same range.
 
 17. `RING-WAL-PAYLOAD-017` `rollback_transaction`
 Main-WAL-only record. The payload is
 `transaction_log_id:u32, range:TransactionLogRange`. It records that the
-transaction did not become visible and that rollback recovery for
-transaction-owned storage effects in the transaction-log range has
-completed.
+transaction did not become visible and that ordered rollback cleanup is
+authorized for every transaction-owned allocation named by a durable
+`rollback_allocation` record in the transaction-log range.
 
 18. `RING-WAL-PAYLOAD-018` `rollback_inline_transaction`
 Main-WAL-only record. Records that recovery cleaned an uncommitted
 bounded inline range and that the range remains non-visible.
+
+19. `RING-WAL-PAYLOAD-019` `free_intent`
+Transaction-log-only record. Payload is `region_index:u32`, and the
+record carries the enrolled `collection_id`. It records a
+transaction-private intent to free a physical region that remains live
+in the collection until the transaction commits. Before commit,
+`free_intent` has no allocator effect, does not append to the
+free-space collection, and does not advance `append_tail`.
+
+20. `RING-WAL-PAYLOAD-020` `rollback_allocation`
+Transaction-log-only record. Payload is `region_index:u32`. It records
+one transaction-owned allocation that rollback cleanup must append to
+the free-space dirty range after the durable
+`rollback_transaction(transaction_log_id, range)` marker. The first
+`rollback_allocation` in a transaction range makes that range
+non-committable.
 
 ## Ordering And Validity
 
@@ -475,16 +504,22 @@ unenrolled collection are invalid in that range.
 `commit_transaction(transaction_log_id, range)` is valid only if the
 range starts at the matching open transaction descriptor's start, ends
 at that transaction log's current append position, contains only
-complete valid records, and contains no torn record before `range.end`.
+complete valid records, contains no torn record before `range.end`, and
+contains no `rollback_allocation` record.
 25. `RING-WAL-VALID-025`
 `transaction_finished(transaction_log_id, range)` is valid only after a
-retained matching `commit_transaction(transaction_log_id, range)` and
-after cleanup for that committed range is complete.
+retained matching `commit_transaction(transaction_log_id, range)` or
+`rollback_transaction(transaction_log_id, range)` and after the ordered
+cleanup cursor reaches the end of the committed free-intent list or
+rolled-back rollback-allocation list.
 26. `RING-WAL-VALID-026`
-`rollback_transaction(transaction_log_id, range)` is valid only when it
-records completed rollback recovery for an uncommitted transaction
-range. A rolled-back range MUST NOT be imported as visible collection
-or allocator state.
+`rollback_transaction(transaction_log_id, range)` is valid only when
+the range starts at the matching open transaction descriptor's start,
+ends at that transaction log's current append position, contains only
+complete valid records, contains no torn record before `range.end`, and
+contains one durable `rollback_allocation(region_index)` record for
+every transaction-owned allocation in the range. A rolled-back range
+MUST NOT be imported as visible collection or allocator state.
 27. `RING-WAL-VALID-027` Before appending
 `commit_transaction(transaction_log_id, range)`, storage MUST verify
 that each enrolled collection's current committed state generation
@@ -529,6 +564,25 @@ may remain open only at the end of the current replay tail region.
 37. `RING-WAL-VALID-037` Any other invalidity of a complete record is
 storage corruption and startup must fail rather than skipping that
 record.
+38. `RING-WAL-VALID-038` `free_intent(collection_id, region_index)` is
+valid only in a transaction log, only for a collection enrolled in the
+containing open transaction range, only for a physical region that is
+live in that collection when the transaction generation is current, and
+only if the same transaction has not already staged the same
+`region_index` as a free intent. Ordinary pre-commit frees MUST use
+`free_intent`; a transaction-log `free_region` record is invalid for
+this purpose.
+39. `RING-WAL-VALID-039` `rollback_allocation(region_index)` is valid
+only in a transaction log and only for a region previously popped by an
+`allocate_region(region_index, allocation_head_after)` record in the
+same open transaction range. A transaction range MUST NOT contain
+duplicate rollback allocation records for the same region.
+40. `RING-WAL-VALID-040` A transaction cleanup `free_region` record is
+valid only in the main WAL while the matching committed or rolled-back
+transaction owns cleanup. Its `append_tail_after` MUST name the queue
+position immediately after the transaction's next cleanup slot:
+`cleanup_start_tail + cleanup_index + 1`. No other main-WAL operation
+may interleave before `transaction_finished`.
 
 ## Checksum Trust Model
 

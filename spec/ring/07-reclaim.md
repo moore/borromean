@@ -18,9 +18,11 @@ Mechanism review:
   replay operations.
 - **Durable edge sequence**: multi-step reclaim work uses full
   transaction-log-backed transactions or bounded inline transactions.
-  Cleanup writes `free_region(region_index, append_tail_after)`;
-  maintenance erases dirty entries before publishing
-  `erase_free_region_span(count, ready_boundary_after)`.
+  Full-transaction cleanup writes ordered
+  `free_region(region_index, append_tail_after)` records while the
+  transaction owns main-WAL cleanup; maintenance erases dirty entries
+  before publishing `erase_free_region_span(count,
+  ready_boundary_after)`.
 - **Replay effect**: replay either sees the same live state as before
   reclaim, a completed transaction, or an incomplete transaction that
   recovery can finish or roll back.
@@ -101,17 +103,18 @@ private allocation reservation is still needed to recover an incomplete
 private-log rotation.
 11. `RING-WAL-RECLAIM-011` Main-WAL transaction-control and inline
 transaction-control records are live while startup replay still needs
-them to import a committed range, prove rollback completed, finish
-committed cleanup, or keep a transaction-log range referenced for
-garbage collection.
+them to import a committed range, prove rollback was decided, finish
+committed or rolled-back cleanup, or keep a transaction-log range
+referenced for garbage collection.
 12. `RING-WAL-RECLAIM-012` `wal_recovery` record:
 live only if replay still needs it to justify later valid WAL records
 that appear after an ignored corrupt/torn span in that WAL region.
-13. `RING-WAL-RECLAIM-013` Transaction-log records are live while any
-retained main-WAL commit, rollback, finish record, open transaction
-descriptor, or pending recovery descriptor points to a range containing
-them. They become reclaimable only when the transaction log's live
-prefix advances past them.
+13. `RING-WAL-RECLAIM-013` Transaction-log records, including
+`free_intent` and `rollback_allocation`, are live while any retained
+main-WAL commit, rollback, finish record, open transaction descriptor,
+or pending recovery descriptor points to a range containing them. They
+become reclaimable only when the transaction log's live prefix advances
+past them.
 
 WAL-region reclaim preconditions:
 
@@ -166,9 +169,9 @@ main-WAL `commit_transaction(transaction_log_id, range)`,
 `transaction_finished(transaction_log_id, range)` record, no open
 transaction descriptor, and no pending recovery descriptor points into
 that prefix. The reclaim result must preserve the same imported
-committed ranges, rollback ranges, cleanup obligations,
-transaction-log append cursors, and allocator cursor recovery result as
-before reclaim.
+committed ranges, rollback ranges, free intents, rollback allocation
+records, cleanup obligations, transaction-log append cursors, and
+allocator cursor recovery result as before reclaim.
 
 1. `RING-TXLOG-RECLAIM-001` Transaction-log reclaim MUST advance only a
 contiguous prefix of one transaction log.
@@ -213,9 +216,10 @@ appended.
 2. `RING-FREE-REGION-PRE-002` The region MUST NOT already be present in
 the free-space collection unless this procedure is being re-entered
 during idempotent recovery.
-3. `RING-FREE-REGION-PRE-003` The owning operation's committed
-transaction state MUST contain enough durable information for cleanup
-recovery to derive that `region_index` must be freed.
+3. `RING-FREE-REGION-PRE-003` The owning operation's committed or
+rolled-back transaction state MUST contain enough durable information
+for cleanup recovery to derive that `region_index` must be freed and to
+derive its ordered cleanup slot.
 
 Procedure:
 
@@ -269,31 +273,67 @@ ordinary user/data allocation is allowed to proceed.
 
 ## Transaction Cleanup Recovery
 
+Full transaction cleanup has two retained lists:
+transaction-private `free_intent` records, which become cleanup
+obligations only after commit, and `rollback_allocation` records, which
+become cleanup obligations after rollback. Cleanup is serialized by one
+main-WAL cleanup owner. The owner records `cleanup_start_tail` when
+`commit_transaction` or `rollback_transaction` is applied and processes
+entry `cleanup_index` at queue slot
+`cleanup_start_tail + cleanup_index`, represented by
+`free_region(region_index, append_tail_after = cleanup_start_tail +
+cleanup_index + 1)`.
+
 1. `RING-TX-RECOVERY-001` If startup reaches main WAL end with an open
 full transaction descriptor and no durable `commit_transaction`, it
-MUST run rollback recovery for that transaction-log range and append
-`rollback_transaction(transaction_log_id, range)`.
+MUST run rollback preparation for that transaction-log range by writing
+any missing `rollback_allocation(region_index)` records for
+transaction-owned allocations.
 2. `RING-TX-RECOVERY-002` If startup reaches main WAL end with an
 uncommitted inline transaction, it MUST run rollback recovery for that
 bounded main-WAL range and may append
 `rollback_inline_transaction(record_count)`.
-3. `RING-TX-RECOVERY-003` If startup reaches main WAL end after
+3. `RING-TX-RECOVERY-003` After all transaction-owned allocations in an
+uncommitted full transaction have durable `rollback_allocation` records,
+startup or foreground rollback MUST append
+`rollback_transaction(transaction_log_id, range)`. The durable rollback
+marker makes the transaction range non-visible, records
+`cleanup_start_tail = append_tail`, and transfers main-WAL cleanup
+ownership to that transaction.
+4. `RING-TX-RECOVERY-004` If startup reaches main WAL end after
 `commit_transaction(transaction_log_id, range)` but before
 `transaction_finished(transaction_log_id, range)`, it MUST preserve the
-committed collection and allocator state imported from that range,
-finish cleanup frees derived from the committed range, and append
-`transaction_finished(transaction_log_id, range)`.
-4. `RING-TX-RECOVERY-004` Both rollback recovery and cleanup recovery
-MUST be idempotent if startup crashes before the terminal marker is
-durable.
-5. `RING-TX-RECOVERY-005` On rollback, any region popped by
-`allocate_region` in the uncommitted range MUST be returned to the
-dirty range with a durable `free_region` record, because foreground code
-may have partially written it before the rollback decision.
-6. `RING-TX-RECOVERY-006` The configured ready-region reserve and WAL
+committed collection state imported from that range and finish ordered
+cleanup frees for the range's `free_intent` records.
+5. `RING-TX-RECOVERY-005` If startup reaches main WAL end after
+`rollback_transaction(transaction_log_id, range)` but before
+`transaction_finished(transaction_log_id, range)`, it MUST preserve the
+range as non-visible and finish ordered cleanup frees for the range's
+`rollback_allocation` records.
+6. `RING-TX-RECOVERY-006` Cleanup recovery MUST be idempotent if
+startup crashes before `transaction_finished` is durable. If the
+expected cleanup slot is already present with the expected region,
+recovery MUST advance to the next cleanup entry. If the expected slot is
+absent, recovery MUST append it. If the slot is present with a different
+region, recovery MUST report corruption.
+7. `RING-TX-RECOVERY-007` While a transaction owns cleanup, no other
+main-WAL operation may append records that affect the free-space
+append-tail order, and erase maintenance MUST NOT advance
+`ready_boundary` over the cleanup suffix. Transaction-log-only records
+for already open transactions may continue.
+8. `RING-TX-RECOVERY-008` On commit, `free_intent` records MUST be
+removed from the enrolled collection's live state before their cleanup
+`free_region` records are appended. On rollback,
+`rollback_allocation` records MUST name transaction-owned allocations
+that were never made collection-live.
+9. `RING-TX-RECOVERY-009` `transaction_finished(transaction_log_id,
+range)` MUST be appended only after the cleanup cursor has reached the
+end of the committed free-intent list or rolled-back allocation list;
+it releases cleanup ownership and clears retained transaction state.
+10. `RING-TX-RECOVERY-010` The configured ready-region reserve and WAL
 space reserve MUST leave enough capacity for startup recovery to append
-a required terminal transaction record and any required allocator
-cleanup records.
+required rollback allocation records, a rollback marker, ordered cleanup
+free records, and the finish marker.
 
 ## Region Reclaim
 
@@ -318,14 +358,15 @@ region ready without erase maintenance publishing an
 `erase_free_region_span` record or equivalent materialized
 free-space state.
 6. `RING-REGION-RECLAIM-ORDER-001` Transaction cleanup MUST not make a
-region free until the committed collection state no longer references
-that region.
+committed free-intent region free until the committed collection state
+no longer references that region. Rollback cleanup may free only regions
+recorded as transaction-owned rollback allocations.
 7. `RING-REGION-RECLAIM-ORDER-002` If cleanup needs a new free-space
 metadata region to append dirty entries, it MUST allocate that metadata
 region through a transaction or privileged storage-core operation whose
 recovery path is already reserved.
 8. `RING-REGION-RECLAIM-ORDER-003` Cleanup is not complete for a
-detached region until its `free_region(region_index,
+detached region until its ordered `free_region(region_index,
 append_tail_after)` record is durable.
 9. `RING-REGION-RECLAIM-ORDER-004` Transaction cleanup MUST be
 idempotent across crashes between any two cleanup steps.
