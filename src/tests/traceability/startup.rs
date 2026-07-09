@@ -89,12 +89,35 @@ fn requirement_startup_open_paths_complete_without_heap_allocation() {
 }
 
 //= spec/implementation.md#startup-requirements
-//= type=todo
+//= type=test
 //# `RING-IMPL-STARTUP-003` If startup needs temporary decode storage,
 //# that storage MUST come from the `Storage` context or bounded storage
 //# supplied when that context is constructed.
 #[test]
-fn todo_startup_uses_storage_context_decode_scratch() {}
+fn requirement_startup_uses_storage_context_decode_scratch() {
+    let mut flash = MockFlash::<512, 5, 2048>::new(0xff);
+    let mut format_memory = StorageMemory::<512, 5, 8>::new();
+    let mut storage = Storage::<_, 512, 5, 8>::format(
+        &mut flash,
+        StorageFormatConfig::new(1, 8, 0xa5),
+        &mut format_memory,
+    )
+    .unwrap();
+
+    storage.create_map(CollectionId(85)).unwrap();
+    storage
+        .append_update(CollectionId(85), &[0xa5, 0xff, 0x11, 0x22])
+        .unwrap();
+    drop(storage);
+
+    let mut open_memory = StorageMemory::<512, 5, 8>::new();
+    let reopened = assert_no_alloc("startup decode scratch", || {
+        Storage::<_, 512, 5, 8>::open(&mut flash, &mut open_memory).unwrap()
+    });
+
+    assert_eq!(reopened.collections()[0].collection_id(), CollectionId(85));
+    assert_eq!(reopened.collections()[0].pending_update_count(), 1);
+}
 
 //= spec/implementation.md#startup-requirements
 //= type=test

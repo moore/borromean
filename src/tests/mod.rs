@@ -187,6 +187,29 @@ fn count_records_in_regions_with_format<
     count
 }
 
+fn count_replayed_wal_records<
+    IO: FlashIo,
+    const REGION_SIZE: usize,
+    const REGION_COUNT: usize,
+    const MAX_COLLECTIONS: usize,
+>(
+    storage: &mut Storage<'_, '_, IO, REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>,
+    mut predicate: impl for<'record> FnMut(WalRecord<'record>) -> bool,
+) -> usize {
+    storage.with_runtime_io_workspace(|runtime, flash, workspace| {
+        let mut count = 0usize;
+        runtime
+            .visit_wal_records::<REGION_SIZE, _, (), _>(flash, workspace, |_flash, record| {
+                if predicate(record) {
+                    count += 1;
+                }
+                Ok(())
+            })
+            .unwrap();
+        count
+    })
+}
+
 fn assert_no_alloc<T>(label: &str, operation: impl FnOnce() -> T) -> T {
     let guard = AllocationTrackingGuard::new();
     let result = operation();
@@ -398,6 +421,284 @@ fn requirement_public_transaction_writer_emits_transaction_enrollment() {
             WalRecordType::AddTransactionCollection,
         ),
         1
+    );
+}
+
+//= spec/ring/09-implementation-coverage.md#free-space-collection-coverage-targets
+//= type=test
+//# `RING-IMPL-FREE-013` Transaction-private frees MUST be recorded as
+//# `free_intent` records before commit and MUST NOT append `free_region` or
+//# advance `append_tail` before commit.
+#[test]
+fn requirement_transaction_private_replacement_free_uses_free_intent_until_commit() {
+    const REGION_SIZE: usize = 512;
+    const REGION_COUNT: usize = 16;
+    const MAX_COLLECTIONS: usize = 8;
+    let collection_id = CollectionId(73);
+    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 8192>::new(0xff);
+    let mut storage_memory = StorageMemory::<REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>::new();
+    let mut storage = Storage::format(
+        &mut flash,
+        StorageFormatConfig::new(2, 8, 0xa5),
+        &mut storage_memory,
+    )
+    .unwrap();
+
+    storage.create_map(collection_id).unwrap();
+    let mut map_buffer = [0u8; REGION_SIZE];
+    let mut map = MapFrontier::<u16, u16, 4>::new(
+        collection_id,
+        &mut map_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
+    map.set_in_memory(1, 10).unwrap();
+    let first_region = storage.flush_map::<_, _, 4>(&mut map).unwrap();
+
+    let append_tail_before_private_free = storage.free_space_cursors().4;
+    let free_entry_count_before_private_free = storage.free_space_entries().len();
+    let mut transaction_memory = TransactionMemory::<REGION_COUNT>::new();
+    let transaction = storage
+        .begin_transaction(collection_id, &mut transaction_memory)
+        .unwrap();
+    map.set_in_memory(2, 20).unwrap();
+    let replacement_region = storage.flush_map::<_, _, 4>(&mut map).unwrap();
+
+    let collection = storage
+        .collections()
+        .iter()
+        .find(|collection| collection.collection_id() == collection_id)
+        .unwrap();
+    assert_eq!(
+        collection.basis(),
+        StartupCollectionBasis::Region(first_region)
+    );
+    assert_ne!(replacement_region, first_region);
+    assert_eq!(
+        storage.free_space_cursors().4,
+        append_tail_before_private_free
+    );
+    assert_eq!(
+        storage.free_space_entries().len(),
+        free_entry_count_before_private_free
+    );
+
+    let metadata = storage.metadata();
+    let free_intent_count = storage.with_io_workspace(|flash, _workspace| {
+        count_records_in_regions_with_format(
+            flash,
+            metadata,
+            crate::disk::TRANSACTION_LOG_V2_FORMAT,
+            WalRecordType::FreeIntent,
+        )
+    });
+    assert_eq!(free_intent_count, 1);
+    assert_eq!(
+        count_replayed_wal_records(&mut storage, |record| matches!(
+            record,
+            WalRecord::FreeRegion { region_index, .. } if region_index == first_region
+        )),
+        0
+    );
+
+    transaction.commit(&mut storage).unwrap();
+    let collection = storage
+        .collections()
+        .iter()
+        .find(|collection| collection.collection_id() == collection_id)
+        .unwrap();
+    assert_eq!(
+        collection.basis(),
+        StartupCollectionBasis::Region(replacement_region)
+    );
+    assert_eq!(
+        storage.free_space_cursors().4,
+        append_tail_before_private_free + 1
+    );
+    assert_eq!(
+        count_replayed_wal_records(&mut storage, |record| matches!(
+            record,
+            WalRecord::FreeRegion { region_index, .. } if region_index == first_region
+        )),
+        1
+    );
+}
+
+//= spec/ring/07-reclaim.md#transaction-cleanup-recovery
+//= type=test
+//# `RING-TX-RECOVERY-008` On commit, `free_intent` records MUST be
+//# removed from the enrolled collection's live state before their cleanup
+//# `free_region` records are appended.
+#[test]
+fn requirement_committed_free_intent_cleanup_runs_after_private_head_import() {
+    const REGION_SIZE: usize = 512;
+    const REGION_COUNT: usize = 16;
+    const MAX_COLLECTIONS: usize = 8;
+    let collection_id = CollectionId(74);
+    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 8192>::new(0xff);
+    let mut storage_memory = StorageMemory::<REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>::new();
+    let mut storage = Storage::format(
+        &mut flash,
+        StorageFormatConfig::new(2, 8, 0xa5),
+        &mut storage_memory,
+    )
+    .unwrap();
+
+    storage.create_map(collection_id).unwrap();
+    let mut map_buffer = [0u8; REGION_SIZE];
+    let mut map = MapFrontier::<u16, u16, 4>::new(
+        collection_id,
+        &mut map_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
+    map.set_in_memory(1, 10).unwrap();
+    let first_region = storage.flush_map::<_, _, 4>(&mut map).unwrap();
+
+    let mut transaction_memory = TransactionMemory::<REGION_COUNT>::new();
+    let transaction = storage
+        .begin_transaction(collection_id, &mut transaction_memory)
+        .unwrap();
+    map.set_in_memory(2, 20).unwrap();
+    let replacement_region = storage.flush_map::<_, _, 4>(&mut map).unwrap();
+    transaction.commit(&mut storage).unwrap();
+
+    let mut saw_commit = false;
+    let mut saw_replacement_head = false;
+    let mut saw_free_after_import = false;
+    let mut saw_finish_after_free = false;
+    storage
+        .with_runtime_io_workspace(|runtime, flash, workspace| {
+            runtime.visit_wal_records::<REGION_SIZE, _, (), _>(
+                flash,
+                workspace,
+                |_flash, record| {
+                    match record {
+                        WalRecord::CommitTransaction { .. } => {
+                            saw_commit = true;
+                        }
+                        WalRecord::Head {
+                            collection_id: record_collection,
+                            region_index,
+                            ..
+                        } if record_collection == collection_id
+                            && region_index == replacement_region =>
+                        {
+                            assert!(saw_commit);
+                            saw_replacement_head = true;
+                        }
+                        WalRecord::FreeRegion { region_index, .. }
+                            if region_index == first_region =>
+                        {
+                            assert!(saw_replacement_head);
+                            saw_free_after_import = true;
+                        }
+                        WalRecord::TransactionFinished { .. } if saw_free_after_import => {
+                            saw_finish_after_free = true;
+                        }
+                        _ => {}
+                    }
+                    Ok(())
+                },
+            )
+        })
+        .unwrap();
+
+    assert!(saw_commit);
+    assert!(saw_replacement_head);
+    assert!(saw_free_after_import);
+    assert!(saw_finish_after_free);
+}
+
+//= spec/ring/07-reclaim.md#transaction-cleanup-recovery
+//= type=test
+//# `RING-TX-RECOVERY-008` On rollback, transaction-owned allocations
+//# retained from the range MUST have never been made collection-live before
+//# their cleanup `free_region` records are appended.
+#[test]
+fn requirement_rollback_ignores_free_intents_and_cleans_transaction_allocations() {
+    const REGION_SIZE: usize = 512;
+    const REGION_COUNT: usize = 16;
+    const MAX_COLLECTIONS: usize = 8;
+    let collection_id = CollectionId(75);
+    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 8192>::new(0xff);
+    let mut storage_memory = StorageMemory::<REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>::new();
+    let mut storage = Storage::format(
+        &mut flash,
+        StorageFormatConfig::new(2, 8, 0xa5),
+        &mut storage_memory,
+    )
+    .unwrap();
+
+    storage.create_map(collection_id).unwrap();
+    let mut map_buffer = [0u8; REGION_SIZE];
+    let mut map = MapFrontier::<u16, u16, 4>::new(
+        collection_id,
+        &mut map_buffer,
+        crate::test_map_frontier_memory(),
+    )
+    .unwrap();
+    map.set_in_memory(1, 10).unwrap();
+    let first_region = storage.flush_map::<_, _, 4>(&mut map).unwrap();
+
+    let mut transaction_memory = TransactionMemory::<REGION_COUNT>::new();
+    let transaction = storage
+        .begin_transaction(collection_id, &mut transaction_memory)
+        .unwrap();
+    map.set_in_memory(2, 20).unwrap();
+    let replacement_region = storage.flush_map::<_, _, 4>(&mut map).unwrap();
+    transaction.rollback(&mut storage).unwrap();
+
+    let collection = storage
+        .collections()
+        .iter()
+        .find(|collection| collection.collection_id() == collection_id)
+        .unwrap();
+    assert_eq!(
+        collection.basis(),
+        StartupCollectionBasis::Region(first_region)
+    );
+    assert_eq!(
+        count_replayed_wal_records(&mut storage, |record| matches!(
+            record,
+            WalRecord::FreeRegion { region_index, .. } if region_index == first_region
+        )),
+        0
+    );
+    assert_eq!(
+        count_replayed_wal_records(&mut storage, |record| matches!(
+            record,
+            WalRecord::FreeRegion { region_index, .. } if region_index == replacement_region
+        )),
+        1
+    );
+
+    drop(storage);
+    let mut reopen_memory = StorageMemory::<REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>::new();
+    let mut reopened = Storage::open(&mut flash, &mut reopen_memory).unwrap();
+    let mut reopened_buffer = [0u8; REGION_SIZE];
+    let reopened_map = reopened
+        .open_map::<u16, u16, 4>(
+            collection_id,
+            &mut reopened_buffer,
+            crate::test_map_frontier_memory(),
+        )
+        .unwrap();
+    assert_eq!(
+        reopened
+            .with_io_workspace(|flash, workspace| {
+                reopened_map.get::<REGION_SIZE, _>(flash, workspace, &1)
+            })
+            .unwrap(),
+        Some(10)
+    );
+    assert_eq!(
+        reopened
+            .with_io_workspace(|flash, workspace| {
+                reopened_map.get::<REGION_SIZE, _>(flash, workspace, &2)
+            })
+            .unwrap(),
+        None
     );
 }
 
@@ -1452,12 +1753,40 @@ fn requirement_storage_flush_map_future_drop_after_region_write_remains_recovera
 }
 
 //= spec/implementation.md#architecture-requirements
-//= type=todo
+//= type=test
 //# `RING-IMPL-ARCH-001` `Storage` MUST own logical storage state, configuration, bounded operation
 //# scratch, and exclusive access to the backing object by value or mutable reference for the
 //# lifetime of the opened database.
 #[test]
-fn todo_storage_format_binds_backing_and_scratch() {}
+fn requirement_storage_format_binds_backing_and_scratch() {
+    let mut flash = MockFlash::<256, 5, 1024>::new(0xff);
+    let mut memory = StorageMemory::<256, 5, 8>::new();
+    let mut storage = Storage::<_, 256, 5, 8>::format(
+        &mut flash,
+        StorageFormatConfig::new(1, 8, 0xa5),
+        &mut memory,
+    )
+    .unwrap();
+
+    assert_eq!(storage.metadata().region_size, 256);
+    assert_eq!(storage.metadata().region_count, 5);
+    assert_eq!(storage.metadata().wal_write_granule, 8);
+    assert_eq!(storage.mode(), StorageMode::Idle);
+    assert_eq!(storage.memory.payload_scratch.len(), 256);
+    assert_eq!(storage.memory.checkpoint_scratch.len(), 256);
+    assert_eq!(storage.memory.collection_scratch.len(), 256);
+    assert_eq!(storage.memory.open_scratch.len(), 256);
+
+    storage.create_map(CollectionId(44)).unwrap();
+    storage
+        .append_update(CollectionId(44), &[0xa5, 0xff, 0x44])
+        .unwrap();
+    let backing = storage.into_backing();
+
+    let reopened = Storage::<_, 256, 5, 8>::open(backing, crate::test_storage_memory()).unwrap();
+    assert_eq!(reopened.collections()[0].collection_id(), CollectionId(44));
+    assert_eq!(reopened.collections()[0].pending_update_count(), 1);
+}
 
 //= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
 //= type=test
@@ -1524,12 +1853,40 @@ fn requirement_storage_append_new_collection_rejects_unsupported_channel_collect
 }
 
 //= spec/implementation.md#api-requirements
-//= type=todo
+//= type=test
 //# `RING-IMPL-API-001` Public format and open entry points MUST bind a backing implementation and
 //# bounded operation scratch into the returned `Storage` context, and normal replay or mutating
 //# operations MUST use those dependencies through `Storage`.
 #[test]
-fn todo_storage_api_binds_backing_and_scratch() {}
+fn requirement_storage_api_binds_backing_and_scratch() {
+    let mut flash = MockFlash::<512, 6, 2048>::new(0xff);
+    let mut format_memory = StorageMemory::<512, 6, 8>::new();
+    let mut storage = Storage::<_, 512, 6, 8>::format(
+        &mut flash,
+        StorageFormatConfig::new(1, 8, 0xa5),
+        &mut format_memory,
+    )
+    .unwrap();
+
+    storage.create_map(CollectionId(45)).unwrap();
+    storage
+        .append_map_update::<u16, u16>(CollectionId(45), &MapUpdate::Set { key: 8, value: 80 })
+        .unwrap();
+    assert_eq!(storage.collections()[0].pending_update_count(), 1);
+    drop(storage);
+
+    let mut open_memory = StorageMemory::<512, 6, 8>::new();
+    let mut reopened = Storage::<_, 512, 6, 8>::open(&mut flash, &mut open_memory).unwrap();
+    let mut map_buffer = [0u8; 512];
+    let map = reopened
+        .open_map::<u16, u16, 8>(
+            CollectionId(45),
+            &mut map_buffer,
+            crate::test_map_frontier_memory(),
+        )
+        .unwrap();
+    assert_eq!(map.get_frontier(&8).unwrap(), Some(80));
+}
 
 //= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
 //= type=test

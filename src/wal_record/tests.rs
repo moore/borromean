@@ -712,7 +712,8 @@ fn requirement_decode_rejects_invalid_escape_sequence() {
 //# `transaction_finished = 0x0f`,
 //# `rollback_transaction = 0x10`,
 //# `add_transaction_collection = 0x11`,
-//# `rollback_inline_transaction = 0x12`.
+//# `rollback_inline_transaction = 0x12`,
+//# `free_intent = 0x13`.
 #[test]
 fn requirement_record_types_use_canonical_byte_codes() {
     let canonical_codes = [
@@ -734,6 +735,7 @@ fn requirement_record_types_use_canonical_byte_codes() {
         (WalRecordType::RollbackTransaction, 0x10),
         (WalRecordType::AddTransactionCollection, 0x11),
         (WalRecordType::RollbackInlineTransaction, 0x12),
+        (WalRecordType::FreeIntent, 0x13),
     ];
 
     for (record_type, code) in canonical_codes {
@@ -742,8 +744,8 @@ fn requirement_record_types_use_canonical_byte_codes() {
     }
 
     assert_eq!(
-        WalRecordType::decode(0x13),
-        Err(WalRecordError::InvalidRecordType(0x13))
+        WalRecordType::decode(0x14),
+        Err(WalRecordError::InvalidRecordType(0x14))
     );
 }
 
@@ -757,6 +759,26 @@ fn requirement_add_transaction_collection_round_trips() {
     let record = WalRecord::AddTransactionCollection {
         collection_id: CollectionId(7),
         observed_collection_generation: 42,
+    };
+
+    let (physical, encoded_len) = encode_physical(record, metadata);
+    let mut decode_scratch = [0u8; 128];
+    let decoded = decode_record(&physical[..encoded_len], metadata, &mut decode_scratch).unwrap();
+
+    assert_eq!(decoded.record, record);
+}
+
+//= spec/ring/04-wal-records.md#wal-record-types
+//= type=test
+//# `RING-WAL-PAYLOAD-019` `free_intent`
+//# Transaction-log-only record. Payload is `region_index:u32`, and the
+//# record carries the enrolled `collection_id`.
+#[test]
+fn requirement_free_intent_round_trips_collection_and_region() {
+    let metadata = metadata(4);
+    let record = WalRecord::FreeIntent {
+        collection_id: CollectionId(7),
+        region_index: 3,
     };
 
     let (physical, encoded_len) = encode_physical(record, metadata);

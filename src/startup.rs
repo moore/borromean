@@ -405,7 +405,9 @@ struct OpenTransactionReplay {
     transaction_log_id: u32,
     start: LogPosition,
     committed_range: Option<TransactionLogRange>,
+    rolled_back_range: Option<TransactionLogRange>,
     commit_seen: bool,
+    rollback_seen: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -453,6 +455,7 @@ pub(crate) struct StartupOpenPlan<const REGION_COUNT: usize, const MAX_COLLECTIO
     pending_wal_recovery_boundary: bool,
     transaction_original_collections: Vec<StartupCollection, MAX_COLLECTIONS>,
     transaction_allocations: Vec<u32, REGION_COUNT>,
+    transaction_free_intents: Vec<u32, REGION_COUNT>,
     transaction_frees: Vec<u32, REGION_COUNT>,
     transaction_cleanup_regions: Vec<u32, REGION_COUNT>,
     transaction_old_regions: Vec<u32, REGION_COUNT>,
@@ -492,6 +495,7 @@ impl<const REGION_COUNT: usize, const MAX_COLLECTIONS: usize>
             pending_wal_recovery_boundary: false,
             transaction_original_collections: Vec::new(),
             transaction_allocations: Vec::new(),
+            transaction_free_intents: Vec::new(),
             transaction_frees: Vec::new(),
             transaction_cleanup_regions: Vec::new(),
             transaction_old_regions: Vec::new(),
@@ -523,6 +527,7 @@ impl<const REGION_COUNT: usize, const MAX_COLLECTIONS: usize>
         self.pending_wal_recovery_boundary = false;
         self.transaction_original_collections.clear();
         self.transaction_allocations.clear();
+        self.transaction_free_intents.clear();
         self.transaction_frees.clear();
         self.transaction_cleanup_regions.clear();
         self.transaction_old_regions.clear();
@@ -537,6 +542,7 @@ impl<const REGION_COUNT: usize, const MAX_COLLECTIONS: usize>
         self.free_space = FreeSpaceState::empty();
         self.transaction_original_collections.clear();
         self.transaction_allocations.clear();
+        self.transaction_free_intents.clear();
         self.transaction_frees.clear();
         self.transaction_cleanup_regions.clear();
         self.transaction_old_regions.clear();
@@ -552,6 +558,7 @@ impl<const REGION_COUNT: usize, const MAX_COLLECTIONS: usize>
                 .map_err(|_| StartupError::TooManyTrackedCollections)?;
         }
         self.transaction_allocations.clear();
+        self.transaction_free_intents.clear();
         self.transaction_frees.clear();
         self.transaction_cleanup_regions.clear();
         self.transaction_old_regions.clear();
@@ -562,6 +569,7 @@ impl<const REGION_COUNT: usize, const MAX_COLLECTIONS: usize>
     fn clear_transaction_recovery_scratch(&mut self) {
         self.transaction_original_collections.clear();
         self.transaction_allocations.clear();
+        self.transaction_free_intents.clear();
         self.transaction_frees.clear();
         self.transaction_cleanup_regions.clear();
         self.transaction_old_regions.clear();
@@ -1076,9 +1084,6 @@ fn replay_open_wal_region<
                         }
                     }
                 }
-                if outcome == TransactionLogOutcome::RolledBack {
-                    plan.clear_transaction_recovery_scratch();
-                }
                 offset = next_offset;
                 reload_region = true;
             }
@@ -1228,7 +1233,9 @@ fn classify_replay_record<const REGION_COUNT: usize, const MAX_COLLECTIONS: usiz
                     transaction_log_id,
                     start,
                     committed_range: None,
+                    rolled_back_range: None,
                     commit_seen: false,
+                    rollback_seen: false,
                 });
                 return Ok(next);
             }
@@ -1289,7 +1296,8 @@ fn classify_replay_record<const REGION_COUNT: usize, const MAX_COLLECTIONS: usiz
                 transaction.transaction_log_id,
                 transaction_log_id,
             )?;
-            *open_transaction = None;
+            transaction.rollback_seen = true;
+            transaction.rolled_back_range = Some(range);
             return Ok(ReplayStep::ReplayTransactionLog {
                 transaction_log_id,
                 range,
@@ -1331,6 +1339,9 @@ fn observe_transaction_recovery_record<const REGION_COUNT: usize, const MAX_COLL
         WalRecord::FreeRegion { region_index, .. } => {
             push_unique_region(&mut plan.transaction_frees, region_index)?;
         }
+        WalRecord::FreeIntent { region_index, .. } => {
+            push_unique_region(&mut plan.transaction_free_intents, region_index)?;
+        }
         _ => {}
     }
 
@@ -1364,7 +1375,8 @@ fn transaction_record_collection_id(record: WalRecord<'_>) -> Option<CollectionI
         | WalRecord::Snapshot { collection_id, .. }
         | WalRecord::Head { collection_id, .. }
         | WalRecord::DropCollection { collection_id }
-        | WalRecord::AddTransactionCollection { collection_id, .. } => Some(collection_id),
+        | WalRecord::AddTransactionCollection { collection_id, .. }
+        | WalRecord::FreeIntent { collection_id, .. } => Some(collection_id),
         WalRecord::AllocateRegion { .. }
         | WalRecord::EraseFreeRegionSpan { .. }
         | WalRecord::FreeRegion { .. }
@@ -1441,15 +1453,25 @@ fn validate_transaction_log_private_record<
             Ok(())
         }
         WalRecord::Link { .. } => Ok(()),
-        WalRecord::AllocateRegion { .. }
-        | WalRecord::FreeRegion { .. }
-        | WalRecord::EraseFreeRegionSpan { .. } => {
+        WalRecord::AllocateRegion { .. } | WalRecord::EraseFreeRegionSpan { .. } => {
             if enrollment.collection_id.is_none() {
                 return Err(StartupError::InvalidTransactionEnrollment {
                     collection_id: CollectionId(0),
                 });
             }
             Ok(())
+        }
+        WalRecord::FreeRegion { .. } => Err(StartupError::InvalidTransactionEnrollment {
+            collection_id: CollectionId(0),
+        }),
+        WalRecord::FreeIntent {
+            collection_id,
+            region_index: _,
+        } => {
+            if enrollment.collection_id == Some(collection_id) {
+                return Ok(());
+            }
+            Err(StartupError::InvalidTransactionEnrollment { collection_id })
         }
         WalRecord::NewCollection { collection_id, .. }
         | WalRecord::Update { collection_id, .. }
@@ -1683,6 +1705,26 @@ fn recover_unfinished_transaction<
                 range,
             },
         )?;
+    } else if open_transaction.rollback_seen {
+        let range = open_transaction
+            .rolled_back_range
+            .ok_or(StartupError::UnfinishedTransaction(CollectionId(0)))?;
+        let collection_id = transaction_collection_id(&open_transaction).unwrap_or(CollectionId(0));
+        let _ = append_recovered_transaction_allocation_frees::<
+            REGION_SIZE,
+            REGION_COUNT,
+            IO,
+            MAX_COLLECTIONS,
+        >(flash, workspace, plan, collection_id)?;
+        append_recovery_record_with_rotation::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
+            flash,
+            workspace,
+            plan,
+            WalRecord::TransactionFinished {
+                transaction_log_id: open_transaction.transaction_log_id,
+                range,
+            },
+        )?;
     } else {
         let range = scan_transaction_log_to_durable_end::<
             REGION_SIZE,
@@ -1698,6 +1740,15 @@ fn recover_unfinished_transaction<
             TransactionReplayMode::ApplyRollbackCleanupOnly,
         )?;
         let collection_id = transaction_collection_id(&open_transaction).unwrap_or(CollectionId(0));
+        append_recovery_record_with_rotation::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
+            flash,
+            workspace,
+            plan,
+            WalRecord::RollbackTransaction {
+                transaction_log_id: open_transaction.transaction_log_id,
+                range,
+            },
+        )?;
         let _ = append_recovered_transaction_allocation_frees::<
             REGION_SIZE,
             REGION_COUNT,
@@ -1708,7 +1759,7 @@ fn recover_unfinished_transaction<
             flash,
             workspace,
             plan,
-            WalRecord::RollbackTransaction {
+            WalRecord::TransactionFinished {
                 transaction_log_id: open_transaction.transaction_log_id,
                 range,
             },
@@ -1815,11 +1866,8 @@ fn derive_transaction_cleanup_regions<
         new_collection,
         &mut plan.transaction_new_regions,
     )?;
-
-    for region_index in plan.transaction_old_regions.iter().copied() {
-        if !plan.transaction_new_regions.contains(&region_index) {
-            push_unique_region(&mut plan.transaction_cleanup_regions, region_index)?;
-        }
+    for region_index in plan.transaction_free_intents.iter().copied() {
+        push_unique_region(&mut plan.transaction_cleanup_regions, region_index)?;
     }
     Ok(())
 }
@@ -2696,6 +2744,9 @@ fn observe_transaction_log_replay_record<
         WalRecord::FreeRegion { region_index, .. } => {
             push_unique_region(&mut plan.transaction_frees, region_index)?;
         }
+        WalRecord::FreeIntent { region_index, .. } => {
+            push_unique_region(&mut plan.transaction_free_intents, region_index)?;
+        }
         _ => {}
     }
     Ok(())
@@ -2795,7 +2846,8 @@ fn wal_record_collection_id(record: WalRecord<'_>) -> Option<CollectionId> {
         | WalRecord::Snapshot { collection_id, .. }
         | WalRecord::Head { collection_id, .. }
         | WalRecord::DropCollection { collection_id }
-        | WalRecord::AddTransactionCollection { collection_id, .. } => Some(collection_id),
+        | WalRecord::AddTransactionCollection { collection_id, .. }
+        | WalRecord::FreeIntent { collection_id, .. } => Some(collection_id),
         WalRecord::AllocateRegion { .. }
         | WalRecord::EraseFreeRegionSpan { .. }
         | WalRecord::FreeRegion { .. }
@@ -3523,7 +3575,8 @@ pub(crate) fn apply_wal_record<const MAX_COLLECTIONS: usize>(
         | WalRecord::CommitTransaction { .. }
         | WalRecord::TransactionFinished { .. }
         | WalRecord::RollbackTransaction { .. }
-        | WalRecord::AddTransactionCollection { .. } => {}
+        | WalRecord::AddTransactionCollection { .. }
+        | WalRecord::FreeIntent { .. } => {}
     }
 
     Ok(())

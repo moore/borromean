@@ -2401,7 +2401,7 @@ fn assert_compaction_writer_push_flushes_full_segments() {
     let mut flash = MockFlash::<PUSH_REGION_SIZE, PUSH_REGION_COUNT, 2048>::new(0xff);
     let mut storage = Storage::<_, PUSH_REGION_SIZE, PUSH_REGION_COUNT>::format(
         &mut flash,
-        StorageFormatConfig::new(1, 8, 0xa5),
+        StorageFormatConfig::new(2, 8, 0xa5),
         crate::test_storage_memory(),
     )
     .unwrap();
@@ -3068,7 +3068,7 @@ fn requirement_snapshot_run_planning_and_storage_write_cover_multi_region_snapsh
     assert!(planned > 1);
 
     const REGION_SIZE: usize = 256;
-    const REGION_COUNT: usize = 16;
+    const REGION_COUNT: usize = 32;
     let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 4096>::new(0xff);
     let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
     let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT>::format(
@@ -3232,7 +3232,7 @@ fn requirement_reclaim_run_regions_moves_run_segments_to_free_space_tail_region(
 //# and retain only run-chain descriptors in the manifest state.
 #[test]
 fn requirement_commit_manifest_reclaims_previous_manifest_and_retains_only_run_chains() {
-    const REGION_SIZE: usize = 512;
+    const REGION_SIZE: usize = 1024;
     const REGION_COUNT: usize = 12;
     const MAX_RUNS: usize = 3;
 
@@ -3684,7 +3684,7 @@ fn assert_run_chain_lookup_handles_exact_payload_boundaries() {
 #[test]
 fn requirement_open_from_storage_uses_only_target_collection_wal_records() {
     const REGION_SIZE: usize = 512;
-    const REGION_COUNT: usize = 8;
+    const REGION_COUNT: usize = 16;
     let target_id = CollectionId(103);
     let other_id = CollectionId(104);
 
@@ -4511,7 +4511,6 @@ fn requirement_map_updates_append_new_head_records_and_replacement_reclaims_the_
     assert_eq!(map.get_frontier(&1).unwrap(), Some(20));
 
     let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 1024>::new(0xff);
-    let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
     let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT>::format(
         &mut flash,
         StorageFormatConfig::new(1, 8, 0xa5),
@@ -4520,34 +4519,10 @@ fn requirement_map_updates_append_new_head_records_and_replacement_reclaims_the_
     .unwrap();
     storage.create_map(map.id()).unwrap();
 
-    let first_region = storage
-        .with_runtime_io_workspace(|runtime, flash, workspace| {
-            map.flush_to_storage::<REGION_SIZE, REGION_COUNT, _, 8>(
-                runtime,
-                flash,
-                workspace,
-                &mut heapless::Vec::new(),
-                &mut heapless::Vec::new(),
-                &mut crate::storage::WalHeadReclaimPlan::empty(),
-                &mut crate::startup::StartupOpenPlan::empty(),
-            )
-        })
-        .unwrap();
+    let first_region = storage.flush_map(&mut map).unwrap();
 
     map.delete_in_memory(1).unwrap();
-    let second_region = storage
-        .with_runtime_io_workspace(|runtime, flash, workspace| {
-            map.flush_to_storage::<REGION_SIZE, REGION_COUNT, _, 8>(
-                runtime,
-                flash,
-                workspace,
-                &mut heapless::Vec::new(),
-                &mut heapless::Vec::new(),
-                &mut crate::storage::WalHeadReclaimPlan::empty(),
-                &mut crate::startup::StartupOpenPlan::empty(),
-            )
-        })
-        .unwrap();
+    let second_region = storage.flush_map(&mut map).unwrap();
 
     assert_ne!(second_region, first_region);
     assert_eq!(

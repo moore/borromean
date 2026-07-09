@@ -139,6 +139,8 @@ pub enum WalRecordType {
     AddTransactionCollection,
     /// Rolls back a bounded inline transaction in the main WAL.
     RollbackInlineTransaction,
+    /// Stages a transaction-private free intent.
+    FreeIntent,
 }
 
 impl WalRecordType {
@@ -163,6 +165,7 @@ impl WalRecordType {
             Self::RollbackTransaction => 0x10,
             Self::AddTransactionCollection => 0x11,
             Self::RollbackInlineTransaction => 0x12,
+            Self::FreeIntent => 0x13,
         }
     }
 
@@ -187,6 +190,7 @@ impl WalRecordType {
             0x10 => Ok(Self::RollbackTransaction),
             0x11 => Ok(Self::AddTransactionCollection),
             0x12 => Ok(Self::RollbackInlineTransaction),
+            0x13 => Ok(Self::FreeIntent),
             _ => Err(WalRecordError::InvalidRecordType(code)),
         }
     }
@@ -200,6 +204,7 @@ impl WalRecordType {
                 | Self::Head
                 | Self::DropCollection
                 | Self::AddTransactionCollection
+                | Self::FreeIntent
         )
     }
 
@@ -346,6 +351,13 @@ pub enum WalRecord<'a> {
         /// Number of body records being rolled back.
         record_count: u32,
     },
+    /// `free_intent(collection_id, region_index)`.
+    FreeIntent {
+        /// Collection whose live region is being staged for transactional free.
+        collection_id: CollectionId,
+        /// Region that remains live until the transaction commits.
+        region_index: u32,
+    },
     /// `wal_recovery()`.
     WalRecovery,
 }
@@ -372,6 +384,7 @@ impl<'a> WalRecord<'a> {
             Self::RollbackTransaction { .. } => WalRecordType::RollbackTransaction,
             Self::AddTransactionCollection { .. } => WalRecordType::AddTransactionCollection,
             Self::RollbackInlineTransaction { .. } => WalRecordType::RollbackInlineTransaction,
+            Self::FreeIntent { .. } => WalRecordType::FreeIntent,
         }
     }
 }
@@ -697,6 +710,14 @@ fn encode_logical_record(
             offset = write_u32(buffer, offset, size_of::<u64>() as u32)?;
             offset = write_u64(buffer, offset, observed_collection_generation)?;
         }
+        WalRecord::FreeIntent {
+            collection_id,
+            region_index,
+        } => {
+            offset = write_u64(buffer, offset, collection_id.0)?;
+            offset = write_u32(buffer, offset, size_of::<u32>() as u32)?;
+            offset = write_u32(buffer, offset, region_index)?;
+        }
         WalRecord::WalRecovery => {
             offset = write_u32(buffer, offset, 0)?;
         }
@@ -919,6 +940,21 @@ fn parse_logical_record(logical: &[u8]) -> Result<WalRecord<'_>, WalRecordError>
         WalRecordType::RollbackInlineTransaction => {
             let record_count = read_inline_terminal_payload(logical, &mut offset, record_type)?;
             Ok(WalRecord::RollbackInlineTransaction { record_count })
+        }
+        WalRecordType::FreeIntent => {
+            let collection_id = CollectionId(read_u64(logical, &mut offset)?);
+            let payload_len = read_u32(logical, &mut offset)?;
+            if payload_len != size_of::<u32>() as u32 {
+                return Err(WalRecordError::PayloadLengthMismatch {
+                    record_type,
+                    payload_len,
+                });
+            }
+            let region_index = read_u32(logical, &mut offset)?;
+            Ok(WalRecord::FreeIntent {
+                collection_id,
+                region_index,
+            })
         }
     }
 }

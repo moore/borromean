@@ -568,12 +568,22 @@ fn setup_postcommit_transaction_recovery(append_free_region: bool) -> MockFlash<
         collection_id,
         startup_test_generation(collection_id, StartupCollectionBasis::Region(2), 0),
     );
-    let tx_end = append_wal_record(
+    let tx_offset = append_wal_record(
         &mut flash,
         metadata,
         tx_region,
         tx_offset,
         WalRecord::DropCollection { collection_id },
+    );
+    let tx_end = append_wal_record(
+        &mut flash,
+        metadata,
+        tx_region,
+        tx_offset,
+        WalRecord::FreeIntent {
+            collection_id,
+            region_index: 2,
+        },
     );
     let range = transaction_range(tx_region, tx_start, tx_end);
 
@@ -1258,6 +1268,82 @@ fn requirement_transaction_log_replay_rejects_enrollment_generation_mismatch() {
     );
 }
 
+//= spec/ring/04-wal-records.md#ordering-and-validity
+//= type=test
+//# `RING-WAL-VALID-038` `free_intent(collection_id, region_index)` is
+//# valid only in a transaction log after the named collection is enrolled in
+//# that transaction. Ordinary pre-commit frees MUST use `free_intent`; a
+//# transaction-log `free_region` record is invalid for this purpose.
+#[test]
+fn requirement_transaction_log_replay_rejects_private_free_region_records() {
+    let mut flash = MockFlash::<512, 4, 128>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    let wal_offset = metadata.wal_record_area_offset().unwrap();
+    let collection_id = CollectionId(7);
+    let tx_region = 2;
+    let tx_start = init_transaction_log_region(&mut flash, metadata, tx_region, 2, tx_region);
+    let tx_offset = append_transaction_enrollment(
+        &mut flash,
+        metadata,
+        tx_region,
+        tx_start,
+        collection_id,
+        startup_test_generation(collection_id, StartupCollectionBasis::Empty, 0),
+    );
+    let tx_end = append_wal_record(
+        &mut flash,
+        metadata,
+        tx_region,
+        tx_offset,
+        WalRecord::FreeRegion {
+            region_index: 3,
+            append_tail_after: FreeQueuePosition {
+                region_index: 1,
+                entry_index: 1,
+            },
+        },
+    );
+    let range = transaction_range(tx_region, tx_start, tx_end);
+
+    let after_new_collection = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        wal_offset,
+        WalRecord::NewCollection {
+            collection_id,
+            collection_type: CollectionType::MAP_CODE,
+        },
+    );
+    let after_begin = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        after_new_collection,
+        WalRecord::BeginTransaction {
+            transaction_log_id: 0,
+            start: range.start,
+        },
+    );
+    append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        after_begin,
+        WalRecord::CommitTransaction {
+            transaction_log_id: 0,
+            range,
+        },
+    );
+
+    assert_eq!(
+        open_formatted_store::<512, 4, _>(&mut flash).unwrap_err(),
+        StartupError::InvalidTransactionEnrollment {
+            collection_id: CollectionId(0),
+        }
+    );
+}
+
 //= spec/ring/06-startup-replay.md#startup-replay-algorithm
 //= type=test
 //# `RING-STARTUP-019` On `head(collection_id, collection_type, region_index)`: if
@@ -1484,12 +1570,22 @@ fn requirement_open_formatted_store_finishes_post_commit_transaction_cleanup() {
         collection_id,
         startup_test_generation(collection_id, StartupCollectionBasis::Region(2), 0),
     );
-    let tx_end = append_wal_record(
+    let tx_offset = append_wal_record(
         &mut flash,
         metadata,
         tx_region,
         tx_offset,
         WalRecord::DropCollection { collection_id },
+    );
+    let tx_end = append_wal_record(
+        &mut flash,
+        metadata,
+        tx_region,
+        tx_offset,
+        WalRecord::FreeIntent {
+            collection_id,
+            region_index: 2,
+        },
     );
     let range = transaction_range(tx_region, tx_start, tx_end);
 
@@ -1605,7 +1701,7 @@ fn requirement_startup_recovers_uncommitted_transaction_with_rollback_marker() {
         RecoveryRecordCounts {
             free_region: 1,
             rollback_transaction: 1,
-            transaction_finished: 0,
+            transaction_finished: 1,
         }
     );
 }
@@ -1697,7 +1793,7 @@ fn requirement_transaction_recovery_is_idempotent() {
         RecoveryRecordCounts {
             free_region: 1,
             rollback_transaction: 1,
-            transaction_finished: 0,
+            transaction_finished: 1,
         }
     );
     drop(precommit_storage);
@@ -1767,7 +1863,7 @@ fn requirement_min_free_region_reserve_covers_transaction_terminal_records() {
         RecoveryRecordCounts {
             free_region: 0,
             rollback_transaction: 1,
-            transaction_finished: 0,
+            transaction_finished: 1,
         }
     );
 }
@@ -1933,7 +2029,7 @@ fn requirement_wal_rollback_transaction_record_closes_data_recovery() {
         RecoveryRecordCounts {
             free_region: 1,
             rollback_transaction: 1,
-            transaction_finished: 0,
+            transaction_finished: 1,
         }
     );
     drop(storage);
@@ -3165,7 +3261,9 @@ fn requirement_transaction_recovery_observes_only_the_transaction_collection_all
         transaction_log_id: crate::test_transaction_log_id(CollectionId(7)),
         start: crate::test_log_position(CollectionId(7)),
         committed_range: None,
+        rolled_back_range: None,
         commit_seen: false,
+        rollback_seen: false,
     };
 
     observe_transaction_recovery_record(
@@ -3183,6 +3281,15 @@ fn requirement_transaction_recovery_observes_only_the_transaction_collection_all
     observe_transaction_recovery_record(
         &mut plan,
         &mut transaction,
+        WalRecord::FreeIntent {
+            collection_id: CollectionId(7),
+            region_index: 3,
+        },
+    )
+    .unwrap();
+    observe_transaction_recovery_record(
+        &mut plan,
+        &mut transaction,
         WalRecord::FreeRegion {
             region_index: 2,
             append_tail_after: FreeQueuePosition {
@@ -3193,6 +3300,7 @@ fn requirement_transaction_recovery_observes_only_the_transaction_collection_all
     )
     .unwrap();
     assert_eq!(plan.transaction_allocations.as_slice(), &[1]);
+    assert_eq!(plan.transaction_free_intents.as_slice(), &[3]);
     assert_eq!(plan.transaction_frees.as_slice(), &[2]);
 
     observe_transaction_recovery_record(
@@ -3210,6 +3318,15 @@ fn requirement_transaction_recovery_observes_only_the_transaction_collection_all
     observe_transaction_recovery_record(
         &mut plan,
         &mut transaction,
+        WalRecord::FreeIntent {
+            collection_id: CollectionId(7),
+            region_index: 3,
+        },
+    )
+    .unwrap();
+    observe_transaction_recovery_record(
+        &mut plan,
+        &mut transaction,
         WalRecord::FreeRegion {
             region_index: 2,
             append_tail_after: FreeQueuePosition {
@@ -3220,6 +3337,7 @@ fn requirement_transaction_recovery_observes_only_the_transaction_collection_all
     )
     .unwrap();
     assert_eq!(plan.transaction_allocations.as_slice(), &[1]);
+    assert_eq!(plan.transaction_free_intents.as_slice(), &[3]);
     assert_eq!(plan.transaction_frees.as_slice(), &[2]);
 }
 

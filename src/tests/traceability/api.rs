@@ -220,21 +220,177 @@ fn requirement_operations_use_storage_backing() {
 }
 
 //= spec/ring/02-state-machines.md#storage-api-requirements
-//= type=todo
+//= type=test
 //# `RING-API-004` Public normal collection operations MUST NOT require callers to provide
 //# collection frontier buffers, payload serialization buffers, or a `StorageWorkspace`; that
 //# bounded memory MUST be supplied through caller-owned memory borrowed by `Storage` or the
 //# collection handle.
 #[test]
-fn todo_collection_operations_use_storage_owned_buffers() {}
+fn requirement_collection_operations_use_storage_owned_buffers() {
+    let mut flash = MockFlash::<512, 8, 4096>::new(0xff);
+    let mut storage = Storage::<_, 512, 8, 8>::format(
+        &mut flash,
+        StorageFormatConfig::new(2, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
+    let mut map = LsmMap::<u16, u16, 8>::new(&mut storage, crate::test_lsm_map_memory()).unwrap();
+    let collection_id = map.collection_id();
+
+    assert!(!map.set(&mut storage, 9, 90).unwrap());
+    assert_eq!(
+        storage.frontier_buffer_owner(),
+        crate::FrontierBufferOwner::Map {
+            collection_id,
+            generation: 1,
+            dirty: true,
+        }
+    );
+    assert_eq!(
+        map.get(&mut storage, &9, |_, value| *value).unwrap(),
+        Some(90)
+    );
+    drop(map);
+    drop(storage);
+
+    let mut reopened =
+        Storage::<_, 512, 8, 8>::open(&mut flash, crate::test_storage_memory()).unwrap();
+    let mut reopened_map =
+        LsmMap::<u16, u16, 8>::open(collection_id, &mut reopened, crate::test_lsm_map_memory())
+            .unwrap();
+    assert_eq!(
+        reopened_map
+            .get(&mut reopened, &9, |_, value| *value)
+            .unwrap(),
+        Some(90)
+    );
+}
 
 //= spec/ring/02-state-machines.md#storage-api-requirements
-//= type=todo
+//= type=test
 //# `RING-API-005` Any shared-device synchronization required by a platform MUST be encapsulated by
 //# the backing implementation rather than by Borromean core requiring a specific mutex, executor,
 //# interrupt policy, or sharing primitive.
 #[test]
-fn todo_shared_backing_synchronization_stays_behind_backing_trait() {}
+fn requirement_shared_backing_synchronization_stays_behind_backing_trait() {
+    let mut flash = GuardedFlash::<256, 5, 2048>::new(0xff);
+    let mut storage = Storage::<_, 256, 5, 8>::format(
+        &mut flash,
+        StorageFormatConfig::new(1, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
+
+    storage.create_map(CollectionId(14)).unwrap();
+    storage
+        .append_map_update::<u16, u16>(CollectionId(14), &MapUpdate::Set { key: 2, value: 20 })
+        .unwrap();
+
+    let backing = storage.into_backing();
+    assert!(backing.guard_entries() > 0);
+    assert!(!backing.in_guard);
+}
+
+struct GuardedFlash<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize> {
+    inner: MockFlash<REGION_SIZE, REGION_COUNT, MAX_LOG>,
+    guard_entries: usize,
+    in_guard: bool,
+}
+
+impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize>
+    GuardedFlash<REGION_SIZE, REGION_COUNT, MAX_LOG>
+{
+    fn new(erased_byte: u8) -> Self {
+        Self {
+            inner: MockFlash::new(erased_byte),
+            guard_entries: 0,
+            in_guard: false,
+        }
+    }
+
+    fn guard_entries(&self) -> usize {
+        self.guard_entries
+    }
+
+    fn with_guard<T>(
+        &mut self,
+        operation: impl FnOnce(&mut MockFlash<REGION_SIZE, REGION_COUNT, MAX_LOG>) -> T,
+    ) -> T {
+        assert!(!self.in_guard);
+        self.in_guard = true;
+        self.guard_entries += 1;
+        let result = operation(&mut self.inner);
+        self.in_guard = false;
+        result
+    }
+}
+
+impl<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize> FlashIo
+    for GuardedFlash<REGION_SIZE, REGION_COUNT, MAX_LOG>
+{
+    fn read_metadata(&mut self) -> Result<Option<StorageMetadata>, StorageIoError> {
+        self.with_guard(|inner| inner.read_metadata().map_err(StorageIoError::from))
+    }
+
+    fn write_metadata(&mut self, metadata: StorageMetadata) -> Result<(), StorageIoError> {
+        self.with_guard(|inner| inner.write_metadata(metadata).map_err(StorageIoError::from))
+    }
+
+    fn read_region<R, F>(
+        &mut self,
+        region_index: u32,
+        offset: usize,
+        len: usize,
+        read: F,
+    ) -> Result<R, StorageIoError>
+    where
+        F: FnOnce(&[u8]) -> R,
+    {
+        self.with_guard(|inner| {
+            inner
+                .read_region(region_index, offset, len, read)
+                .map_err(StorageIoError::from)
+        })
+    }
+
+    fn write_region(
+        &mut self,
+        region_index: u32,
+        offset: usize,
+        data: &[u8],
+    ) -> Result<(), StorageIoError> {
+        self.with_guard(|inner| {
+            inner
+                .write_region(region_index, offset, data)
+                .map_err(StorageIoError::from)
+        })
+    }
+
+    fn erase_region(&mut self, region_index: u32) -> Result<(), StorageIoError> {
+        self.with_guard(|inner| {
+            inner
+                .erase_region(region_index)
+                .map_err(StorageIoError::from)
+        })
+    }
+
+    fn sync(&mut self) -> Result<(), StorageIoError> {
+        self.with_guard(|inner| inner.sync().map_err(StorageIoError::from))
+    }
+
+    fn format_empty_store(
+        &mut self,
+        min_free_regions: u32,
+        wal_write_granule: u32,
+        wal_record_magic: u8,
+    ) -> Result<StorageMetadata, StorageFormatError> {
+        self.with_guard(|inner| {
+            inner
+                .format_empty_store(min_free_regions, wal_write_granule, wal_record_magic)
+                .map_err(StorageFormatError::from)
+        })
+    }
+}
 
 //= spec/ring/02-state-machines.md#ring-state-machine-requirements
 //= type=test
@@ -321,12 +477,30 @@ fn requirement_public_operations_validate_source_mode() {
 }
 
 //= spec/ring/02-state-machines.md#ring-state-machine-requirements
-//= type=todo
+//= type=test
 //# `RING-MACHINE-004` Every durable write that changes replay-visible state MUST be represented
 //# as a named transition edge with defined preconditions, durable effect, runtime effect, replay
 //# effect, and crash-cut result.
 #[test]
-fn todo_durable_writes_are_named_transition_edges() {}
+fn requirement_durable_writes_are_named_transition_edges() {
+    for edge in DurableTransitionEdge::ALL {
+        let semantics = edge.semantics();
+        assert_eq!(semantics.edge, *edge);
+        assert!(!semantics.preconditions.is_empty());
+        assert!(!semantics.durable_effect.is_empty());
+        assert!(!semantics.runtime_effect.is_empty());
+        assert!(!semantics.replay_effect.is_empty());
+        assert!(!semantics.crash_cut_result.is_empty());
+    }
+
+    let free_intent = DurableTransitionEdge::StageFreeIntent.semantics();
+    assert!(free_intent.runtime_effect.contains("no allocator effect"));
+    assert!(free_intent.replay_effect.contains("before commit"));
+
+    let commit = DurableTransitionEdge::CommitTransaction.semantics();
+    assert!(commit.runtime_effect.contains("imports private effects"));
+    assert!(commit.crash_cut_result.contains("visible atomically"));
+}
 
 //= spec/ring/02-state-machines.md#ring-state-machine-requirements
 //= type=test
@@ -356,18 +530,74 @@ fn requirement_foreground_replay_and_recovery_share_wal_record_semantics() {
 }
 
 //= spec/ring/02-state-machines.md#ring-state-machine-requirements
-//= type=todo
-//# `RING-MACHINE-006` Startup and recovery modes MUST compose the same
+//= type=test
+//# `RING-MACHINE-009` Startup and recovery modes MUST compose the same
 //# collection, allocator, WAL-chain, and transaction submachine
 //# transitions used by normal operation rather than defining separate
 //# incompatible transition rules.
 #[test]
-fn todo_startup_and_recovery_compose_normal_submachines() {}
+fn requirement_startup_and_recovery_compose_normal_submachines() {
+    let open = StateMachineOperation::OpenStorage.rule();
+    assert!(open.active_mode.contains("Opening"));
+    assert!(open
+        .durable_edges
+        .contains(&DurableTransitionEdge::RollbackTransaction));
+    assert!(open
+        .durable_edges
+        .contains(&DurableTransitionEdge::AppendFreeRegion));
+    assert!(open
+        .durable_edges
+        .contains(&DurableTransitionEdge::FinishTransaction));
+
+    let rollback = StateMachineOperation::RollbackTransaction.rule();
+    assert!(rollback.active_mode.contains("TransactionRecovery"));
+    assert_eq!(
+        rollback.durable_edges,
+        &[
+            DurableTransitionEdge::RollbackTransaction,
+            DurableTransitionEdge::AppendFreeRegion,
+            DurableTransitionEdge::FinishTransaction,
+        ]
+    );
+
+    let reclaim = StateMachineOperation::ReclaimWalHead.rule();
+    assert!(reclaim.active_mode.contains("ReclaimingWalHead"));
+    assert!(reclaim
+        .durable_edges
+        .contains(&DurableTransitionEdge::CopyRetainedWalRecord));
+    assert!(reclaim
+        .durable_edges
+        .contains(&DurableTransitionEdge::CommitWalHeadControl));
+}
 
 //= spec/ring/02-state-machines.md#ring-state-machine-requirements
-//= type=todo
-//# `RING-MACHINE-007` State-machine transition rules MUST use named operation identifiers, and
+//= type=test
+//# `RING-MACHINE-010` State-machine transition rules MUST use named operation identifiers, and
 //# each named operation MUST define its source state, active mode, durable edge sequence, and
 //# target state or runtime effect.
 #[test]
-fn todo_state_machine_transitions_use_named_operations() {}
+fn requirement_state_machine_transitions_use_named_operations() {
+    for operation in StateMachineOperation::ALL {
+        let rule = operation.rule();
+        assert_eq!(rule.operation, *operation);
+        assert!(!rule.source.is_empty());
+        assert!(!rule.active_mode.is_empty());
+        assert!(!rule.target_or_effect.is_empty());
+        for edge in rule.durable_edges {
+            assert!(DurableTransitionEdge::ALL.contains(edge));
+        }
+    }
+
+    assert_eq!(
+        StateMachineOperation::CreateCollection.rule().durable_edges,
+        &[DurableTransitionEdge::CreateCollection]
+    );
+    assert!(StateMachineOperation::CommitCollectionRegion
+        .rule()
+        .durable_edges
+        .contains(&DurableTransitionEdge::WriteCommittedRegion));
+    assert!(StateMachineOperation::StageFreeIntent
+        .rule()
+        .durable_edges
+        .contains(&DurableTransitionEdge::StageFreeIntent));
+}
