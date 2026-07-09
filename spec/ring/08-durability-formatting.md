@@ -79,13 +79,15 @@ log_head_region_index=current_log_head, free-space cursors)) ->`
 replacement, drop cleanup, or `ReclaimWalHead`:
 `W(main_wal begin_transaction(transaction_log_id, start)) ->`
 `S(begin_transaction) ->`
-`W(transaction_log add_transaction_collection, private mutation,
-allocate_region, and free_intent records) ->`
-`S(transaction_log records) ->`
+`W/S(transaction-log allocation entries as each region is allocated) ->`
+`buffer private suffix entries for add_transaction_collection, private
+mutation, and free_intent data ->`
+`W/S(segment link seals for non-final transaction-log segments as
+needed) ->`
 `check enrolled collection generations ->`
-`W(main_wal commit_transaction(transaction_log_id, range)) ->`
+`W(main_wal commit_transaction(transaction_log_id, range, seal)) ->`
 `S(commit_transaction) ->`
-`atomically install private frontiers as visible collection state ->`
+`atomically import sealed suffix ranges as visible collection state ->`
 `record cleanup_start_tail ->`
 `append ordered cleanup frees for committed free_intents ->`
 `W(main_wal transaction_finished(transaction_log_id, range)) ->`
@@ -130,7 +132,7 @@ AllocateRegion -> WriteCommittedRegion -> CommitRegionHead`"]
     Rotation["`RotateWalTail
 AllocateRegion -> RotateWalLink -> InitializeRotatedLogRegion`"]
     Reclaim["`Transaction log commit
-BeginTransaction -> private records -> CommitTransaction -> cleanup frees -> FinishTransaction`"]
+BeginTransaction -> allocation entries + sealed suffixes -> CommitTransaction -> cleanup frees -> FinishTransaction`"]
     Rollback["`Transaction log rollback
 RollbackTransaction -> cleanup frees -> FinishTransaction`"]
     Erase["`EraseFreeRegionSpan
@@ -154,16 +156,17 @@ CommitWalRecoveryBoundary -> next AppendRawWalRecord`"]
 General region-allocation rule:
 
 1. `RING-ALLOC-001` Any operation that writes a newly allocated region
-MUST first make `allocate_region(region_index, allocation_head_after)`
-durable in a full transaction, bounded inline transaction, or
-privileged storage-core operation.
+MUST first make either a transaction-log
+`TransactionAllocationEntry(region_index, allocation_head_after,
+purpose)` durable for a full transaction, or
+`allocate_region(region_index, allocation_head_after)` durable for a
+bounded inline transaction or privileged storage-core operation.
 2. `RING-ALLOC-002` Erasing or initializing the reserved region is
-allowed only after the corresponding `allocate_region` record has been
-written and synced in its enclosing full transaction, bounded inline
-transaction, or privileged storage-core operation. For transaction-owned
-allocations, that synced record consumes the allocator ready entry but
-the region remains private and not collection-visible until the
-enclosing commit marker is durable.
+allowed only after the corresponding transaction allocation entry or
+`allocate_region` record has been written and synced in its enclosing
+operation. For transaction-owned allocations, that synced entry consumes
+the allocator ready entry but the region remains private and not
+collection-visible until the enclosing commit marker is durable.
 3. `RING-ALLOC-003` Ordinary user/data allocations are
 transaction-owned. If their enclosing full or inline transaction rolls
 back, the popped region returns to the dirty range even if foreground
@@ -192,12 +195,12 @@ collection id may be accepted.
 the ready entry remains available because replay does not advance
 `allocation_head`.
 6. `RING-CRASH-006` Crash after a transaction-owned
-`allocate_region(region_index, allocation_head_after)` is durable but
-before the enclosing transaction commits:
-startup ignores the transaction's visible effects, treats the popped
-region as transaction-owned recovery work, and returns it to the dirty
-range through ordered rollback cleanup after the rollback marker is
-durable.
+transaction allocation entry is durable but before the enclosing
+transaction commits:
+startup ignores the transaction's visible suffix effects, treats the
+popped region as transaction-owned recovery work, and returns it to the
+dirty range through ordered rollback cleanup after the rollback marker
+is durable.
 7. `RING-CRASH-007` Crash after `S(region)` but before
 `S(head(collection_id, collection_type, region_index))`:
 the physical region may exist, but it is not a committed collection
@@ -212,11 +215,11 @@ the head record remains transaction-private and is ignored unless the
 transaction commit marker is durable.
 9. `RING-CRASH-009` Crash after
 `S(commit_inline_transaction(record_count))` or
-`S(commit_transaction(transaction_log_id, range))` but before cleanup
-finishes:
-startup imports the committed range atomically, preserves the committed
-collection and allocator state, completes cleanup frees idempotently,
-and writes the matching finish marker if required.
+`S(commit_transaction(transaction_log_id, range, seal))` but before
+cleanup finishes:
+startup imports sealed suffix ranges atomically, preserves the
+committed collection and allocator state, completes cleanup frees
+idempotently, and writes the matching finish marker if required.
 10. `RING-CRASH-010` Crash after a storage-core
 `allocate_region(next_region_index, allocation_head_after)` in the WAL
 rotation reserve window but before any durable matching `link`:
@@ -255,43 +258,44 @@ recovered append point, the first durable later record must be
 `wal_recovery()`.
 17. `RING-CRASH-017` Crash after
 `S(begin_transaction(transaction_log_id, start))` but before
-`S(commit_transaction(transaction_log_id, range))`:
+`S(commit_transaction(transaction_log_id, range, seal))`:
 startup runs rollback recovery for the transaction-log range, preserves
 the pre-transaction visible collection state, appends
 `rollback_transaction(transaction_log_id, range)`, appends ordered
 cleanup frees for transaction-owned allocations, and appends
 `transaction_finished(transaction_log_id, range)`.
 18. `RING-CRASH-018` Crash after durable transaction-log private
-records but before `S(commit_transaction(transaction_log_id, range))`:
-startup treats the private records as non-visible, runs rollback
-recovery for their transaction-owned storage effects, appends
+allocation entries or sealed suffix ranges but before
+`S(commit_transaction(transaction_log_id, range, seal))`:
+startup treats private suffix entries as non-visible, runs rollback
+recovery from durable transaction allocation entries, appends
 `rollback_transaction(transaction_log_id, range)`, appends ordered
-cleanup frees for transaction-owned allocations, and appends
+cleanup frees for transaction-owned data allocations, and appends
 `transaction_finished(transaction_log_id, range)`.
 19. `RING-CRASH-019` Crash after
-`S(commit_transaction(transaction_log_id, range))` but before private
-frontiers are installed in memory:
-startup imports the frozen transaction-log range at the main-WAL commit
+`S(commit_transaction(transaction_log_id, range, seal))` but before
+private frontiers are installed in memory:
+startup imports the sealed suffix ranges at the main-WAL commit
 position, reconstructs the committed collection state, resumes ordered
 free-intent cleanup at the expected cleanup slot, and appends
 `transaction_finished(transaction_log_id, range)` if needed.
 20. `RING-CRASH-020` Crash after private frontiers are installed but
 before `S(transaction_finished(transaction_log_id, range))`:
 startup ignores the lost volatile install, imports the committed range
-from durable media, resumes ordered free-intent cleanup at the expected
-cleanup slot, and appends `transaction_finished(transaction_log_id,
-range)`.
+from durable sealed suffix ranges, resumes ordered free-intent cleanup
+at the expected cleanup slot, and appends
+`transaction_finished(transaction_log_id, range)`.
 21. `RING-CRASH-021` Crash after
 `S(transaction_finished(transaction_log_id, range))`:
 startup replays the matching main-WAL commit or rollback record,
 imports committed state or preserves the rolled-back non-visible state,
 and observes no remaining transaction cleanup work for that range.
 22. `RING-CRASH-022` Crash during transaction-log segment rotation:
-startup uses the transaction log's `LogRegionPrologue`, link record,
-and free-space cursor checkpoint rules to recover either the old
-transaction-log tail or the initialized linked tail without making
-private transaction records visible unless a retained main-WAL commit
-imports them.
+startup uses the transaction log's `LogRegionPrologue`, durable
+allocation entries, segment-link seal, and free-space cursor checkpoint
+rules to recover either the old transaction-log tail or the initialized
+linked tail without making private suffix entries visible unless a
+retained main-WAL commit imports them.
 23. `RING-CRASH-023` If the ready-region reserve is exhausted while
 dirty entries remain, ordinary allocation MUST stop. Storage may still
 run erase maintenance and privileged storage-core operations using the

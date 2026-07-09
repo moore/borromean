@@ -168,8 +168,9 @@ state, `basis_pos`, `pending_updates`, and committed state generation;
 free-space collection queue and cursors; optional storage-core private
 allocation reservation; transaction-log cursors and live-prefix
 boundaries; full transaction descriptors with enrolled collections,
-observed generations, transaction-owned allocations, free intents,
-cleanup start tail, and cleanup cursor;
+observed generations, durable transaction allocation entries, sealed
+private suffix ranges, imported free intents, cleanup start tail, and
+cleanup cursor;
 inline transaction descriptors; the main-WAL cleanup owner; and the
 replay local WAL-recovery boundary.
 9. `RING-STARTUP-009` On
@@ -233,6 +234,14 @@ recovery. Records inside an uncommitted rollback range are scanned for
 transaction-owned allocations, free intents, and cleanup progress, but
 their collection mutations and free intents do not become visible
 collection or allocator state.
+
+    For revised `transaction_log_v2` segments, transaction-owned
+    allocation recovery scans durable `TransactionAllocationEntry`
+    values rather than logical `allocate_region` records in the private
+    suffix. Private suffix bytes are scanned only when their segment is
+    sealed by a valid `TransactionSegmentSeal` or, for the final
+    segment, by the matching `commit_transaction` seal. Unsealed suffix
+    bytes are ignored during rollback recovery.
 16. `RING-STARTUP-016` Inline transaction body records are validated
 when encountered in the main WAL but ignored until the matching
 `commit_inline_transaction` is durable. If replay reaches WAL end with a
@@ -283,33 +292,38 @@ clear pending updates for that collection.
 transaction descriptor for `transaction_log_id` at `start`. If that
 transaction log already has an open descriptor, return an error.
 23. `RING-STARTUP-023` On
-`commit_transaction(transaction_log_id, range)`: verify that the id and
-range match an active descriptor or a recoverable committed range. Scan
-the transaction-log range; if any record inside the range is torn,
-malformed, or invalid, return an error. Apply the range's enrolled
-collection mutations at this main-WAL commit position, publish
-transaction-owned allocations as collection-owned, detach the range's
-free intents from their enrolled collection live sets, advance
-committed generation for every enrolled collection, set cleanup start
-tail to the current `append_tail`, and record that ordered free-intent
-cleanup is owned by this transaction until a matching
-`transaction_finished` is retained.
+`commit_transaction(transaction_log_id, range, seal)`: verify that the
+id and range match an active descriptor or a recoverable committed
+range. Scan the transaction-log segment chain. Every durable allocation
+entry in the range must validate against the recovered allocator cursor
+state. Every non-final segment must have a valid segment seal, and the
+commit seal must identify the final segment's `free_intent_start` and
+`segment_end`. If any sealed private suffix entry inside the imported
+range is torn, malformed, checksum-invalid, or semantically invalid,
+return an error. Apply the sealed suffix's enrolled collection
+mutations at this main-WAL commit position, publish data-region
+transaction allocations as collection-owned, detach sealed free intents
+from their enrolled collection live sets, advance committed generation
+for every enrolled collection, set cleanup start tail to the current
+`append_tail`, and record that ordered free-intent cleanup is owned by
+this transaction until a matching `transaction_finished` is retained.
 24. `RING-STARTUP-024` On
 `add_transaction_collection(collection_id, observed_generation)` while
-scanning a transaction range: record the collection as enrolled in the
-range. `free_intent(collection_id, region_index)` records a
-transaction-private free obligation for the enrolled collection.
-Transaction-owned allocations are retained from
-`allocate_region(region_index, allocation_head_after)` records in the
-same range. During recovery of a committed range, the stored collection
+scanning a sealed transaction private suffix: record the collection as
+enrolled in the range. `free_intent(collection_id, region_index)`
+records a transaction-private free obligation for the enrolled
+collection. Transaction-owned allocations are retained from durable
+`TransactionAllocationEntry` values in the same transaction-log segment
+chain. During recovery of a committed range, the stored collection
 generation is not rechecked because the retained main-WAL commit record
 is durable evidence that foreground conflict checking succeeded before
 commit.
 25. `RING-STARTUP-025` On
 `rollback_transaction(transaction_log_id, range)`: scan the referenced
-range, retain its transaction-owned allocations from its
-`allocate_region` records, do not apply collection mutations or free
-intents from the range, set cleanup start tail to the current
+transaction-log segment chain, retain its transaction-owned data-region
+allocations from durable `TransactionAllocationEntry` values, ignore
+unsealed private suffix bytes, do not apply collection mutations or
+free intents from the range, set cleanup start tail to the current
 `append_tail`, and record that ordered rollback cleanup for those
 allocations is owned by this transaction until a matching
 `transaction_finished` is retained.
@@ -319,18 +333,20 @@ clear the boundary.
 27. `RING-STARTUP-027` If replay reaches WAL end with an active full
 transaction descriptor and no durable `commit_transaction`, run
 idempotent rollback recovery for that transaction-log range. Recovery
-MUST retain transaction-owned allocations from `allocate_region`
-records, append `rollback_transaction(transaction_log_id, range)`,
-append ordered cleanup `free_region` records for those allocations, and
-append `transaction_finished(transaction_log_id, range)`.
+MUST retain transaction-owned data allocations from durable
+`TransactionAllocationEntry` values, ignore unsealed private suffix
+bytes, append `rollback_transaction(transaction_log_id, range)`, append
+ordered cleanup `free_region` records for those allocations, and append
+`transaction_finished(transaction_log_id, range)`.
 28. `RING-STARTUP-028` If replay reaches WAL end after
-`commit_transaction(transaction_log_id, range)` but before
+`commit_transaction(transaction_log_id, range, seal)` but before
 `transaction_finished(transaction_log_id, range)`, or after
 `rollback_transaction(transaction_log_id, range)` but before
 `transaction_finished(transaction_log_id, range)`, preserve the imported
-committed state or non-visible rollback state, resume the owning
-transaction's ordered cleanup from `cleanup_start_tail + cleanup_index`,
-append any missing cleanup `free_region` records, and append
+committed state from sealed suffix ranges or non-visible rollback state,
+resume the owning transaction's ordered cleanup from
+`cleanup_start_tail + cleanup_index`, append any missing cleanup
+`free_region` records, and append
 `transaction_finished(transaction_log_id, range)`. If an already-written
 cleanup slot contains a different region than the expected cleanup
 entry, startup MUST report corruption.
@@ -372,6 +388,24 @@ reachability.
 36. `RING-STARTUP-036` A dropped tombstone whose old
 `collection_type` is unsupported MAY remain as inert metadata and does
 not by itself require startup failure.
+37. `RING-STARTUP-037` Startup MUST recover transaction-owned
+allocations from durable transaction-log allocation entries even when
+the transaction's private suffix was never sealed. Those allocations
+remain transaction-owned and must be cleaned by rollback recovery if no
+matching commit is retained.
+38. `RING-STARTUP-038` Startup MUST ignore transaction-log private
+suffix bytes that are not covered by a valid segment seal or final
+commit seal. Ignoring those bytes MUST NOT undo any allocation-head
+advance already justified by durable transaction allocation entries.
+39. `RING-STARTUP-039` Startup MUST import collection mutations and
+free intents from a transaction-log private suffix only at the
+main-WAL `commit_transaction` replay position and only for suffix bytes
+covered by valid non-final segment seals and the final commit seal.
+40. `RING-STARTUP-040` Startup MUST keep transaction-log segment
+allocations reachable until `transaction_finished` releases the
+retained transaction-log range. Rollback cleanup before that marker may
+free data-region allocations from the range, but not the transaction-log
+segment regions needed to prove recovery progress.
 
 ## Startup Replay Implementation Requirements
 

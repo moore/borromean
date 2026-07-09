@@ -155,14 +155,16 @@ other collection.
 Multi-step collection operations that replace durable state use
 transaction-log-backed transactions. A transaction begins with a main
 WAL `begin_transaction(transaction_log_id, start)` record, then writes
-private collection and allocator records into that transaction log.
-Before `commit_transaction(transaction_log_id, range)`, replay can
-abandon the private collection state update and recover
-transaction-owned allocation effects. After
-`commit_transaction(transaction_log_id, range)`, replay imports the
-frozen transaction-log range at the main WAL commit position, keeps the
-new collection state, and finishes any allocator cleanup. The
-transaction is complete only after
+durable allocation entries and private suffix entries into that
+transaction log. Allocation entries advance allocator recovery state
+immediately but remain transaction-owned. Private collection data and
+free intents remain non-visible until their suffix range is sealed and
+imported by `commit_transaction(transaction_log_id, range, seal)`.
+Before that commit, replay can abandon private collection state and
+recover transaction-owned allocation effects. After commit, replay
+imports the sealed transaction-log suffix ranges at the main WAL commit
+position, keeps the new collection state, and finishes any allocator
+cleanup. The transaction is complete only after
 `transaction_finished(transaction_log_id, range)` is durable; if
 pre-commit recovery has already cleaned up an abandoned transaction,
 replay records that fact with

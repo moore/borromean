@@ -27,12 +27,16 @@ Mechanism review:
 
 All main WAL records are append-only and ordered by physical write
 order within the main WAL region chain. Transaction-log records use the
-same physical record framing and validation rules. Collection mutation
-effects and `free_intent` records are private until a retained
-`commit_transaction` record in the main WAL imports a frozen
-transaction-log range. Transaction-log `allocate_region` records advance
-the free-space allocation cursor when durable, but the popped regions
-remain transaction-owned until commit publishes them or rollback cleanup
+same physical record framing and validation rules only for their
+private suffix stream. Transaction-log allocation recovery uses the
+`TransactionAllocationEntry` layout in
+[spec/ring/05-disk-format.md](05-disk-format.md), not ordinary
+`allocate_region` WAL records. Collection mutation effects and
+`free_intent` records are private until a retained `commit_transaction`
+record in the main WAL imports sealed transaction-log suffix bytes.
+Durable transaction allocation entries advance the free-space
+allocation cursor before commit, but the popped regions remain
+transaction-owned until commit publishes them or rollback cleanup
 returns them.
 
 Inline transactions are bounded main-WAL ranges for short
@@ -59,17 +63,33 @@ LogPosition =
 TransactionLogRange =
   start:LogPosition
   end:LogPosition
+
+TransactionCommitSeal =
+  final_free_intent_start:LogPosition
+  final_segment_end:LogPosition
 ```
 
 `LogPosition` names a byte offset within a private storage log region.
 The offset MUST be aligned to `wal_write_granule` and MUST be greater
 than or equal to `wal_record_area_offset` for that region. A
-`TransactionLogRange` names a half-open range `[start, end)` inside one
-transaction log. A main-WAL transaction-control record always carries
-`transaction_log_id` beside the range so concurrent transaction order is
-explicit in the main WAL. The range's `start` and `end` positions MUST
-name the selected transaction-log chain and `end` MUST be reachable from
-`start` by following that transaction log's `link` records.
+`TransactionLogRange` names the transaction-log segment chain owned by
+one full transaction. Its `start` names the first byte owned by the
+transaction in the first segment. Its `end` names the final segment end
+for the transaction, and MUST equal the `final_segment_end` carried by
+the matching commit seal when the transaction commits. A main-WAL
+transaction-control record always carries `transaction_log_id` beside
+the range so concurrent transaction order is explicit in the main WAL.
+The range's `start` and `end` positions MUST name the selected
+transaction-log chain and `end` MUST be reachable from `start` by
+following that transaction log's sealed segment links.
+
+`TransactionCommitSeal` is present only in
+`commit_transaction(transaction_log_id, range, seal)`. It seals the
+final transaction-log segment. `final_free_intent_start` names the first
+byte of the final segment's private suffix stream, and
+`final_segment_end` names the first byte after that suffix. Non-final
+segments get the same bounds from their durable
+`TransactionSegmentSeal` values.
 
 Let `wal_escape_byte`, `wal_escape_code_erased`,
 `wal_escape_code_magic`, and `wal_escape_code_escape` be the first four
@@ -242,8 +262,10 @@ the region indexes for logical positions
 are `record_count:u32`;
 `begin_transaction` payload is
 `transaction_log_id:u32, start:LogPosition`;
-`commit_transaction`, `transaction_finished`, and
-`rollback_transaction` payloads are
+`commit_transaction` payload is
+`transaction_log_id:u32, range:TransactionLogRange,
+seal:TransactionCommitSeal`;
+`transaction_finished` and `rollback_transaction` payloads are
 `transaction_log_id:u32, range:TransactionLogRange`;
 `add_transaction_collection` payload is
 `observed_collection_generation:u64`;
@@ -278,6 +300,13 @@ at the current `allocation_head` and the self-checking
 The record carries no owner or purpose. Ownership comes from the
 enclosing full transaction, enclosing inline transaction, or privileged
 storage-core operation.
+
+    In a full transaction, ordinary user/data and transaction-log growth
+    allocations are represented by durable
+    `TransactionAllocationEntry` values in the transaction log instead
+    of logical `allocate_region` records in the private suffix. Those
+    entries have the same allocator pop effect as this record once their
+    checksum and cursor fields validate.
 
 5. `RING-WAL-PAYLOAD-005` `head`
 Commits a collection to a durable region head. Payload contains the
@@ -355,15 +384,19 @@ collection frontier into its private transaction buffer.
 
 15. `RING-WAL-PAYLOAD-015` `commit_transaction`
 Main-WAL-only record. The payload is
-`transaction_log_id:u32, range:TransactionLogRange`. It freezes the
-named range in that transaction log and imports that range into
-main-WAL replay at the position of this commit record. Before this
-marker, recovery keeps transaction-private collection changes and free
-intents non-visible and rolls back transaction-owned allocations through
-the rollback protocol. After this marker, recovery preserves imported
-collection state, publishes transaction-owned allocations, detaches
-transaction free intents from collection live state, and finishes
-ordered free-intent cleanup before the transaction is finished.
+`transaction_log_id:u32, range:TransactionLogRange,
+seal:TransactionCommitSeal`. It freezes the named segment chain in that
+transaction log, seals the final segment's private suffix, and imports
+sealed suffix entries into main-WAL replay at the position of this
+commit record. Before this marker, recovery keeps transaction-private
+collection changes and free intents non-visible and rolls back
+transaction-owned allocation entries through the rollback protocol.
+After this marker, recovery preserves imported collection state,
+publishes data-region transaction allocations as collection-owned,
+detaches transaction free intents from collection live state, and
+finishes ordered free-intent cleanup before the transaction is
+finished. Transaction-log segment allocations remain retained until
+`transaction_finished` releases the range.
 
 16. `RING-WAL-PAYLOAD-016` `transaction_finished`
 Main-WAL-only record. The payload is
@@ -391,6 +424,11 @@ transaction-private intent to free a physical region that remains live
 in the collection until the transaction commits. Before commit,
 `free_intent` has no allocator effect, does not append to the
 free-space collection, and does not advance `append_tail`.
+
+    In `transaction_log_v2`, `free_intent` is encoded as a
+    transaction private suffix entry. It is not replay-visible until
+    its segment is sealed and a matching main-WAL `commit_transaction`
+    imports the transaction.
 
 ## Ordering And Validity
 
@@ -513,13 +551,15 @@ collection explicitly enrolled by `add_transaction_collection` in the
 same open transaction range. Collection mutation records for an
 unenrolled collection are invalid in that range.
 24. `RING-WAL-VALID-024`
-`commit_transaction(transaction_log_id, range)` is valid only if the
-range starts at the matching open transaction descriptor's start, ends
-at that transaction log's current append position, contains only
-complete valid records, and contains no torn record before `range.end`.
+`commit_transaction(transaction_log_id, range, seal)` is valid only if
+the range starts at the matching open transaction descriptor's start,
+the range reaches the final segment identified by `seal`, all segment
+links before the final segment are valid seals, and the final segment
+suffix bounds in `seal` are valid for the transaction log's current
+append position.
 25. `RING-WAL-VALID-025`
 `transaction_finished(transaction_log_id, range)` is valid only after a
-retained matching `commit_transaction(transaction_log_id, range)` or
+retained matching `commit_transaction(transaction_log_id, range, seal)` or
 `rollback_transaction(transaction_log_id, range)` and after the ordered
 cleanup cursor reaches the end of the committed free-intent list or
 rolled-back transaction-owned allocation list.
@@ -532,7 +572,7 @@ The transaction-owned allocations in the range become the ordered
 rollback cleanup list. A rolled-back range MUST NOT be imported as
 visible collection or allocator state.
 27. `RING-WAL-VALID-027` Before appending
-`commit_transaction(transaction_log_id, range)`, storage MUST verify
+`commit_transaction(transaction_log_id, range, seal)`, storage MUST verify
 that each enrolled collection's current committed state generation
 still equals the generation recorded by that collection's
 `add_transaction_collection` record. Any mismatch fails the commit with
@@ -589,6 +629,45 @@ transaction owns cleanup. Its `append_tail_after` MUST name the queue
 position immediately after the transaction's next cleanup slot:
 `cleanup_start_tail + cleanup_index + 1`. No other main-WAL operation
 may interleave before `transaction_finished`.
+40. `RING-WAL-VALID-041` A full-transaction ordinary allocation is
+valid only if it can append and sync a `TransactionAllocationEntry`
+inside the current transaction-log segment before any recovered
+allocator cursor is advanced. A transaction allocation entry is invalid
+if its `region_index` is not the current ready entry, if its
+`allocation_head_after` is not the next queue position after the
+current `allocation_head`, if its purpose is unknown, or if its
+checksum is invalid.
+41. `RING-WAL-VALID-042` A transaction-log segment link is valid only
+if the current segment has enough durable allocation-entry and suffix
+accounting to prove that the sealed private suffix bytes occupy exactly
+`[free_intent_start, segment_end)`, that this range does not overlap
+the allocation-entry prefix or segment seal, and that the linked target
+region has `collection_format = transaction_log_v2` and the expected
+sequence.
+42. `RING-WAL-VALID-043`
+`commit_transaction(transaction_log_id, range, seal)` is valid only if
+`range.start` matches the active transaction descriptor, `seal` names
+the final segment of the transaction-log chain, `range.end ==
+seal.final_segment_end`, every non-final segment in the chain has a
+valid `TransactionSegmentSeal`, and every sealed private suffix entry
+inside the imported chain is complete, checksummed, and valid for the
+transaction.
+43. `RING-WAL-VALID-044`
+`rollback_transaction(transaction_log_id, range)` is valid for an
+uncommitted transaction-log chain even if the final private suffix is
+unsealed or torn. Rollback recovery MUST ignore unsealed private suffix
+bytes and derive its cleanup list only from durable
+`TransactionAllocationEntry` values with `purpose = data_region`.
+44. `RING-WAL-VALID-045` A sealed private suffix entry has no
+collection or allocator effect until the matching main-WAL
+`commit_transaction` imports it. A sealed suffix in an uncommitted or
+rolled-back transaction-log chain remains non-visible.
+45. `RING-WAL-VALID-046` A transaction-log segment allocation entry
+with `purpose = transaction_segment` MUST NOT be returned to the
+free-space collection by rollback cleanup or committed free-intent
+cleanup. It remains reachable as transaction-log storage until
+`transaction_finished(transaction_log_id, range)` releases the retained
+transaction-log range.
 
 ## Checksum Trust Model
 

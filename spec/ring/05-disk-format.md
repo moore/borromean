@@ -426,3 +426,125 @@ that is both greater than or equal to the end of `Header` plus
 Replay scans candidate WAL record starts only at aligned offsets
 greater than or equal to `wal_record_area_offset`, and new WAL appends
 must begin at such offsets as well.
+
+## Transaction Log Segment Layout
+
+`transaction_log_v2` is experimental until implemented. The normative
+layout in this section replaces any earlier prototype layout using a
+plain WAL-record stream for transaction-log allocation recovery.
+
+A transaction-log region begins with the same `Header` and
+`LogRegionPrologue` as other private log regions. After that prologue,
+the transaction-log segment is split into two logical areas:
+
+```text
+TransactionLogSegment =
+  Header
+  LogRegionPrologue
+  allocation_entries:[TransactionAllocationEntry]
+  [TransactionSegmentSeal if this is not the final segment]
+  private_suffix:[TransactionPrivateSuffixEntry]
+  erased_tail
+```
+
+The allocation-entry area starts at `wal_record_area_offset`. It grows
+upward in aligned `wal_write_granule` slots. Every transaction
+allocation writes one `TransactionAllocationEntry` and syncs it before
+the recovered allocator state may advance. Transaction-private
+collection data and free intents are not written incrementally; they
+are buffered until a segment is sealed or the transaction commits.
+
+```rust
+struct TransactionAllocationEntry {
+  region_index: u32,
+  allocation_head_after: FreeQueuePosition,
+  purpose: u8,
+  entry_checksum: u32,
+}
+
+enum TransactionAllocationPurpose {
+  data_region = 0x01,
+  transaction_segment = 0x02,
+}
+```
+
+`entry_checksum` is CRC-32C over `region_index`,
+`allocation_head_after`, and `purpose` in canonical disk byte order.
+The encoded entry is padded to `wal_write_granule`; padding bytes are
+reserved and ignored after checksum validation. The entries form a
+contiguous valid prefix. At startup, a checksum-invalid or torn entry at
+the next aligned allocation slot ends the durable allocation prefix for
+that open transaction segment; any later non-erased allocation entry in
+the same prefix area is corruption.
+
+When a transaction needs to continue in another segment, the current
+segment must first be sealed with a transaction-segment seal:
+
+```rust
+struct TransactionSegmentSeal {
+  next_region_index: u32,
+  expected_sequence: u64,
+  free_intent_start: u32,
+  segment_end: u32,
+  seal_checksum: u32,
+}
+```
+
+`next_region_index` and `expected_sequence` identify the next
+transaction-log segment. `free_intent_start` is the first byte of the
+sealed private suffix in this segment, and `segment_end` is the first
+byte after that suffix. `seal_checksum` is CRC-32C over the prior
+fields. The seal is written and synced before any allocation entry or
+private suffix byte in the next transaction-log segment may become
+durable. A sealed non-final segment remains transaction-private; the
+seal only makes its private suffix eligible for import if a later
+main-WAL `commit_transaction` imports the transaction.
+
+The final transaction-log segment has no `TransactionSegmentSeal`.
+Instead, the main-WAL `commit_transaction` record supplies that final
+segment's `free_intent_start` and `segment_end`.
+
+The private suffix is a typed stream. Its bytes are ignored unless the
+segment is sealed by a `TransactionSegmentSeal` or, for the final
+segment, by the matching `commit_transaction` record. Implementations
+may pack suffix entries without `wal_write_granule` alignment.
+
+```rust
+struct TransactionPrivateSuffixEntry {
+  suffix_type: u8,
+  collection_id: u64,
+  payload_len: u32,
+  payload: [u8; payload_len],
+  entry_checksum: u32,
+}
+```
+
+`suffix_type` identifies an enrolled-collection marker, a private
+collection record, or a `free_intent`. `entry_checksum` is CRC-32C over
+the entry through the payload. The suffix stream is self-delimiting
+from `free_intent_start` to `segment_end`; replay rejects malformed,
+truncated, or checksum-invalid entries inside a sealed suffix.
+
+1. `RING-TXLOG-SEG-001` A `transaction_log_v2` segment MUST use the
+allocation-entry and private-suffix layout in this section; a
+transaction-log region that uses the old plain-WAL-record prototype
+layout is unsupported experimental media.
+2. `RING-TXLOG-SEG-002` Every transaction allocation MUST write and
+sync exactly one valid `TransactionAllocationEntry` before advancing
+the recovered free-space `allocation_head`.
+3. `RING-TXLOG-SEG-003` A transaction allocation entry with
+`purpose = data_region` is transaction-owned until
+`commit_transaction` publishes it as collection-owned or rollback
+cleanup frees it.
+4. `RING-TXLOG-SEG-004` A transaction allocation entry with
+`purpose = transaction_segment` keeps a transaction-log segment
+reachable until `transaction_finished` releases the retained
+transaction-log range.
+5. `RING-TXLOG-SEG-005` Private suffix bytes MUST NOT be replay-visible
+unless their segment is sealed by a valid `TransactionSegmentSeal` or,
+for the final segment, by the matching main-WAL `commit_transaction`
+record.
+6. `RING-TXLOG-SEG-006` A transaction-log implementation MUST reserve
+enough unwritten space in the current segment for all buffered private
+suffix entries plus either a `TransactionSegmentSeal` or the final
+commit seal before it appends another allocation entry.

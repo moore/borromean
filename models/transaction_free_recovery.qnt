@@ -1,5 +1,5 @@
-// Semantic model for allocator WAL commands, transaction-owned allocations,
-// transaction-private free intents, and transaction cleanup.
+// Semantic model for transaction-log allocation entries, buffered private
+// suffix state, transaction-private free intents, and transaction cleanup.
 //
 // The collection payload semantics are intentionally abstracted away. The
 // model assumes any collection effect that must be undone before transaction
@@ -8,10 +8,11 @@
 // regions, because that requires a collection-specific undo rule rather than
 // allocator-only recovery.
 //
-// The trace is the durable WAL prefix. Each action models both making one WAL
-// command durable and applying that command to replayed runtime state. A crash
-// cut is therefore any prefix of the action trace: online apply and crash
-// replay are intentionally the same transition relation in this model.
+// Durable allocation entries are modeled separately from private suffix data.
+// A crash cut may keep allocation entries while dropping buffered suffix
+// entries that were never sealed by a transaction-log segment link or final
+// commit. Online apply and crash replay intentionally share the same durable
+// transition relation for allocation entries and main-WAL cleanup records.
 
 module transaction_free_recovery {
   ////// Model vocabulary and bounded domains //////
@@ -44,9 +45,12 @@ module transaction_free_recovery {
   // - A cleanup free reference is a free-log slot. In the implementation this
   //   is a `(free_log_region, offset)` pair; in this bounded model it is the
   //   integer queue position `cleanupStartTail + cleanupIndex`.
-  // - Transaction free intents and transaction-owned allocations retain
-  //   physical regions. Cleanup idempotence comes from the ordered free slot,
-  //   not from a logical region sequence header.
+  // - Transaction-owned allocations are durable transaction-log allocation
+  //   entries. They survive crash cuts as soon as their entry is durable.
+  // - Transaction free intents are buffered private suffix entries until a
+  //   segment seal or final commit makes them commit-visible. Cleanup
+  //   idempotence comes from the ordered free slot, not from a logical region
+  //   sequence header.
   type TxState = {
     phase: TxPhase,
     collectionIndex: int,
@@ -55,6 +59,7 @@ module transaction_free_recovery {
     cleanupStartTail: int,
     allocatedRegions: List[int],
     freeIntents: List[int],
+    bufferedFreeIntents: List[int],
   }
 
   type CollectionState = {
@@ -148,6 +153,7 @@ module transaction_free_recovery {
     cleanupStartTail: int,
     allocatedRegions: List[int],
     freeIntents: List[int],
+    bufferedFreeIntents: List[int],
   ): TxState = {
     phase: phase,
     collectionIndex: collectionIndex,
@@ -156,15 +162,16 @@ module transaction_free_recovery {
     cleanupStartTail: cleanupStartTail,
     allocatedRegions: allocatedRegions,
     freeIntents: freeIntents,
+    bufferedFreeIntents: bufferedFreeIntents,
   }
 
   pure val EmptyTx =
-    txState(TxIdle, NoCollection, 0, 0, 0, [], [])
+    txState(TxIdle, NoCollection, 0, 0, 0, [], [], [])
 
   pure val InitialTransactions = [EmptyTx, EmptyTx]
 
   pure def openTx(collectionIndex: int, observedGeneration: int): TxState =
-    txState(TxOpen, collectionIndex, observedGeneration, 0, 0, [], [])
+    txState(TxOpen, collectionIndex, observedGeneration, 0, 0, [], [], [])
 
   pure def txAddAllocation(tx: TxState, allocation: int): TxState =
     txState(
@@ -175,6 +182,7 @@ module transaction_free_recovery {
       tx.cleanupStartTail,
       tx.allocatedRegions.append(allocation),
       tx.freeIntents,
+      tx.bufferedFreeIntents,
     )
 
   pure def txAddFreeIntent(tx: TxState, freeIntent: int): TxState =
@@ -185,7 +193,26 @@ module transaction_free_recovery {
       tx.cleanupIndex,
       tx.cleanupStartTail,
       tx.allocatedRegions,
-      tx.freeIntents.append(freeIntent),
+      tx.freeIntents,
+      tx.bufferedFreeIntents.append(freeIntent),
+    )
+
+  pure def appendAll(base: List[int], extra: List[int]): List[int] =
+    extra.foldl(base, (acc, region) => acc.append(region))
+
+  pure def txAllFreeIntents(tx: TxState): List[int] =
+    appendAll(tx.freeIntents, tx.bufferedFreeIntents)
+
+  pure def txSealBufferedSuffix(tx: TxState): TxState =
+    txState(
+      tx.phase,
+      tx.collectionIndex,
+      tx.observedGeneration,
+      tx.cleanupIndex,
+      tx.cleanupStartTail,
+      tx.allocatedRegions,
+      txAllFreeIntents(tx),
+      [],
     )
 
   pure def txCommitted(tx: TxState, cleanupStartTail: int): TxState =
@@ -196,7 +223,8 @@ module transaction_free_recovery {
       0,
       cleanupStartTail,
       tx.allocatedRegions,
-      tx.freeIntents,
+      txAllFreeIntents(tx),
+      [],
     )
 
   pure def txRolledBack(tx: TxState, cleanupStartTail: int): TxState =
@@ -207,7 +235,8 @@ module transaction_free_recovery {
       0,
       cleanupStartTail,
       tx.allocatedRegions,
-      tx.freeIntents,
+      [],
+      [],
     )
 
   pure def txAdvanceCleanup(tx: TxState): TxState =
@@ -219,6 +248,7 @@ module transaction_free_recovery {
       tx.cleanupStartTail,
       tx.allocatedRegions,
       tx.freeIntents,
+      tx.bufferedFreeIntents,
     )
 
   pure def intListToSet(regions: List[int]): Set[int] =
@@ -228,6 +258,9 @@ module transaction_free_recovery {
     intListToSet(tx.allocatedRegions)
 
   pure def txFreeIntentSet(tx: TxState): Set[int] =
+    intListToSet(txAllFreeIntents(tx))
+
+  pure def txSealedFreeIntentSet(tx: TxState): Set[int] =
     intListToSet(tx.freeIntents)
 
   pure def pendingRegionSet(regions: List[int], cleanupIndex: int): Set[int] =
@@ -420,7 +453,9 @@ module transaction_free_recovery {
     }
   }
 
-  // transaction_log allocate_region(tx, region, allocation_head_after)
+  // transaction-log allocation entry(tx, region, allocation_head_after).
+  // This is durable immediately and advances allocator recovery state, but
+  // the region remains transaction-owned until commit or rollback cleanup.
   action AllocateInTransaction = {
     nondet txIndex = storage.transactions.indices().oneOf()
     val currentTx = storage.transactions.nth(txIndex)
@@ -440,7 +475,9 @@ module transaction_free_recovery {
     }
   }
 
-  // transaction_log free_intent(tx, region). Staging has no allocator effect.
+  // transaction-log private suffix free_intent(tx, region). Staging has no
+  // allocator effect; the suffix entry is buffered until a segment seal or
+  // commit imports the final segment.
   action StageFreeIntent = {
     nondet txIndex = storage.transactions.indices().oneOf()
     val currentTx = storage.transactions.nth(txIndex)
@@ -456,7 +493,24 @@ module transaction_free_recovery {
     }
   }
 
-  // main_wal commit_transaction(tx)
+  // Segment link seal for a non-final transaction-log segment. The sealed
+  // suffix becomes eligible for later commit import, but still has no public
+  // replay effect before commit. This allocator-focused model tracks only
+  // free intents inside the suffix, so sealing a suffix with no buffered free
+  // intents is valid and may be a semantic no-op here.
+  action SealPrivateSuffix = {
+    nondet txIndex = storage.transactions.indices().oneOf()
+    val currentTx = storage.transactions.nth(txIndex)
+    val nextTx = txSealBufferedSuffix(currentTx)
+    all {
+      currentTx.phase == TxOpen,
+
+      storage' = storageWithTransaction(storage, txIndex, nextTx),
+    }
+  }
+
+  // main_wal commit_transaction(tx, range, seal). The final commit seal
+  // imports the final buffered suffix together with earlier sealed segments.
   action CommitTransaction = {
     nondet txIndex = storage.transactions.indices().oneOf()
     val currentTx = storage.transactions.nth(txIndex)
@@ -497,8 +551,11 @@ module transaction_free_recovery {
     }
   }
 
-  // main_wal rollback_transaction(tx), after rollback cleanup is still pending.
-  // Transaction-owned allocations become the retained cleanup list directly.
+  // main_wal rollback_transaction(tx), after rollback cleanup is still
+  // pending. Transaction-owned allocation entries become the retained cleanup
+  // list directly. All private suffix entries are discarded here, including
+  // buffered entries that would not survive a pre-seal crash and sealed
+  // entries that remain non-visible because no commit imported them.
   action RollbackTransaction = {
     nondet txIndex = storage.transactions.indices().oneOf()
     val currentTx = storage.transactions.nth(txIndex)
@@ -614,6 +671,7 @@ module transaction_free_recovery {
     BeginTransaction,
     AllocateInTransaction,
     StageFreeIntent,
+    SealPrivateSuffix,
     CommitTransaction,
     RollbackTransaction,
     FreeCommittedIntent,
@@ -631,8 +689,9 @@ module transaction_free_recovery {
   action UnsafeFreeIntentBeforeCommit = {
     nondet txIndex = storage.transactions.indices().oneOf()
     val currentTx = storage.transactions.nth(txIndex)
-    nondet freeIntentIndex = currentTx.freeIntents.indices().oneOf()
-    val freeIntent = currentTx.freeIntents.nth(freeIntentIndex)
+    val freeIntents = txAllFreeIntents(currentTx)
+    nondet freeIntentIndex = freeIntents.indices().oneOf()
+    val freeIntent = freeIntents.nth(freeIntentIndex)
     all {
       currentTx.phase == TxOpen,
 
@@ -791,9 +850,11 @@ module transaction_free_recovery {
     // Every transaction-owned list names modeled physical regions.
     intListEntriesInRegions(tx.allocatedRegions)
     and intListEntriesInRegions(tx.freeIntents)
-    // A transaction may not retain duplicate ownership/cleanup entries.
+    and intListEntriesInRegions(tx.bufferedFreeIntents)
+    // A transaction may not retain duplicate ownership/cleanup entries,
+    // including free intents split between sealed and buffered suffix state.
     and noDuplicates(tx.allocatedRegions)
-    and noDuplicates(tx.freeIntents)
+    and noDuplicates(txAllFreeIntents(tx))
 
   pure def txCollectionOK(
     tx: TxState,
@@ -821,7 +882,8 @@ module transaction_free_recovery {
       and tx.cleanupIndex == 0
       and tx.cleanupStartTail == 0
       and tx.allocatedRegions.length() == 0
-      and tx.freeIntents.length() == 0)
+      and tx.freeIntents.length() == 0
+      and tx.bufferedFreeIntents.length() == 0)
 
   pure def txCleanupIndexOK(tx: TxState): bool =
     // The scan cursor is bounded by the list being scanned, and is zero when
