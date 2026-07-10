@@ -624,9 +624,9 @@ fn requirement_empty_payload_record_types_encode_zero_payload_len() {
     assert_eq!(begin_len, 21);
     assert_eq!(
         &commit_logical[1..5],
-        &((size_of::<u32>() + 4 * size_of::<u32>()) as u32).to_le_bytes()
+        &((size_of::<u32>() + 4 * size_of::<u32>() + 4 * size_of::<u32>()) as u32).to_le_bytes()
     );
-    assert_eq!(commit_len, 29);
+    assert_eq!(commit_len, 45);
     assert_eq!(
         &finished_logical[1..5],
         &((size_of::<u32>() + 4 * size_of::<u32>()) as u32).to_le_bytes()

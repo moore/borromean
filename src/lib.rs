@@ -148,9 +148,14 @@ pub(crate) fn test_begin_transaction_record(collection_id: CollectionId) -> WalR
 
 #[cfg(test)]
 pub(crate) fn test_commit_transaction_record(collection_id: CollectionId) -> WalRecord<'static> {
+    let range = test_transaction_log_range(collection_id);
     WalRecord::CommitTransaction {
         transaction_log_id: test_transaction_log_id(collection_id),
-        range: test_transaction_log_range(collection_id),
+        range,
+        seal: TransactionCommitSeal {
+            final_free_intent_start: range.end,
+            final_segment_end: range.end,
+        },
     }
 }
 
@@ -214,6 +219,8 @@ pub use startup::*;
 /// Advanced runtime-state and low-level storage operation helpers.
 pub mod storage;
 pub use storage::*;
+
+pub(crate) mod transaction_log;
 
 /// Advanced reference types for WAL record encoding and decoding.
 pub mod wal_record;

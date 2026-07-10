@@ -12,9 +12,13 @@ use crate::storage::{
     RetainedTransactionLog, StorageRuntime, StorageRuntimeError, TransactionLogOutcome,
     MAX_RETAINED_TRANSACTION_LOGS, MAX_RETAINED_TRANSACTION_LOG_REGIONS, TRANSACTION_SLOT_COUNT,
 };
+use crate::transaction_log::{
+    decode_private_suffix_entry, TransactionAllocationEntry, TransactionAllocationPurpose,
+    TransactionSegmentSeal,
+};
 use crate::wal_record::{
-    decode_record, encode_record_into, encoded_record_len, LogPosition, TransactionLogRange,
-    WalRecord, WalRecordError,
+    decode_record, encode_record_into, encoded_record_len, LogPosition, TransactionCommitSeal,
+    TransactionLogRange, WalRecord, WalRecordError,
 };
 use crate::workspace::StorageWorkspace;
 use crate::{CollectionId, CollectionType};
@@ -580,6 +584,7 @@ impl<const REGION_COUNT: usize, const MAX_COLLECTIONS: usize>
         &mut self,
         transaction_log_id: u32,
         range: TransactionLogRange,
+        seal: Option<TransactionCommitSeal>,
         regions: &[u32],
         outcome: TransactionLogOutcome,
     ) -> Result<(), StartupError> {
@@ -588,6 +593,9 @@ impl<const REGION_COUNT: usize, const MAX_COLLECTIONS: usize>
             retained.transaction_log_id == transaction_log_id && retained.range.start == range.start
         }) {
             retained.range = range;
+            if seal.is_some() {
+                retained.seal = seal;
+            }
             retained.outcome = outcome;
             retained.regions.clear();
             for region_index in regions.iter().copied() {
@@ -609,6 +617,7 @@ impl<const REGION_COUNT: usize, const MAX_COLLECTIONS: usize>
             .push(RetainedTransactionLog {
                 transaction_log_id,
                 range,
+                seal,
                 regions: retained_regions,
                 outcome,
             })
@@ -637,6 +646,7 @@ impl<const REGION_COUNT: usize, const MAX_COLLECTIONS: usize>
             .push(RetainedTransactionLog {
                 transaction_log_id,
                 range,
+                seal: None,
                 regions,
                 outcome: TransactionLogOutcome::Finished,
             })
@@ -1063,17 +1073,19 @@ fn replay_open_wal_region<
             ReplayStep::ReplayTransactionLog {
                 transaction_log_id,
                 range,
+                seal,
                 mode,
                 outcome,
                 next_offset,
             } => {
                 let replay_result =
                     replay_transaction_log_range::<REGION_SIZE, REGION_COUNT, IO, MAX_COLLECTIONS>(
-                        flash, workspace, plan, range, mode,
+                        flash, workspace, plan, range, seal, mode,
                     )?;
                 plan.retain_transaction_log(
                     transaction_log_id,
                     range,
+                    seal,
                     replay_result.regions.as_slice(),
                     outcome,
                 )?;
@@ -1117,6 +1129,7 @@ enum ReplayStep {
     ReplayTransactionLog {
         transaction_log_id: u32,
         range: TransactionLogRange,
+        seal: Option<TransactionCommitSeal>,
         mode: TransactionReplayMode,
         outcome: TransactionLogOutcome,
         next_offset: usize,
@@ -1260,6 +1273,7 @@ fn classify_replay_record<const REGION_COUNT: usize, const MAX_COLLECTIONS: usiz
         WalRecord::CommitTransaction {
             transaction_log_id,
             range,
+            seal,
         } => {
             ensure_transaction_log_marker_matches(
                 transaction.transaction_log_id,
@@ -1270,6 +1284,7 @@ fn classify_replay_record<const REGION_COUNT: usize, const MAX_COLLECTIONS: usiz
             return Ok(ReplayStep::ReplayTransactionLog {
                 transaction_log_id,
                 range,
+                seal: Some(seal),
                 mode: TransactionReplayMode::ApplyFullInterval,
                 outcome: TransactionLogOutcome::Committed,
                 next_offset: aligned_end_offset,
@@ -1301,6 +1316,7 @@ fn classify_replay_record<const REGION_COUNT: usize, const MAX_COLLECTIONS: usiz
             return Ok(ReplayStep::ReplayTransactionLog {
                 transaction_log_id,
                 range,
+                seal: None,
                 mode: TransactionReplayMode::ApplyRollbackCleanupOnly,
                 outcome: TransactionLogOutcome::RolledBack,
                 next_offset: aligned_end_offset,
@@ -1737,6 +1753,7 @@ fn recover_unfinished_transaction<
             workspace,
             plan,
             range,
+            None,
             TransactionReplayMode::ApplyRollbackCleanupOnly,
         )?;
         let collection_id = transaction_collection_id(&open_transaction).unwrap_or(CollectionId(0));
@@ -2481,13 +2498,13 @@ fn replay_transaction_log_range<
     workspace: &mut StorageWorkspace<REGION_SIZE>,
     plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS>,
     range: TransactionLogRange,
+    seal: Option<TransactionCommitSeal>,
     mode: TransactionReplayMode,
 ) -> Result<TransactionLogReplayResult, StartupError> {
     let mut result = TransactionLogReplayResult {
         collection_id: None,
         regions: Vec::new(),
     };
-    let mut enrollment = TransactionLogReplayEnrollment::default();
     push_unique_region(&mut result.regions, range.start.region_index)?;
     if range.start == range.end {
         return Ok(result);
@@ -2495,13 +2512,12 @@ fn replay_transaction_log_range<
     ensure_region_index_in_range(range.start.region_index, plan.metadata.region_count)?;
     ensure_region_index_in_range(range.end.region_index, plan.metadata.region_count)?;
     let mut current_region = range.start.region_index;
-    let mut offset =
+    let mut segment_start =
         usize::try_from(range.start.offset).map_err(|_| StartupError::LengthOverflow)?;
-    let end_offset = usize::try_from(range.end.offset).map_err(|_| StartupError::LengthOverflow)?;
     let region_size =
         usize::try_from(plan.metadata.region_size).map_err(|_| StartupError::LengthOverflow)?;
-    let granule = usize::try_from(plan.metadata.wal_write_granule)
-        .map_err(|_| StartupError::LengthOverflow)?;
+    let allocation_entry_len = TransactionAllocationEntry::encoded_len(plan.metadata)?;
+    let mut enrollment = TransactionLogReplayEnrollment::default();
 
     for _ in 0..plan.metadata.region_count {
         push_unique_region(&mut result.regions, current_region)?;
@@ -2511,81 +2527,148 @@ fn replay_transaction_log_range<
         })?;
         validate_transaction_log_region_bytes(region_bytes, plan.metadata, current_region)?;
 
-        let limit = if current_region == range.end.region_index {
-            end_offset
-        } else {
-            region_size
-        };
-        let mut next_region = None;
+        if segment_start < region_size
+            && region_bytes[segment_start] == plan.metadata.wal_record_magic
+        {
+            return Err(StartupError::InvalidWalRegion(current_region));
+        }
 
-        while offset < limit {
-            let next_offset = {
-                let (region_bytes, logical_scratch) = workspace.scan_buffers();
-                if region_bytes[offset] == plan.metadata.erased_byte {
-                    if current_region == range.end.region_index {
-                        return Ok(result);
-                    }
-                    return Err(StartupError::BrokenWalChain {
-                        region_index: current_region,
-                    });
-                }
-                if region_bytes[offset] != plan.metadata.wal_record_magic {
-                    offset
-                        .checked_add(granule)
-                        .ok_or(StartupError::LengthOverflow)?
-                } else {
-                    let decoded = decode_record(
-                        &region_bytes[offset..limit],
-                        plan.metadata,
-                        logical_scratch,
-                    )?;
-                    let next_offset = offset
-                        .checked_add(decoded.encoded_len)
+        let mut offset = segment_start;
+        while offset
+            .checked_add(allocation_entry_len)
+            .is_some_and(|end| end <= region_size)
+        {
+            match TransactionAllocationEntry::decode(
+                plan.metadata,
+                &region_bytes[offset..offset + allocation_entry_len],
+            ) {
+                Ok(entry) => {
+                    observe_transaction_allocation_entry(plan, &mut result, entry)?;
+                    offset = offset
+                        .checked_add(allocation_entry_len)
                         .ok_or(StartupError::LengthOverflow)?;
-                    match decoded.record {
-                        WalRecord::Link {
-                            next_region_index, ..
-                        } => {
-                            next_region = Some(next_region_index);
-                        }
-                        record => {
-                            validate_transaction_log_private_record(plan, &mut enrollment, record)?;
-                            if result.collection_id.is_none() {
-                                if let Some(collection_id) =
-                                    transaction_record_collection_id(record)
-                                {
-                                    if collection_id != CollectionId(0) {
-                                        result.collection_id = Some(collection_id);
-                                    }
-                                }
-                            }
-                            observe_transaction_log_replay_record(plan, record)?;
-                            apply_transaction_replay_record(plan, record, mode)?;
-                        }
-                    }
-                    next_offset
                 }
-            };
-            offset = next_offset;
-            if next_region.is_some() {
-                break;
+                Err(_) => break,
             }
         }
 
-        if current_region == range.end.region_index {
+        let is_final = current_region == range.end.region_index;
+        if is_final {
+            let Some(commit_seal) = seal else {
+                return Ok(result);
+            };
+            if commit_seal.final_free_intent_start.region_index != current_region
+                || commit_seal.final_segment_end.region_index != current_region
+                || commit_seal.final_segment_end != range.end
+            {
+                return Err(StartupError::InvalidWalRegion(current_region));
+            }
+            replay_transaction_suffix_range(
+                plan,
+                &mut enrollment,
+                &mut result,
+                region_bytes,
+                usize::try_from(commit_seal.final_free_intent_start.offset)
+                    .map_err(|_| StartupError::LengthOverflow)?,
+                usize::try_from(commit_seal.final_segment_end.offset)
+                    .map_err(|_| StartupError::LengthOverflow)?,
+                mode,
+            )?;
             return Ok(result);
         }
 
-        current_region = next_region.ok_or(StartupError::BrokenWalChain {
-            region_index: current_region,
-        })?;
+        let segment_seal =
+            TransactionSegmentSeal::decode(&region_bytes[offset..]).map_err(|_| {
+                StartupError::BrokenWalChain {
+                    region_index: current_region,
+                }
+            })?;
+        if usize::try_from(segment_seal.free_intent_start)
+            .map_err(|_| StartupError::LengthOverflow)?
+            < offset + TransactionSegmentSeal::ENCODED_LEN
+            || usize::try_from(segment_seal.segment_end)
+                .map_err(|_| StartupError::LengthOverflow)?
+                > region_size
+        {
+            return Err(StartupError::InvalidWalRegion(current_region));
+        }
+        replay_transaction_suffix_range(
+            plan,
+            &mut enrollment,
+            &mut result,
+            region_bytes,
+            usize::try_from(segment_seal.free_intent_start)
+                .map_err(|_| StartupError::LengthOverflow)?,
+            usize::try_from(segment_seal.segment_end).map_err(|_| StartupError::LengthOverflow)?,
+            mode,
+        )?;
+
+        current_region = segment_seal.next_region_index;
         ensure_region_index_in_range(current_region, plan.metadata.region_count)?;
-        offset = plan.metadata.wal_record_area_offset()?;
+        segment_start = plan.metadata.wal_record_area_offset()?;
     }
 
     Err(StartupError::BrokenWalChain {
         region_index: current_region,
     })
+}
+
+fn observe_transaction_allocation_entry<const REGION_COUNT: usize, const MAX_COLLECTIONS: usize>(
+    plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS>,
+    result: &mut TransactionLogReplayResult,
+    entry: TransactionAllocationEntry,
+) -> Result<(), StartupError> {
+    ensure_region_index_in_range(entry.region_index, plan.metadata.region_count)?;
+    apply_wal_record(
+        plan.metadata,
+        WalRecord::AllocateRegion {
+            region_index: entry.region_index,
+            allocation_head_after: entry.allocation_head_after,
+        },
+        &mut plan.collections,
+        &mut plan.free_space,
+        &mut plan.ready_region,
+    )?;
+    match entry.purpose {
+        TransactionAllocationPurpose::DataRegion => {
+            push_unique_region(&mut plan.transaction_allocations, entry.region_index)?;
+        }
+        TransactionAllocationPurpose::TransactionSegment => {
+            push_unique_region(&mut result.regions, entry.region_index)?;
+        }
+    }
+    Ok(())
+}
+
+fn replay_transaction_suffix_range<const REGION_COUNT: usize, const MAX_COLLECTIONS: usize>(
+    plan: &mut StartupOpenPlan<REGION_COUNT, MAX_COLLECTIONS>,
+    enrollment: &mut TransactionLogReplayEnrollment,
+    result: &mut TransactionLogReplayResult,
+    region_bytes: &[u8],
+    mut offset: usize,
+    end: usize,
+    mode: TransactionReplayMode,
+) -> Result<(), StartupError> {
+    if offset > end || end > region_bytes.len() {
+        return Err(StartupError::LengthOverflow);
+    }
+    while offset < end {
+        let decoded = decode_private_suffix_entry(&region_bytes[offset..end])?;
+        validate_transaction_log_private_record(plan, enrollment, decoded.record)?;
+        if result.collection_id.is_none() {
+            if let Some(collection_id) = transaction_record_collection_id(decoded.record) {
+                if collection_id != CollectionId(0) {
+                    result.collection_id = Some(collection_id);
+                }
+            }
+        }
+        observe_transaction_log_replay_record(plan, decoded.record)?;
+        apply_transaction_replay_record(plan, decoded.record, mode)?;
+        offset = offset
+            .checked_add(decoded.encoded_len)
+            .ok_or(StartupError::LengthOverflow)?;
+    }
+    Ok(())
 }
 
 fn scan_transaction_log_to_durable_end<
@@ -2601,11 +2684,11 @@ fn scan_transaction_log_to_durable_end<
 ) -> Result<TransactionLogRange, StartupError> {
     ensure_region_index_in_range(start.region_index, plan.metadata.region_count)?;
     let mut current_region = start.region_index;
-    let mut offset = usize::try_from(start.offset).map_err(|_| StartupError::LengthOverflow)?;
+    let mut segment_start =
+        usize::try_from(start.offset).map_err(|_| StartupError::LengthOverflow)?;
     let region_size =
         usize::try_from(plan.metadata.region_size).map_err(|_| StartupError::LengthOverflow)?;
-    let granule = usize::try_from(plan.metadata.wal_write_granule)
-        .map_err(|_| StartupError::LengthOverflow)?;
+    let allocation_entry_len = TransactionAllocationEntry::encoded_len(plan.metadata)?;
 
     for _ in 0..plan.metadata.region_count {
         let (region_bytes, _) = workspace.scan_buffers();
@@ -2614,84 +2697,43 @@ fn scan_transaction_log_to_durable_end<
         })?;
         validate_transaction_log_region_bytes(region_bytes, plan.metadata, current_region)?;
 
-        while offset < region_size {
-            let step = {
-                let (region_bytes, logical_scratch) = workspace.scan_buffers();
-                let start_byte = region_bytes[offset];
-                if start_byte == plan.metadata.erased_byte {
-                    return Ok(TransactionLogRange {
-                        start,
-                        end: LogPosition {
-                            region_index: current_region,
-                            offset: u32::try_from(offset)
-                                .map_err(|_| StartupError::LengthOverflow)?,
-                        },
-                    });
-                }
-                if start_byte != plan.metadata.wal_record_magic {
-                    return Ok(TransactionLogRange {
-                        start,
-                        end: LogPosition {
-                            region_index: current_region,
-                            offset: u32::try_from(offset)
-                                .map_err(|_| StartupError::LengthOverflow)?,
-                        },
-                    });
-                }
-                let decoded = match decode_record(
-                    &region_bytes[offset..region_size],
-                    plan.metadata,
-                    logical_scratch,
-                ) {
-                    Ok(decoded) => decoded,
-                    Err(_) => {
-                        return Ok(TransactionLogRange {
-                            start,
-                            end: LogPosition {
-                                region_index: current_region,
-                                offset: u32::try_from(offset)
-                                    .map_err(|_| StartupError::LengthOverflow)?,
-                            },
-                        });
-                    }
-                };
-                let next_offset = offset
-                    .checked_add(decoded.encoded_len)
-                    .ok_or(StartupError::LengthOverflow)?;
-                match decoded.record {
-                    WalRecord::Link {
-                        next_region_index, ..
-                    } => Some((next_region_index, next_offset)),
-                    _ => {
-                        let _ = granule;
-                        None
-                    }
-                }
-            };
-
-            if let Some((next_region, _next_offset)) = step {
-                current_region = next_region;
-                ensure_region_index_in_range(current_region, plan.metadata.region_count)?;
-                offset = plan.metadata.wal_record_area_offset()?;
-                break;
-            }
-            let (region_bytes, logical_scratch) = workspace.scan_buffers();
-            let decoded = decode_record(
-                &region_bytes[offset..region_size],
-                plan.metadata,
-                logical_scratch,
-            )?;
-            offset = offset
-                .checked_add(decoded.encoded_len)
-                .ok_or(StartupError::LengthOverflow)?;
+        if segment_start < region_size
+            && region_bytes[segment_start] == plan.metadata.wal_record_magic
+        {
+            return Err(StartupError::InvalidWalRegion(current_region));
         }
 
-        if offset >= region_size {
+        let mut offset = segment_start;
+        while offset
+            .checked_add(allocation_entry_len)
+            .is_some_and(|end| end <= region_size)
+        {
+            match TransactionAllocationEntry::decode(
+                plan.metadata,
+                &region_bytes[offset..offset + allocation_entry_len],
+            ) {
+                Ok(_) => {
+                    offset = offset
+                        .checked_add(allocation_entry_len)
+                        .ok_or(StartupError::LengthOverflow)?;
+                }
+                Err(_) => break,
+            }
+        }
+
+        if let Ok(segment_seal) = TransactionSegmentSeal::decode(&region_bytes[offset..]) {
+            current_region = segment_seal.next_region_index;
+            ensure_region_index_in_range(current_region, plan.metadata.region_count)?;
+            segment_start = plan.metadata.wal_record_area_offset()?;
+            continue;
+        }
+
+        if offset <= region_size {
             return Ok(TransactionLogRange {
                 start,
                 end: LogPosition {
                     region_index: current_region,
-                    offset: u32::try_from(region_size).map_err(|_| StartupError::LengthOverflow)?,
+                    offset: u32::try_from(offset).map_err(|_| StartupError::LengthOverflow)?,
                 },
             });
         }

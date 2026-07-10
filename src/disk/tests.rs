@@ -455,3 +455,124 @@ fn requirement_wal_record_area_offset_is_granule_aligned() {
     assert_eq!(offset % 16, 0);
     assert!(offset >= Header::ENCODED_LEN + WalRegionPrologue::ENCODED_LEN);
 }
+
+//= spec/ring/05-disk-format.md#free-space-region-layout
+//= type=test
+//# `RING-FREE-010` A materialized free-space basis MUST cover exactly
+//# the logical positions `[allocation_head, append_tail)`.
+#[test]
+fn requirement_contiguous_free_space_positions_map_to_metadata_regions() {
+    assert_eq!(
+        free_queue_position_for_contiguous_metadata(10, 3, 4, 0).unwrap(),
+        FreeQueuePosition {
+            region_index: 10,
+            entry_index: 0,
+        }
+    );
+    assert_eq!(
+        free_queue_position_for_contiguous_metadata(10, 3, 4, 3).unwrap(),
+        FreeQueuePosition {
+            region_index: 10,
+            entry_index: 3,
+        }
+    );
+    assert_eq!(
+        free_queue_position_for_contiguous_metadata(10, 3, 4, 4).unwrap(),
+        FreeQueuePosition {
+            region_index: 11,
+            entry_index: 0,
+        }
+    );
+    assert_eq!(
+        free_queue_position_for_contiguous_metadata(10, 3, 4, 11).unwrap(),
+        FreeQueuePosition {
+            region_index: 12,
+            entry_index: 3,
+        }
+    );
+    assert_eq!(
+        free_queue_position_for_contiguous_metadata(10, 3, 4, 12).unwrap(),
+        FreeQueuePosition {
+            region_index: 12,
+            entry_index: 4,
+        }
+    );
+    assert_eq!(
+        free_queue_position_for_contiguous_metadata(10, 0, 4, 0),
+        Err(DiskError::BufferTooSmall {
+            needed: 1,
+            available: 0,
+        })
+    );
+    assert_eq!(
+        free_queue_position_for_contiguous_metadata(10, 3, 0, 0),
+        Err(DiskError::BufferTooSmall {
+            needed: 1,
+            available: 0,
+        })
+    );
+}
+
+//= spec/ring/05-disk-format.md#log-region-prologue
+//= type=test
+//# `RING-PROLOGUE-004` The checkpointed free-space cursors MUST satisfy
+//# `allocation_head <= ready_boundary <= append_tail` in logical
+//# free-space collection order.
+#[test]
+fn requirement_log_region_prefix_helpers_encode_format_and_cursor_fields() {
+    let metadata = StorageMetadata::new(512, 16, 2, 8, 0xff, 0xa5).unwrap();
+    let allocation_head = FreeQueuePosition {
+        region_index: 1,
+        entry_index: 2,
+    };
+    let ready_boundary = FreeQueuePosition {
+        region_index: 1,
+        entry_index: 3,
+    };
+    let append_tail = FreeQueuePosition {
+        region_index: 2,
+        entry_index: 0,
+    };
+    let mut wal = [0u8; 128];
+    let used = encode_wal_region_prefix_with_cursors(
+        &mut wal,
+        metadata,
+        9,
+        4,
+        allocation_head,
+        ready_boundary,
+        append_tail,
+    )
+    .unwrap();
+    assert_eq!(used, metadata.wal_record_area_offset().unwrap());
+    let header = Header::decode(&wal[..Header::ENCODED_LEN]).unwrap();
+    assert_eq!(header.sequence, 9);
+    assert_eq!(header.collection_id, CollectionId(0));
+    assert_eq!(header.collection_format, MAIN_WAL_V2_FORMAT);
+    let prologue = WalRegionPrologue::decode(
+        &wal[Header::ENCODED_LEN..Header::ENCODED_LEN + WalRegionPrologue::ENCODED_LEN],
+        metadata.region_count,
+    )
+    .unwrap();
+    assert_eq!(prologue.log_head_region_index, 4);
+    assert_eq!(prologue.allocation_head, allocation_head);
+    assert_eq!(prologue.ready_boundary, ready_boundary);
+    assert_eq!(prologue.append_tail, append_tail);
+
+    let mut tx = [0u8; 128];
+    let used = encode_transaction_log_region_prefix_with_cursors(
+        &mut tx,
+        metadata,
+        10,
+        5,
+        allocation_head,
+        ready_boundary,
+        append_tail,
+    )
+    .unwrap();
+    assert_eq!(used, metadata.wal_record_area_offset().unwrap());
+    let header = Header::decode(&tx[..Header::ENCODED_LEN]).unwrap();
+    assert_eq!(header.sequence, 10);
+    assert_eq!(header.collection_id, CollectionId(0));
+    assert_eq!(header.collection_format, TRANSACTION_LOG_V2_FORMAT);
+}

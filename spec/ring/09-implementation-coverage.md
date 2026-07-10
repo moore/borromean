@@ -190,6 +190,13 @@ helpers.
     collection create/update/snapshot/head/drop, allocator
     allocate/free/erase, WAL link/head control, and transaction begin,
     commit, rollback, cleanup free, and finish records.
+55. `RING-IMPL-REGRESSION-155` Transaction collection validation MUST
+    reject unknown collections and collections whose latest retained
+    basis is a dropped tombstone before opening an explicit
+    transaction.
+56. `RING-IMPL-REGRESSION-156` Storage facade ready-region accessors
+    MUST report a reserved WAL-rotation region while rotation is open
+    and clear that reservation after the matching rotation finish.
 
 ## Free-Space Collection Coverage Targets
 
@@ -246,3 +253,15 @@ from transaction-owned `allocate_region` records and MUST append
 17. `RING-IMPL-FREE-017` Rollback cleanup MUST finish with
 `transaction_finished` after every transaction-owned allocation has been
 returned to the dirty range.
+18. `RING-IMPL-FREE-018` Transaction memory clearing MUST remove the
+active collection, dirty-frontier checkpoint, and transaction-owned
+object-log allocation list.
+19. `RING-IMPL-FREE-019` Transaction writers MUST reject operations
+after closure and reject collection ids that do not match the active
+transaction collection.
+20. `RING-IMPL-FREE-020` Explicit public transaction commit after a
+writer is dropped MUST publish staged collection effects and clear the
+caller-owned transaction memory.
+21. `RING-IMPL-FREE-021` Transactional map delete operations MUST
+return the same compaction-needed signal as ordinary map deletes while
+keeping effects scoped to the active transaction.

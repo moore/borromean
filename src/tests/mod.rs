@@ -126,21 +126,22 @@ fn find_record_in_regions_with_format<
     None
 }
 
-fn count_records_in_regions_with_format<
+fn count_transaction_suffix_records<
     const REGION_SIZE: usize,
     const REGION_COUNT: usize,
     const MAX_LOG: usize,
 >(
     flash: &MockFlash<REGION_SIZE, REGION_COUNT, MAX_LOG>,
     metadata: StorageMetadata,
-    collection_format: u16,
     record_type: WalRecordType,
 ) -> usize {
     let mut count = 0usize;
     let Some(record_area_offset) = metadata.wal_record_area_offset().ok() else {
         return 0;
     };
-    let Ok(granule) = usize::try_from(metadata.wal_write_granule) else {
+    let Ok(allocation_entry_len) =
+        crate::transaction_log::TransactionAllocationEntry::encoded_len(metadata)
+    else {
         return 0;
     };
     for region_index in 0..REGION_COUNT {
@@ -153,35 +154,38 @@ fn count_records_in_regions_with_format<
         let Ok(header) = Header::decode(&bytes[..Header::ENCODED_LEN]) else {
             continue;
         };
-        if header.collection_id != CollectionId(0) || header.collection_format != collection_format
+        if header.collection_id != CollectionId(0)
+            || header.collection_format != crate::disk::TRANSACTION_LOG_V2_FORMAT
         {
             continue;
         }
         let mut offset = record_area_offset;
-        let mut scratch = [0u8; REGION_SIZE];
-        while offset < REGION_SIZE {
-            match bytes[offset] {
-                byte if byte == metadata.erased_byte => break,
-                byte if byte != metadata.wal_record_magic => {
-                    let Some(next) = offset.checked_add(granule) else {
-                        break;
-                    };
-                    offset = next;
-                }
-                _ => {
-                    let Ok(decoded) = decode_record(&bytes[offset..], metadata, &mut scratch)
-                    else {
-                        break;
-                    };
-                    if decoded.record.record_type() == record_type {
-                        count += 1;
-                    }
-                    let Some(next) = offset.checked_add(decoded.encoded_len) else {
-                        break;
-                    };
-                    offset = next;
-                }
+        while offset
+            .checked_add(allocation_entry_len)
+            .is_some_and(|end| end <= REGION_SIZE)
+            && crate::transaction_log::TransactionAllocationEntry::decode(
+                metadata,
+                &bytes[offset..offset + allocation_entry_len],
+            )
+            .is_ok()
+        {
+            let Some(next) = offset.checked_add(allocation_entry_len) else {
+                break;
+            };
+            offset = next;
+        }
+        while offset < REGION_SIZE && bytes[offset] != metadata.erased_byte {
+            let Ok(decoded) = crate::transaction_log::decode_private_suffix_entry(&bytes[offset..])
+            else {
+                break;
+            };
+            if decoded.record.record_type() == record_type {
+                count += 1;
             }
+            let Some(next) = offset.checked_add(decoded.encoded_len) else {
+                break;
+            };
+            offset = next;
         }
     }
     count
@@ -303,9 +307,71 @@ fn active_free_space_entries<
 
 //= spec/ring/09-implementation-coverage.md#free-space-collection-coverage-targets
 //= type=test
-//# `RING-IMPL-FREE-011` Full transactions MUST import allocator and
-//# collection effects atomically at `commit_transaction`, not at the
-//# physical transaction-log record positions.
+//# `RING-IMPL-FREE-018` Transaction memory clearing MUST remove the active
+//# collection, dirty-frontier checkpoint, and transaction-owned object-log
+//# allocation list.
+#[test]
+fn requirement_transaction_memory_clear_and_collection_guards_are_strict() {
+    let mut memory = TransactionMemory::<8>::new();
+
+    assert!(matches!(
+        memory.require_collection(CollectionId(7)),
+        Err(StorageRuntimeError::TransactionNotOpen(CollectionId(7)))
+    ));
+
+    memory.begin(CollectionId(7), true);
+    memory.object_log_allocated_regions.push(3).unwrap();
+    assert!(memory.require_collection(CollectionId(7)).is_ok());
+    assert!(matches!(
+        memory.require_collection(CollectionId(8)),
+        Err(StorageRuntimeError::TransactionMismatch { expected, actual })
+            if expected == CollectionId(7) && actual == CollectionId(8)
+    ));
+
+    memory.clear();
+
+    assert!(!memory.dirty_frontier_was_active);
+    assert!(memory.object_log_allocated_regions.is_empty());
+    assert!(matches!(
+        memory.require_collection(CollectionId(7)),
+        Err(StorageRuntimeError::TransactionNotOpen(CollectionId(7)))
+    ));
+}
+
+//= spec/ring/09-implementation-coverage.md#free-space-collection-coverage-targets
+//= type=test
+//# `RING-IMPL-FREE-019` Transaction writers MUST reject operations after
+//# closure and reject collection ids that do not match the active transaction
+//# collection.
+#[test]
+fn requirement_transaction_writer_require_collection_rejects_closed_and_mismatched_writers() {
+    let mut memory = TransactionMemory::<8>::new();
+    memory.begin(CollectionId(7), false);
+    let mut writer = TransactionWriter {
+        memory: &mut memory,
+        collection_id: CollectionId(7),
+        closed: true,
+    };
+
+    assert!(matches!(
+        writer.require_collection(CollectionId(7)),
+        Err(StorageRuntimeError::TransactionNotOpen(CollectionId(7)))
+    ));
+
+    writer.closed = false;
+    assert!(matches!(
+        writer.require_collection(CollectionId(8)),
+        Err(StorageRuntimeError::TransactionMismatch { expected, actual })
+            if expected == CollectionId(7) && actual == CollectionId(8)
+    ));
+    assert!(writer.require_collection(CollectionId(7)).is_ok());
+}
+
+//= spec/ring/09-implementation-coverage.md#free-space-collection-coverage-targets
+//= type=test
+//# `RING-IMPL-FREE-020` Explicit public transaction commit after a writer is
+//# dropped MUST publish staged collection effects and clear the caller-owned
+//# transaction memory.
 #[test]
 fn requirement_public_transaction_writer_commits_map_updates() {
     const REGION_SIZE: usize = 512;
@@ -335,6 +401,118 @@ fn requirement_public_transaction_writer_commits_map_updates() {
         map.get(&mut storage, &7, |_, value| *value).unwrap(),
         Some(70)
     );
+}
+
+//= spec/ring/09-implementation-coverage.md#free-space-collection-coverage-targets
+//= type=test
+//# `RING-IMPL-FREE-021` Transactional map delete operations MUST return the
+//# same compaction-needed signal as ordinary map deletes while keeping effects
+//# scoped to the active transaction.
+#[test]
+fn requirement_public_explicit_commit_transaction_commits_and_clears_memory() {
+    const REGION_SIZE: usize = 512;
+    const REGION_COUNT: usize = 12;
+    const MAX_COLLECTIONS: usize = 8;
+    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 4096>::new(0xff);
+    let mut storage_memory = StorageMemory::<REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>::new();
+    let mut storage = Storage::format(
+        &mut flash,
+        StorageFormatConfig::new(2, 8, 0xa5),
+        &mut storage_memory,
+    )
+    .unwrap();
+    let mut map_memory = LsmMapMemory::<u16, u16, 4>::new();
+    let mut map = LsmMap::<u16, u16, 4>::new(&mut storage, &mut map_memory).unwrap();
+    let mut transaction_memory = TransactionMemory::<REGION_COUNT>::new();
+
+    {
+        let mut transaction = map
+            .begin_transaction_writer(&mut storage, &mut transaction_memory)
+            .unwrap();
+        assert!(!transaction.set(&mut storage, 11, 110).unwrap());
+        drop(transaction);
+    }
+
+    storage
+        .commit_transaction(map.collection_id(), &mut transaction_memory)
+        .unwrap();
+    assert!(matches!(
+        storage.commit_transaction(map.collection_id(), &mut transaction_memory),
+        Err(StorageRuntimeError::TransactionNotOpen(collection_id))
+            if collection_id == map.collection_id()
+    ));
+    assert_eq!(
+        map.get(&mut storage, &11, |_, value| *value).unwrap(),
+        Some(110)
+    );
+}
+
+//= spec/ring/09-implementation-coverage.md#free-space-collection-coverage-targets
+//= type=test
+//# `RING-IMPL-FREE-011` Full transactions MUST import allocator and
+//# collection effects atomically at `commit_transaction`, not at the
+//# physical transaction-log record positions.
+#[test]
+fn requirement_public_transaction_delete_reports_compaction_need() {
+    const REGION_SIZE: usize = 512;
+    const REGION_COUNT: usize = 12;
+    const MAX_COLLECTIONS: usize = 8;
+    let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 4096>::new(0xff);
+    let mut storage_memory = StorageMemory::<REGION_SIZE, REGION_COUNT, MAX_COLLECTIONS>::new();
+    let mut storage = Storage::format(
+        &mut flash,
+        StorageFormatConfig::new(2, 8, 0xa5),
+        &mut storage_memory,
+    )
+    .unwrap();
+    let mut map_memory = LsmMapMemory::<i32, i32, 4>::new();
+    let mut map = LsmMap::<i32, i32, 4>::new(&mut storage, &mut map_memory)
+        .unwrap()
+        .with_compaction_run_target(1)
+        .unwrap();
+    let mut transaction_memory = TransactionMemory::<REGION_COUNT>::new();
+
+    {
+        let mut transaction = map
+            .begin_transaction_writer(&mut storage, &mut transaction_memory)
+            .unwrap();
+        assert!(!transaction.delete(&mut storage, 99).unwrap());
+        transaction.rollback(&mut storage).unwrap();
+    }
+
+    map.set(&mut storage, 1, 10).unwrap();
+    {
+        let mut buffer = [0u8; REGION_SIZE];
+        let mut frontier = storage
+            .open_map::<i32, i32, 4>(
+                map.collection_id(),
+                &mut buffer,
+                crate::test_map_frontier_memory(),
+            )
+            .unwrap();
+        storage.flush_map(&mut frontier).unwrap();
+    }
+    map.set(&mut storage, 2, 20).unwrap();
+    {
+        let mut buffer = [0u8; REGION_SIZE];
+        let mut frontier = storage
+            .open_map::<i32, i32, 4>(
+                map.collection_id(),
+                &mut buffer,
+                crate::test_map_frontier_memory(),
+            )
+            .unwrap();
+        storage.flush_map(&mut frontier).unwrap();
+    }
+
+    {
+        let mut transaction = map
+            .begin_transaction_writer(&mut storage, &mut transaction_memory)
+            .unwrap();
+        assert!(transaction.set(&mut storage, 3, 30).unwrap());
+        assert!(transaction.delete(&mut storage, 1).unwrap());
+        transaction.rollback(&mut storage).unwrap();
+    }
 }
 
 //= spec/ring/06-startup-replay.md#startup-replay-algorithm
@@ -409,17 +587,12 @@ fn requirement_public_transaction_writer_emits_transaction_enrollment() {
         .begin_transaction_writer(&mut storage, &mut transaction_memory)
         .unwrap();
     assert!(!transaction.set(&mut storage, 9, 90).unwrap());
-    transaction.rollback(&mut storage).unwrap();
+    transaction.commit(&mut storage).unwrap();
     let metadata = storage.metadata();
     drop(storage);
 
     assert_eq!(
-        count_records_in_regions_with_format(
-            &flash,
-            metadata,
-            crate::disk::TRANSACTION_LOG_V2_FORMAT,
-            WalRecordType::AddTransactionCollection,
-        ),
+        count_transaction_suffix_records(&flash, metadata, WalRecordType::AddTransactionCollection,),
         1
     );
 }
@@ -485,14 +658,9 @@ fn requirement_transaction_private_replacement_free_uses_free_intent_until_commi
 
     let metadata = storage.metadata();
     let free_intent_count = storage.with_io_workspace(|flash, _workspace| {
-        count_records_in_regions_with_format(
-            flash,
-            metadata,
-            crate::disk::TRANSACTION_LOG_V2_FORMAT,
-            WalRecordType::FreeIntent,
-        )
+        count_transaction_suffix_records(flash, metadata, WalRecordType::FreeIntent)
     });
-    assert_eq!(free_intent_count, 1);
+    assert_eq!(free_intent_count, 0);
     assert_eq!(
         count_replayed_wal_records(&mut storage, |record| matches!(
             record,
@@ -502,6 +670,13 @@ fn requirement_transaction_private_replacement_free_uses_free_intent_until_commi
     );
 
     transaction.commit(&mut storage).unwrap();
+    assert_eq!(
+        count_replayed_wal_records(&mut storage, |record| matches!(
+            record,
+            WalRecord::FreeIntent { region_index, .. } if region_index == first_region
+        )),
+        1
+    );
     let collection = storage
         .collections()
         .iter()
@@ -852,8 +1027,9 @@ fn requirement_collection_id_helpers_preserve_little_endian_and_overflow_semanti
 
 //= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
 //= type=test
-//# `RING-IMPL-REGRESSION-093` Storage facade accessors MUST reflect underlying runtime state and
-//# tracked collection metadata.
+//# `RING-IMPL-REGRESSION-155` Transaction collection validation MUST reject
+//# unknown collections and collections whose latest retained basis is a
+//# dropped tombstone before opening an explicit transaction.
 #[test]
 fn requirement_storage_facade_accessors_reflect_runtime_state() {
     let mut flash = MockFlash::<512, 5, 1024>::new(0xff);
@@ -919,6 +1095,70 @@ fn requirement_storage_facade_accessors_reflect_runtime_state() {
         storage.collections()[0].basis(),
         StartupCollectionBasis::Dropped
     );
+}
+
+//= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-156` Storage facade ready-region accessors MUST
+//# report a reserved WAL-rotation region while rotation is open and clear that
+//# reservation after the matching rotation finish.
+#[test]
+fn requirement_storage_transaction_collection_validation_rejects_unknown_and_dropped() {
+    let mut flash = MockFlash::<512, 5, 1024>::new(0xff);
+    let mut storage = Storage::<_, 512, 5>::format(
+        &mut flash,
+        StorageFormatConfig::new(1, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        storage.validate_transaction_collection(CollectionId(44)),
+        Err(StorageRuntimeError::UnknownCollection(CollectionId(44)))
+    ));
+
+    storage
+        .append_new_collection(CollectionId(44), CollectionType::MAP_CODE)
+        .unwrap();
+    storage.append_drop_collection(CollectionId(44)).unwrap();
+
+    assert!(matches!(
+        storage.validate_transaction_collection(CollectionId(44)),
+        Err(StorageRuntimeError::DroppedCollection(CollectionId(44)))
+    ));
+}
+
+//= spec/ring/09-implementation-coverage.md#storage-runtime-state-requirements
+//= type=test
+//# `RING-IMPL-REGRESSION-093` Storage facade accessors MUST reflect underlying runtime state and
+//# tracked collection metadata.
+#[test]
+fn requirement_storage_ready_region_accessor_reports_rotation_reserve() {
+    let mut flash = MockFlash::<512, 6, 2048>::new(0xff);
+    let mut storage = Storage::<_, 512, 6>::format(
+        &mut flash,
+        StorageFormatConfig::new(1, 8, 0xa5),
+        crate::test_storage_memory(),
+    )
+    .unwrap();
+    storage.create_map(CollectionId(41)).unwrap();
+
+    for _ in 0..128 {
+        match storage.append_wal_rotation_start() {
+            Ok(region_index) => {
+                assert_eq!(storage.ready_region(), Some(region_index));
+                storage.append_wal_rotation_finish(region_index).unwrap();
+                assert_eq!(storage.ready_region(), None);
+                return;
+            }
+            Err(StorageRuntimeError::InvalidRotationWindow { .. }) => {
+                storage.append_update(CollectionId(41), &[0]).unwrap();
+            }
+            Err(error) => panic!("unexpected rotation-start error: {error:?}"),
+        }
+    }
+
+    panic!("WAL tail rotation did not reach a valid rotation window");
 }
 
 //= spec/map.md#map-api-model

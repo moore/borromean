@@ -367,6 +367,9 @@ the logical positions `[allocation_head, append_tail)`. The first
 metadata region's `first_queue_position` MUST equal `allocation_head`,
 and each following metadata region's `first_queue_position` MUST equal
 the previous region's `first_queue_position + entry_count`.
+11. `RING-FREE-011` Free-space cursor helpers MUST map logical queue
+positions across every materialized metadata segment and reject
+positions outside the retained metadata chain.
 
 ## Log Region Prologue
 
@@ -548,3 +551,18 @@ record.
 enough unwritten space in the current segment for all buffered private
 suffix entries plus either a `TransactionSegmentSeal` or the final
 commit seal before it appends another allocation entry.
+7. `RING-TXLOG-SEG-007` Runtime transaction-log visitation MUST use the
+matching final `commit_transaction` seal to bound private suffix import
+for the final transaction-log segment.
+8. `RING-TXLOG-SEG-008` Runtime transaction-log visitation MUST follow
+non-final `TransactionSegmentSeal` links and reject malformed or
+inverted sealed suffix bounds.
+9. `RING-TXLOG-SEG-009` Private suffix entry encoding MUST round-trip
+every supported transaction-private collection and allocator record
+shape.
+10. `RING-TXLOG-SEG-010` Private suffix entry encoding MUST reject
+unsupported record types, short output buffers, truncated input, and
+checksum-corrupt entries.
+11. `RING-TXLOG-SEG-011` Transaction-log byte helpers MUST advance
+offset cursors exactly and leave cursors unchanged when a short buffer
+prevents the requested read or write.

@@ -23,6 +23,9 @@ pub(crate) enum FreeSpaceError {
     },
 }
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct FreeSpaceState {
     metadata_region_index: u32,

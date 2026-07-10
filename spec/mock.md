@@ -29,3 +29,6 @@ keeps an operation log for tests.
    count and persist matching metadata.
 9. `RING-IMPL-REGRESSION-045` Formatting an empty mock store MUST leave reserved bytes after
    encoded StorageMetadata erased.
+10. `RING-IMPL-REGRESSION-157` Mock flash operation logging controls MUST clear the existing log
+    when disabled, suppress new operation log entries while disabled, and resume logging when
+    re-enabled without suppressing the underlying flash operation.

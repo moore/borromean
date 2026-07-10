@@ -453,7 +453,7 @@ fn requirement_lsm_map_get_set_delete_and_open_use_storage_owned_scratch() {
 #[test]
 fn requirement_lower_level_map_storage_bindings_support_frontier_mutations() {
     const REGION_SIZE: usize = 1024;
-    const REGION_COUNT: usize = 12;
+    const REGION_COUNT: usize = 16;
     const MAX_LOG: usize = 8192;
 
     let mut direct_flash = MockFlash::<REGION_SIZE, REGION_COUNT, MAX_LOG>::new(0xff);
@@ -3073,7 +3073,7 @@ fn requirement_snapshot_run_planning_and_storage_write_cover_multi_region_snapsh
     let mut workspace = StorageWorkspace::<REGION_SIZE>::new();
     let mut storage = Storage::<_, REGION_SIZE, REGION_COUNT>::format(
         &mut flash,
-        StorageFormatConfig::new(1, 8, 0xa5),
+        StorageFormatConfig::new(4, 8, 0xa5),
         crate::test_storage_memory(),
     )
     .unwrap();
@@ -3158,8 +3158,8 @@ fn requirement_frontier_run_planning_counts_all_committed_payload_segments() {
 //# the storage free-space tail.
 #[test]
 fn requirement_reclaim_run_regions_moves_run_segments_to_free_space_tail_region() {
-    const REGION_SIZE: usize = 256;
-    const REGION_COUNT: usize = 9;
+    const REGION_SIZE: usize = 512;
+    const REGION_COUNT: usize = 16;
 
     let collection_id = CollectionId(106);
     let mut flash = MockFlash::<REGION_SIZE, REGION_COUNT, 4096>::new(0xff);
@@ -3203,22 +3203,29 @@ fn requirement_reclaim_run_regions_moves_run_segments_to_free_space_tail_region(
 
     storage
         .with_runtime_io_workspace(|runtime, flash, workspace| {
-            runtime.begin_collection_transaction::<REGION_SIZE, REGION_COUNT, _>(
-                flash,
-                workspace,
-                collection_id,
-            )?;
-            runtime.commit_collection_transaction::<REGION_SIZE, REGION_COUNT, _>(
-                flash,
-                workspace,
-                collection_id,
-            )?;
-            map.reclaim_run_regions::<REGION_SIZE, REGION_COUNT, _, 8>(runtime, flash, workspace)?;
-            runtime.finish_collection_transaction::<REGION_SIZE, REGION_COUNT, _>(
-                flash,
-                workspace,
-                collection_id,
-            )?;
+            runtime
+                .begin_collection_transaction::<REGION_SIZE, REGION_COUNT, _>(
+                    flash,
+                    workspace,
+                    collection_id,
+                )
+                .expect("begin transaction for run reclaim");
+            runtime
+                .commit_collection_transaction::<REGION_SIZE, REGION_COUNT, _>(
+                    flash,
+                    workspace,
+                    collection_id,
+                )
+                .expect("commit transaction before run reclaim");
+            map.reclaim_run_regions::<REGION_SIZE, REGION_COUNT, _, 8>(runtime, flash, workspace)
+                .expect("reclaim run regions during committed cleanup");
+            runtime
+                .finish_collection_transaction::<REGION_SIZE, REGION_COUNT, _>(
+                    flash,
+                    workspace,
+                    collection_id,
+                )
+                .expect("finish transaction after run reclaim");
             Ok::<(), MapStorageError>(())
         })
         .unwrap();

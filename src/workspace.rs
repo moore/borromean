@@ -3,6 +3,7 @@ pub struct StorageWorkspace<const REGION_SIZE: usize> {
     region_bytes: [u8; REGION_SIZE],
     physical_scratch: [u8; REGION_SIZE],
     logical_scratch: [u8; REGION_SIZE],
+    transaction_suffix: [u8; REGION_SIZE],
 }
 
 impl<const REGION_SIZE: usize> StorageWorkspace<REGION_SIZE> {
@@ -12,6 +13,7 @@ impl<const REGION_SIZE: usize> StorageWorkspace<REGION_SIZE> {
             region_bytes: [0u8; REGION_SIZE],
             physical_scratch: [0u8; REGION_SIZE],
             logical_scratch: [0u8; REGION_SIZE],
+            transaction_suffix: [0u8; REGION_SIZE],
         }
     }
 
@@ -31,6 +33,10 @@ impl<const REGION_SIZE: usize> StorageWorkspace<REGION_SIZE> {
         &mut self,
     ) -> (&mut [u8; REGION_SIZE], &mut [u8; REGION_SIZE]) {
         (&mut self.region_bytes, &mut self.physical_scratch)
+    }
+
+    pub(crate) fn transaction_suffix_buffer(&mut self) -> &mut [u8; REGION_SIZE] {
+        &mut self.transaction_suffix
     }
 }
 

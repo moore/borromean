@@ -4,6 +4,7 @@
 
 Borromean splits storage behavior into three layers:
 
+- high-level storage concepts in [core-storage-concepts.md](./core-storage-concepts.md)
 - ring-level storage rules in [../spec/ring/00-introduction.md](../spec/ring/00-introduction.md)
 - implementation architecture and API constraints in
   [../spec/implementation.md](../spec/implementation.md)
@@ -98,6 +99,9 @@ as a separate operation using the Target-Then-Greedy selection policy.
   WAL records
 
 ## Contributor Guide
+
+If you are orienting yourself to the storage core before reading the formal
+ring spec, start with [core-storage-concepts.md](./core-storage-concepts.md).
 
 If you are adding a new durably integrated collection type, start with
 [implementing-a-collection.md](./implementing-a-collection.md). That tutorial walks through the

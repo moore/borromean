@@ -96,6 +96,7 @@ same deterministic workloads for each engine. The full generated report lives in
 
 ## Documentation
 
+- Core storage concepts: [docs/core-storage-concepts.md](docs/core-storage-concepts.md)
 - Storage format and crash semantics: [spec/ring/00-introduction.md](spec/ring/00-introduction.md)
 - Architecture and API guide: [docs/architecture-and-api.md](docs/architecture-and-api.md)
 - Durable map format and behavior: [spec/map.md](spec/map.md)

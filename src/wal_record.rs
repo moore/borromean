@@ -231,6 +231,15 @@ pub struct TransactionLogRange {
     pub end: LogPosition,
 }
 
+/// Final-segment seal carried by `commit_transaction`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TransactionCommitSeal {
+    /// First byte of the final segment's sealed private suffix.
+    pub final_free_intent_start: LogPosition,
+    /// First byte after the final segment's sealed private suffix.
+    pub final_segment_end: LogPosition,
+}
+
 /// Borrowed logical WAL record.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WalRecord<'a> {
@@ -318,12 +327,14 @@ pub enum WalRecord<'a> {
         /// Transaction-log start position.
         start: LogPosition,
     },
-    /// `commit_transaction(transaction_log_id, range)`.
+    /// `commit_transaction(transaction_log_id, range, seal)`.
     CommitTransaction {
         /// Transaction log slot selected for this transaction.
         transaction_log_id: u32,
         /// Frozen transaction-log range being imported.
         range: TransactionLogRange,
+        /// Final transaction-log segment seal.
+        seal: TransactionCommitSeal,
     },
     /// `transaction_finished(transaction_log_id, range)`.
     TransactionFinished {
@@ -685,8 +696,18 @@ fn encode_logical_record(
         WalRecord::CommitTransaction {
             transaction_log_id,
             range,
+            seal,
+        } => {
+            offset = write_u32(
+                buffer,
+                offset,
+                (size_of::<u32>() + transaction_range_len() + transaction_commit_seal_len()) as u32,
+            )?;
+            offset = write_u32(buffer, offset, transaction_log_id)?;
+            offset = write_transaction_log_range(buffer, offset, range)?;
+            offset = write_transaction_commit_seal(buffer, offset, seal)?;
         }
-        | WalRecord::TransactionFinished {
+        WalRecord::TransactionFinished {
             transaction_log_id,
             range,
         }
@@ -899,11 +920,12 @@ fn parse_logical_record(logical: &[u8]) -> Result<WalRecord<'_>, WalRecordError>
             })
         }
         WalRecordType::CommitTransaction => {
-            let (transaction_log_id, range) =
-                read_transaction_log_control_payload(logical, &mut offset, record_type)?;
+            let (transaction_log_id, range, seal) =
+                read_transaction_commit_payload(logical, &mut offset, record_type)?;
             Ok(WalRecord::CommitTransaction {
                 transaction_log_id,
                 range,
+                seal,
             })
         }
         WalRecordType::TransactionFinished => {
@@ -991,6 +1013,26 @@ fn read_transaction_log_control_payload(
     Ok((transaction_log_id, range))
 }
 
+fn read_transaction_commit_payload(
+    logical: &[u8],
+    offset: &mut usize,
+    record_type: WalRecordType,
+) -> Result<(u32, TransactionLogRange, TransactionCommitSeal), WalRecordError> {
+    let payload_len = read_u32(logical, offset)?;
+    if payload_len
+        != (size_of::<u32>() + transaction_range_len() + transaction_commit_seal_len()) as u32
+    {
+        return Err(WalRecordError::PayloadLengthMismatch {
+            record_type,
+            payload_len,
+        });
+    }
+    let transaction_log_id = read_u32(logical, offset)?;
+    let range = read_transaction_log_range(logical, offset)?;
+    let seal = read_transaction_commit_seal(logical, offset)?;
+    Ok((transaction_log_id, range, seal))
+}
+
 fn encode_logical_byte(
     logical_byte: u8,
     output: &mut [u8],
@@ -1050,6 +1092,10 @@ fn transaction_range_len() -> usize {
     log_position_len() * 2
 }
 
+fn transaction_commit_seal_len() -> usize {
+    log_position_len() * 2
+}
+
 fn free_queue_position_len() -> usize {
     FreeQueuePosition::ENCODED_LEN
 }
@@ -1081,6 +1127,15 @@ fn write_transaction_log_range(
     write_log_position(buffer, offset, range.end)
 }
 
+fn write_transaction_commit_seal(
+    buffer: &mut [u8],
+    offset: usize,
+    seal: TransactionCommitSeal,
+) -> Result<usize, WalRecordError> {
+    let offset = write_log_position(buffer, offset, seal.final_free_intent_start)?;
+    write_log_position(buffer, offset, seal.final_segment_end)
+}
+
 fn read_free_queue_position(
     buffer: &[u8],
     offset: &mut usize,
@@ -1109,6 +1164,18 @@ fn read_transaction_log_range(
     let start = read_log_position(buffer, offset)?;
     let end = read_log_position(buffer, offset)?;
     Ok(TransactionLogRange { start, end })
+}
+
+fn read_transaction_commit_seal(
+    buffer: &[u8],
+    offset: &mut usize,
+) -> Result<TransactionCommitSeal, WalRecordError> {
+    let final_free_intent_start = read_log_position(buffer, offset)?;
+    let final_segment_end = read_log_position(buffer, offset)?;
+    Ok(TransactionCommitSeal {
+        final_free_intent_start,
+        final_segment_end,
+    })
 }
 
 fn read_payload<'a>(buffer: &'a [u8], offset: &mut usize) -> Result<&'a [u8], WalRecordError> {

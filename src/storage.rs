@@ -12,9 +12,14 @@ use crate::free_space::{FreeSpaceError, FreeSpaceState};
 use crate::mock::{MockError, MockFormatError};
 use crate::mode::StorageMode;
 use crate::startup::{apply_wal_record, StartupCollection, StartupError, StartupOpenPlan};
+use crate::transaction_log::{
+    decode_private_suffix_entry, encode_private_suffix_entry, log_position,
+    private_suffix_entry_len, TransactionAllocationEntry, TransactionAllocationPurpose,
+    TransactionSegmentSeal,
+};
 use crate::wal_record::{
-    decode_record, encode_record_into, encoded_record_len, LogPosition, TransactionLogRange,
-    WalRecord, WalRecordError, WalRecordType,
+    decode_record, encode_record_into, encoded_record_len, LogPosition, TransactionCommitSeal,
+    TransactionLogRange, WalRecord, WalRecordError, WalRecordType,
 };
 use crate::workspace::StorageWorkspace;
 use crate::StorageMetadata;
@@ -266,6 +271,7 @@ pub(crate) enum TransactionLogOutcome {
 pub(crate) struct RetainedTransactionLog {
     pub(crate) transaction_log_id: u32,
     pub(crate) range: TransactionLogRange,
+    pub(crate) seal: Option<TransactionCommitSeal>,
     pub(crate) regions: Vec<u32, MAX_RETAINED_TRANSACTION_LOG_REGIONS>,
     pub(crate) outcome: TransactionLogOutcome,
 }
@@ -303,10 +309,16 @@ pub(crate) enum TransactionCollectionEffect {
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum TransactionSlot {
     Empty,
+    Idle {
+        head_region: u32,
+        tail_region: u32,
+        append_offset: usize,
+    },
     Active {
         head_region: u32,
         tail_region: u32,
         append_offset: usize,
+        suffix_len: usize,
         start: LogPosition,
         collection_id: CollectionId,
         observed_collection_generation: u64,
@@ -338,6 +350,127 @@ enum WalHeadReclaimAction {
         collection_id: CollectionId,
         collection_type: u16,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OwnedReclaimRecord {
+    NewCollection {
+        collection_id: CollectionId,
+        collection_type: u16,
+    },
+    Update {
+        collection_id: CollectionId,
+        payload_len: usize,
+    },
+    Snapshot {
+        collection_id: CollectionId,
+        collection_type: u16,
+        payload_len: usize,
+    },
+    Head {
+        collection_id: CollectionId,
+        collection_type: u16,
+        region_index: u32,
+    },
+    DropCollection {
+        collection_id: CollectionId,
+    },
+}
+
+impl OwnedReclaimRecord {
+    fn copy_from(
+        record: WalRecord<'_>,
+        payload_copy: &mut [u8],
+    ) -> Result<Self, StorageRuntimeError> {
+        match record {
+            WalRecord::NewCollection {
+                collection_id,
+                collection_type,
+            } => Ok(Self::NewCollection {
+                collection_id,
+                collection_type,
+            }),
+            WalRecord::Update {
+                collection_id,
+                payload,
+            } => {
+                if payload.len() > payload_copy.len() {
+                    return Err(StorageRuntimeError::TransactionLogFull);
+                }
+                payload_copy[..payload.len()].copy_from_slice(payload);
+                Ok(Self::Update {
+                    collection_id,
+                    payload_len: payload.len(),
+                })
+            }
+            WalRecord::Snapshot {
+                collection_id,
+                collection_type,
+                payload,
+            } => {
+                if payload.len() > payload_copy.len() {
+                    return Err(StorageRuntimeError::TransactionLogFull);
+                }
+                payload_copy[..payload.len()].copy_from_slice(payload);
+                Ok(Self::Snapshot {
+                    collection_id,
+                    collection_type,
+                    payload_len: payload.len(),
+                })
+            }
+            WalRecord::Head {
+                collection_id,
+                collection_type,
+                region_index,
+            } => Ok(Self::Head {
+                collection_id,
+                collection_type,
+                region_index,
+            }),
+            WalRecord::DropCollection { collection_id } => {
+                Ok(Self::DropCollection { collection_id })
+            }
+            _ => Err(StorageRuntimeError::InvalidFreeSpaceCommand),
+        }
+    }
+
+    fn as_wal_record<'a>(&self, payload_copy: &'a [u8]) -> WalRecord<'a> {
+        match *self {
+            Self::NewCollection {
+                collection_id,
+                collection_type,
+            } => WalRecord::NewCollection {
+                collection_id,
+                collection_type,
+            },
+            Self::Update {
+                collection_id,
+                payload_len,
+            } => WalRecord::Update {
+                collection_id,
+                payload: &payload_copy[..payload_len],
+            },
+            Self::Snapshot {
+                collection_id,
+                collection_type,
+                payload_len,
+            } => WalRecord::Snapshot {
+                collection_id,
+                collection_type,
+                payload: &payload_copy[..payload_len],
+            },
+            Self::Head {
+                collection_id,
+                collection_type,
+                region_index,
+            } => WalRecord::Head {
+                collection_id,
+                collection_type,
+                region_index,
+            },
+            Self::DropCollection { collection_id } => WalRecord::DropCollection { collection_id },
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -923,6 +1056,7 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
         &mut self,
         transaction_log_id: u32,
         range: TransactionLogRange,
+        seal: Option<TransactionCommitSeal>,
         regions: &[u32],
         outcome: TransactionLogOutcome,
     ) -> Result<(), StorageRuntimeError> {
@@ -931,6 +1065,9 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
             retained.transaction_log_id == transaction_log_id && retained.range.start == range.start
         }) {
             retained.range = range;
+            if seal.is_some() {
+                retained.seal = seal;
+            }
             retained.outcome = outcome;
             retained.regions.clear();
             for region_index in regions.iter().copied() {
@@ -952,6 +1089,7 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
             .push(RetainedTransactionLog {
                 transaction_log_id,
                 range,
+                seal,
                 regions: retained_regions,
                 outcome,
             })
@@ -1655,14 +1793,13 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
         if collection_id != CollectionId(0) {
             self.require_collection_transaction(collection_id)?;
             return self
-                .append_transaction_private_record_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
+                .append_transaction_allocation_entry_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
                     flash,
                     workspace,
                     collection_id,
-                    WalRecord::AllocateRegion {
-                        region_index,
-                        allocation_head_after,
-                    },
+                    region_index,
+                    allocation_head_after,
+                    TransactionAllocationPurpose::DataRegion,
                 );
         }
 
@@ -1672,6 +1809,137 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
             region_index,
             allocation_head_after,
         )
+    }
+
+    fn append_transaction_allocation_entry_with_rotation<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        collection_id: CollectionId,
+        region_index: u32,
+        allocation_head_after: FreeQueuePosition,
+        purpose: TransactionAllocationPurpose,
+    ) -> Result<(), StorageRuntimeError> {
+        self.require_collection_transaction(collection_id)?;
+        for _attempt in 0..self.metadata.region_count {
+            if self.transaction_allocation_entry_fits(purpose)? {
+                return self.append_transaction_allocation_entry::<REGION_SIZE, IO>(
+                    flash,
+                    workspace,
+                    collection_id,
+                    region_index,
+                    allocation_head_after,
+                    purpose,
+                );
+            }
+            self.grow_transaction_log::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace)?;
+        }
+        Err(StorageRuntimeError::TransactionLogFull)
+    }
+
+    fn transaction_allocation_entry_fits(
+        &self,
+        purpose: TransactionAllocationPurpose,
+    ) -> Result<bool, StorageRuntimeError> {
+        let slot = Self::validate_transaction_log_id(PRIMARY_TRANSACTION_SLOT_ID)?;
+        let (append_offset, suffix_len) = match self.transaction_slots.get(slot) {
+            Some(TransactionSlot::Active {
+                append_offset,
+                suffix_len,
+                ..
+            }) => (*append_offset, *suffix_len),
+            _ => return Err(StorageRuntimeError::TransactionNotOpen(CollectionId(0))),
+        };
+        let append_limit = wal_record_append_limit(self.metadata)
+            .map_err(|error| StorageRuntimeError::Startup(error.into()))?;
+        let entry_len = TransactionAllocationEntry::encoded_len(self.metadata)?;
+        let reserve = match purpose {
+            TransactionAllocationPurpose::DataRegion => entry_len
+                .checked_add(TransactionSegmentSeal::ENCODED_LEN)
+                .ok_or(StorageRuntimeError::TransactionLogFull)?,
+            TransactionAllocationPurpose::TransactionSegment => TransactionSegmentSeal::ENCODED_LEN,
+        };
+        let end = append_offset
+            .checked_add(entry_len)
+            .and_then(|offset| offset.checked_add(suffix_len))
+            .and_then(|offset| offset.checked_add(reserve))
+            .ok_or(StorageRuntimeError::TransactionLogFull)?;
+        Ok(end <= append_limit)
+    }
+
+    fn append_transaction_allocation_entry<const REGION_SIZE: usize, IO: FlashIo>(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        collection_id: CollectionId,
+        region_index: u32,
+        allocation_head_after: FreeQueuePosition,
+        purpose: TransactionAllocationPurpose,
+    ) -> Result<(), StorageRuntimeError> {
+        if self.free_space.next_ready_region()? != region_index {
+            return Err(StorageRuntimeError::InvalidFreeSpaceCommand);
+        }
+        if self.free_space.position_after_allocation()? != allocation_head_after {
+            return Err(StorageRuntimeError::InvalidFreeSpaceCommand);
+        }
+        let slot = Self::validate_transaction_log_id(PRIMARY_TRANSACTION_SLOT_ID)?;
+        let (tail_region, append_offset) = match self.transaction_slots.get(slot) {
+            Some(TransactionSlot::Active {
+                collection_id: active_collection,
+                tail_region,
+                append_offset,
+                ..
+            }) if *active_collection == collection_id => (*tail_region, *append_offset),
+            _ => return Err(StorageRuntimeError::TransactionNotOpen(collection_id)),
+        };
+
+        let (physical, _) = workspace.encode_buffers();
+        let encoded_len = {
+            TransactionAllocationEntry {
+                region_index,
+                allocation_head_after,
+                purpose,
+            }
+            .encode_into(self.metadata, physical)?
+        };
+        flash.write_region(tail_region, append_offset, &physical[..encoded_len])?;
+        flash.sync()?;
+
+        match self.transaction_slots.get_mut(slot) {
+            Some(TransactionSlot::Active {
+                collection_id: active_collection,
+                append_offset,
+                allocated_regions,
+                ..
+            }) if *active_collection == collection_id => {
+                *append_offset = append_offset
+                    .checked_add(encoded_len)
+                    .ok_or(StorageRuntimeError::TransactionLogFull)?;
+                if purpose == TransactionAllocationPurpose::DataRegion
+                    && !allocated_regions
+                        .iter()
+                        .any(|allocation| allocation.region_index == region_index)
+                {
+                    allocated_regions
+                        .push(TransactionAllocation {
+                            region_index,
+                            allocation_head_after,
+                        })
+                        .map_err(|_| StorageRuntimeError::TransactionLogFull)?;
+                }
+            }
+            _ => return Err(StorageRuntimeError::TransactionNotOpen(collection_id)),
+        }
+        self.free_space
+            .apply_allocate(region_index, allocation_head_after)?;
+        if self.ready_region == Some(region_index) {
+            self.ready_region = None;
+        }
+        Ok(())
     }
 
     fn append_allocate_region_to_main_wal<
@@ -1864,7 +2132,9 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
 
             let regions = self.retained_transaction_logs[index].regions.clone();
             for region_index in regions.iter().copied() {
-                if self.free_space.contains_free_region(region_index) {
+                if self.free_space.contains_free_region(region_index)
+                    || self.transaction_slot_references_region(region_index)
+                {
                     continue;
                 }
                 self.append_free_region_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
@@ -1874,17 +2144,28 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
                     region_index,
                 )?;
             }
-            if regions
-                .iter()
-                .copied()
-                .all(|region_index| self.free_space.contains_free_region(region_index))
-            {
+            if regions.iter().copied().all(|region_index| {
+                self.free_space.contains_free_region(region_index)
+                    || self.transaction_slot_references_region(region_index)
+            }) {
                 self.retained_transaction_logs.remove(index);
             } else {
                 index += 1;
             }
         }
         Ok(())
+    }
+
+    fn transaction_slot_references_region(&self, region_index: u32) -> bool {
+        self.transaction_slots.iter().any(|slot| match slot {
+            TransactionSlot::Empty => false,
+            TransactionSlot::Idle {
+                head_region,
+                tail_region,
+                ..
+            } => *head_region == region_index || *tail_region == region_index,
+            TransactionSlot::Active { regions, .. } => regions.contains(&region_index),
+        })
     }
 
     fn retained_transaction_log_is_reachable<
@@ -2041,6 +2322,7 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
         collection_id: CollectionId,
         region_index: u32,
     ) -> Result<(), StorageRuntimeError> {
+        let mut committed_cleanup_range = None;
         if collection_id != CollectionId(0) {
             self.require_collection_transaction(collection_id)?;
             if !self.collection_transaction_has_committed_outcome(collection_id)? {
@@ -2058,20 +2340,31 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
                     },
                 );
             }
+            let slot = Self::validate_transaction_log_id(PRIMARY_TRANSACTION_SLOT_ID)?;
+            committed_cleanup_range = Some(self.active_transaction_range(slot)?);
         }
         self.ensure_free_space_metadata_capacity_for_len::<REGION_SIZE, REGION_COUNT, IO>(
             flash,
             workspace,
             self.free_space.entries().len().saturating_add(1),
         )?;
-        self.ensure_record_append_room_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
-            flash,
-            workspace,
-            WalRecord::FreeRegion {
+        if let Some(range) = committed_cleanup_range {
+            self.ensure_committed_cleanup_free_room_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
+                flash,
+                workspace,
                 region_index,
-                append_tail_after: self.free_space.position_after_append()?,
-            },
-        )?;
+                range,
+            )?;
+        } else {
+            self.ensure_record_append_room_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
+                flash,
+                workspace,
+                WalRecord::FreeRegion {
+                    region_index,
+                    append_tail_after: self.free_space.position_after_append()?,
+                },
+            )?;
+        }
         self.write_record_and_apply::<REGION_SIZE, REGION_COUNT, IO>(
             flash,
             workspace,
@@ -2080,6 +2373,62 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
                 append_tail_after: self.free_space.position_after_append()?,
             },
         )
+    }
+
+    fn ensure_committed_cleanup_free_room_with_rotation<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        region_index: u32,
+        range: TransactionLogRange,
+    ) -> Result<(), StorageRuntimeError> {
+        for _attempt in 0..self.metadata.region_count {
+            let encoded_len = {
+                let append_tail_after = self.free_space.position_after_append()?;
+                let (physical, logical) = workspace.encode_buffers();
+                let free_len = encode_record_into(
+                    WalRecord::FreeRegion {
+                        region_index,
+                        append_tail_after,
+                    },
+                    self.metadata,
+                    physical,
+                    logical,
+                )?;
+                let finish_len = encode_record_into(
+                    WalRecord::TransactionFinished {
+                        transaction_log_id: PRIMARY_TRANSACTION_SLOT_ID,
+                        range,
+                    },
+                    self.metadata,
+                    physical,
+                    logical,
+                )?;
+                free_len
+                    .checked_add(finish_len)
+                    .ok_or(StorageRuntimeError::WalRotationRequired)?
+            };
+            match self.ensure_encoded_append_reserve::<REGION_SIZE, REGION_COUNT, IO>(
+                workspace,
+                flash,
+                encoded_len,
+                false,
+                false,
+            ) {
+                Ok(()) => return Ok(()),
+                Err(StorageRuntimeError::WalRotationRequired) => {
+                    self.rotate_wal_tail_with_progress::<REGION_SIZE, REGION_COUNT, IO>(
+                        flash, workspace,
+                    )?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(StorageRuntimeError::WalRotationRequired)
     }
 
     fn erase_dirty_free_region_span_with_rotation<
@@ -2165,19 +2514,36 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
             .find_collection(collection_id)
             .map(StartupCollection::committed_generation)
             .ok_or(StorageRuntimeError::UnknownCollection(collection_id))?;
-        let head_region = self
-            .allocate_privileged_region_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
-                flash, workspace,
-            )?;
-        let append_offset = self
-            .initialize_transaction_log_region::<REGION_SIZE, REGION_COUNT, IO>(
-                flash,
-                workspace,
+        let append_limit = wal_record_append_limit(self.metadata)
+            .map_err(|error| StorageRuntimeError::Startup(error.into()))?;
+        let reusable = match self.transaction_slots.get(slot) {
+            Some(TransactionSlot::Idle {
                 head_region,
-                head_region,
-            )?;
+                tail_region,
+                append_offset,
+            }) if *append_offset < append_limit => {
+                Some((*head_region, *tail_region, *append_offset))
+            }
+            _ => None,
+        };
+        let (head_region, tail_region, append_offset) = if let Some(reusable) = reusable {
+            reusable
+        } else {
+            let head_region = self
+                .allocate_privileged_region_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
+                    flash, workspace,
+                )?;
+            let append_offset = self
+                .initialize_transaction_log_region::<REGION_SIZE, REGION_COUNT, IO>(
+                    flash,
+                    workspace,
+                    head_region,
+                    head_region,
+                )?;
+            (head_region, head_region, append_offset)
+        };
         let start = LogPosition {
-            region_index: head_region,
+            region_index: tail_region,
             offset: u32::try_from(append_offset)
                 .map_err(|_| StorageRuntimeError::WalRotationRequired)?,
         };
@@ -2194,10 +2560,12 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
             .push(head_region)
             .map_err(|_| StorageRuntimeError::TransactionLogFull)?;
         self.capture_transaction_runtime_snapshot()?;
+        workspace.transaction_suffix_buffer().fill(0);
         self.transaction_slots[slot] = TransactionSlot::Active {
             head_region,
-            tail_region: head_region,
+            tail_region,
             append_offset,
+            suffix_len: 0,
             collection_id,
             start,
             observed_collection_generation,
@@ -2273,6 +2641,22 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
         match self.transaction_slots.get(slot) {
             Some(TransactionSlot::Active { regions, .. }) => Ok(regions.clone()),
             _ => Err(StorageRuntimeError::TransactionNotOpen(CollectionId(0))),
+        }
+    }
+
+    fn reusable_transaction_slot(
+        &self,
+        head_region: u32,
+        tail_region: u32,
+        append_offset: usize,
+    ) -> TransactionSlot {
+        match wal_record_append_limit(self.metadata) {
+            Ok(append_limit) if append_offset < append_limit => TransactionSlot::Idle {
+                head_region,
+                tail_region,
+                append_offset,
+            },
+            _ => TransactionSlot::Empty,
         }
     }
 
@@ -2366,61 +2750,54 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
         record: WalRecord<'_>,
     ) -> Result<(), StorageRuntimeError> {
         self.require_collection_transaction(collection_id)?;
+        self.validate_transaction_private_record(collection_id, record)?;
+        let entry_len = private_suffix_entry_len(record)?;
         for _attempt in 0..self.metadata.region_count {
-            match self.try_append_transaction_private_record::<REGION_SIZE, REGION_COUNT, IO>(
-                flash,
-                workspace,
-                collection_id,
-                record,
-            ) {
-                Ok(()) => return Ok(()),
-                Err(StorageRuntimeError::TransactionLogFull) => {
-                    self.grow_transaction_log::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace)?;
-                }
+            if self.transaction_suffix_entry_fits(entry_len)? {
+                self.append_transaction_private_suffix_entry(workspace, collection_id, record)?;
+                return Ok(());
+            }
+            match self.grow_transaction_log::<REGION_SIZE, REGION_COUNT, IO>(flash, workspace) {
+                Ok(()) => {}
+                Err(StorageRuntimeError::TransactionLogFull) => {}
                 Err(error) => return Err(error),
+            }
+            if self.transaction_suffix_entry_fits(entry_len)? {
+                self.append_transaction_private_suffix_entry(workspace, collection_id, record)?;
+                return Ok(());
             }
         }
         Err(StorageRuntimeError::TransactionLogFull)
     }
 
-    fn try_append_transaction_private_record<
-        const REGION_SIZE: usize,
-        const REGION_COUNT: usize,
-        IO: FlashIo,
-    >(
+    fn validate_transaction_private_record(
         &mut self,
-        flash: &mut IO,
-        workspace: &mut StorageWorkspace<REGION_SIZE>,
         collection_id: CollectionId,
         record: WalRecord<'_>,
     ) -> Result<(), StorageRuntimeError> {
         let slot = Self::validate_transaction_log_id(PRIMARY_TRANSACTION_SLOT_ID)?;
-        let (tail_region, append_offset, enrollment_written, observed_generation) =
-            match self.transaction_slots.get(slot) {
-                Some(TransactionSlot::Active {
-                    collection_id: active_collection,
-                    tail_region,
-                    append_offset,
-                    enrollment_written,
-                    observed_collection_generation,
-                    ..
-                }) if *active_collection == collection_id => (
-                    *tail_region,
-                    *append_offset,
-                    *enrollment_written,
-                    *observed_collection_generation,
-                ),
-                Some(TransactionSlot::Active {
-                    collection_id: active_collection,
-                    ..
-                }) => {
-                    return Err(StorageRuntimeError::TransactionMismatch {
-                        expected: *active_collection,
-                        actual: collection_id,
-                    })
-                }
-                _ => return Err(StorageRuntimeError::TransactionNotOpen(collection_id)),
-            };
+        let (enrollment_written, observed_generation) = match self.transaction_slots.get(slot) {
+            Some(TransactionSlot::Active {
+                collection_id: active_collection,
+                enrollment_written,
+                observed_collection_generation,
+                ..
+            }) if *active_collection == collection_id => {
+                (*enrollment_written, *observed_collection_generation)
+            }
+            Some(TransactionSlot::Active {
+                collection_id: active_collection,
+                ..
+            }) => {
+                return Err(StorageRuntimeError::TransactionMismatch {
+                    expected: *active_collection,
+                    actual: collection_id,
+                })
+            }
+            Some(TransactionSlot::Empty) | Some(TransactionSlot::Idle { .. }) | None => {
+                return Err(StorageRuntimeError::TransactionNotOpen(collection_id))
+            }
+        };
 
         match record {
             WalRecord::AddTransactionCollection {
@@ -2464,77 +2841,63 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
                 }
             }
         }
+        Ok(())
+    }
 
-        let (physical, logical) = workspace.encode_buffers();
-        let encoded_len = encode_record_into(record, self.metadata, physical, logical)?;
+    fn transaction_suffix_entry_fits(&self, entry_len: usize) -> Result<bool, StorageRuntimeError> {
+        let slot = Self::validate_transaction_log_id(PRIMARY_TRANSACTION_SLOT_ID)?;
+        let (append_offset, suffix_len) = match self.transaction_slots.get(slot) {
+            Some(TransactionSlot::Active {
+                append_offset,
+                suffix_len,
+                ..
+            }) => (*append_offset, *suffix_len),
+            _ => return Err(StorageRuntimeError::TransactionNotOpen(CollectionId(0))),
+        };
         let append_limit = wal_record_append_limit(self.metadata)
             .map_err(|error| StorageRuntimeError::Startup(error.into()))?;
-        let end = append_offset
-            .checked_add(encoded_len)
+        let reserve = TransactionAllocationEntry::encoded_len(self.metadata)?
+            .checked_add(TransactionSegmentSeal::ENCODED_LEN)
             .ok_or(StorageRuntimeError::TransactionLogFull)?;
-        if end > append_limit {
-            return Err(StorageRuntimeError::TransactionLogFull);
-        }
+        let end = append_offset
+            .checked_add(suffix_len)
+            .and_then(|offset| offset.checked_add(entry_len))
+            .and_then(|offset| offset.checked_add(reserve))
+            .ok_or(StorageRuntimeError::TransactionLogFull)?;
+        Ok(end <= append_limit)
+    }
 
-        if !matches!(record, WalRecord::Link { .. }) {
-            let expected_sequence = self
-                .max_seen_sequence
-                .checked_add(1)
-                .ok_or(StorageRuntimeError::WalRotationRequired)?;
-            let link_len = encode_record_into(
-                WalRecord::Link {
-                    next_region_index: 0,
-                    expected_sequence,
-                },
-                self.metadata,
-                physical,
-                logical,
-            )?;
-            let remaining_after = append_limit
-                .checked_sub(end)
-                .ok_or(StorageRuntimeError::TransactionLogFull)?;
-            if remaining_after < link_len {
-                return Err(StorageRuntimeError::TransactionLogFull);
-            }
-            let encoded_again = encode_record_into(record, self.metadata, physical, logical)?;
-            if encoded_again != encoded_len {
-                return Err(StorageRuntimeError::WalRotationRequired);
-            }
-        }
-
-        flash.write_region(tail_region, append_offset, &physical[..encoded_len])?;
-        flash.sync()?;
-
+    fn append_transaction_private_suffix_entry<const REGION_SIZE: usize>(
+        &mut self,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        collection_id: CollectionId,
+        record: WalRecord<'_>,
+    ) -> Result<(), StorageRuntimeError> {
+        let slot = Self::validate_transaction_log_id(PRIMARY_TRANSACTION_SLOT_ID)?;
+        let suffix_len = match self.transaction_slots.get(slot) {
+            Some(TransactionSlot::Active {
+                collection_id: active_collection,
+                suffix_len,
+                ..
+            }) if *active_collection == collection_id => *suffix_len,
+            _ => return Err(StorageRuntimeError::TransactionNotOpen(collection_id)),
+        };
+        let encoded_len = {
+            let suffix = workspace.transaction_suffix_buffer();
+            encode_private_suffix_entry(record, &mut suffix[suffix_len..])?
+        };
         match self.transaction_slots.get_mut(slot) {
             Some(TransactionSlot::Active {
                 collection_id: active_collection,
-                append_offset,
                 enrollment_written,
-                allocated_regions,
+                suffix_len,
                 free_intents,
                 collection_effects,
                 ..
             }) if *active_collection == collection_id => {
-                *append_offset = end;
                 match record {
                     WalRecord::AddTransactionCollection { .. } => {
                         *enrollment_written = true;
-                    }
-                    WalRecord::AllocateRegion {
-                        region_index,
-                        allocation_head_after,
-                    } => {
-                        if !allocated_regions
-                            .iter()
-                            .any(|allocation| allocation.region_index == region_index)
-                        {
-                            allocated_regions
-                                .push(TransactionAllocation {
-                                    region_index,
-                                    allocation_head_after,
-                                })
-                                .map_err(|_| StorageRuntimeError::TransactionLogFull)?;
-                        }
                     }
                     WalRecord::FreeIntent { region_index, .. } => {
                         if !free_intents.contains(&region_index) {
@@ -2545,6 +2908,9 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
                     }
                     _ => {}
                 }
+                *suffix_len = suffix_len
+                    .checked_add(encoded_len)
+                    .ok_or(StorageRuntimeError::TransactionLogFull)?;
                 if let Some(effect) = Self::transaction_collection_effect(record) {
                     collection_effects
                         .push(effect)
@@ -2552,19 +2918,6 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
                 }
             }
             _ => return Err(StorageRuntimeError::TransactionNotOpen(collection_id)),
-        }
-
-        if matches!(
-            record,
-            WalRecord::AllocateRegion { .. } | WalRecord::EraseFreeRegionSpan { .. }
-        ) {
-            apply_wal_record(
-                self.metadata,
-                record,
-                &mut self.collections,
-                &mut self.free_space,
-                &mut self.ready_region,
-            )?;
         }
         Ok(())
     }
@@ -2575,45 +2928,42 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
         workspace: &mut StorageWorkspace<REGION_SIZE>,
     ) -> Result<(), StorageRuntimeError> {
         let slot = Self::validate_transaction_log_id(PRIMARY_TRANSACTION_SLOT_ID)?;
-        let (head_region, tail_region, append_offset) = match self.transaction_slots.get(slot) {
+        let (head_region, collection_id) = match self.transaction_slots.get(slot) {
             Some(TransactionSlot::Active {
                 head_region,
-                tail_region,
-                append_offset,
+                collection_id,
                 ..
-            }) => (*head_region, *tail_region, *append_offset),
+            }) => (*head_region, *collection_id),
             _ => return Err(StorageRuntimeError::TransactionNotOpen(CollectionId(0))),
         };
+        if !self
+            .transaction_allocation_entry_fits(TransactionAllocationPurpose::TransactionSegment)?
+        {
+            return Err(StorageRuntimeError::TransactionLogFull);
+        }
         let new_region = self
-            .allocate_privileged_region_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
-                flash, workspace,
-            )?;
+            .free_space
+            .next_ready_region()
+            .map_err(|_| StorageRuntimeError::NoFreeRegionForRotation)?;
+        let allocation_head_after = self.free_space.position_after_allocation()?;
+        self.append_transaction_allocation_entry::<REGION_SIZE, IO>(
+            flash,
+            workspace,
+            collection_id,
+            new_region,
+            allocation_head_after,
+            TransactionAllocationPurpose::TransactionSegment,
+        )?;
         let expected_sequence = self
             .max_seen_sequence
             .checked_add(1)
             .ok_or(StorageRuntimeError::WalRotationRequired)?;
-
-        let (physical, logical) = workspace.encode_buffers();
-        let link_len = encode_record_into(
-            WalRecord::Link {
-                next_region_index: new_region,
-                expected_sequence,
-            },
-            self.metadata,
-            physical,
-            logical,
+        self.materialize_transaction_segment_seal::<REGION_SIZE, IO>(
+            flash,
+            workspace,
+            new_region,
+            expected_sequence,
         )?;
-        let append_limit = wal_record_append_limit(self.metadata)
-            .map_err(|error| StorageRuntimeError::Startup(error.into()))?;
-        if append_offset
-            .checked_add(link_len)
-            .is_none_or(|end| end > append_limit)
-        {
-            return Err(StorageRuntimeError::TransactionLogFull);
-        }
-        flash.write_region(tail_region, append_offset, &physical[..link_len])?;
-        flash.sync()?;
-
         let new_offset = self.initialize_transaction_log_region::<REGION_SIZE, REGION_COUNT, IO>(
             flash,
             workspace,
@@ -2624,11 +2974,13 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
             Some(TransactionSlot::Active {
                 tail_region,
                 append_offset,
+                suffix_len,
                 regions,
                 ..
             }) => {
                 *tail_region = new_region;
                 *append_offset = new_offset;
+                *suffix_len = 0;
                 regions
                     .push(new_region)
                     .map_err(|_| StorageRuntimeError::TransactionLogFull)?;
@@ -2636,6 +2988,103 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
             _ => return Err(StorageRuntimeError::TransactionNotOpen(CollectionId(0))),
         }
         Ok(())
+    }
+
+    fn materialize_transaction_segment_seal<const REGION_SIZE: usize, IO: FlashIo>(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        next_region_index: u32,
+        expected_sequence: u64,
+    ) -> Result<(), StorageRuntimeError> {
+        let slot = Self::validate_transaction_log_id(PRIMARY_TRANSACTION_SLOT_ID)?;
+        let (tail_region, seal_offset, suffix_len) = match self.transaction_slots.get(slot) {
+            Some(TransactionSlot::Active {
+                tail_region,
+                append_offset,
+                suffix_len,
+                ..
+            }) => (*tail_region, *append_offset, *suffix_len),
+            _ => return Err(StorageRuntimeError::TransactionNotOpen(CollectionId(0))),
+        };
+        let free_intent_start = seal_offset
+            .checked_add(TransactionSegmentSeal::ENCODED_LEN)
+            .ok_or(StorageRuntimeError::TransactionLogFull)?;
+        let segment_end = free_intent_start
+            .checked_add(suffix_len)
+            .ok_or(StorageRuntimeError::TransactionLogFull)?;
+        let append_limit = wal_record_append_limit(self.metadata)
+            .map_err(|error| StorageRuntimeError::Startup(error.into()))?;
+        if segment_end > append_limit {
+            return Err(StorageRuntimeError::TransactionLogFull);
+        }
+
+        let seal = TransactionSegmentSeal {
+            next_region_index,
+            expected_sequence,
+            free_intent_start: u32::try_from(free_intent_start)
+                .map_err(|_| StorageRuntimeError::TransactionLogFull)?,
+            segment_end: u32::try_from(segment_end)
+                .map_err(|_| StorageRuntimeError::TransactionLogFull)?,
+        };
+        {
+            let (physical, _) = workspace.encode_buffers();
+            let seal_len = seal.encode_into(physical)?;
+            flash.write_region(tail_region, seal_offset, &physical[..seal_len])?;
+        }
+        if suffix_len > 0 {
+            let suffix = workspace.transaction_suffix_buffer();
+            flash.write_region(tail_region, free_intent_start, &suffix[..suffix_len])?;
+        }
+        flash.sync()?;
+        workspace.transaction_suffix_buffer().fill(0);
+        Ok(())
+    }
+
+    fn materialize_final_transaction_suffix<const REGION_SIZE: usize, IO: FlashIo>(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+    ) -> Result<TransactionCommitSeal, StorageRuntimeError> {
+        let slot = Self::validate_transaction_log_id(PRIMARY_TRANSACTION_SLOT_ID)?;
+        let (tail_region, suffix_start, suffix_len) = match self.transaction_slots.get(slot) {
+            Some(TransactionSlot::Active {
+                tail_region,
+                append_offset,
+                suffix_len,
+                ..
+            }) => (*tail_region, *append_offset, *suffix_len),
+            _ => return Err(StorageRuntimeError::TransactionNotOpen(CollectionId(0))),
+        };
+        let segment_end = suffix_start
+            .checked_add(suffix_len)
+            .ok_or(StorageRuntimeError::TransactionLogFull)?;
+        let append_limit = wal_record_append_limit(self.metadata)
+            .map_err(|error| StorageRuntimeError::Startup(error.into()))?;
+        if segment_end > append_limit {
+            return Err(StorageRuntimeError::TransactionLogFull);
+        }
+        if suffix_len > 0 {
+            let suffix = workspace.transaction_suffix_buffer();
+            flash.write_region(tail_region, suffix_start, &suffix[..suffix_len])?;
+            flash.sync()?;
+        }
+        match self.transaction_slots.get_mut(slot) {
+            Some(TransactionSlot::Active {
+                append_offset,
+                suffix_len,
+                ..
+            }) => {
+                *append_offset = segment_end;
+                *suffix_len = 0;
+            }
+            _ => return Err(StorageRuntimeError::TransactionNotOpen(CollectionId(0))),
+        }
+        workspace.transaction_suffix_buffer().fill(0);
+        Ok(TransactionCommitSeal {
+            final_free_intent_start: log_position(tail_region, suffix_start)?,
+            final_segment_end: log_position(tail_region, segment_end)?,
+        })
     }
 
     fn apply_committed_transaction_effects(
@@ -2718,7 +3167,7 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
             Some(TransactionSlot::Active { .. }) => {
                 return Err(StorageRuntimeError::TransactionNotOpen(collection_id))
             }
-            Some(TransactionSlot::Empty) | None => {
+            Some(TransactionSlot::Empty) | Some(TransactionSlot::Idle { .. }) | None => {
                 return Err(StorageRuntimeError::TransactionNotOpen(collection_id))
             }
         };
@@ -2731,8 +3180,6 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
                 current_generation,
             });
         }
-        let range = self.active_transaction_range(slot)?;
-        let regions = self.active_transaction_regions(slot)?;
         let (free_intents, collection_effects) = match self.transaction_slots.get(slot) {
             Some(TransactionSlot::Active {
                 free_intents,
@@ -2741,6 +3188,10 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
             }) => (free_intents.clone(), collection_effects.clone()),
             _ => return Err(StorageRuntimeError::TransactionNotOpen(collection_id)),
         };
+        let seal =
+            self.materialize_final_transaction_suffix::<REGION_SIZE, IO>(flash, workspace)?;
+        let range = self.active_transaction_range(slot)?;
+        let regions = self.active_transaction_regions(slot)?;
         if !free_intents.is_empty() {
             self.ensure_free_space_metadata_capacity_for_len::<REGION_SIZE, REGION_COUNT, IO>(
                 flash,
@@ -2754,6 +3205,7 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
         let commit_record = WalRecord::CommitTransaction {
             transaction_log_id: PRIMARY_TRANSACTION_SLOT_ID,
             range,
+            seal,
         };
         let finish_record = WalRecord::TransactionFinished {
             transaction_log_id: PRIMARY_TRANSACTION_SLOT_ID,
@@ -2775,6 +3227,7 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
         self.retain_transaction_log(
             PRIMARY_TRANSACTION_SLOT_ID,
             range,
+            Some(seal),
             regions.as_slice(),
             TransactionLogOutcome::Committed,
         )?;
@@ -2807,10 +3260,22 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
         let slot = Self::validate_transaction_log_id(PRIMARY_TRANSACTION_SLOT_ID)?;
         let range = self.active_transaction_range(slot)?;
         let regions = self.active_transaction_regions(slot)?;
-        let free_intents = match self.transaction_slots.get(slot) {
-            Some(TransactionSlot::Active { free_intents, .. }) => free_intents.clone(),
-            _ => return Err(StorageRuntimeError::TransactionNotOpen(collection_id)),
-        };
+        let (free_intents, reusable_head, reusable_tail, reusable_offset) =
+            match self.transaction_slots.get(slot) {
+                Some(TransactionSlot::Active {
+                    head_region,
+                    tail_region,
+                    append_offset,
+                    free_intents,
+                    ..
+                }) => (
+                    free_intents.clone(),
+                    *head_region,
+                    *tail_region,
+                    *append_offset,
+                ),
+                _ => return Err(StorageRuntimeError::TransactionNotOpen(collection_id)),
+            };
         for region_index in free_intents.iter().copied() {
             self.ensure_free_space_metadata_capacity_for_len::<REGION_SIZE, REGION_COUNT, IO>(
                 flash,
@@ -2838,10 +3303,12 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
         self.retain_transaction_log(
             PRIMARY_TRANSACTION_SLOT_ID,
             range,
+            None,
             regions.as_slice(),
             TransactionLogOutcome::Finished,
         )?;
-        self.transaction_slots[slot] = TransactionSlot::Empty;
+        self.transaction_slots[slot] =
+            self.reusable_transaction_slot(reusable_head, reusable_tail, reusable_offset);
         self.clear_transaction_runtime_snapshot();
         Ok(())
     }
@@ -2872,21 +3339,30 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
             .get(slot)
             .cloned()
             .ok_or(StorageRuntimeError::TransactionNotOpen(collection_id))?;
-        let (range, regions, allocations) = match active_slot {
-            TransactionSlot::Active {
-                start: _,
-                regions,
-                allocated_regions,
-                ..
-            } => (
-                self.active_transaction_range(slot)?,
-                regions,
-                allocated_regions,
-            ),
-            TransactionSlot::Empty => {
-                return Err(StorageRuntimeError::TransactionNotOpen(collection_id))
-            }
-        };
+        let (range, regions, allocations, reusable_head, reusable_tail, reusable_offset) =
+            match active_slot {
+                TransactionSlot::Active {
+                    head_region,
+                    tail_region,
+                    append_offset,
+                    regions,
+                    allocated_regions,
+                    ..
+                } => (
+                    self.active_transaction_range(slot)?,
+                    regions,
+                    allocated_regions,
+                    head_region,
+                    tail_region,
+                    append_offset,
+                ),
+                TransactionSlot::Empty => {
+                    return Err(StorageRuntimeError::TransactionNotOpen(collection_id))
+                }
+                TransactionSlot::Idle { .. } => {
+                    return Err(StorageRuntimeError::TransactionNotOpen(collection_id))
+                }
+            };
         if !allocations.is_empty() {
             self.ensure_free_space_metadata_capacity_for_len::<REGION_SIZE, REGION_COUNT, IO>(
                 flash,
@@ -2920,6 +3396,7 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
         self.retain_transaction_log(
             PRIMARY_TRANSACTION_SLOT_ID,
             range,
+            None,
             regions.as_slice(),
             TransactionLogOutcome::RolledBack,
         )?;
@@ -2955,10 +3432,12 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
         self.retain_transaction_log(
             PRIMARY_TRANSACTION_SLOT_ID,
             range,
+            None,
             regions.as_slice(),
             TransactionLogOutcome::Finished,
         )?;
-        self.transaction_slots[slot] = TransactionSlot::Empty;
+        self.transaction_slots[slot] =
+            self.reusable_transaction_slot(reusable_head, reusable_tail, reusable_offset);
         self.clear_transaction_runtime_snapshot();
         Ok(())
     }
@@ -4004,6 +4483,41 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
         Err(StorageRuntimeError::WalRotationRequired)
     }
 
+    fn copy_logical_record_with_rotation<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        record: WalRecord<'_>,
+    ) -> Result<(), StorageRuntimeError> {
+        for _attempt in 0..self.metadata.region_count {
+            match self
+                .ensure_append_reserve::<REGION_SIZE, REGION_COUNT, IO>(workspace, flash, record)
+            {
+                Ok(()) => {
+                    let encoded_len = self.write_record_raw::<REGION_SIZE, REGION_COUNT, IO>(
+                        flash, workspace, record,
+                    )?;
+                    self.wal_append_offset = self
+                        .wal_append_offset
+                        .checked_add(encoded_len)
+                        .ok_or(StorageRuntimeError::WalRotationRequired)?;
+                    return Ok(());
+                }
+                Err(StorageRuntimeError::WalRotationRequired) => {
+                    self.rotate_wal_tail_with_progress::<REGION_SIZE, REGION_COUNT, IO>(
+                        flash, workspace,
+                    )?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Err(StorageRuntimeError::WalRotationRequired)
+    }
+
     fn append_empty_basis_snapshot_with_rotation<
         const REGION_SIZE: usize,
         const REGION_COUNT: usize,
@@ -4914,6 +5428,7 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
             WalRecord::CommitTransaction {
                 transaction_log_id,
                 range,
+                ..
             }
             | WalRecord::TransactionFinished {
                 transaction_log_id,
@@ -4980,19 +5495,30 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
             return Ok(());
         }
 
+        let Some(commit_seal) = retained.seal else {
+            return Err(StorageRuntimeError::Startup(
+                StartupError::InvalidWalRegion(range.start.region_index),
+            ));
+        };
+        if range.start.region_index >= self.metadata.region_count
+            || range.end.region_index >= self.metadata.region_count
+        {
+            return Err(StorageRuntimeError::Startup(
+                StartupError::InvalidWalRegion(range.start.region_index),
+            ));
+        }
+        let _ = open_plan;
         let metadata = self.metadata;
         let region_size = usize::try_from(metadata.region_size)
             .map_err(|_| StorageRuntimeError::WalRotationRequired)?;
-        let granule = usize::try_from(metadata.wal_write_granule)
-            .map_err(|_| StorageRuntimeError::WalRotationRequired)?;
-        let end_offset = usize::try_from(range.end.offset)
-            .map_err(|_| StorageRuntimeError::WalRotationRequired)?;
+        let allocation_entry_len = TransactionAllocationEntry::encoded_len(metadata)?;
         let mut current_region = range.start.region_index;
-        let mut offset = usize::try_from(range.start.offset)
+        let mut segment_start = usize::try_from(range.start.offset)
             .map_err(|_| StorageRuntimeError::WalRotationRequired)?;
+        let mut payload_copy = [0u8; REGION_SIZE];
 
         for _ in 0..metadata.region_count {
-            {
+            let (suffix_start, suffix_end, next_region) = {
                 let (region_bytes, _) = workspace.scan_buffers();
                 flash.read_region(current_region, 0, region_bytes.len(), |bytes| {
                     region_bytes.copy_from_slice(bytes);
@@ -5006,108 +5532,95 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
                     StorageVisitError::Storage(error) => error,
                     StorageVisitError::Visitor(()) => StorageRuntimeError::WalRotationRequired,
                 })?;
-            }
-
-            let limit = if current_region == range.end.region_index {
-                end_offset
-            } else {
-                region_size
-            };
-            let mut next_region = None;
-
-            while offset < limit {
-                let action = {
-                    let (region_bytes, logical_scratch) = workspace.scan_buffers();
-                    let start_byte = region_bytes[offset];
-                    if start_byte == metadata.erased_byte {
+                if segment_start < region_size
+                    && region_bytes[segment_start] == metadata.wal_record_magic
+                {
+                    return Err(StorageRuntimeError::Startup(
+                        StartupError::InvalidWalRegion(current_region),
+                    ));
+                }
+                let mut offset = segment_start;
+                while offset
+                    .checked_add(allocation_entry_len)
+                    .is_some_and(|end| end <= region_size)
+                {
+                    if TransactionAllocationEntry::decode(
+                        metadata,
+                        &region_bytes[offset..offset + allocation_entry_len],
+                    )
+                    .is_err()
+                    {
                         break;
                     }
-                    if start_byte != metadata.wal_record_magic {
-                        let next_offset = offset
-                            .checked_add(granule)
-                            .ok_or(StorageRuntimeError::WalRotationRequired)?;
-                        Some((next_offset, WalHeadReclaimAction::Skip, None, 0usize))
-                    } else {
-                        let decoded =
-                            decode_record(&region_bytes[offset..limit], metadata, logical_scratch)?;
-                        let encoded_len = decoded.encoded_len;
-                        let record = decoded.record;
-                        let next_offset = offset
-                            .checked_add(encoded_len)
-                            .ok_or(StorageRuntimeError::WalRotationRequired)?;
-                        let link_target = match record {
-                            WalRecord::Link {
-                                next_region_index, ..
-                            } => Some(next_region_index),
-                            _ => None,
-                        };
-                        let reclaim_action = if matches!(
-                            record,
-                            WalRecord::AllocateRegion { .. }
-                                | WalRecord::EraseFreeRegionSpan { .. }
-                                | WalRecord::FreeRegion { .. }
-                        ) {
-                            WalHeadReclaimAction::Skip
-                        } else {
-                            self.classify_wal_head_record_for_reclaim(
-                                &plan.original_collections,
-                                active_collections,
-                                record,
-                            )?
-                        };
-                        Some((next_offset, reclaim_action, link_target, encoded_len))
-                    }
-                };
-
-                let Some((next_offset, reclaim_action, link_target, encoded_len)) = action else {
-                    break;
-                };
-                match reclaim_action {
-                    WalHeadReclaimAction::Skip => {}
-                    WalHeadReclaimAction::CopyEncoded => {
-                        #[cfg(feature = "perf-counters")]
-                        if let Some(metrics) = metrics.as_deref_mut() {
-                            metrics.increment(StoragePerfCounter::WalHeadReclaimCopiedRecords);
-                        }
-                        self.copy_encoded_record_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
-                            flash,
-                            workspace,
-                            current_region,
-                            offset,
-                            encoded_len,
-                            open_plan,
-                            #[cfg(feature = "perf-counters")]
-                            metrics.as_deref_mut(),
-                        )?;
-                    }
-                    WalHeadReclaimAction::RewriteEmptyBasisAsSnapshot {
-                        collection_id,
-                        collection_type,
-                    } => {
-                        self.append_empty_basis_snapshot_with_rotation::<
-                            REGION_SIZE,
-                            REGION_COUNT,
-                            IO,
-                        >(flash, workspace, collection_id, collection_type)?;
-                    }
+                    offset = offset
+                        .checked_add(allocation_entry_len)
+                        .ok_or(StorageRuntimeError::WalRotationRequired)?;
                 }
 
-                offset = next_offset;
-                if let Some(next_region_index) = link_target {
-                    next_region = Some(next_region_index);
-                    break;
+                if current_region == range.end.region_index {
+                    if commit_seal.final_free_intent_start.region_index != current_region
+                        || commit_seal.final_segment_end.region_index != current_region
+                        || commit_seal.final_segment_end != range.end
+                    {
+                        return Err(StorageRuntimeError::Startup(
+                            StartupError::InvalidWalRegion(current_region),
+                        ));
+                    }
+                    (
+                        usize::try_from(commit_seal.final_free_intent_start.offset)
+                            .map_err(|_| StorageRuntimeError::WalRotationRequired)?,
+                        usize::try_from(commit_seal.final_segment_end.offset)
+                            .map_err(|_| StorageRuntimeError::WalRotationRequired)?,
+                        None,
+                    )
+                } else {
+                    let segment_seal = TransactionSegmentSeal::decode(&region_bytes[offset..])?;
+                    let suffix_start = usize::try_from(segment_seal.free_intent_start)
+                        .map_err(|_| StorageRuntimeError::WalRotationRequired)?;
+                    let suffix_end = usize::try_from(segment_seal.segment_end)
+                        .map_err(|_| StorageRuntimeError::WalRotationRequired)?;
+                    if suffix_start
+                        < offset
+                            .checked_add(TransactionSegmentSeal::ENCODED_LEN)
+                            .ok_or(StorageRuntimeError::WalRotationRequired)?
+                        || suffix_end > region_size
+                        || suffix_start > suffix_end
+                    {
+                        return Err(StorageRuntimeError::Startup(
+                            StartupError::InvalidWalRegion(current_region),
+                        ));
+                    }
+                    if segment_seal.next_region_index >= metadata.region_count {
+                        return Err(StorageRuntimeError::Startup(
+                            StartupError::InvalidWalRegion(segment_seal.next_region_index),
+                        ));
+                    }
+                    (
+                        suffix_start,
+                        suffix_end,
+                        Some(segment_seal.next_region_index),
+                    )
                 }
-            }
+            };
 
-            if current_region == range.end.region_index {
+            self.copy_transaction_suffix_reclaim_range::<REGION_SIZE, REGION_COUNT, IO>(
+                flash,
+                workspace,
+                plan,
+                active_collections,
+                current_region,
+                suffix_start,
+                suffix_end,
+                &mut payload_copy,
+                #[cfg(feature = "perf-counters")]
+                metrics.as_deref_mut(),
+            )?;
+
+            let Some(next_region) = next_region else {
                 return Ok(());
-            }
-
-            current_region =
-                next_region.ok_or(StorageRuntimeError::Startup(StartupError::BrokenWalChain {
-                    region_index: current_region,
-                }))?;
-            offset = metadata
+            };
+            current_region = next_region;
+            segment_start = metadata
                 .wal_record_area_offset()
                 .map_err(|error| StorageRuntimeError::Startup(error.into()))?;
         }
@@ -5115,6 +5628,80 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
         Err(StorageRuntimeError::Startup(StartupError::BrokenWalChain {
             region_index: current_region,
         }))
+    }
+
+    fn copy_transaction_suffix_reclaim_range<
+        const REGION_SIZE: usize,
+        const REGION_COUNT: usize,
+        IO: FlashIo,
+    >(
+        &mut self,
+        flash: &mut IO,
+        workspace: &mut StorageWorkspace<REGION_SIZE>,
+        plan: &mut WalHeadReclaimPlan<MAX_COLLECTIONS>,
+        active_collections: &mut Vec<CollectionId, MAX_COLLECTIONS>,
+        region_index: u32,
+        mut offset: usize,
+        end: usize,
+        payload_copy: &mut [u8],
+        #[cfg(feature = "perf-counters")] mut metrics: Option<&mut StoragePerfMetrics>,
+    ) -> Result<(), StorageRuntimeError> {
+        if offset > end || end > REGION_SIZE {
+            return Err(StorageRuntimeError::Startup(StartupError::LengthOverflow));
+        }
+        while offset < end {
+            let (encoded_len, action, copied_record) = {
+                let (region_bytes, _) = workspace.scan_buffers();
+                flash.read_region(region_index, 0, region_bytes.len(), |bytes| {
+                    region_bytes.copy_from_slice(bytes);
+                })?;
+                let decoded = decode_private_suffix_entry(&region_bytes[offset..end])?;
+                let action = self.classify_wal_head_record_for_reclaim(
+                    &plan.original_collections,
+                    active_collections,
+                    decoded.record,
+                )?;
+                let copied_record = if matches!(action, WalHeadReclaimAction::CopyEncoded) {
+                    Some(OwnedReclaimRecord::copy_from(decoded.record, payload_copy)?)
+                } else {
+                    None
+                };
+                (decoded.encoded_len, action, copied_record)
+            };
+
+            match action {
+                WalHeadReclaimAction::Skip => {}
+                WalHeadReclaimAction::CopyEncoded => {
+                    #[cfg(feature = "perf-counters")]
+                    if let Some(metrics) = metrics.as_deref_mut() {
+                        metrics.increment(StoragePerfCounter::WalHeadReclaimCopiedRecords);
+                    }
+                    let Some(copied_record) = copied_record else {
+                        return Err(StorageRuntimeError::InvalidFreeSpaceCommand);
+                    };
+                    self.copy_logical_record_with_rotation::<REGION_SIZE, REGION_COUNT, IO>(
+                        flash,
+                        workspace,
+                        copied_record.as_wal_record(payload_copy),
+                    )?;
+                }
+                WalHeadReclaimAction::RewriteEmptyBasisAsSnapshot {
+                    collection_id,
+                    collection_type,
+                } => {
+                    self.append_empty_basis_snapshot_with_rotation::<
+                        REGION_SIZE,
+                        REGION_COUNT,
+                        IO,
+                    >(flash, workspace, collection_id, collection_type)?;
+                }
+            }
+
+            offset = offset
+                .checked_add(encoded_len)
+                .ok_or(StorageRuntimeError::WalRotationRequired)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn commit_wal_head_reclaim<
@@ -5428,7 +6015,8 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
                         WalRecord::CommitTransaction {
                             transaction_log_id,
                             range,
-                        } => Some((transaction_log_id, range)),
+                            seal,
+                        } => Some((transaction_log_id, range, seal)),
                         _ => None,
                     };
                     if deferred_commit.is_none() {
@@ -5439,12 +6027,13 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
                 if let Some(next_region_index) = link_target {
                     next_region = Some(next_region_index);
                 }
-                if let Some((transaction_log_id, range)) = deferred_commit {
+                if let Some((transaction_log_id, range, seal)) = deferred_commit {
                     visit_transaction_log_range::<REGION_SIZE, IO, E, _>(
                         flash,
                         workspace,
                         metadata,
                         range,
+                        seal,
                         &mut visitor,
                     )?;
                     {
@@ -5461,6 +6050,7 @@ impl<const MAX_COLLECTIONS: usize> StorageRuntime<MAX_COLLECTIONS> {
                         WalRecord::CommitTransaction {
                             transaction_log_id,
                             range,
+                            seal,
                         },
                     )
                     .map_err(StorageVisitError::Visitor)?;
@@ -5495,6 +6085,7 @@ fn visit_transaction_log_range<const REGION_SIZE: usize, IO: FlashIo, E, F>(
     workspace: &mut StorageWorkspace<REGION_SIZE>,
     metadata: StorageMetadata,
     range: TransactionLogRange,
+    seal: TransactionCommitSeal,
     visitor: &mut F,
 ) -> Result<(), StorageVisitError<E>>
 where
@@ -5503,18 +6094,22 @@ where
     if range.start == range.end {
         return Ok(());
     }
+    if range.start.region_index >= metadata.region_count
+        || range.end.region_index >= metadata.region_count
+    {
+        return Err(StorageVisitError::Storage(StorageRuntimeError::Startup(
+            StartupError::InvalidWalRegion(range.start.region_index),
+        )));
+    }
     let mut current_region = range.start.region_index;
-    let mut offset = usize::try_from(range.start.offset)
-        .map_err(|_| StorageRuntimeError::WalRotationRequired)
-        .map_err(StorageVisitError::Storage)?;
-    let end_offset = usize::try_from(range.end.offset)
+    let mut segment_start = usize::try_from(range.start.offset)
         .map_err(|_| StorageRuntimeError::WalRotationRequired)
         .map_err(StorageVisitError::Storage)?;
     let region_size = usize::try_from(metadata.region_size)
         .map_err(|_| StorageRuntimeError::WalRotationRequired)
         .map_err(StorageVisitError::Storage)?;
-    let granule = usize::try_from(metadata.wal_write_granule)
-        .map_err(|_| StorageRuntimeError::WalRotationRequired)
+    let allocation_entry_len = TransactionAllocationEntry::encoded_len(metadata)
+        .map_err(StorageRuntimeError::from)
         .map_err(StorageVisitError::Storage)?;
 
     for _ in 0..metadata.region_count {
@@ -5527,68 +6122,84 @@ where
             .map_err(StorageVisitError::Storage)?;
         validate_transaction_log_region_for_visit(region_bytes, metadata, current_region)?;
 
-        let limit = if current_region == range.end.region_index {
-            end_offset
-        } else {
-            region_size
-        };
-        let mut next_region = None;
-        while offset < limit {
-            let step = {
-                let (region_bytes, logical_scratch) = workspace.scan_buffers();
-                if region_bytes[offset] == metadata.erased_byte {
-                    if current_region == range.end.region_index {
-                        return Ok(());
-                    }
-                    return Err(StorageVisitError::Storage(StorageRuntimeError::Startup(
-                        StartupError::BrokenWalChain {
-                            region_index: current_region,
-                        },
-                    )));
-                }
-                if region_bytes[offset] != metadata.wal_record_magic {
-                    offset
-                        .checked_add(granule)
-                        .ok_or(StorageRuntimeError::WalRotationRequired)
-                        .map_err(StorageVisitError::Storage)?
-                } else {
-                    let decoded =
-                        decode_record(&region_bytes[offset..limit], metadata, logical_scratch)
-                            .map_err(StorageRuntimeError::from)
-                            .map_err(StorageVisitError::Storage)?;
-                    let next_offset = offset
-                        .checked_add(decoded.encoded_len)
-                        .ok_or(StorageRuntimeError::WalRotationRequired)
-                        .map_err(StorageVisitError::Storage)?;
-                    match decoded.record {
-                        WalRecord::Link {
-                            next_region_index, ..
-                        } => {
-                            next_region = Some(next_region_index);
-                        }
-                        record => {
-                            visitor(flash, record).map_err(StorageVisitError::Visitor)?;
-                        }
-                    }
-                    next_offset
-                }
-            };
-            offset = step;
-            if next_region.is_some() {
+        if segment_start < region_size && region_bytes[segment_start] == metadata.wal_record_magic {
+            return Err(StorageVisitError::Storage(StorageRuntimeError::Startup(
+                StartupError::InvalidWalRegion(current_region),
+            )));
+        }
+
+        let mut offset = segment_start;
+        while offset
+            .checked_add(allocation_entry_len)
+            .is_some_and(|end| end <= region_size)
+        {
+            if TransactionAllocationEntry::decode(
+                metadata,
+                &region_bytes[offset..offset + allocation_entry_len],
+            )
+            .is_err()
+            {
                 break;
             }
+            offset = offset
+                .checked_add(allocation_entry_len)
+                .ok_or(StorageRuntimeError::WalRotationRequired)
+                .map_err(StorageVisitError::Storage)?;
         }
 
         if current_region == range.end.region_index {
+            if seal.final_free_intent_start.region_index != current_region
+                || seal.final_segment_end.region_index != current_region
+                || seal.final_segment_end != range.end
+            {
+                return Err(StorageVisitError::Storage(StorageRuntimeError::Startup(
+                    StartupError::InvalidWalRegion(current_region),
+                )));
+            }
+            let suffix_start = usize::try_from(seal.final_free_intent_start.offset)
+                .map_err(|_| StorageRuntimeError::WalRotationRequired)
+                .map_err(StorageVisitError::Storage)?;
+            let suffix_end = usize::try_from(seal.final_segment_end.offset)
+                .map_err(|_| StorageRuntimeError::WalRotationRequired)
+                .map_err(StorageVisitError::Storage)?;
+            visit_transaction_suffix_range(flash, region_bytes, suffix_start, suffix_end, visitor)?;
             return Ok(());
         }
 
-        current_region = next_region.ok_or_else(|| {
-            StorageVisitError::Storage(StorageRuntimeError::Startup(StartupError::BrokenWalChain {
-                region_index: current_region,
-            }))
-        })?;
-        offset = metadata.wal_record_area_offset().map_err(|error| {
+        let segment_seal =
+            TransactionSegmentSeal::decode(&region_bytes[offset..]).map_err(|_| {
+                StorageVisitError::Storage(StorageRuntimeError::Startup(
+                    StartupError::BrokenWalChain {
+                        region_index: current_region,
+                    },
+                ))
+            })?;
+        let suffix_start = usize::try_from(segment_seal.free_intent_start)
+            .map_err(|_| StorageRuntimeError::WalRotationRequired)
+            .map_err(StorageVisitError::Storage)?;
+        let suffix_end = usize::try_from(segment_seal.segment_end)
+            .map_err(|_| StorageRuntimeError::WalRotationRequired)
+            .map_err(StorageVisitError::Storage)?;
+        if suffix_start
+            < offset
+                .checked_add(TransactionSegmentSeal::ENCODED_LEN)
+                .ok_or(StorageRuntimeError::WalRotationRequired)
+                .map_err(StorageVisitError::Storage)?
+            || suffix_end > region_size
+            || suffix_start > suffix_end
+        {
+            return Err(StorageVisitError::Storage(StorageRuntimeError::Startup(
+                StartupError::InvalidWalRegion(current_region),
+            )));
+        }
+        visit_transaction_suffix_range(flash, region_bytes, suffix_start, suffix_end, visitor)?;
+        if segment_seal.next_region_index >= metadata.region_count {
+            return Err(StorageVisitError::Storage(StorageRuntimeError::Startup(
+                StartupError::InvalidWalRegion(segment_seal.next_region_index),
+            )));
+        }
+        current_region = segment_seal.next_region_index;
+        segment_start = metadata.wal_record_area_offset().map_err(|error| {
             StorageVisitError::Storage(StorageRuntimeError::Startup(error.into()))
         })?;
     }
@@ -5598,6 +6209,34 @@ where
             region_index: current_region,
         },
     )))
+}
+
+fn visit_transaction_suffix_range<IO: FlashIo, E, F>(
+    flash: &mut IO,
+    region_bytes: &[u8],
+    mut offset: usize,
+    end: usize,
+    visitor: &mut F,
+) -> Result<(), StorageVisitError<E>>
+where
+    F: for<'record> FnMut(&mut IO, WalRecord<'record>) -> Result<(), E>,
+{
+    if offset > end || end > region_bytes.len() {
+        return Err(StorageVisitError::Storage(StorageRuntimeError::Startup(
+            StartupError::LengthOverflow,
+        )));
+    }
+    while offset < end {
+        let decoded = decode_private_suffix_entry(&region_bytes[offset..end])
+            .map_err(StorageRuntimeError::from)
+            .map_err(StorageVisitError::Storage)?;
+        visitor(flash, decoded.record).map_err(StorageVisitError::Visitor)?;
+        offset = offset
+            .checked_add(decoded.encoded_len)
+            .ok_or(StorageRuntimeError::WalRotationRequired)
+            .map_err(StorageVisitError::Storage)?;
+    }
+    Ok(())
 }
 
 fn validate_transaction_log_region_for_visit<E>(
@@ -5643,6 +6282,7 @@ fn transaction_control_references_retained_log(
         WalRecord::CommitTransaction {
             transaction_log_id,
             range,
+            ..
         }
         | WalRecord::TransactionFinished {
             transaction_log_id,

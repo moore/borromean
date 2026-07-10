@@ -178,6 +178,33 @@ fn requirement_erase_write_read_and_sync_are_logged() {
 
 //= spec/mock.md#mock-flash-requirements
 //= type=test
+//# `RING-IMPL-REGRESSION-157` Mock flash operation logging controls MUST
+//# clear the existing log when disabled, suppress new operation log entries
+//# while disabled, and resume logging when re-enabled without suppressing the
+//# underlying flash operation.
+#[test]
+fn requirement_operation_logging_toggle_clears_and_suppresses_logs() {
+    let mut flash = MockFlash::<16, 2, 16>::new(0xff);
+    flash.write_region(1, 0, &[1]).unwrap();
+    assert_eq!(flash.operations().len(), 1);
+
+    flash.set_operation_logging(false);
+    assert!(flash.operations().is_empty());
+    flash.write_region(1, 1, &[2]).unwrap();
+    flash.sync().unwrap();
+    assert!(flash.operations().is_empty());
+    assert_eq!(&flash.region_bytes(1).unwrap()[..2], &[1, 2]);
+
+    flash.set_operation_logging(true);
+    flash.erase_region(1).unwrap();
+    assert_eq!(
+        flash.operations(),
+        &[MockOperation::EraseRegion { region_index: 1 }]
+    );
+}
+
+//= spec/mock.md#mock-flash-requirements
+//= type=test
 //# `RING-IMPL-REGRESSION-043` Erasing a mock flash region MUST restore every byte in that region to
 //# the erased byte.
 #[test]
@@ -325,6 +352,72 @@ fn requirement_format_empty_store_populates_free_space_collection_in_ascending_o
     assert!(metadata_region[entries_offset + 8..]
         .iter()
         .all(|byte| *byte == 0xff));
+}
+
+//= spec/ring/08-durability-formatting.md#format-storage-on-disk-initialization
+//= type=test
+//# `RING-FORMAT-STORAGE-003` Initialize regions
+//# `1..=initial_free_space_metadata_region_count` as a linked
+//# `free_space_v2` metadata chain.
+#[test]
+fn requirement_format_empty_store_builds_multi_region_free_space_metadata_chain() {
+    let mut flash = MockFlash::<67, 6, 64>::new(0xff);
+    let metadata = flash.format_empty_store(1, 1, 0xa5).unwrap();
+    assert_eq!(metadata.region_size, 67);
+    assert_eq!(metadata.region_count, 6);
+
+    let wal_region = flash.region_bytes(0).unwrap();
+    let wal_header = Header::decode(&wal_region[..Header::ENCODED_LEN]).unwrap();
+    assert_eq!(wal_header.sequence, 3);
+    assert_eq!(wal_header.collection_id, CollectionId(0));
+    assert_eq!(wal_header.collection_format, WAL_V1_FORMAT);
+    let wal_prologue = WalRegionPrologue::decode(
+        &wal_region[Header::ENCODED_LEN..Header::ENCODED_LEN + WalRegionPrologue::ENCODED_LEN],
+        metadata.region_count,
+    )
+    .unwrap();
+    assert_eq!(
+        wal_prologue.allocation_head,
+        FreeQueuePosition {
+            region_index: 1,
+            entry_index: 0,
+        }
+    );
+    assert_eq!(
+        wal_prologue.ready_boundary,
+        FreeQueuePosition {
+            region_index: 3,
+            entry_index: 0,
+        }
+    );
+    assert_eq!(wal_prologue.append_tail, wal_prologue.ready_boundary);
+
+    let prologue_offset = Header::ENCODED_LEN;
+    let entries_offset = prologue_offset + FreeSpaceRegionPrologue::ENCODED_LEN;
+    for (metadata_region, expected_next, expected_entry_count, expected_entry) in [
+        (1, Some(2), 1, Some(4)),
+        (2, Some(3), 1, Some(5)),
+        (3, None, 0, None),
+    ] {
+        let bytes = flash.region_bytes(metadata_region).unwrap();
+        let header = Header::decode(&bytes[..Header::ENCODED_LEN]).unwrap();
+        assert_eq!(header.sequence, u64::from(metadata_region - 1));
+        assert_eq!(header.collection_id, CollectionId(0));
+        assert_eq!(header.collection_format, FREE_SPACE_V2_FORMAT);
+        let prologue =
+            FreeSpaceRegionPrologue::decode(&bytes[prologue_offset..entries_offset], 6).unwrap();
+        assert_eq!(prologue.next_metadata_region, expected_next);
+        assert_eq!(prologue.entry_count, expected_entry_count);
+        assert_eq!(prologue.ready_boundary, wal_prologue.ready_boundary);
+        assert_eq!(prologue.append_tail, wal_prologue.append_tail);
+        if let Some(expected_entry) = expected_entry {
+            let entry =
+                FreeSpaceEntry::decode(&bytes[entries_offset..entries_offset + 4], 6).unwrap();
+            assert_eq!(entry.region_index, expected_entry);
+        } else {
+            assert!(bytes[entries_offset..].iter().all(|byte| *byte == 0xff));
+        }
+    }
 }
 
 //= spec/ring/05-disk-format.md#free-space-collection-regions

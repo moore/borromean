@@ -2,8 +2,13 @@
 
 use super::*;
 use crate::disk::{encode_transaction_log_region_prefix_with_cursors, Header};
+use crate::transaction_log::{
+    encode_private_suffix_entry, TransactionAllocationEntry, TransactionAllocationPurpose,
+    TransactionSegmentSeal,
+};
 use crate::wal_record::{
-    encode_record_into, encoded_record_len, LogPosition, TransactionLogRange, WalRecord,
+    encode_record_into, encoded_record_len, LogPosition, TransactionCommitSeal,
+    TransactionLogRange, WalRecord, WalRecordError,
 };
 use crate::{
     MapError, MapStorageError, MockFlash, Storage, StorageFormatConfig, StorageWorkspace,
@@ -43,6 +48,13 @@ fn append_wal_record<const REGION_SIZE: usize, const REGION_COUNT: usize, const 
         .write_region(region_index, offset, &physical[..used])
         .unwrap();
     offset + used
+}
+
+fn commit_seal(range: TransactionLogRange) -> TransactionCommitSeal {
+    TransactionCommitSeal {
+        final_free_intent_start: range.start,
+        final_segment_end: range.end,
+    }
 }
 
 fn init_transaction_log_region<
@@ -155,6 +167,159 @@ fn startup_test_generation(
     .committed_generation()
 }
 
+//= spec/ring/06-startup-replay.md#startup-replay-algorithm
+//= type=test
+//# `RING-STARTUP-023` On `commit_transaction(transaction_log_id, range)`:
+//# advance committed generation for every enrolled collection.
+#[test]
+fn requirement_startup_collection_generation_distinguishes_type_basis_and_updates() {
+    let typed_empty = StartupCollection {
+        collection_id: CollectionId(7),
+        collection_type: Some(CollectionType::MAP_CODE),
+        basis: StartupCollectionBasis::Empty,
+        pending_update_count: 0,
+    };
+    let typed_snapshot = StartupCollection {
+        basis: StartupCollectionBasis::WalSnapshot,
+        ..typed_empty
+    };
+    let typed_region = StartupCollection {
+        basis: StartupCollectionBasis::Region(5),
+        pending_update_count: 3,
+        ..typed_empty
+    };
+    let typed_dropped = StartupCollection {
+        basis: StartupCollectionBasis::Dropped,
+        pending_update_count: 4,
+        ..typed_empty
+    };
+    let untyped_empty = StartupCollection {
+        collection_type: None,
+        ..typed_empty
+    };
+
+    assert_eq!(
+        typed_empty.committed_generation(),
+        u64::from(CollectionType::MAP_CODE).rotate_left(32)
+    );
+    assert_eq!(
+        typed_snapshot.committed_generation(),
+        u64::from(CollectionType::MAP_CODE).rotate_left(32) ^ 1u64.rotate_left(8)
+    );
+    assert_eq!(
+        typed_region.committed_generation(),
+        u64::from(CollectionType::MAP_CODE).rotate_left(32)
+            ^ (2u64 ^ 5u64.rotate_left(17)).rotate_left(8)
+            ^ 3
+    );
+    assert_eq!(
+        typed_dropped.committed_generation(),
+        u64::from(CollectionType::MAP_CODE).rotate_left(32) ^ 3u64.rotate_left(8) ^ 4
+    );
+    assert_eq!(
+        untyped_empty.committed_generation(),
+        u64::MAX.rotate_left(32)
+    );
+    assert_ne!(
+        typed_region.committed_generation(),
+        typed_snapshot.committed_generation()
+    );
+}
+
+//= spec/ring/04-wal-records.md#wal-record-types
+//= type=test
+//# `RING-WAL-PAYLOAD-016` `transaction_finished` records that the
+//# transaction's committed or rolled-back cleanup and recovery obligations
+//# are complete, so transaction-log garbage collection may release this
+//# reference when no retained record or active descriptor points to the same
+//# range.
+#[test]
+fn requirement_startup_open_plan_retains_and_finishes_transaction_logs_by_start() {
+    let mut plan = StartupOpenPlan::<8, 8>::empty();
+    let range = TransactionLogRange {
+        start: LogPosition {
+            region_index: 4,
+            offset: 40,
+        },
+        end: LogPosition {
+            region_index: 4,
+            offset: 80,
+        },
+    };
+    let later_range = TransactionLogRange {
+        end: LogPosition {
+            region_index: 5,
+            offset: 48,
+        },
+        ..range
+    };
+    let seal = TransactionCommitSeal {
+        final_free_intent_start: range.end,
+        final_segment_end: range.end,
+    };
+
+    plan.retain_transaction_log(
+        0,
+        range,
+        Some(seal),
+        &[range.start.region_index, range.end.region_index],
+        TransactionLogOutcome::Committed,
+    )
+    .unwrap();
+    assert_eq!(plan.retained_transaction_logs.len(), 1);
+    assert_eq!(plan.retained_transaction_logs[0].seal, Some(seal));
+    assert_eq!(
+        plan.retained_transaction_logs[0].regions.as_slice(),
+        &[range.start.region_index, range.end.region_index]
+    );
+
+    plan.retain_transaction_log(
+        0,
+        later_range,
+        None,
+        &[later_range.end.region_index],
+        TransactionLogOutcome::RolledBack,
+    )
+    .unwrap();
+    assert_eq!(plan.retained_transaction_logs.len(), 1);
+    assert_eq!(plan.retained_transaction_logs[0].range, later_range);
+    assert_eq!(plan.retained_transaction_logs[0].seal, Some(seal));
+    assert_eq!(
+        plan.retained_transaction_logs[0].outcome,
+        TransactionLogOutcome::RolledBack
+    );
+    assert_eq!(
+        plan.retained_transaction_logs[0].regions.as_slice(),
+        &[later_range.end.region_index]
+    );
+
+    plan.mark_transaction_log_finished(0, later_range).unwrap();
+    assert_eq!(plan.retained_transaction_logs.len(), 1);
+    assert_eq!(
+        plan.retained_transaction_logs[0].outcome,
+        TransactionLogOutcome::Finished
+    );
+
+    let other_range = TransactionLogRange {
+        start: LogPosition {
+            region_index: 6,
+            offset: 40,
+        },
+        end: LogPosition {
+            region_index: 6,
+            offset: 40,
+        },
+    };
+    plan.mark_transaction_log_finished(0, other_range).unwrap();
+    assert_eq!(plan.retained_transaction_logs.len(), 2);
+    assert_eq!(plan.retained_transaction_logs[1].range, other_range);
+    assert_eq!(plan.retained_transaction_logs[1].seal, None);
+    assert_eq!(
+        plan.retained_transaction_logs[1].regions.as_slice(),
+        &[other_range.start.region_index]
+    );
+}
+
 fn append_transaction_enrollment<
     const REGION_SIZE: usize,
     const REGION_COUNT: usize,
@@ -167,9 +332,8 @@ fn append_transaction_enrollment<
     collection_id: CollectionId,
     observed_collection_generation: u64,
 ) -> usize {
-    append_wal_record(
+    append_transaction_suffix_record(
         flash,
-        metadata,
         tx_region,
         tx_offset,
         WalRecord::AddTransactionCollection {
@@ -177,6 +341,69 @@ fn append_transaction_enrollment<
             observed_collection_generation,
         },
     )
+}
+
+fn append_transaction_suffix_record<
+    const REGION_SIZE: usize,
+    const REGION_COUNT: usize,
+    const MAX_LOG: usize,
+>(
+    flash: &mut MockFlash<REGION_SIZE, REGION_COUNT, MAX_LOG>,
+    tx_region: u32,
+    tx_offset: usize,
+    record: WalRecord<'_>,
+) -> usize {
+    let mut bytes = [0u8; REGION_SIZE];
+    let used = encode_private_suffix_entry(record, &mut bytes).unwrap();
+    flash
+        .write_region(tx_region, tx_offset, &bytes[..used])
+        .unwrap();
+    tx_offset + used
+}
+
+fn append_transaction_allocation_entry<
+    const REGION_SIZE: usize,
+    const REGION_COUNT: usize,
+    const MAX_LOG: usize,
+>(
+    flash: &mut MockFlash<REGION_SIZE, REGION_COUNT, MAX_LOG>,
+    metadata: StorageMetadata,
+    tx_region: u32,
+    tx_offset: usize,
+    region_index: u32,
+    allocation_head_after: FreeQueuePosition,
+    purpose: TransactionAllocationPurpose,
+) -> usize {
+    let mut bytes = [0u8; REGION_SIZE];
+    let used = TransactionAllocationEntry {
+        region_index,
+        allocation_head_after,
+        purpose,
+    }
+    .encode_into(metadata, &mut bytes)
+    .unwrap();
+    flash
+        .write_region(tx_region, tx_offset, &bytes[..used])
+        .unwrap();
+    tx_offset + used
+}
+
+fn append_transaction_segment_seal<
+    const REGION_SIZE: usize,
+    const REGION_COUNT: usize,
+    const MAX_LOG: usize,
+>(
+    flash: &mut MockFlash<REGION_SIZE, REGION_COUNT, MAX_LOG>,
+    tx_region: u32,
+    tx_offset: usize,
+    seal: TransactionSegmentSeal,
+) -> usize {
+    let mut bytes = [0u8; TransactionSegmentSeal::ENCODED_LEN];
+    let used = seal.encode_into(&mut bytes).unwrap();
+    flash
+        .write_region(tx_region, tx_offset, &bytes[..used])
+        .unwrap();
+    tx_offset + used
 }
 
 fn init_wal_region<const REGION_SIZE: usize, const REGION_COUNT: usize, const MAX_LOG: usize>(
@@ -326,30 +553,28 @@ fn setup_precommit_transaction_recovery(
     let collection_id = CollectionId(7);
     let tx_region = 4;
     let tx_start = init_transaction_log_region(&mut flash, metadata, tx_region, 2, tx_region);
-    let mut tx_offset = append_transaction_enrollment(
+    let allocation_end = append_transaction_allocation_entry(
         &mut flash,
         metadata,
         tx_region,
         tx_start,
-        collection_id,
-        startup_test_generation(collection_id, StartupCollectionBasis::Empty, 0),
+        2,
+        FreeQueuePosition {
+            region_index: 1,
+            entry_index: 1,
+        },
+        TransactionAllocationPurpose::DataRegion,
     );
-    tx_offset = append_wal_record(
+    let mut tx_offset = append_transaction_enrollment(
         &mut flash,
         metadata,
         tx_region,
-        tx_offset,
-        WalRecord::AllocateRegion {
-            region_index: 2,
-            allocation_head_after: FreeQueuePosition {
-                region_index: 1,
-                entry_index: 1,
-            },
-        },
+        allocation_end,
+        collection_id,
+        startup_test_generation(collection_id, StartupCollectionBasis::Empty, 0),
     );
-    tx_offset = append_wal_record(
+    let _suffix_end = append_transaction_suffix_record(
         &mut flash,
-        metadata,
         tx_region,
         tx_offset,
         WalRecord::Update {
@@ -357,7 +582,7 @@ fn setup_precommit_transaction_recovery(
             payload: &[1],
         },
     );
-    let range = transaction_range(tx_region, tx_start, tx_offset);
+    let range = transaction_range(tx_region, tx_start, allocation_end);
 
     let mut offset = append_wal_record(
         &mut flash,
@@ -439,9 +664,8 @@ fn setup_precommit_transaction_requiring_recovery_rotation() -> MockFlash<512, 6
         collection_id,
         startup_test_generation(collection_id, StartupCollectionBasis::Empty, 0),
     );
-    let tx_end = append_wal_record(
+    let tx_end = append_transaction_suffix_record(
         &mut flash,
-        metadata,
         tx_region,
         tx_offset,
         WalRecord::Update {
@@ -568,16 +792,14 @@ fn setup_postcommit_transaction_recovery(append_free_region: bool) -> MockFlash<
         collection_id,
         startup_test_generation(collection_id, StartupCollectionBasis::Region(2), 0),
     );
-    let tx_offset = append_wal_record(
+    let tx_offset = append_transaction_suffix_record(
         &mut flash,
-        metadata,
         tx_region,
         tx_offset,
         WalRecord::DropCollection { collection_id },
     );
-    let tx_end = append_wal_record(
+    let tx_end = append_transaction_suffix_record(
         &mut flash,
-        metadata,
         tx_region,
         tx_offset,
         WalRecord::FreeIntent {
@@ -645,6 +867,7 @@ fn setup_postcommit_transaction_recovery(append_free_region: bool) -> MockFlash<
         WalRecord::CommitTransaction {
             transaction_log_id: 0,
             range,
+            seal: commit_seal(range),
         },
     );
     if append_free_region {
@@ -1075,9 +1298,8 @@ fn requirement_open_formatted_store_replays_finished_transaction_interval() {
         collection_id,
         startup_test_generation(collection_id, StartupCollectionBasis::Empty, 0),
     );
-    let tx_end = append_wal_record(
+    let tx_end = append_transaction_suffix_record(
         &mut flash,
-        metadata,
         tx_region,
         tx_offset,
         WalRecord::Update {
@@ -1115,6 +1337,7 @@ fn requirement_open_formatted_store_replays_finished_transaction_interval() {
         WalRecord::CommitTransaction {
             transaction_log_id: 0,
             range,
+            seal: commit_seal(range),
         },
     );
     append_wal_record(
@@ -1133,6 +1356,228 @@ fn requirement_open_formatted_store_replays_finished_transaction_interval() {
     assert_eq!(collection.pending_update_count(), 1);
 }
 
+//= spec/ring/05-disk-format.md#transaction-log-segment-layout
+//= type=test
+//# `RING-TXLOG-SEG-005` Private suffix bytes MUST NOT be replay-visible
+//# unless their segment is sealed by a valid `TransactionSegmentSeal` or, for
+//# the final segment, by the matching main-WAL `commit_transaction` record.
+#[test]
+fn requirement_open_formatted_store_replays_sealed_transaction_log_segment_chain() {
+    let mut flash = MockFlash::<512, 6, 256>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    let wal_offset = metadata.wal_record_area_offset().unwrap();
+    let collection_id = CollectionId(7);
+    let first_tx_region = 4;
+    let second_tx_region = 5;
+    let first_start =
+        init_transaction_log_region(&mut flash, metadata, first_tx_region, 2, first_tx_region);
+    let second_start =
+        init_transaction_log_region(&mut flash, metadata, second_tx_region, 3, first_tx_region);
+
+    let first_suffix_start = first_start + TransactionSegmentSeal::ENCODED_LEN;
+    let mut first_suffix_end = append_transaction_enrollment(
+        &mut flash,
+        metadata,
+        first_tx_region,
+        first_suffix_start,
+        collection_id,
+        startup_test_generation(collection_id, StartupCollectionBasis::Empty, 0),
+    );
+    first_suffix_end = append_transaction_suffix_record(
+        &mut flash,
+        first_tx_region,
+        first_suffix_end,
+        WalRecord::Update {
+            collection_id,
+            payload: &[1],
+        },
+    );
+    append_transaction_segment_seal(
+        &mut flash,
+        first_tx_region,
+        first_start,
+        TransactionSegmentSeal {
+            next_region_index: second_tx_region,
+            expected_sequence: 3,
+            free_intent_start: u32::try_from(first_suffix_start).unwrap(),
+            segment_end: u32::try_from(first_suffix_end).unwrap(),
+        },
+    );
+    let second_end = append_transaction_suffix_record(
+        &mut flash,
+        second_tx_region,
+        second_start,
+        WalRecord::Update {
+            collection_id,
+            payload: &[2],
+        },
+    );
+    let range = TransactionLogRange {
+        start: LogPosition {
+            region_index: first_tx_region,
+            offset: u32::try_from(first_start).unwrap(),
+        },
+        end: LogPosition {
+            region_index: second_tx_region,
+            offset: u32::try_from(second_end).unwrap(),
+        },
+    };
+    let seal = TransactionCommitSeal {
+        final_free_intent_start: LogPosition {
+            region_index: second_tx_region,
+            offset: u32::try_from(second_start).unwrap(),
+        },
+        final_segment_end: range.end,
+    };
+
+    let after_new_collection = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        wal_offset,
+        WalRecord::NewCollection {
+            collection_id,
+            collection_type: CollectionType::MAP_CODE,
+        },
+    );
+    let after_begin = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        after_new_collection,
+        WalRecord::BeginTransaction {
+            transaction_log_id: 0,
+            start: range.start,
+        },
+    );
+    let after_commit = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        after_begin,
+        WalRecord::CommitTransaction {
+            transaction_log_id: 0,
+            range,
+            seal,
+        },
+    );
+    append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        after_commit,
+        WalRecord::TransactionFinished {
+            transaction_log_id: 0,
+            range,
+        },
+    );
+
+    let state = open_formatted_store::<512, 6, _>(&mut flash).unwrap();
+    let collection = collection_summary(&state, collection_id);
+    assert_eq!(collection.pending_update_count(), 2);
+}
+
+//= spec/ring/05-disk-format.md#transaction-log-segment-layout
+//= type=test
+//# `RING-TXLOG-SEG-005` The private suffix stream is self-delimiting
+//# from `free_intent_start` to `segment_end`; replay rejects malformed,
+//# truncated, or checksum-invalid entries inside a sealed suffix.
+#[test]
+fn requirement_open_formatted_store_rejects_invalid_transaction_log_segment_bounds() {
+    let mut flash = MockFlash::<512, 6, 256>::new(0xff);
+    let metadata = flash.format_empty_store(1, 8, 0xa5).unwrap();
+    let wal_offset = metadata.wal_record_area_offset().unwrap();
+    let collection_id = CollectionId(7);
+    let first_tx_region = 4;
+    let second_tx_region = 5;
+    let first_start =
+        init_transaction_log_region(&mut flash, metadata, first_tx_region, 2, first_tx_region);
+    let second_start =
+        init_transaction_log_region(&mut flash, metadata, second_tx_region, 3, first_tx_region);
+    let first_suffix_start = first_start + TransactionSegmentSeal::ENCODED_LEN;
+    let first_suffix_end = append_transaction_enrollment(
+        &mut flash,
+        metadata,
+        first_tx_region,
+        first_suffix_start,
+        collection_id,
+        startup_test_generation(collection_id, StartupCollectionBasis::Empty, 0),
+    );
+    append_transaction_segment_seal(
+        &mut flash,
+        first_tx_region,
+        first_start,
+        TransactionSegmentSeal {
+            next_region_index: second_tx_region,
+            expected_sequence: 3,
+            free_intent_start: u32::try_from(first_start).unwrap(),
+            segment_end: u32::try_from(first_suffix_end).unwrap(),
+        },
+    );
+    let second_end = append_transaction_suffix_record(
+        &mut flash,
+        second_tx_region,
+        second_start,
+        WalRecord::Update {
+            collection_id,
+            payload: &[2],
+        },
+    );
+    let range = TransactionLogRange {
+        start: LogPosition {
+            region_index: first_tx_region,
+            offset: u32::try_from(first_start).unwrap(),
+        },
+        end: LogPosition {
+            region_index: second_tx_region,
+            offset: u32::try_from(second_end).unwrap(),
+        },
+    };
+
+    let after_new_collection = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        wal_offset,
+        WalRecord::NewCollection {
+            collection_id,
+            collection_type: CollectionType::MAP_CODE,
+        },
+    );
+    let after_begin = append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        after_new_collection,
+        WalRecord::BeginTransaction {
+            transaction_log_id: 0,
+            start: range.start,
+        },
+    );
+    append_wal_record(
+        &mut flash,
+        metadata,
+        0,
+        after_begin,
+        WalRecord::CommitTransaction {
+            transaction_log_id: 0,
+            range,
+            seal: TransactionCommitSeal {
+                final_free_intent_start: LogPosition {
+                    region_index: second_tx_region,
+                    offset: u32::try_from(second_start).unwrap(),
+                },
+                final_segment_end: range.end,
+            },
+        },
+    );
+
+    assert_eq!(
+        open_formatted_store::<512, 6, _>(&mut flash).unwrap_err(),
+        StartupError::InvalidWalRegion(first_tx_region)
+    );
+}
+
 //= spec/ring/04-wal-records.md#ordering-and-validity
 //= type=test
 //# `RING-WAL-VALID-023` A transaction log may contain records for any collection
@@ -1147,9 +1592,8 @@ fn requirement_transaction_log_replay_rejects_unenrolled_collection_mutation() {
     let collection_id = CollectionId(7);
     let tx_region = 2;
     let tx_start = init_transaction_log_region(&mut flash, metadata, tx_region, 2, tx_region);
-    let tx_end = append_wal_record(
+    let tx_end = append_transaction_suffix_record(
         &mut flash,
-        metadata,
         tx_region,
         tx_start,
         WalRecord::Update {
@@ -1187,6 +1631,7 @@ fn requirement_transaction_log_replay_rejects_unenrolled_collection_mutation() {
         WalRecord::CommitTransaction {
             transaction_log_id: 0,
             range,
+            seal: commit_seal(range),
         },
     );
 
@@ -1219,9 +1664,8 @@ fn requirement_transaction_log_replay_rejects_enrollment_generation_mismatch() {
         collection_id,
         startup_test_generation(collection_id, StartupCollectionBasis::Empty, 0).wrapping_add(1),
     );
-    let tx_end = append_wal_record(
+    let tx_end = append_transaction_suffix_record(
         &mut flash,
-        metadata,
         tx_region,
         tx_offset,
         WalRecord::Update {
@@ -1259,6 +1703,7 @@ fn requirement_transaction_log_replay_rejects_enrollment_generation_mismatch() {
         WalRecord::CommitTransaction {
             transaction_log_id: 0,
             range,
+            seal: commit_seal(range),
         },
     );
 
@@ -1333,14 +1778,13 @@ fn requirement_transaction_log_replay_rejects_private_free_region_records() {
         WalRecord::CommitTransaction {
             transaction_log_id: 0,
             range,
+            seal: commit_seal(range),
         },
     );
 
     assert_eq!(
         open_formatted_store::<512, 4, _>(&mut flash).unwrap_err(),
-        StartupError::InvalidTransactionEnrollment {
-            collection_id: CollectionId(0),
-        }
+        StartupError::WalRecord(WalRecordError::InvalidRecordType(0xa5))
     );
 }
 
@@ -1368,9 +1812,8 @@ fn requirement_open_formatted_store_rolls_back_only_transaction_collection_recor
         transaction_collection,
         startup_test_generation(transaction_collection, StartupCollectionBasis::Empty, 0),
     );
-    let tx_offset = append_wal_record(
+    let tx_offset = append_transaction_suffix_record(
         &mut flash,
-        metadata,
         tx_region,
         tx_offset,
         WalRecord::Update {
@@ -1452,30 +1895,28 @@ fn requirement_open_formatted_store_recovers_unfinished_transaction_before_commi
     let collection_id = CollectionId(7);
     let tx_region = 4;
     let tx_start = init_transaction_log_region(&mut flash, metadata, tx_region, 2, tx_region);
-    let mut tx_offset = append_transaction_enrollment(
+    let allocation_end = append_transaction_allocation_entry(
         &mut flash,
         metadata,
         tx_region,
         tx_start,
-        collection_id,
-        startup_test_generation(collection_id, StartupCollectionBasis::Empty, 0),
+        2,
+        FreeQueuePosition {
+            region_index: 1,
+            entry_index: 1,
+        },
+        TransactionAllocationPurpose::DataRegion,
     );
-    tx_offset = append_wal_record(
+    let mut tx_offset = append_transaction_enrollment(
         &mut flash,
         metadata,
         tx_region,
-        tx_offset,
-        WalRecord::AllocateRegion {
-            region_index: 2,
-            allocation_head_after: FreeQueuePosition {
-                region_index: 1,
-                entry_index: 1,
-            },
-        },
+        allocation_end,
+        collection_id,
+        startup_test_generation(collection_id, StartupCollectionBasis::Empty, 0),
     );
-    tx_offset = append_wal_record(
+    let _suffix_end = append_transaction_suffix_record(
         &mut flash,
-        metadata,
         tx_region,
         tx_offset,
         WalRecord::Update {
@@ -1483,7 +1924,7 @@ fn requirement_open_formatted_store_recovers_unfinished_transaction_before_commi
             payload: &[1],
         },
     );
-    let range = transaction_range(tx_region, tx_start, tx_offset);
+    let range = transaction_range(tx_region, tx_start, allocation_end);
 
     let after_new_collection = append_wal_record(
         &mut flash,
@@ -1570,16 +2011,14 @@ fn requirement_open_formatted_store_finishes_post_commit_transaction_cleanup() {
         collection_id,
         startup_test_generation(collection_id, StartupCollectionBasis::Region(2), 0),
     );
-    let tx_offset = append_wal_record(
+    let tx_offset = append_transaction_suffix_record(
         &mut flash,
-        metadata,
         tx_region,
         tx_offset,
         WalRecord::DropCollection { collection_id },
     );
-    let tx_end = append_wal_record(
+    let tx_end = append_transaction_suffix_record(
         &mut flash,
-        metadata,
         tx_region,
         tx_offset,
         WalRecord::FreeIntent {
@@ -1647,6 +2086,7 @@ fn requirement_open_formatted_store_finishes_post_commit_transaction_cleanup() {
         WalRecord::CommitTransaction {
             transaction_log_id: 0,
             range,
+            seal: commit_seal(range),
         },
     );
 
@@ -1939,9 +2379,8 @@ fn requirement_wal_transaction_finished_record_closes_cleanup_phase() {
         collection_id,
         startup_test_generation(collection_id, StartupCollectionBasis::Empty, 0),
     );
-    let tx_end = append_wal_record(
+    let tx_end = append_transaction_suffix_record(
         &mut flash,
-        metadata,
         tx_region,
         tx_offset,
         WalRecord::Update {
@@ -1979,6 +2418,7 @@ fn requirement_wal_transaction_finished_record_closes_cleanup_phase() {
         WalRecord::CommitTransaction {
             transaction_log_id: 0,
             range,
+            seal: commit_seal(range),
         },
     );
     append_wal_record(
