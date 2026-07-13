@@ -2,11 +2,11 @@
 
 ## Purpose
 
-This specification defines the Rust implementation strategy for the
-low-level storage design in [spec/ring/00-introduction.md](ring/00-introduction.md).
-[spec/ring/00-introduction.md](ring/00-introduction.md) remains the source of truth for storage
-semantics, crash ordering, and on-disk format. This document defines
-how those rules are to be realized in a `no_std`, `no_alloc`,
+This specification defines the Rust implementation strategy for the low-level
+storage design in [spec/ring/00-introduction.md](ring/00-introduction.md).
+[spec/ring/00-introduction.md](ring/00-introduction.md) remains the source of
+truth for storage semantics, crash ordering, and on-disk format. This document
+defines how those rules are to be realized in a `no_std`, `no_alloc`,
 runtime-agnostic Rust implementation.
 
 Repository traceability policy and specification-format rules live in
@@ -38,9 +38,9 @@ Rust `alloc` crate.
 3. `RING-IMPL-CORE-003` The core library crate MUST NOT depend on an
 async runtime, executor, scheduler, or timer facility.
 4. `RING-IMPL-CORE-004` The implementation MUST preserve the durable
-behavior defined by [spec/ring/00-introduction.md](ring/00-introduction.md); this specification MAY
-constrain implementation structure but MUST NOT weaken ring-level
-correctness requirements.
+behavior defined by [spec/ring/00-introduction.md](ring/00-introduction.md);
+this specification MAY constrain implementation structure but MUST NOT weaken
+ring-level correctness requirements.
 5. `RING-IMPL-CORE-005` All memory required for normal operation MUST
 come from caller-owned values, fixed-capacity fields, or stack frames
 whose size is statically bounded by type parameters or API contracts.
@@ -101,14 +101,14 @@ make the boundary stricter by ensuring the public `Storage` facade owns
 the backing access and scratch buffers while the lower-level runtime
 state remains reviewable as explicit storage logic.
 
-The state-machine model in [spec/ring/00-introduction.md](ring/00-introduction.md) maps to an
-implementation shape where `StorageRuntime`, or the storage context
-that owns it, carries one storage-mode enum. Complex operations use
-mode-specific sub-enums for their interstitial state. Format and open
-paths may use bounded builder or startup state until the recovered
-runtime state exists; after that point operation progress belongs in
-the active mode rather than in unrelated runtime fields or hidden
-long-lived globals.
+The state-machine model in
+[spec/ring/00-introduction.md](ring/00-introduction.md) maps to an
+implementation shape where `StorageRuntime`, or the storage context that owns
+it, carries one storage-mode enum. Complex operations use mode-specific
+sub-enums for their interstitial state. Format and open paths may use bounded
+builder or startup state until the recovered runtime state exists; after that
+point operation progress belongs in the active mode rather than in unrelated
+runtime fields or hidden long-lived globals.
 
 ### Architecture Requirements
 
@@ -150,8 +150,9 @@ dispatched by default.
 ### I/O Requirements
 
 1. `RING-IMPL-IO-001` The Borromean backing abstraction MUST expose only
-the primitive operations needed to satisfy [spec/ring/00-introduction.md](ring/00-introduction.md):
-region or metadata reads, writes, erases, and durability barriers.
+the primitive operations needed to satisfy
+[spec/ring/00-introduction.md](ring/00-introduction.md): region or metadata
+reads, writes, erases, and durability barriers.
 2. `RING-IMPL-IO-002` The Borromean backing abstraction MUST be generic
 over the caller's concrete transport, flash driver, emulator, or
 synchronization wrapper type.
@@ -305,20 +306,22 @@ reuse one `Storage` context across sequential operations.
 
 ### Operation Future Regression Requirements
 
-1. `RING-IMPL-REGRESSION-097` Storage format futures MUST poll to completion and return initialized
-   storage state.
-2. `RING-IMPL-REGRESSION-098` Storage open futures MUST poll to completion and replay collection
-   pending update state.
-3. `RING-IMPL-REGRESSION-099` Storage open futures MUST yield pending between startup phases before
-   completing with recovered WAL head and tail.
-4. `RING-IMPL-REGRESSION-100` Dropping a partially polled storage open future MUST leave the store
-   openable with unchanged recovered state.
-5. `RING-IMPL-REGRESSION-101` Storage WAL-head reclaim futures MUST poll to completion, update WAL
-   head to the reclaimed continuation, and append the old WAL prefix to the free-space tail.
-6. `RING-IMPL-REGRESSION-102` Storage WAL-head reclaim futures MUST yield between reclaim phases
-   before completing with updated WAL head.
-7. `RING-IMPL-REGRESSION-103` Dropping a WAL-head reclaim future after reclaim begins MUST leave
-   the store recoverable with original WAL head and live collection basis.
+1. `RING-IMPL-REGRESSION-097` Storage format futures MUST poll to completion and
+   return initialized storage state.
+2. `RING-IMPL-REGRESSION-098` Storage open futures MUST poll to completion and
+   replay collection pending update state.
+3. `RING-IMPL-REGRESSION-099` Storage open futures MUST yield pending between
+   startup phases before completing with recovered WAL head and tail.
+4. `RING-IMPL-REGRESSION-100` Dropping a partially polled storage open future
+   MUST leave the store openable with unchanged recovered state.
+5. `RING-IMPL-REGRESSION-101` Storage WAL-head reclaim futures MUST poll to
+   completion, update WAL head to the reclaimed continuation, and append the old
+   WAL prefix to the free-space tail.
+6. `RING-IMPL-REGRESSION-102` Storage WAL-head reclaim futures MUST yield
+   between reclaim phases before completing with updated WAL head.
+7. `RING-IMPL-REGRESSION-103` Dropping a WAL-head reclaim future after reclaim
+   begins MUST leave the store recoverable with original WAL head and live
+   collection basis.
 
 ## API Shape
 

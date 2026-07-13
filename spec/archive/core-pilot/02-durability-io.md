@@ -76,8 +76,8 @@ make one meaningful. The operation set separately names which actions exist or
 are permitted. Adding a new operation type is not itself adding or changing a
 budget.
 
-Before the first media write, erase, or sync, a state-changing operation preflights
-the encoded and granule-rounded append size where applicable, WAL
+Before the first media write, erase, or sync, a state-changing operation
+preflights the encoded and granule-rounded append size where applicable, WAL
 successor-link space, reservation capacity, scratch memory, and any other
 resource needed to reach its publication point. A capacity or lock failure
 therefore leaves no new media fact.

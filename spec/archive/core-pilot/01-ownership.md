@@ -132,25 +132,26 @@ the recyclable lifecycle.
 
 1. `CORE-OWN-009` For every valid durable ownership-event sequence, foreground
    application and startup replay MUST produce identical ownership tables; for
-   an invalid event, both paths MUST return the same typed ownership error at the
-   same event without applying it.
+   an invalid event, both paths MUST return the same typed ownership error at
+   the same event without applying it.
 
 ## Formal refinement evidence
 
 The ownership design has two independent Quint representations. The
-[abstract ownership model](../../../models/archive/core-pilot/region_ownership.qnt) defines this
-chapter's lifecycle, identities, linear reservation authority, transition
-errors, and replay fold without device state. The shared
-[mechanical storage model](../../../models/archive/core-pilot/storage_mechanical.qnt) represents
-issued work, durable records, content and erase completion, runtime apply,
-crash outcomes, and recovery.
+[abstract ownership model](../../../models/archive/core-pilot/region_ownership.qnt)
+defines this chapter's lifecycle, identities, linear reservation authority,
+transition errors, and replay fold without device state. The shared
+[mechanical storage model](../../../models/archive/core-pilot/storage_mechanical.qnt)
+represents issued work, durable records, content and erase completion, runtime
+apply, crash outcomes, and recovery.
 
-The [ownership refinement bridge](../../../models/archive/core-pilot/ownership_refinement.qnt)
+The
+[ownership refinement bridge](../../../models/archive/core-pilot/ownership_refinement.qnt)
 imports both models and maps recoverable mechanical state to the abstract
-ownership table. It checks forward refinement: each mechanical step must
-produce one permitted abstract ownership batch or leave abstract ownership
-unchanged. The abstract model does not import the mechanical model, and the
-mechanical model does not import this chapter's abstraction.
+ownership table. It checks forward refinement: each mechanical step must produce
+one permitted abstract ownership batch or leave abstract ownership unchanged.
+The abstract model does not import the mechanical model, and the mechanical
+model does not import this chapter's abstraction.
 
 This bounded model supplies evidence for the logical transition requirements.
 The encoded namespace portion of `CORE-OWN-004` and Rust's compile-time

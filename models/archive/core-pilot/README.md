@@ -53,16 +53,16 @@ invariant to fail, demonstrating that the checks reject publication without
 durable content, readiness without erase, reuse of a published region, and a
 mismatched publication token.
 
-The original [`transaction_free_recovery.qnt`](../../transaction_free_recovery.qnt)
-remains unchanged as a regression oracle. `legacy_recovery_bounded.qnt` wraps
-that exact init, step, and safety relation with eight actions of model fuel for
-TLC.
-The ownership abstraction, mechanical protocol, and refinement bridge are
-checked with Quint's TLC backend. Apalache 0.56.1 remains the verifier for the
-smaller focused core models; its Z3 translation currently returns `UNKNOWN` or
-fails to complete for the richer ownership protocol and legacy recovery model
-instead of producing a proof or counterexample. The verification script treats
-that result as unsupported, not success.
+The original
+[`transaction_free_recovery.qnt`](../../transaction_free_recovery.qnt) remains
+unchanged as a regression oracle. `legacy_recovery_bounded.qnt` wraps that exact
+init, step, and safety relation with eight actions of model fuel for TLC. The
+ownership abstraction, mechanical protocol, and refinement bridge are checked
+with Quint's TLC backend. Apalache 0.56.1 remains the verifier for the smaller
+focused core models; its Z3 translation currently returns `UNKNOWN` or fails to
+complete for the richer ownership protocol and legacy recovery model instead of
+producing a proof or counterexample. The verification script treats that result
+as unsupported, not success.
 
 Quint 0.32.0 does not forward `--max-steps` to its TLC backend, so the ownership
 models enforce their bounds in the transition systems themselves. The abstract

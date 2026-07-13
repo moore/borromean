@@ -2,8 +2,8 @@
 
 ## Purpose
 
-`ObjectLog` is a durable opaque object collection intended to support
-external storage systems built on top of it. It is meant for callers that need stable
+`ObjectLog` is a durable opaque object collection intended to support external
+storage systems built on top of it. It is meant for callers that need stable
 object addresses, durable append semantics, prefix truncation, and efficient
 packing on flash-like media.
 
@@ -41,15 +41,15 @@ small, the read fails with an error that reports the stored object length so the
 caller can retry with a larger buffer or switch to a range read. A length-only
 query returns the stored `u64` object length without returning object bytes. A
 range read uses an opaque live handle plus `offset` and `len` values inside that
-object's payload bytes. It returns only the requested byte range, so callers need
-scratch capacity for the requested range rather than for the full object.
+object's payload bytes. It returns only the requested byte range, so callers
+need scratch capacity for the requested range rather than for the full object.
 
 This collection also has its own durable `collection_type`. That lets generic
 Borromean open and replay paths recognize object-log collections without
-hard-coding application-specific behavior into core storage. The collection-specific
-module owns the object payload formats and validation rules; Borromean core
-only needs to know that the collection type is supported and which empty
-snapshot payload represents an empty object log during WAL reclaim.
+hard-coding application-specific behavior into core storage. The
+collection-specific module owns the object payload formats and validation rules;
+Borromean core only needs to know that the collection type is supported and
+which empty snapshot payload represents an empty object log during WAL reclaim.
 
 1. `RING-OBJECT-001` Appending an object MUST return an opaque
 `ObjectLogHandle` that names a committed object record, and reopening the
@@ -171,8 +171,8 @@ allocated auxiliary region. `tail_logical_len` MUST NOT exceed
 `total_object_len` and MUST be less than one complete auxiliary-region image's
 logical chunk capacity.
 
-Large-object auxiliary regions use the ordinary Borromean region header, then
-an object-log auxiliary prologue with its own version. The auxiliary prologue is:
+Large-object auxiliary regions use the ordinary Borromean region header, then an
+object-log auxiliary prologue with its own version. The auxiliary prologue is:
 
 - `aux_magic: [u8; 4]`: the literal bytes `OLAX`.
 - `aux_version: u16`: the auxiliary-region format version, currently `1`.
@@ -313,9 +313,9 @@ image, that image becomes the final auxiliary region. If the object ends with a
 partial scratch image, the writer publishes the object through the ordinary
 object-log path by appending a `LargeRecordEntry` followed immediately by the
 remaining private tail chunks. There may be zero or more tail chunks, up to one
-fewer chunk than fits in an auxiliary region. The large record entry and its tail
-chunks are contiguous in ordinary object-log order, although that span may cross
-ordinary object-log region boundaries. Public traversal skips tail chunks.
+fewer chunk than fits in an auxiliary region. The large record entry and its
+tail chunks are contiguous in ordinary object-log order, although that span may
+cross ordinary object-log region boundaries. Public traversal skips tail chunks.
 
 Crossing a chunk, span, or region boundary does not create logical object
 padding. `chunk_len` records only logical bytes. Auxiliary chunk zero fill and

@@ -124,7 +124,8 @@ through `AppendUpdate`, and applies that update to RAM.
 `update` record through `AppendUpdate` and applies that update to the
 existing RAM frontier.
 
-9. `EmptyClean | EmptyDirty | WALSnapshotClean | WALSnapshotDirty | RegionClean | RegionDirty
+9. `EmptyClean | EmptyDirty | WALSnapshotClean | WALSnapshotDirty | RegionClean
+   | RegionDirty
 --CommitCollectionSnapshot--> WALSnapshotClean`
 `CommitCollectionSnapshot(collection_id, payload)` appends a
 `snapshot` record through `CommitSnapshotHead`.
@@ -134,7 +135,8 @@ dirty frontier is clear. Clean-source snapshotting is allowed because a
 collection operation may choose to rewrite its clean basis into a
 different retained WAL snapshot without changing logical content.
 
-10. `EmptyClean | EmptyDirty | WALSnapshotClean | WALSnapshotDirty | RegionClean | RegionDirty
+10. `EmptyClean | EmptyDirty | WALSnapshotClean | WALSnapshotDirty | RegionClean
+    | RegionDirty
 --CommitCollectionRegion--> RegionClean`
 `CommitCollectionRegion(collection_id, region_index, payload)` runs the
 region-commit operation: reserve a target region as needed, write the
@@ -150,7 +152,8 @@ If the operation makes old regions unreachable, it uses a collection
 transaction so the new basis is recovered only with the required cleanup
 mode.
 
-11. `EmptyClean | EmptyDirty | WALSnapshotClean | WALSnapshotDirty | RegionClean | RegionDirty
+11. `EmptyClean | EmptyDirty | WALSnapshotClean | WALSnapshotDirty | RegionClean
+    | RegionDirty
 --DropCollection--> Dropped`
 `DropCollection(collection_id)` appends `drop_collection(collection_id)`
 through `CommitDropCollection`, inside a collection transaction when
@@ -212,14 +215,18 @@ durable tombstone`"])
 
 Collection format responsibility:
 
-1. `RING-FORMAT-001` Each non-WAL `collection_format` value is defined by the user
+1. `RING-FORMAT-001` Each non-WAL `collection_format` value is defined by the
+   user
 collection type that writes it; Borromean core stores that value in the
 region header but does not assign it global meaning.
-2. `RING-FORMAT-002` Each user collection format defines how reads merge the durable basis
+2. `RING-FORMAT-002` Each user collection format defines how reads merge the
+   durable basis
 with the in-memory frontier.
-3. `RING-FORMAT-003` The frontier MUST take precedence over older values in the durable
+3. `RING-FORMAT-003` The frontier MUST take precedence over older values in the
+   durable
 basis.
-4. `RING-FORMAT-004` Flush to `RegionClean` materializes the logical state produced by
+4. `RING-FORMAT-004` Flush to `RegionClean` materializes the logical state
+   produced by
 that merge, either directly in the head region or through
 collection-defined manifest state referenced by the head region.
 5. `RING-FORMAT-005` Every user collection MUST remain log-structured:
@@ -227,16 +234,20 @@ flushing mutable state writes new immutable committed region state
 instead of rewriting existing live region state in place. An LSM-style
 layout with manifest-described immutable runs is one valid way to
 satisfy this requirement.
-6. `RING-FORMAT-006` A `WALSnapshotClean` basis MUST be loadable into RAM before that
+6. `RING-FORMAT-006` A `WALSnapshotClean` basis MUST be loadable into RAM before
+   that
 collection accepts further mutations.
-7. `RING-FORMAT-007` For live user collections, the replay-tracked collection type is
+7. `RING-FORMAT-007` For live user collections, the replay-tracked collection
+   type is
 fixed by the earliest retained type-bearing record for that collection
 (`new_collection`, `snapshot`, or `head`). Historically this begins at
 `new_collection`, but WAL reclaim may later remove that record.
-8. `RING-FORMAT-008` Every later retained type-bearing record for that collection MUST
+8. `RING-FORMAT-008` Every later retained type-bearing record for that
+   collection MUST
 carry the same `collection_type`, otherwise replay must treat the
 mismatch as corruption.
-9. `RING-FORMAT-009` When a user collection implementation loads a committed region
+9. `RING-FORMAT-009` When a user collection implementation loads a committed
+   region
 basis, it validates that region's `collection_format` according to its
 own rules.
 10. `RING-FORMAT-010` Borromean core reserves three canonical private
@@ -246,7 +257,8 @@ logs, and `free_space_v2` for free-space collection metadata. These
 identifiers are not user-definable. `main_wal_v2` and `free_space_v2`
 are also the storage-private `collection_type` values used by WAL
 records that name `collection_id = 0`.
-11. `RING-FORMAT-011` Per-region format evolution remains allowed because region headers
+11. `RING-FORMAT-011` Per-region format evolution remains allowed because region
+    headers
 carry `collection_format` independently of the collection's stable
 type.
 12. `RING-FORMAT-012` Every non-WAL `collection_type` that may appear
@@ -271,7 +283,8 @@ Storage open validates the shared ring, WAL, allocator, and storage
 ownership structure. Typed collection open or load validates
 collection-defined payloads.
 
-16. `RING-FORMAT-016` Shared storage validation MUST reject a live retained committed-region
+16. `RING-FORMAT-016` Shared storage validation MUST reject a live retained
+    committed-region
 basis whose referenced region header does not belong to that collection.
 17. `RING-FORMAT-016A` Typed collection open or load MUST fail if retained
 committed-region payloads, retained `snapshot` payloads, or retained
@@ -284,7 +297,8 @@ post-basis updates still exist for it.
 
 Invariants:
 
-1. `RING-INVARIANT-001` The active durable basis for a collection is the last valid basis
+1. `RING-INVARIANT-001` The active durable basis for a collection is the last
+   valid basis
 decision in replay order, where a basis decision is
 `new_collection`, `snapshot`,
 `drop_collection`, or
@@ -293,16 +307,19 @@ decision in replay order, where a basis decision is
 `drop_collection`, and
 `head(collection_id, collection_type, region_index)` records totally
 order durable basis decisions per collection.
-3. `RING-INVARIANT-003` Any `new_collection`, `update`, `snapshot`, or `head` older than the
+3. `RING-INVARIANT-003` Any `new_collection`, `update`, `snapshot`, or `head`
+   older than the
 active basis for that collection is reclaimable.
-4. `RING-INVARIANT-004` If the active basis for a collection is `drop_collection`, then that
+4. `RING-INVARIANT-004` If the active basis for a collection is
+   `drop_collection`, then that
 collection is logically absent from the live namespace and any older
 durable basis or update bytes for that collection are reclaimable once
 they are no longer physically reachable. Any region associated with
 that dropped collection may then be appended to the free-space
 collection as a dirty free entry if it is not already represented there,
 using `free_region(region_index, append_tail_after)`.
-5. `RING-INVARIANT-005` Historical append validity and retained replay basis are distinct:
+5. `RING-INVARIANT-005` Historical append validity and retained replay basis are
+   distinct:
 `new_collection` is required before later user-collection records are
 appended, but reclaim may later remove it so replay reconstructs from
 the earliest retained basis record instead.

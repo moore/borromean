@@ -18,11 +18,11 @@ mid-publication surprise.
 
 ## Interface layers
 
-The raw device trait is intentionally mechanical. It exposes
-geometry plus blocking metadata/region reads, aligned media writes, region erase,
-and sync, with an associated backend error. It does not encode v3 headers or
-provide a separate formatting implementation. `Storage::format` and
-`Storage::open` own the on-media format and drive raw I/O.
+The raw device trait is intentionally mechanical. It exposes geometry plus
+blocking metadata/region reads, aligned media writes, region erase, and sync,
+with an associated backend error. It does not encode v3 headers or provide a
+separate formatting implementation. `Storage::format` and `Storage::open` own
+the on-media format and drive raw I/O.
 
 Above raw I/O, the generic core exposes:
 
@@ -59,8 +59,8 @@ flags are advisory work that may be performed later; success does not imply
 that maintenance was hidden in the call.
 
 If required prepared capacity is absent, the operation returns
-`MaintenanceRequired(flags)` before any media write, erase, or sync. If an enrolled collection is
-write-reserved, a competing write returns
+`MaintenanceRequired(flags)` before any media write, erase, or sync. If an
+enrolled collection is write-reserved, a competing write returns
 `CollectionWriteLocked(collection_id)` before any raw-device call. Neither
 condition waits for a scheduler or OS lock.
 
@@ -123,11 +123,11 @@ blocking calls, but it cannot borrow an OS executor as implicit state storage.
 ## Mechanical call sequence
 
 A mutating call validates logical state and all capacity first. It then records
-any required reservation, performs the format's declared physical writes and syncs,
-publishes the durable decision, applies the corresponding pure runtime
-transition, and returns the result with remaining pressure. Tests can drive
-the same synchronous steps one at a time, inspect raw-I/O traces, and inject a
-crash before any primitive operation or sync.
+any required reservation, performs the format's declared physical writes and
+syncs, publishes the durable decision, applies the corresponding pure runtime
+transition, and returns the result with remaining pressure. Tests can drive the
+same synchronous steps one at a time, inspect raw-I/O traces, and inject a crash
+before any primitive operation or sync.
 
 Dropping a handle or caller memory performs no implicit write. Work that must
 survive handle loss has already been recorded durably and is completed by

@@ -1,9 +1,10 @@
 # Benchmarks
 
-This document records the current local performance matrix for Borromean and the comparison
-engines used by the perf runner. The numbers are not intended to be universal claims about the
-engines. They are a repeatable engineering signal for this repository: same workload generator,
-same operation sequence, same value sizes, and the same reporting format.
+This document records the current local performance matrix for Borromean and the
+comparison engines used by the perf runner. The numbers are not intended to be
+universal claims about the engines. They are a repeatable engineering signal for
+this repository: same workload generator, same operation sequence, same value
+sizes, and the same reporting format.
 
 ## Running The Matrix
 
@@ -13,14 +14,15 @@ Run the full comparison matrix with:
 ./tasks.sh perf-matrix
 ```
 
-That command runs the configured scenarios and then prints a Markdown summary. It also writes the
-same summary to:
+That command runs the configured scenarios and then prints a Markdown summary.
+It also writes the same summary to:
 
 ```text
 target/perf/perf_matrix_summary.md
 ```
 
-To regenerate the Markdown summary from existing JSON reports without rerunning the benchmarks:
+To regenerate the Markdown summary from existing JSON reports without rerunning
+the benchmarks:
 
 ```bash
 ./tasks.sh perf-matrix-summary
@@ -28,25 +30,27 @@ To regenerate the Markdown summary from existing JSON reports without rerunning 
 
 ## Calibrating Run Size
 
-The matrix should use enough measured operations that one scheduler pause or cache-state accident
-does not dominate throughput. To find that point, run the calibration task:
+The matrix should use enough measured operations that one scheduler pause or
+cache-state accident does not dominate throughput. To find that point, run the
+calibration task:
 
 ```bash
 ./tasks.sh perf-calibrate
 ```
 
-That task builds the release perf binary once, runs each matrix config repeatedly at increasing
-operation counts, and writes a stability summary to:
+That task builds the release perf binary once, runs each matrix config
+repeatedly at increasing operation counts, and writes a stability summary to:
 
 ```text
 target/perf/perf_calibration_summary.md
 ```
 
-The calibration summary reports relative MAD: median absolute deviation divided by median
-throughput. The default stability thresholds are 3% for read-only workloads and 5% for write or
-mixed workloads. redb and Fjall are run once per workload during calibration; additional Borromean
-geometry configs run only the Borromean engines. The default write counts are intentionally
-conservative because durable writes are slow; raise them when needed with:
+The calibration summary reports relative MAD: median absolute deviation divided
+by median throughput. The default stability thresholds are 3% for read-only
+workloads and 5% for write or mixed workloads. redb and Fjall are run once per
+workload during calibration; additional Borromean geometry configs run only the
+Borromean engines. The default write counts are intentionally conservative
+because durable writes are slow; raise them when needed with:
 
 ```bash
 BORROMEAN_PERF_CALIBRATION_WRITE_COUNTS=3000,10000,30000 ./tasks.sh perf-calibrate
@@ -59,37 +63,44 @@ The checked-in perf matrix uses the current stable run sizes from calibration:
 
 ## Why These Benchmarks Exist
 
-The matrix is designed to separate the performance questions we are actively investigating:
+The matrix is designed to separate the performance questions we are actively
+investigating:
 
-- **Insert** measures durable WAL append cost and active frontier mutation for new keys.
-- **Hot update** preloads keys and then overwrites them, which is the workload where an LSM-like
-  design should plausibly do well.
+- **Insert** measures durable WAL append cost and active frontier mutation for
+  new keys.
+- **Hot update** preloads keys and then overwrites them, which is the workload
+  where an LSM-like design should plausibly do well.
 - **Read hits** measures successful lookups against preloaded keys.
 - **Read misses** measures negative lookup cost without writes.
-- **Mixed update** combines mostly reads with durable updates, approximating a small hot working
-  set.
+- **Mixed update** combines mostly reads with durable updates, approximating a
+  small hot working set.
 
 The comparison engines are chosen for different reasons:
 
-- **borromean** is the file-backed implementation with the current durability policy.
+- **borromean** is the file-backed implementation with the current durability
+  policy.
 - **redb** is a mature Rust embedded B-tree comparison point.
-- **fjall** is a Rust LSM-style comparison point and is closer to Borromean architecturally.
+- **fjall** is a Rust LSM-style comparison point and is closer to Borromean
+  architecturally.
 
-The file-backed write results should be read together with the durability and IO tables. Borromean
-and Fjall write similar process byte counts in these workloads, while redb often writes more.
+The file-backed write results should be read together with the durability and IO
+tables. Borromean and Fjall write similar process byte counts in these
+workloads, while redb often writes more.
 
-Borromean's memory backend is intentionally omitted from this document because it is an internal
-upper-bound diagnostic. To include it in ad hoc summaries, run the formatter with
-`--include-memory`.
+Borromean's memory backend is intentionally omitted from this document because
+it is an internal upper-bound diagnostic. To include it in ad hoc summaries, run
+the formatter with `--include-memory`.
 
-The durability table reports engine diagnostics from the full run. For read-only measured
-workloads, redb may still show commit time/count from preload because preload writes are durable,
-while measured read throughput excludes preload time.
+The durability table reports engine diagnostics from the full run. For read-only
+measured workloads, redb may still show commit time/count from preload because
+preload writes are durable, while measured read throughput excludes preload
+time.
 
-The matrix intentionally runs both 1 MiB and 4 KiB Borromean regions. Region size affects WAL
-rotation frequency, frontier flush granularity, compaction granularity, mmap flush ranges, and
-committed-read locality, so the two geometries are reported as separate Borromean columns. redb
-and Fjall do not use Borromean region geometry, so they run and are shown once per workload.
+The matrix intentionally runs both 1 MiB and 4 KiB Borromean regions. Region
+size affects WAL rotation frequency, frontier flush granularity, compaction
+granularity, mmap flush ranges, and committed-read locality, so the two
+geometries are reported as separate Borromean columns. redb and Fjall do not use
+Borromean region geometry, so they run and are shown once per workload.
 
 ## Current Local Results
 
@@ -99,11 +110,11 @@ The tables below were generated with:
 ./tasks.sh perf-matrix-summary
 ```
 
-Bold values mark the best result in each comparable performance row.
-Borromean geometry is shown as separate Borromean columns; redb and Fjall are shown once per
-workload because Borromean region size does not apply to those engines.
-All engines executed identical operation counts for each scenario; the JSON reports contain the
-full count breakdown.
+Bold values mark the best result in each comparable performance row. Borromean
+geometry is shown as separate Borromean columns; redb and Fjall are shown once
+per workload because Borromean region size does not apply to those engines. All
+engines executed identical operation counts for each scenario; the JSON reports
+contain the full count breakdown.
 
 ### Throughput (ops/s, higher is better)
 

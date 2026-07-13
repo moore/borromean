@@ -16,10 +16,12 @@ respective subsystems.
 This policy specification keeps normative requirements adjacent to the
 text that motivates them.
 
-1. `RING-IMPL-FORMAT-001` Each normative requirement in a repository specification configured for
-   Duvet verification MUST start with a stable identifier such as `RING-IMPL-CORE-001`.
-2. `RING-IMPL-FORMAT-002` Each normative requirement in a repository specification configured for
-   Duvet verification MUST use explicit RFC-2119 normative language.
+1. `RING-IMPL-FORMAT-001` Each normative requirement in a repository
+   specification configured for Duvet verification MUST start with a stable
+   identifier such as `RING-IMPL-CORE-001`.
+2. `RING-IMPL-FORMAT-002` Each normative requirement in a repository
+   specification configured for Duvet verification MUST use explicit RFC-2119
+   normative language.
 
 These identifiers are intended to be Duvet traceability targets for
 implementation-architecture decisions and repository policy

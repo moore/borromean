@@ -317,8 +317,8 @@ prepared spare can be linked within the operation's declared budget.
    before making it the runtime tail.
 2. `CORE-LOG-004` Recovery MUST never follow a link to an unprepared target.
 3. `CORE-LOG-024` A prepared WAL spare MAY contain its final WAL region header,
-   but MUST NOT contain a valid WAL preamble; only tail publication may write the
-   head-bearing preamble that makes it a valid WAL region.
+   but MUST NOT contain a valid WAL preamble; only tail publication may write
+   the head-bearing preamble that makes it a valid WAL region.
 4. `CORE-LOG-025` Tail publication MUST capture allocation sequence and
    allocation head from the same global allocator state. A preamble MUST NOT
    claim an allocator state not justified by durable allocation facts or a

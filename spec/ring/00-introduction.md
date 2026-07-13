@@ -33,8 +33,8 @@ collection implementations can be added later.
 
 ## Table of Contents
 
-This document is organized from the conceptual model toward the concrete mechanisms that make the
-model durable and recoverable.
+This document is organized from the conceptual model toward the concrete
+mechanisms that make the model durable and recoverable.
 
 - [Requirements Format](#requirements-format)
 - [Reader Model](#reader-model)

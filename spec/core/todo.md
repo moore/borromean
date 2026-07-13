@@ -111,8 +111,8 @@ design.
   the wear-leveling claim and non-goal note.
 - [ ] **D09 — Logical read API and lifetime.** Preserve arbitrary unaligned
   logical reads, then agree callback versus caller-buffer shape, borrowing
-  lifetime, zero-length reads, and bounded large-range reads. The follow-up patch
-  changes only the `read` contract.
+  lifetime, zero-length reads, and bounded large-range reads. The follow-up
+  patch changes only the `read` contract.
 - [ ] **D10 — Logical write and failed-write semantics.** Agree erased-range or
   program-only preconditions, alignment, continuous-power visibility, the tear
   boundary, and allowed physical effects when `write` returns an error. The
@@ -179,8 +179,8 @@ design.
   append serialization. The follow-up patch changes only concurrency rules.
 - [ ] **D24 — Free-list durable representation abstraction.** Agree how a basis,
   materialized backing regions, WAL-resident tail, and the allocation/ready/
-  append cursors together represent one logical FIFO. The follow-up patch changes
-  only the abstract free-list representation.
+  append cursors together represent one logical FIFO. The follow-up patch
+  changes only the abstract free-list representation.
 - [ ] **D25 — Transaction decision semantics.** Agree begin, sealed private
   range, atomic main-WAL commit import, rollback interpretation, free-intent
   visibility, and the preconditions revalidated before a decision. The follow-up
@@ -197,9 +197,10 @@ design.
   rule, then agree the ready-head-consuming command, target initialization,
   cursor and sequence fields, validation, and crash cuts. The follow-up patch is
   limited to tail growth.
-- [ ] **D29 — Free-list backing retirement.** Agree the atomic unlink-and-append-
-  dirty command, its cursor fields, validation, and crash cuts. The follow-up
-  patch is limited to retirement of one obsolete backing region.
+- [ ] **D29 — Free-list backing retirement.** Agree the atomic
+  unlink-and-append- dirty command, its cursor fields, validation, and crash
+  cuts. The follow-up patch is limited to retirement of one obsolete backing
+  region.
 - [ ] **D30 — Erase maintenance completion and failure.** Preserve the agreed
   bounded prefix and stop-on-erase-error behavior, correct a zero selected count
   to success with no I/O, and decide readiness-record write/sync error handling.
@@ -248,13 +249,14 @@ design.
   [frontier-capacity design question](design-questions/frontier-capacity-preflight.md)
   as discussion input and feed the result back into D14 and D41.
 - [ ] **D40 — Public execution surface and resumability.** Agree blocking versus
-  caller-driven step/future APIs, safe interruption, one active storage operation
-  or another exclusion rule, and no implicit I/O on Drop. The follow-up patch
-  defines behavior only; exact Rust signatures are separate.
+  caller-driven step/future APIs, safe interruption, one active storage
+  operation or another exclusion rule, and no implicit I/O on Drop. The
+  follow-up patch defines behavior only; exact Rust signatures are separate.
 - [ ] **D41 — Result, error, and pressure model.** Agree backend-error
-  propagation; typed geometry, corruption, capacity, conflict, and ambiguous-I/O
-  failures; preflight rejection before I/O; and success-with-maintenance-pressure
-  reporting. The follow-up patch changes only result semantics.
+  propagation; typed geometry, corruption, capacity, conflict, and
+  ambiguous-I/O failures; preflight rejection before I/O; and
+  success-with-maintenance-pressure reporting. The follow-up patch changes
+  only result semantics.
 - [ ] **D42 — Maintenance task inventory and budgets.** Agree the explicit tasks
   for erase, snapshot/materialization, WAL rotation/reclaim, free-list work, and
   transaction cleanup; their budgets; remaining-work signaling; and which work
@@ -273,10 +275,11 @@ design.
   list operations, recovery capacity, idempotence, and the point at which normal
   operations become available. The follow-up patch is limited to recovery work.
 - [ ] **D46 — Relational models and crash evidence.** Agree replacements for the
-  ownership pilot, focused WAL/allocator/transaction/free-list models, refinement
-  bridges to Rust transitions, and the required failure-before/after-write,
-  sync, and erase scenarios. The follow-up patch creates the verification plan;
-  each model or code change receives its own later item.
+  ownership pilot, focused WAL/allocator/transaction/free-list models,
+  refinement bridges to Rust transitions, and the required
+  failure-before/after-write, sync, and erase scenarios. The follow-up patch
+  creates the verification plan; each model or code change receives its own
+  later item.
 - [ ] **D47 — Generate the post-design migration queue.** Once the design
   decisions are stable, derive ordered, independently reviewable items for each
   normative chapter patch, exact Rust API and private-state slice, model change,

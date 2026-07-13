@@ -106,15 +106,15 @@ concurrency, crash behavior, and resource bounds.
 
 Rust memory layout is not a persistent codec. On-media formats use fixed-width
 fields, explicit endianness, explicit framing and padding, and defined integrity
-checks. A format may use a Rust type as its logical value model, but encoding and
-decoding define its durable bytes.
+checks. A format may use a Rust type as its logical value model, but encoding
+and decoding define its durable bytes.
 
 ## Authority and refinement rules
 
 - A preview states only the minimum contract needed at that point and links to
   the detailed owner of the rule.
-- Each precise fact has one authoritative detailed home. Other chapters summarize
-  and reference it rather than independently redefining it.
+- Each precise fact has one authoritative detailed home. Other chapters
+  summarize and reference it rather than independently redefining it.
 - A later pass may add detail but must not change an earlier contract without
   correcting that earlier text.
 - Abstract state, embedded compile-checked Rust transitions, persistent codecs,

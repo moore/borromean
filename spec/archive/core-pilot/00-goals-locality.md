@@ -96,8 +96,8 @@ different information.
 1. The **WAL** stores each accepted mutation promptly in receive order. At that
    moment the core does not know the complete set of records that will share a
    future data region. Append separators, byte stuffing, checksums, alignment,
-   and padding make an unknown-length stream recoverable after a torn write,
-   at the cost of additional space and a receive-order layout that is inefficient
+   and padding make an unknown-length stream recoverable after a torn write, at
+   the cost of additional space and a receive-order layout that is inefficient
    for collection queries.
 2. The **collection memory frontier** holds the corresponding logical mutations
    in bounded caller-owned memory. Reads combine immutable materializations with
