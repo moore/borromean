@@ -69,7 +69,8 @@ positions within that chain.
 - [x] `cargo check --lib --features file-backing`
 - [x] `cargo check --bins`
 - [x] `git diff --check -- src spec/ring spec/object-log.md journal.md allocator-v2-gap-closure-plan.md`
-- [x] `rg "free-list|free list|AllocBegin|FreePointerFooter|free_list_head_after" src spec journal.md`
+- [x] Searched `src`, `spec`, and `journal.md` for `free-list`, `free list`,
+  `AllocBegin`, `FreePointerFooter`, and `free_list_head_after`.
 
 ## Assumptions
 
