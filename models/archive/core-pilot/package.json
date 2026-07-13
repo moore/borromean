@@ -1,0 +1,10 @@
+{
+  "name": "borromean-core-pilot-models",
+  "private": true,
+  "scripts": {
+    "verify-models": "bash verify.sh"
+  },
+  "devDependencies": {
+    "@informalsystems/quint": "0.32.0"
+  }
+}
