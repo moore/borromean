@@ -203,9 +203,9 @@ fn requirement_embedded_storage_feature_exposes_backend_api() {
 //# verification, strict write padding, and formatted `StorageMetadata`.
 #[test]
 fn requirement_embedded_storage_uses_configured_erased_byte() {
-    let flash = TestNorFlash::<256, 1, 8, 64, 64>::new(0x00);
+    let flash = TestNorFlash::<512, 1, 8, 128, 64>::new(0x00);
     let mut backing =
-        EmbeddedStorageFlash::<_, 64, 3>::new(flash, EmbeddedStorageOptions::new(0x00)).unwrap();
+        EmbeddedStorageFlash::<_, 128, 3>::new(flash, EmbeddedStorageOptions::new(0x00)).unwrap();
 
     assert_eq!(backing.read_metadata().unwrap(), None);
 
@@ -213,7 +213,7 @@ fn requirement_embedded_storage_uses_configured_erased_byte() {
     assert_eq!(metadata.erased_byte, 0x00);
     assert_eq!(backing.read_metadata().unwrap(), Some(metadata));
 
-    let mut metadata_region = [0xff; 64];
+    let mut metadata_region = [0xff; 128];
     backing.read_storage(0, &mut metadata_region).unwrap();
     assert!(metadata_region[StorageMetadata::ENCODED_LEN..]
         .iter()
@@ -317,13 +317,13 @@ fn requirement_embedded_storage_strict_pad_only_rejects_programmed_span() {
 //# `wal_record_area_offset`.
 #[test]
 fn requirement_embedded_storage_format_writes_wal_prefix_contiguously() {
-    let flash = TestNorFlash::<256, 1, 8, 64, 64>::new(0x00);
+    let flash = TestNorFlash::<512, 1, 8, 128, 64>::new(0x00);
     let mut backing =
-        EmbeddedStorageFlash::<_, 64, 3>::new(flash, EmbeddedStorageOptions::new(0x00)).unwrap();
+        EmbeddedStorageFlash::<_, 128, 3>::new(flash, EmbeddedStorageOptions::new(0x00)).unwrap();
 
     let metadata = backing.format_empty_store(1, 8, 0xa5).unwrap();
     let prefix_len = metadata.wal_record_area_offset().unwrap();
-    let mut region = [0xff; 64];
+    let mut region = [0xff; 128];
     backing
         .read_region(0, 0, region.len(), |bytes| region.copy_from_slice(bytes))
         .unwrap();
@@ -347,7 +347,7 @@ fn requirement_embedded_storage_format_writes_wal_prefix_contiguously() {
         .inner()
         .operations()
         .contains(&TestNorOperation::Write {
-            offset: 64,
+            offset: 128,
             len: prefix_len,
         }));
 }
