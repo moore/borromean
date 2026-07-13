@@ -19,6 +19,8 @@ Design history and exploratory ideas live in [journal.md](journal.md).
   recovery ordering.
 - Harden collection-scoped WAL transaction recovery with broader crash-injection coverage and
   foreground I/O-error tests.
+- Fix the cached-frontier compaction `InvalidChecksum` exposed by `cargo test --all-features`,
+  then add the all-features suite to `scripts/verify.sh`.
 - Rewrite the forced WAL-rotation and WAL-head reclaim lifecycle stress tests so they exercise the
   transaction-era allocator model without relying on old cleanup counters.
 - Refine the explicit state machine so durable transitions have named preconditions, durable
