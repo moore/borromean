@@ -3,3 +3,7 @@ Cargo.lock
 .duvet/reports/
 .mutants.out/
 __pycache__/
+/notes/
+node_modules/
+/_apalache-out/
+/.alloy.tmp
