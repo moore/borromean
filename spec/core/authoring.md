@@ -109,6 +109,97 @@ fields, explicit endianness, explicit framing and padding, and defined integrity
 checks. A format may use a Rust type as its logical value model, but encoding
 and decoding define its durable bytes.
 
+## Testable requirements and traceability
+
+Only a normative rule with a concrete semantic pass/fail method receives a
+requirement ID. The rule must have an authoritative home in a component or
+composition chapter and must state what evidence computes or establishes.
+System-narrative previews, rationale, assumptions, examples, and unresolved
+design claims do not receive requirement IDs.
+
+Evidence may be an executable Rust test, a compile or static check, or a model
+check. It must exercise, compute, or mechanically establish the property. A
+source search that merely finds an identifier, field name, function name, or
+other string is not evidence. A citation may aid navigation, but under the
+current policy only test evidence counts toward requirement coverage.
+
+An ID may be assigned before its evidence is implemented when the pass/fail
+method is already precise. The requirement then remains visibly unmet; authors
+must not add a placeholder or source-text search and label it as satisfying
+evidence.
+
+### Canonical requirement record
+
+The canonical traceability identity is the complete normalized requirement
+record, not the ID by itself. The ID is a convenient label and must be unique
+among active requirements. Use a semantic namespace that does not encode a
+chapter number, filename, section, or specification version.
+
+Write the behavior and its verification method as one grammatical sentence.
+The sentence contains one RFC-2119 keyword, then uses a semicolon to introduce a
+`Verification` clause without another RFC-2119 keyword. For example:
+
+```markdown
+1. `CORE-ALLOC-001` The runtime allocation cursor MUST advance only after the
+   head-consuming command is durable; **Verification:** an executable crash-cut
+   check computes recovered state at every interruption point through runtime
+   apply.
+```
+
+The verification clause describes both the exercised cases and the oracle that
+decides whether the requirement holds. Naming a test kind without saying what
+it computes or establishes is insufficient.
+
+### Evidence annotation
+
+A test annotation quotes the complete canonical record, including the
+`Verification` clause. The final traced entry point is dedicated to that one
+requirement, although setup, generators, and assertion helpers may be shared.
+The following is a non-normative shape example:
+
+```rust
+//= spec/core/allocator.md#allocation-publication
+//= type=test
+//# `CORE-ALLOC-001` The runtime allocation cursor MUST advance only after the
+//# head-consuming command is durable; **Verification:** an executable crash-cut
+//# check computes recovered state at every interruption point through runtime
+//# apply.
+#[test]
+fn requirement_allocation_cursor_advances_after_durability() {
+    // Exercise every specified crash cut and compare recovered state.
+}
+```
+
+Line wrapping may differ between the Markdown and evidence annotation because
+matching normalizes whitespace. The words and punctuation of the canonical
+record do not differ.
+
+Duvet 0.4.1 matches quoted text spans rather than semantic IDs and accepts
+partial, even ID-only, quotations as test coverage. Consequently, complete
+quotation is currently an authoring and review convention rather than a property
+enforced by the traceability tooling. A passing Duvet report does not prove that
+an annotation includes the complete canonical record. Purpose-built enforcement
+is deferred until after a working v3 exists, or later.
+
+Model evidence counts only when a verification process runs the model and
+identifies the invariant or temporal property that it checked. A Rust
+placeholder does not substitute for running the model. Integration of that
+evidence into requirement reporting is deferred with the purpose-built
+traceability tooling.
+
+### Moving and revising requirements
+
+Moving an unchanged canonical record preserves its ID and text. The move also
+updates every Duvet document-and-anchor reference. Traceability checks should
+fail until all evidence follows the requirement to its authoritative location.
+
+Reflow does not change a requirement's identity. A substantive behavior or
+verification change updates the complete record and every evidence quotation
+and is reviewed as a change to the acceptance contract. IDs remain unique among
+active records, but no retired-ID ledger is maintained for now; Git retains the
+history, and the complete behavior-and-verification text is more important than
+permanent reservation of its label.
+
 ## Authority and refinement rules
 
 - A preview states only the minimum contract needed at that point and links to

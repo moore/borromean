@@ -77,10 +77,79 @@ design.
 
   Verification: Review the guide against this decision, confirm that every
   template section is optional when inapplicable, and run Markdown/diff checks.
-- [ ] **D02 — Requirement and evidence method.** Agree when stable requirement
+- [x] **D02 — Requirement and evidence method.** Agree when stable requirement
   IDs are assigned, how a chapter records model/Rust/test obligations, and how
   decisions remain traceable while chapters move. The follow-up patch adds only
   the specification-writing and evidence template.
+
+  Decision: Give an ID only to a normative rule in its authoritative component
+  or composition chapter after a concrete semantic pass/fail method has been
+  defined. The evidence may be an executable Rust test, a compile or static
+  check, or a model check, but it must compute or establish the required
+  property rather than search source text for a string. An ID may precede the
+  implementation of its evidence so that the unmet obligation remains visible.
+  Narrative previews, rationale, assumptions, and unresolved claims do not
+  receive requirement IDs.
+
+  The canonical traceability identity is the complete normalized requirement
+  text, including its verification method; the ID is a convenient label that
+  must be unique among active requirements. Write each record as one grammatical
+  RFC-2119 sentence with one ID and one normative keyword, followed within that
+  sentence by a semicolon and a `Verification` clause that states what evidence
+  computes or establishes. Tests quote the complete record. Duvet `type=test`
+  evidence counts toward coverage; citations do not. Do not maintain a retired
+  ID ledger for now.
+
+  Moving an unchanged canonical record preserves its ID and updates the Duvet
+  document-and-anchor reference. Reflow does not change identity. A substantive
+  wording or verification change updates the complete quotation and is reviewed
+  as a change to the acceptance contract. Git retains its history.
+
+  Rationale: A requirement without an executable or mechanically checked
+  acceptance condition cannot provide meaningful conformance traceability.
+  Keeping the verification method in the cited record makes the intended test
+  oracle difficult to overlook. Duvet 0.4.1 accepts partial and even ID-only
+  quotations, so Duvet alone cannot enforce this convention; the existing local
+  traceability audit must add exact-record enforcement. The complete behavior
+  and verification text matters more than permanent reservation of its label.
+
+  Patch scope: Add only the requirement-writing and evidence-record template to
+  `spec/core/authoring.md`. Do not add v3 requirements, change Duvet
+  configuration, or modify traceability tooling in this patch.
+
+  Verification: Review the template against this decision and the observed
+  Duvet extraction behavior, then run Markdown and diff checks.
+- [x] **D02A — Defer complete-record enforcement.**
+
+  Decision: Treat complete requirement quotations as an authoring and review
+  convention for v3. Do not extend the traceability audit while designing or
+  producing the first working v3. Reconsider purpose-built requirement-tracing
+  tooling only after that milestone, or later.
+
+  Rationale: Duvet accepts partial quotations and therefore cannot enforce the
+  complete-record convention. Building a second enforcement layer now would
+  interrupt the storage-design work, while the specification and its evidence
+  format may still change substantially.
+
+  Patch scope: Record the deferral in this queue and state the present tooling
+  limitation in `spec/core/authoring.md`. Do not change traceability tooling.
+
+  Verification: Confirm the future work remains in the detailed backlog and run
+  Markdown and diff checks.
+- [x] **D02B — Defer model-evidence integration.**
+
+  Decision: Design model-check registration as part of the same purpose-built
+  post-v3 traceability tooling, rather than adding an adapter to Duvet now.
+
+  Rationale: A model check must run the model and identify the checked property;
+  a placeholder Rust test is not evidence. The right representation depends on
+  the future traceability design and need not block the v3 specification.
+
+  Patch scope: Retain the question in the post-v3 tooling backlog only. Do not
+  change models, Duvet configuration, or verification scripts.
+
+  Verification: Confirm D03 becomes the first unchecked design item and run
+  Markdown and diff checks.
 - [ ] **D03 — Implementation-preservation inventory.** Before deleting or
   replacing old code or models, map each current supported behavior, relevant
   requirement, and hardening test to a replacement obligation or an explicitly
@@ -295,6 +364,21 @@ design.
 The items below retain the detailed concerns already discovered. They are not an
 independent work queue: each is gated by the applicable `Dxx` discussion above,
 and none should be implemented merely because it appears earlier in this file.
+
+### Post-v3 traceability tooling (D02A-D02B)
+
+These tasks are deliberately gated until a working v3 exists, and may be done
+later if other work remains more valuable.
+
+- [ ] Design purpose-built requirement-tracing tooling that distinguishes
+  executable evidence from navigational citations and matches Borromean's
+  acceptance model.
+- [ ] Decide whether complete normalized requirement-and-verification
+  quotations remain the canonical evidence identity, then enforce the chosen
+  rule without relying on Duvet's partial-text matching.
+- [ ] Register model evidence by running a named model invocation and
+  associating its checked invariant or temporal property with the requirement
+  it verifies.
 
 ### Recursive internal allocation (D27, D32, D34, D36, D38)
 
