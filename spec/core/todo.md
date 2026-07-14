@@ -150,15 +150,85 @@ design.
 
   Verification: Confirm D03 becomes the first unchecked design item and run
   Markdown and diff checks.
-- [ ] **D03 — Implementation-preservation inventory.** Before deleting or
-  replacing old code or models, map each current supported behavior, relevant
-  requirement, and hardening test to a replacement obligation or an explicitly
-  agreed removal. The follow-up patch creates only that inventory; it does not
-  change implementation or design authority.
-- [ ] **D04 — Shared vocabulary.** Agree definitions for region, logical record,
-  durable fact/command, retained, root/head/basis, reachability, publication,
-  snapshot, materialization, main WAL, and transaction log. The follow-up patch
-  adds only a common vocabulary section.
+- [x] **D03 — Defer the implementation-preservation inventory.**
+
+  Decision: Perform semantic preservation review as a near-final design audit
+  under D48, after the relevant v3 component and composition chapters are
+  stable. Audit one subsystem at a time rather than creating a detailed mapping
+  against the incomplete design now.
+
+  Rationale: v3 intentionally changes some semantics and mechanisms. An early
+  point-by-point comparison would report unresolved or deliberately changed
+  behavior as accidental omissions. The archived pilot, current specification,
+  tests, models, and implementation snapshot preserve the source material for a
+  meaningful later comparison.
+
+  Patch scope: Record the deferral here and expand D48 to own the comparison
+  method. Do not create an inventory or change design or implementation files.
+
+  Verification: Confirm D04 becomes the first unchecked design item and run
+  Markdown and diff checks.
+- [x] **D04A — Storage and encoding units.** Agree the minimum cross-chapter
+  meanings of region and operation record, including what each term deliberately
+  leaves to later geometry and framing decisions. The follow-up patch adds only
+  these terms to the common vocabulary.
+
+  Decision: A region is one of the equal-sized, non-overlapping byte ranges in
+  Borromean's configured logical region area. Its start is erase-block aligned,
+  its length is an erase-block multiple, and its complete span includes any
+  region header or format prefix. A region is Borromean's unit of storage
+  allocation, reclamation, and reuse. A structure's responsibility covers an
+  entire region, and erase operations cover one or more whole regions. The
+  database header for the whole store is outside the indexed region area. A
+  region index names only the reusable byte range; current role and
+  responsibility derive from retained structures, and bytes are interpreted
+  only after structure-specific validation. The common region header has no
+  independent padding requirement because it is written with the
+  collection-defined data that follows it as one logical write.
+
+  An operation record is a finite byte sequence representing one
+  collection-defined mutation of a particular collection's logical state.
+  Applying an ordered sequence of operation records to a collection basis
+  produces later collection state. Its meaning does not depend on its own
+  storage location or persistent framing. A log format may add routing,
+  framing, integrity, alignment, and ordering metadata. WAL-protocol records
+  are one subset of operation records; an operation record carried by the WAL
+  does not become a WAL-protocol record merely because of that placement.
+
+  Rationale: Region geometry must remain distinct from the backing erase-block
+  geometry and from relational ownership roles. Operation record names the
+  semantic state transition without conflating it with a stored collection
+  value, a physical append frame, or a WAL-protocol operation. This is the
+  ordered-operation foundation also used by Operational Transform systems;
+  whether concurrent operations are transformed is outside this definition.
+
+  Patch scope: Add the operation-record definition to the opening state-change
+  discussion in `spec/core/thoughts.md`, add the region definition to its
+  geometry introduction, clarify the immediately related WAL terminology, and
+  replace the misleading residence list with the agreed current-root and later-
+  operation distinction. Do not decide exact geometry, routing fields,
+  persistent framing, stale-link validation, snapshot and materialization
+  equivalence, or snapshot reread behavior.
+
+  Verification: Review the resulting definitions against this decision and run
+  Markdown and diff checks. Leave D04A unchecked until that bounded patch has
+  been reviewed.
+- [ ] **D04B1 — Durable authority and publication.** Agree the minimum
+  cross-chapter meanings of durable fact, durable command, and publication,
+  including their relationship to runtime apply. The follow-up patch adds only
+  these terms where the narrative first motivates them.
+- [ ] **D04B2 — Retention and reachability.** Agree the minimum cross-chapter
+  meanings of retained and reachable without reducing one to the other or
+  implying an explicit ownership table. The follow-up patch adds only these
+  terms where the narrative first motivates them.
+- [ ] **D04C — State references and representations.** Agree the minimum
+  cross-chapter meanings of root, qualified uses of head, basis, snapshot, and
+  materialization. The follow-up patch adds only these terms to the common
+  vocabulary.
+- [ ] **D04D — Log roles.** Agree provisional cross-chapter definitions of the
+  main WAL and transaction log without deciding the detailed protocols owned by
+  their later chapters. The follow-up patch adds only these terms to the common
+  vocabulary.
 - [ ] **D05 — Exact chapter spine and dependency cycle.** Agree the chapter
   order and how the circular dependency among the main WAL, transaction logs,
   and free list is introduced through abstract contracts before concrete
@@ -203,6 +273,15 @@ design.
   model and decide when retained WAL snapshots and updates may be reread. The
   follow-up patch replaces only the semantic residency section; cache allocation
   and scaling remain D39.
+
+  Agreed premise from D04A: Each operation's effect has one authoritative
+  representation. The newest valid snapshot or head record establishes the
+  current collection root and supersedes earlier representations for that
+  collection. Only operation records later than that root remain separately
+  represented. Operation records are read from the WAL only during startup
+  replay; before their reconstructed RAM effects can be discarded, a snapshot
+  or region materialization must incorporate them. D14 still owns the complete
+  basis model and snapshot reread rules.
 - [ ] **D15 — Snapshot and materialization equivalence.** Agree what complete
   logical state a WAL snapshot represents, how later deltas apply, and the read-
   result equivalence required of an immutable collection materialization. The
@@ -354,10 +433,14 @@ design.
   normative chapter patch, exact Rust API and private-state slice, model change,
   adapter update, and targeted test. Generating this queue does not authorize
   executing more than its first unchecked item.
-- [ ] **D48 — Final preservation and refinement audit.** Revisit the D03
-  inventory and prove that each retained behavior has a requirement and evidence
-  or an explicit agreed removal before the new specification is declared to
-  supersede the current implementation.
+- [ ] **D48 — Final semantic preservation and refinement audit.** Once the v3
+  component and composition chapters are stable, extract candidate obligations
+  from the current specification, public behavior, hardening tests, models, and
+  relevant defensive checks. Compare semantic outcomes rather than old APIs or
+  mechanisms, one subsystem at a time. Classify each candidate as preserved,
+  replaced by different or stronger semantics, intentionally removed with a
+  rationale, or accidentally missing. Every retained behavior must have a v3
+  requirement and suitable evidence before v3 supersedes the current design.
 
 ## Detailed implementation and propagation backlog
 
@@ -460,7 +543,7 @@ later if other work remains more valuable.
   earlier write: require callers to cover the complete write, define durability
   per covered granule, or have the implementation widen to the full operation.
 
-### Replace the explicit ownership pilot (D03, D17-D20, D46-D47)
+### Replace the explicit ownership pilot (D17-D20, D46-D48)
 
 - [ ] Rewrite `01-ownership.md` around derived relations. Ready and dirty state
   comes from free-queue intervals, transaction ownership comes from retained

@@ -13,10 +13,17 @@ The primary target for Borromean is flash storage connecte to mrico controlers.
 This added the complexity that the database must be responsible for ware
 leveling. To achieve this Boarroman combineds sevral key ideas.
 
-All updates are proformed as appends. If a record a must be update a delta or
-new copy of the record is writen that superceeds the curent value. If a record
-must be deleted a toomstone is writen that marks the record as deleted without
-touching the current persited value.
+The first idea is that Borromean uses an append-only model. Every change to
+collection state is persisted as an append rather than an in-place update. When
+a collection value changes, a delta or replacement copy is stored without
+modifying its earlier persisted representation. When a value is deleted, a
+tombstone is recorded.
+
+The abstract form of one such state change is an **operation record**: a finite
+sequence of bytes representing one collection-defined mutation of a particular
+collection's logical state. Applying an ordered sequence of operation records
+to a collection basis produces the collection's later state. The operation
+record describes what to apply, not where or how it is persisted.
 
 The second idea is that free regions are managed in a FIFO (First In First Out)
 queue where the oldes entry in the free queue is the first removed when neew
@@ -58,25 +65,36 @@ useage so a traid must be made between start up effechency and required ram.
    1. The flash erase block size.
    2. The minimum write size (refered to in Borromean as the write granule).
    3. The totall liniear size allocated to Borromean.
-   4. The Region size for the database.
+   4. The region size for the database.
 
-The data base is layed out as:
+The database header for the whole store occupies a separate,
+erase-block-aligned span outside the indexed region area. The remaining storage
+is divided into equal-sized, non-overlapping **regions**:
 
 ```text
 [Database header][Region 0]...[Region n]
 ```
 
-Each reagion has the format:
+A region is Borromean's unit of storage allocation, reclamation, and reuse. A
+structure's responsibility covers an entire region, and erase operations cover
+one or more whole regions.
+
+Each region has the format:
 
 ```text
-[Region Header][user data]
+[Region header][collection-defined data]
 ```
 
-The database headder and each region must be erase block aligned. The region
-header must be write granual aligned. A region size which is not a multpule of
-the erash block is rejected on initilzation of a new database. The database
-headder is padded to erase block size, and the region headder padded to the
-region granual size.
+Each region begins on an erase-block boundary, and its length is a multiple of
+the erase-block length. The region header and the collection-defined data that
+follows it are written together as one logical write, so the header has no
+independent padding requirement. The configured region length includes that
+complete span. Geometry that violates these constraints is rejected during
+initialization.
+
+A region index names only the reusable byte range. Its current role and
+responsibility derive from retained structures, and its bytes are interpreted
+only after structure-specific validation.
 
 Borromean uses a logical byte-oriented storage interface with four core
 operations:
@@ -152,22 +170,25 @@ collections.
 ...Eaplain that there is a bounded number collections, and how there heads
 tracked by storage struct in memory...
 
-4. In Borromean live records may live in three distinct state:
+4. Each operation's effect is represented by exactly one of:
 
-   1. WAL Resident
-   2. Snapshot Resident
-   3. Region Resident
+   1. An operation record in the WAL.
+   2. A snapshot in the WAL.
+   3. A region materialization.
 
-This set of state is a stratgy to manage the writing of records in an append
-only namer while still allowing immeadeat durability and fast indexed reads.
+The newest valid snapshot or head record for a collection establishes its
+current root. A snapshot stores the root in the WAL, while a head record points
+to a region materialization. A new root supersedes all earlier operation
+records, snapshots, and head records for that collection.
 
-The WAL (Write Ahead Log) is a short term durable location for a record to be
-stored. The WAL stores records in the order they were written. Records are never
-directly read from the WAL othen that at database startup when all opperations
-in the WAL are replayed in sequantial order to reconstruct the state of the
-database when it stopped. After replay any record that is not snapshot or region
-resident will be in ram. Reads of WAL resident records are always serviced from
-RAM.
+Operation records written after the current root are applied in order. The
+current root and these later operation records coexist, but they never represent
+the same operation.
+
+The write-ahead log (WAL) provides short-term durable storage for operation
+records and snapshots in append order. Operation records are read from the WAL
+only during startup replay. After replay, the effects of operation records
+following each collection's current root are held in RAM.
 
 Each open collection maintines a RAM buffer with a size equal to a region. Once
 a opperation is persted in the WAL is is applied by the collection implmentation
