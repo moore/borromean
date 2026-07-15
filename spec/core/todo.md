@@ -214,9 +214,40 @@ design.
   Markdown and diff checks. Leave D04A unchecked until that bounded patch has
   been reviewed.
 - [ ] **D04B1 — Durable authority and publication.** Agree the minimum
-  cross-chapter meanings of durable fact, durable command, and publication,
-  including their relationship to runtime apply. The follow-up patch adds only
-  these terms where the narrative first motivates them.
+  cross-chapter meanings of durable operation record and publication. The
+  follow-up patch adds only these terms where the narrative first motivates
+  them.
+
+  Decision: An operation record is durable when its complete persistent
+  representation will survive power loss under the logical storage contract.
+  Durability alone does not make its effect committed, visible, or part of a
+  particular logical view. Publication is the protocol-defined durability point
+  after which recovery must include a specified effect in the relevant logical
+  view. A record's durability and the publication of its effect may coincide,
+  or a later record such as transaction commit may publish an already durable
+  private effect.
+
+  Command, durable fact, and runtime apply are not first-class vocabulary.
+  Operation names the abstract state change, and operation record names its
+  collection-defined bytes. Fact retains only its ordinary-language meaning.
+  Prose may say that RAM is updated after publication; D20 and the component
+  chapters own the exact foreground and replay transitions.
+
+  Rationale: These two terms distinguish survival of recorded bytes from
+  recoverable authority without adding an intermediate command representation
+  or formalizing ordinary words. The distinction is required by durable private
+  transaction operations, which remain outside the committed view until commit.
+
+  Disposition: Do not add these definitions to the introductory narrative.
+  Preserve them here as input to D20 and the unwritten mechanical WAL chapter,
+  where concrete protocol ordering first motivates the distinction. Retain the
+  transaction-lock wording cleanup, which does not depend on introducing these
+  terms early. Do not define exact carriers, sync sequences, retention,
+  reachability, or replay mechanics here.
+
+  Verification: Confirm no standalone durability/publication definition remains
+  in the introductory narrative, then run Markdown and diff checks. Leave D04B1
+  unchecked until its later mechanical treatment has been reviewed.
 - [ ] **D04B2 — Retention and reachability.** Agree the minimum cross-chapter
   meanings of retained and reachable without reducing one to the other or
   implying an explicit ownership table. The follow-up patch adds only these

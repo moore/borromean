@@ -141,8 +141,10 @@ lost during erase, or erase returns an error, the range may be unchanged,
 completely erased, or partially erased.
 
 Any operation that addresses bytes outside the configured storage range or
-violates its geometry returns an error. Later chapters define how Borromean
-orders these storage primitives to publish higher-level state safely.
+violates its geometry returns an error.
+
+Later chapters define how Borromean orders the storage primitives to publish
+higher-level state safely.
 
 3. In Borromean records are grouped into logical collections. Each collection
    may own zero or more regions. The core is not responsible for interpreting
@@ -286,9 +288,9 @@ scopes:
 | Main-WAL finish lock | The uninterrupted transaction decision, ordered cleanup, and finish interval | From immediately before appending commit or rollback through durable finish and runtime finish apply |
 
 Preparation that touches only a transaction's private state should occur before
-either global lock is acquired. The locks are runtime concurrency controls
-rather than durable ownership facts; replay reconstructs state from the durable
-commands.
+either global lock is acquired. The locks are runtime concurrency controls and
+are not persisted. Replay reconstructs allocator and transaction state from
+durable operation records.
 
 ...explain that there is a fixed number of transactions held by the storage
 structure, with bounded ephemeral state for each transaction and a reference to
