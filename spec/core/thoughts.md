@@ -5,9 +5,11 @@ wrong but I think the ordering of ideas and which to stress are a little off.
 Here is a ruff sequancing of how I would structure it. These chapters are not
 meant to nessarly be complete but to sketch out the core ideas.
 
-1. Borromean is a database that is intended to run without the help of an
-   undelying filesystem. Fallowing from that one of it's core conserns is how to
-   manage storage allocations, reclomation, and the geomitry of the storage.
+## 1. 
+
+Borromean is a database that is intended to run without the help of an
+undelying filesystem. Fallowing from that one of it's core conserns is how to
+manage storage allocations, reclomation, and the geomitry of the storage.
 
 The primary target for Borromean is flash storage connecte to mrico controlers.
 This added the complexity that the database must be responsible for ware
@@ -59,8 +61,10 @@ root of the database. To minimise this scan time larger regions are prefered
 thou as we will see later the size of the regions has a direct impact on memory
 useage so a traid must be made between start up effechency and required ram.
 
-2. The storage geometry of a Borromean database is constrained by four
-   parameters:
+## 2. 
+
+The storage geometry of a Borromean database is constrained by four
+parameters:
 
    1. The flash erase block size.
    2. The minimum write size (refered to in Borromean as the write granule).
@@ -146,13 +150,15 @@ violates its geometry returns an error.
 Later chapters define how Borromean orders the storage primitives to publish
 higher-level state safely.
 
-3. In Borromean records are grouped into logical collections. Each collection
-   may own zero or more regions. The core is not responsible for interpreting
-   collection-specific data after the region header. A header identifies and
-   validates the collection and encoding expected for the region's bytes, but
-   the header does not itself confer current ownership. Current ownership
-   follows from the retained collection, transaction, WAL, and free-queue
-   structures that reach the region.
+## 3
+
+In Borromean, records are grouped into logical collections. A collection may
+own zero or more regions, and its format may link those regions into a larger
+structure. Access to that structure begins at a collection root which is a single region, snapshot, or in-memory frontier from which all live data in the collection can be accessed.
+
+The core is not responsible for interpreting collection-specific data after the
+region header. A header identifies the collection and encoding
+expected for the region's bytes.
 
 There are three internal collection types used by Borromean core to manage
 region and record lifecycles:
@@ -172,7 +178,9 @@ collections.
 ...Eaplain that there is a bounded number collections, and how there heads
 tracked by storage struct in memory...
 
-4. Each operation's effect is represented by exactly one of:
+## 4. 
+
+Each operation's effect is represented by exactly one of:
 
    1. An operation record in the WAL.
    2. A snapshot in the WAL.
@@ -204,7 +212,9 @@ space can be stored as a snapshot in the WAL. This allow the collection to be
 closed, and its RAM buffer returned, without writing a partally filled region
 whiles still allowing effechent reads from flash.
 
-5. The Region Free List is a cohesive internal collection represented by a
+## 5.
+
+ The Region Free List is a cohesive internal collection represented by a
    logical FIFO queue with three cursor positions: allocation, ready, and
    append. Materialized free-list regions form a linked representation of the
    queue. The current tail may instead be represented by WAL records and a
@@ -267,7 +277,9 @@ retirement are recorded in
 [todo.md](todo.md#free-list-collection-chapter-d28-d30). Transaction-log and
 main-WAL continuation questions remain in the recursive-allocation TODOs.
 
-6. Transactions are required whenever allocating or freeing a region moves
+## 6.
+
+Transactions are required whenever allocating or freeing a region moves
    responsibility between two objects. Allocation must remove a region from the
    global free-list collection and make a transaction responsible for it before
    a collection may publish it. Freeing performs the reverse transfer without
@@ -350,7 +362,9 @@ free intents, so those regions remain collection-owned. If replay ends after a
 commit or rollback but before transaction finish, it resumes the remaining
 cleanup and writes the finish record.
 
-7. Region lifecycle names are derived relationships, not fields stored in a
+## 7. 
+
+Region lifecycle names are derived relationships, not fields stored in a
    region table. Borromean keeps no persistent or runtime strcture containing
    one lifecycle state per region. A region's classification follows from its
    position in the free-list collection, the retained transaction structures
@@ -441,16 +455,24 @@ apply is repaired by replay, which reconstructs the advanced cursor. Adjacent
 physical regions may be coalesced into one larger erase call without changing
 the logical region-count budget.
 
-8. TODO: A detaild michanical discription of the in memory storage state,
+## 8. 
+
+TODO: A detaild michanical discription of the in memory storage state,
    fields, rust structs, etc. This should the signitures of public APIs that
    will be used to interact with the storage. This should build on the privouse
    high level discrition.
 
-9. TODO: A detaild michanical description of the WAL. Record framing: byte
+## 9.
+
+ TODO: A detaild michanical description of the WAL. Record framing: byte
    stuffing, checksums, record-start discovery after torn records, and related
    details. In memory rust structs, life cycle of the regions, etc. This should
    build on the privouse high level discrition.
 
-10. TODO: Detaild discption of the michanical desing of the free list.
+## 10. 
 
-11. A percisc discriton of start up and WAL replay.
+TODO: Detaild discption of the michanical desing of the free list.
+
+## 11.
+
+ A percisc discriton of start up and WAL replay.

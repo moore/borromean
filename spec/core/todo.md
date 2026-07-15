@@ -248,14 +248,51 @@ design.
   Verification: Confirm no standalone durability/publication definition remains
   in the introductory narrative, then run Markdown and diff checks. Leave D04B1
   unchecked until its later mechanical treatment has been reviewed.
-- [ ] **D04B2 — Retention and reachability.** Agree the minimum cross-chapter
-  meanings of retained and reachable without reducing one to the other or
-  implying an explicit ownership table. The follow-up patch adds only these
-  terms where the narrative first motivates them.
-- [ ] **D04C — State references and representations.** Agree the minimum
-  cross-chapter meanings of root, qualified uses of head, basis, snapshot, and
-  materialization. The follow-up patch adds only these terms to the common
-  vocabulary.
+- [x] **D04B2 — Reachability.** Agree the minimum cross-chapter meaning of
+  reachable without implying an explicit ownership table.
+
+  Decision: Reachability remains a relationship derived from collection,
+  transaction, WAL, and free-queue structures rather than an intrinsic property
+  recorded against a region. It does not need a standalone definition in the
+  introductory narrative; the collection-root definition supplies the access
+  model needed there.
+
+  Rationale: A separate definition would repeat the root's essential property
+  while introducing traversal and link validity before their mechanics are
+  motivated.
+
+  Patch scope: Keep relational ownership language, but remove the standalone
+  reachability paragraph. D16 owns the traversal contract, D18 owns the
+  relational safety invariants, and D19 owns stale-link validation.
+
+  Verification: The narrower treatment was reviewed in context.
+- [ ] **D04B3 — Retention.** Defer the definition of retained until the
+  mechanical WAL and recovery chapters establish which representations must
+  remain available despite not being reachable from a collection's current
+  root. Keep retention distinct from reachability and do not add it to the
+  introductory narrative.
+- [ ] **D04C1 — Collection root.** Agree the minimum cross-chapter meaning of a
+  collection root.
+
+  Decision: A collection root is a single region, snapshot, or in-memory
+  frontier from which all live data in the collection can be accessed.
+
+  Rationale: A collection may link multiple regions into a larger structure and
+  therefore needs one access point. The definition states that essential role
+  without conflating the current root with a recovery basis or prescribing
+  traversal mechanics.
+
+  Patch scope: Motivate and define the collection root in the introductory
+  collection discussion. Later chapters explain the three root forms and how
+  the root moves between them.
+
+  Verification: Review the definition in its narrative context and run
+  Markdown and diff checks. Leave D04C1 unchecked until that bounded patch has
+  been reviewed.
+- [ ] **D04C2 — Head terminology.** Agree qualified uses of head without
+  conflating a head record with the collection root it names.
+- [ ] **D04C3 — Basis, snapshot, and materialization.** Agree their minimum
+  cross-chapter meanings and their relationship to the current collection root.
 - [ ] **D04D — Log roles.** Agree provisional cross-chapter definitions of the
   main WAL and transaction log without deciding the detailed protocols owned by
   their later chapters. The follow-up patch adds only these terms to the common
