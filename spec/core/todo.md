@@ -271,7 +271,7 @@ design.
   remain available despite not being reachable from a collection's current
   root. Keep retention distinct from reachability and do not add it to the
   introductory narrative.
-- [ ] **D04C1 — Collection root.** Agree the minimum cross-chapter meaning of a
+- [x] **D04C1 — Collection root.** Agree the minimum cross-chapter meaning of a
   collection root.
 
   Decision: A collection root is a single region, snapshot, or in-memory
@@ -286,11 +286,22 @@ design.
   collection discussion. Later chapters explain the three root forms and how
   the root moves between them.
 
-  Verification: Review the definition in its narrative context and run
-  Markdown and diff checks. Leave D04C1 unchecked until that bounded patch has
-  been reviewed.
+  Verification: The definition was reviewed in its narrative context.
 - [ ] **D04C2 — Head terminology.** Agree qualified uses of head without
   conflating a head record with the collection root it names.
+
+  Decision: A collection head record is a WAL-protocol record that names a
+  region as the collection root. Other positional uses of head must be
+  qualified by their structure; head has no unqualified cross-chapter meaning.
+
+  Patch scope: Introduce the definition in section 4 only when the narrative
+  explains how a region materialization becomes the collection root. Replace
+  mistaken uses of collection head with collection root, but leave the exact
+  main-WAL, transaction-log, and free-list positions to their mechanical
+  chapters.
+
+  Verification: Review the definition after D04C3 supplies its narrative
+  context. Leave D04C2 unchecked until then.
 - [ ] **D04C3 — Basis, snapshot, and materialization.** Agree their minimum
   cross-chapter meanings and their relationship to the current collection root.
 - [ ] **D04D — Log roles.** Agree provisional cross-chapter definitions of the
