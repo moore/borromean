@@ -27,6 +27,16 @@ collection's logical state. Applying an ordered sequence of operation records
 to a collection basis produces the collection's later state. The operation
 record describes what to apply, not where or how it is persisted.
 
+The top-level storage object follows a reader/writer access rule. Read-only
+top-level operations may coexist. An operation that may change shared
+persistent state or shared mutable runtime state has exclusive access and is
+non-reentrant at the top-level API boundary. Internal allocator, WAL,
+transaction, cleanup, and free-list operations may call one another while
+retaining that same exclusive access; they do not acquire subsystem locks.
+Transaction-private preparation may occur without entering the top-level
+storage object. This access discipline is a runtime invariant and is not
+persisted.
+
 The second idea is that free regions are managed in a FIFO (First In First Out)
 queue where the oldes entry in the free queue is the first removed when neew
 space is needed. This promotes equal ware across all regions of flash.
@@ -240,22 +250,36 @@ position after the allocation, and a monotonically increasing allocation
 sequence. Only after that entry is durable does the runtime allocation cursor
 advance and the transaction become responsible for the region.
 
-The global allocator lock protects selection of the current allocation entry,
-assignment of the global allocation sequence, and advancement of the allocation
-cursor. An operation should preflight the space needed for its durable
-head-consuming command before acquiring this lock. It then acquires the lock,
-revalidates and selects the entry at `allocation`, assigns the next sequence and
-`allocation_head_after`, writes and syncs the command, applies the runtime
-cursor advance, and releases the lock. For an ordinary allocation that command
-is the transaction allocation entry; a free-list-local command that consumes the
-same head entry uses the same lock and durable-apply ordering.
+Every mutating top-level storage operation has exclusive access to allocator
+state. A head-consuming operation preflights the space needed for its durable
+command, selects the entry at `allocation`, assigns the next sequence and
+`allocation_head_after`, writes and syncs the command, and only then applies the
+runtime cursor advance. No other top-level mutation may interleave with that
+sequence. For an ordinary allocation the command is the transaction allocation
+entry; a free-list-local command that consumes the same head entry uses the same
+durable-apply ordering.
 
-Transactions may append allocation entries in parallel transaction logs.
-Therefore the physically last allocation record observed during replay is not
+Different transactions store allocation entries in different transaction logs.
+The physically last allocation record observed in any one log is therefore not
 necessarily the newest allocator state. Replay uses the retained allocation
 record with the largest valid allocation sequence and its
 `allocation_head_after` value. Transaction cleanup frees are written in their
 ordered main-WAL cleanup range and advance the append cursor.
+
+Free-list appends update the WAL and the in-memory frontier; they do not modify
+a materialized region. Materialized free-list regions are immutable. When the
+current frontier must be materialized into its already reserved region `n`, the
+free list first uses a free-list-local allocation command to consume a Ready
+Free region as reserved successor `n+1`. This does not transfer ownership. It
+then writes and syncs the complete frontier into region `n`, including the link
+to `n+1`, and writes and syncs a free-list tail-advance command in the WAL. The
+tail-advance command publishes `n` as the materialized tail and `n+1` as the new
+reserved successor. Runtime tail state advances only after that command is
+durable.
+
+If replay finds the successor allocation without its corresponding durable
+tail-advance command, region `n` is an incomplete or unpublished
+materialization. Recovery erases region `n` before retrying the materialization even if its bytes appear valid.
 
 When the allocation cursor crosses into a new materialized free-list region, the
 old representation region is no longer needed as backing storage. Moving that
@@ -275,29 +299,21 @@ main-WAL continuation questions remain in the recursive-allocation TODOs.
 ## 6.
 
 Transactions are required whenever allocating or freeing a region moves
-   responsibility between two objects. Allocation must remove a region from the
-   global free-list collection and make a transaction responsible for it before
-   a collection may publish it. Freeing performs the reverse transfer without
-   allowing a crash to leak the region or expose a still-reachable region for
-   erase and reuse. This applies to both user collections and Borromean's
-   internal collections.
+responsibility between two objects. Allocation must remove a region from the
+global free-list collection and make a transaction responsible for it before
+a collection may publish it. Freeing performs the reverse transfer without
+allowing a crash to leak the region or expose a still-reachable region for
+erase and reuse. This applies to both user collections and Borromean's
+internal collections.
 
-Transactions also allow long-running multi-step updates to avoid blocking reads
-to the collecton being written or to writes in unrelated collections. A possible
-example is a large file streamed over a slow network connection.
+Transactions also allow long-running multi-step updates without reserving
+exclusive top-level storage access for the transaction's entire lifetime. A
+possible example is a large file streamed over a slow network connection. The
+exact representation of an open transaction between calls belongs to the
+mechanical design.
 
-The two cross-transaction locks used by the paths described here have distinct
-scopes:
-
-| Lock | Protects | Required scope |
-| --- | --- | --- |
-| Global allocator lock | Selection of the ready head, global allocation sequence, and allocation cursor | From final head validation through the durable head-consuming command and runtime cursor apply |
-| Main-WAL finish lock | The uninterrupted transaction decision, ordered cleanup, and finish interval | From immediately before appending commit or rollback through durable finish and runtime finish apply |
-
-Preparation that touches only a transaction's private state should occur before
-either global lock is acquired. The locks are runtime concurrency controls and
-are not persisted. Replay reconstructs allocator and transaction state from
-durable operation records.
+Replay reconstructs allocator and transaction state from durable operation
+records.
 
 Transaction-log regions can be reclaimed only when no retained WAL record
 references any segment in the region.
@@ -326,13 +342,14 @@ but every allocation is appended and synced immediately in the transaction log
 before the global allocator cursor advances. A crash can therefore recover every
 consumed free-list entry even though the transaction never committed.
 
-Commit preparation does not require the main-WAL finish lock. The transaction
-first encodes, flushes, and syncs its private transaction segments and performs
-any other preparation that does not change shared state. Only when it is ready
-to append the durable decision does it acquire the finish lock, revalidate the
-commit preconditions, and write and sync the main-WAL commit record identifying
-the imported segment range. It holds that lock through ordered cleanup and the
-durable transaction-finish record.
+Using only the transaction object, commit preparation first encodes, flushes,
+and syncs the private transaction segments and performs any other work that does
+not change shared state. The exact mechanical construction of the transaction
+object is defined later. Once preparation is complete, commit enters the
+top-level storage object with exclusive access, revalidates the commit
+preconditions, and writes and syncs the main-WAL commit record identifying the
+imported segment range. The same exclusive storage operation continues through
+ordered cleanup and the durable transaction-finish record.
 
 The durable commit atomically interprets the collection operations and free
 intents. A new allocation used by a collection becomes collection-owned because
@@ -344,7 +361,7 @@ opaque collection formats and must enforce it for its internal collections.
 
 Following commit, ordered free records move committed free-intent regions into
 the dirty free-list range, and a transaction-finish record closes the cleanup
-range and releases the finish lock.
+range.
 
 If replay finds an open transaction without a durable decision, it writes a
 rollback decision and returns its durable transaction allocations to the dirty
@@ -635,16 +652,6 @@ reachable from the committed root of exactly one user or internal collection.
 record that moves a region within the Region Free List without transferring it
 to a different owner.
 
-### Runtime locks
-
-**Global allocator lock.** The global allocator lock serializes selection of
-the entry at the allocation cursor, assignment of the global allocation
-sequence, writing and syncing the corresponding durable head-consuming command,
-and the subsequent runtime cursor advancement.
-
-**Main-WAL finish lock.** The main-WAL finish lock serializes a transaction's
-decision, ordered cleanup, and finish interval. Private commit preparation may
-occur before this lock is acquired.
 
 ## 8.
 
@@ -657,6 +664,8 @@ fields, Rust structs, and public API signatures. This includes:
 3. The fixed transaction slots, the bounded ephemeral state held for each
    transaction, and the reference to the transaction-log region containing its
    current segment.
+4. The concrete representation of shared read-only access, exclusive mutating
+   access, and open transaction state between top-level calls.
 
 This chapter should build on the preceding high-level description.
 

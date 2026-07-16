@@ -41,9 +41,12 @@ Verification: <review or targeted checks required before completion>
 Previously agreed design decisions are not reopened by this queue unless a
 later contradiction requires it. In particular, the logical `FlashIo`
 semantics, relational rather than table-based ownership, transaction-only
-cross-owner transfers, free-list-local representation movement, allocator-lock
-scope, and delayed acquisition of the main-WAL finish lock remain the working
-design.
+cross-owner transfers, free-list-local representation movement, and shared-read/
+exclusive-mutation access to the top-level storage object remain the working
+design. A top-level mutation of shared state is non-reentrant, while internal
+subsystem operations may compose under the same exclusive access without
+subsystem locks. Transaction-private preparation may occur without entering the
+top-level storage object.
 
 ## Ordered design discussion queue
 
@@ -241,7 +244,7 @@ design.
   Disposition: Do not add these definitions to the introductory narrative.
   Preserve them here as input to D20 and the unwritten mechanical WAL chapter,
   where concrete protocol ordering first motivates the distinction. Retain the
-  transaction-lock wording cleanup, which does not depend on introducing these
+  runtime-access wording cleanup, which does not depend on introducing these
   terms early. Do not define exact carriers, sync sequences, retention,
   reachability, or replay mechanics here.
 
@@ -400,10 +403,12 @@ design.
   readers see during a transaction, how transaction-aware reads overlay private
   updates, and the atomic visibility change produced by commit. The follow-up
   patch changes only transaction read/visibility semantics.
-- [ ] **D23 — Transaction enrollment and writer concurrency.** Agree collection
-  enrollment, generation validation, competing-writer rejection, unrelated
-  collection writes, bounded simultaneous transactions, and ordinary main-WAL
-  append serialization. The follow-up patch changes only concurrency rules.
+- [ ] **D23 — Transaction enrollment and mutation serialization.** Starting
+  from shared-read/exclusive-mutation top-level access, agree collection
+  enrollment, generation validation, competing-writer rejection, bounded
+  simultaneous open transactions, and which work may occur between exclusive
+  mutating calls. The follow-up patch changes only concurrency rules and does
+  not choose exact Rust borrowing or transaction-handle types.
 - [ ] **D24 — Free-list durable representation abstraction.** Agree how a basis,
   materialized backing regions, WAL-resident tail, and the allocation/ready/
   append cursors together represent one logical FIFO. The follow-up patch
@@ -421,8 +426,9 @@ design.
   for multiple segments, and the final retained WAL reference that permits log-
   region reclamation. The follow-up patch excludes format bootstrap.
 - [ ] **D28 — Free-list tail growth.** Preserve the collection-local ownership
-  rule, then agree the ready-head-consuming command, target initialization,
-  cursor and sequence fields, validation, and crash cuts. The follow-up patch is
+  rule and the agreed reserved-successor/materialize/tail-advance sequence, then
+  define the commands' exact cursor and sequence fields, replay comparisons,
+  admission reserves, I/O-error results, and crash cuts. The follow-up patch is
   limited to tail growth.
 - [ ] **D29 — Free-list backing retirement.** Agree the atomic
   unlink-and-append- dirty command, its cursor fields, validation, and crash
@@ -437,11 +443,12 @@ design.
   validation of all later transaction and free-list-local allocation facts,
   duplicate/gap/FIFO rejection, retention, and exhaustion behavior. The follow-
   up patch is limited to allocator recovery semantics.
-- [ ] **D32 — Cleanup and finish boundary.** Preserve private preparation before
-  the finish lock, then decide one-call versus resumable cleanup, durable cursor
-  and idempotence, transaction-log cleanup, Drop behavior, finish publication,
-  and the response to cleanup I/O failure. The follow-up patch excludes the
-  commit/rollback decision already covered by D25.
+- [ ] **D32 — Cleanup and finish boundary.** Under exclusive top-level mutation,
+  decide one-call versus resumable cleanup, durable cursor and idempotence,
+  transaction-log cleanup, Drop behavior, finish publication, admission of
+  later mutations after interruption, and the response to cleanup I/O failure.
+  The follow-up patch excludes the commit/rollback decision already covered by
+  D25.
 - [ ] **D33 — WAL record framing and torn-tail continuation.** Agree separator,
   escaping, checksum, granule padding, candidate discovery, corrupt versus torn
   interpretation, and any recovery-boundary command. The follow-up patch changes
@@ -459,11 +466,12 @@ design.
   main WAL, transaction log, and free list and still roll back, clean up, and
   finish. Account for every simultaneously open transaction. The follow-up patch
   states the capacity/progress contract before any numeric implementation.
-- [ ] **D37 — Complete lock ordering and fail-stop behavior.** Starting from the
-  agreed allocator and finish-lock scopes, enumerate collection enrollment and
-  WAL append locks, establish total acquisition order and revalidation rules,
-  and decide behavior after ambiguous I/O failure while a global lock is held.
-  The follow-up patch is limited to the shared concurrency contract.
+- [ ] **D37 — Reader/writer access and fail-stop behavior.** Starting from the
+  agreed shared-read/exclusive-mutation invariant, classify top-level
+  operations, define internal call composition and required revalidation, and
+  decide which access remains admissible after ambiguous I/O failure or an
+  interrupted mutation. The follow-up patch is limited to the shared access and
+  fail-stop contract, not exact Rust signatures.
 - [ ] **D38 — Format bootstrap publication.** Using the already agreed format,
   ownership, WAL, transaction-log, free-list, continuation, and progress rules,
   specify construction of the initial carriers, metadata-last publication, and
@@ -476,9 +484,10 @@ design.
   [frontier-capacity design question](design-questions/frontier-capacity-preflight.md)
   as discussion input and feed the result back into D14 and D41.
 - [ ] **D40 — Public execution surface and resumability.** Agree blocking versus
-  caller-driven step/future APIs, safe interruption, one active storage
-  operation or another exclusion rule, and no implicit I/O on Drop. The
-  follow-up patch defines behavior only; exact Rust signatures are separate.
+  caller-driven step/future APIs, safe interruption, how open transactions are
+  represented between calls without retaining top-level storage access, and no
+  implicit I/O on Drop. The follow-up patch defines behavior only; exact Rust
+  borrowing and signatures are separate mechanical-design work.
 - [ ] **D41 — Result, error, and pressure model.** Agree backend-error
   propagation; typed geometry, corruption, capacity, conflict, and
   ambiguous-I/O failures; preflight rejection before I/O; and
@@ -567,42 +576,41 @@ later if other work remains more valuable.
   the free-list backing structure does not change owners, so it is a
   collection-local command rather than a transaction or privileged allocator
   exception.
-- [ ] Define the free-list tail-growth WAL command and its validation fields. It
-  should consume exactly the current ready-head region, advance the allocation
-  cursor, link that region as the new empty tail, and carry the global
-  allocation sequence and `allocation_head_after` needed to order it with
-  transaction-log allocations during replay.
-- [ ] Specify safe target initialization ordering. The new region must not be
-  programmed while it is still logically Ready Free. The likely protocol is to
-  make the tail-growth command durable first, then initialize and sync the now
-  structurally retained empty tail before appending entries to it.
-- [ ] Define recovery for every tail-growth cut: a torn or absent command leaves
-  the region Ready Free; a durable command removes it from allocation even if
-  initialization has not started, is torn, or returns an error; recovery can
-  then erase and reinitialize the retained empty tail without rollback.
+- [ ] Define the exact free-list-local successor-allocation command. It consumes
+  the current ready-head region as reserved successor `n+1`, advances allocator
+  state without changing owners, and carries the global allocation sequence and
+  `allocation_head_after` needed to order it with transaction-log allocations
+  during replay.
+- [ ] Define the exact materialization and tail-advance protocol. Free-list
+  appends update the WAL and in-memory frontier rather than a materialized
+  region. After reserving `n+1`, write and sync the frontier into already
+  reserved region `n` with its link to `n+1`, then write and sync a free-list
+  tail-advance command that publishes `n` and advances runtime tail state.
+- [ ] Define recovery and validation for every tail-growth cut. A retained
+  successor allocation without its tail-advance command requires erasing `n`
+  before retry, even when its bytes appear valid. Every startup replay must
+  validate every retained free-list operation against the reconstructed basis
+  and materialized data, regardless of whether that startup repaired a region.
 - [ ] Specify retiring an old free-list backing region as the inverse
   collection-local operation: unlink it and append it to the dirty range in one
   free-list command rather than transaction cleanup. Define its cursor fields,
   replay validation, and crash cuts.
 
-### Locking model (D23, D37)
+### Reader/writer access model (D23, D37, D40)
 
-- [ ] Give every shared operation a consistent lock contract naming what each
-  lock protects, what may be preflighted before acquisition, the exact
-  acquisition and release points, and the state that must be revalidated while
-  held.
-- [ ] Specify the global allocator lock for transaction allocations and
-  free-list-local commands that consume the ready head. It must serialize head
-  selection, allocation sequence assignment, durable cursor movement, and
-  runtime apply across parallel transaction logs and main-WAL free-list
-  commands.
-- [ ] Specify the main-WAL finish lock independently of private commit
-  preparation. Transaction-segment encoding and sync occur before acquisition;
-  the lock begins immediately before the commit or rollback command and remains
-  held through ordered cleanup and durable finish.
-- [ ] Define lock ordering for any operation that needs both free-list state and
-  main-WAL append access, and define fail-stop/recovery behavior when storage
-  I/O fails while a global lock is held.
+- [ ] Classify every top-level operation as read-only or mutating. Read-only
+  operations may coexist; an operation that mutates shared persistent or runtime
+  state has exclusive top-level storage access and is non-reentrant at that
+  boundary. Transaction-private preparation may occur outside that access.
+- [ ] Specify how allocator, WAL, transaction, cleanup, and free-list operations
+  call one another under one exclusive top-level mutation without acquiring
+  subsystem locks. Preserve each required durable-write, sync, and runtime-apply
+  ordering explicitly.
+- [ ] Define revalidation and fail-stop/recovery behavior when storage I/O fails
+  or has an ambiguous result during an exclusive mutation, including which later
+  reads or mutations remain admissible.
+- [ ] Define the eventual Rust borrowing and open-transaction representation
+  without requiring a concrete runtime reader/writer lock.
 
 ### Logical storage interface propagation (D09-D11)
 
