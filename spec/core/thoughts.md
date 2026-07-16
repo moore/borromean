@@ -108,8 +108,6 @@ operations:
 3. `read(address, length) -> Result<[u8], Error>`
 4. `erase(address, length) -> Result<(), Error>`
 
-> TODO: This is missing life times.
-
 The interface is logical rather than a direct representation of the physical
 device API. A `FlashIo` implementation is responsible for expanding unaligned
 reads, splitting transfers, widening range sync into a global barrier when
@@ -174,9 +172,6 @@ collection implementation guarantees that every region allocated by a committing
 transaction is reachable from its committed representation. Core assumes that
 contract for opaque collection types and must satisfy it for its own internal
 collections.
-
-...Eaplain that there is a bounded number collections, and how there heads
-tracked by storage struct in memory...
 
 ## 4. 
 
@@ -304,10 +299,6 @@ either global lock is acquired. The locks are runtime concurrency controls and
 are not persisted. Replay reconstructs allocator and transaction state from
 durable operation records.
 
-...explain that there is a fixed number of transactions held by the storage
-structure, with bounded ephemeral state for each transaction and a reference to
-the transaction-log region containing its current segment...
-
 Transaction-log regions can be reclaimed only when no retained WAL record
 references any segment in the region.
 
@@ -379,13 +370,11 @@ Ready Free -> Transaction Owned -> Collection Owned -> Transaction Owned -> Dirt
 Rollback skips the collection-owned state for new allocations. Transaction-log
 continuation regions may remain transaction-owned while retained transaction and
 WAL structures still reference them.
->TODO: This belongs in the transation machinal desing chapter..
 
 Free-list backing regions have additional collection-local paths. A free-list
 command may move the ready-head region directly into Free-List Collection Owned
 backing storage, or move an obsolete backing region directly into Dirty Free,
 because neither operation transfers responsibility to a different owner.
->TODO: This belongs in the free lisit machinal desing chapter.
 
 Ready Free:
 
@@ -455,13 +444,7 @@ apply is repaired by replay, which reconstructs the advanced cursor. Adjacent
 physical regions may be coalesced into one larger erase call without changing
 the logical region-count budget.
 
-## Draft glossary
-
-This glossary collects the definitions introduced in the preceding narrative
-so they can be reviewed together. It does not replace the in-line definitions
-that introduce each concept where the surrounding design motivates it. Every
-entry remains draft. An entry marked as a working or deferred draft still needs
-an agreed in-line home in the appropriate narrative or mechanical chapter.
+## Glossary
 
 ### Storage geometry and I/O
 
@@ -515,7 +498,7 @@ collection-defined references from that representation.
 **Collection head record.** A collection head record is a WAL-protocol record
 that names a region as the collection root.
 
-**Collection basis (working draft).** A collection basis is the current
+**Collection basis.** A collection basis is the current
 collection-specific state produced by the ordered application of the
 collection's operation history, whether or not the records representing that
 history remain retained.
@@ -663,24 +646,45 @@ and the subsequent runtime cursor advancement.
 decision, ordered cleanup, and finish interval. Private commit preparation may
 occur before this lock is acquired.
 
-## 8. 
+## 8.
 
-TODO: A detaild michanical discription of the in memory storage state,
-   fields, rust structs, etc. This should the signitures of public APIs that
-   will be used to interact with the storage. This should build on the privouse
-   high level discrition.
+TODO: Provide a detailed mechanical description of the in-memory storage state,
+fields, Rust structs, and public API signatures. This includes:
+
+1. The lifetimes and borrowing model of the logical I/O API.
+2. The bounded collection catalog and how the storage structure tracks each
+   collection's current head.
+3. The fixed transaction slots, the bounded ephemeral state held for each
+   transaction, and the reference to the transaction-log region containing its
+   current segment.
+
+This chapter should build on the preceding high-level description.
 
 ## 9.
 
- TODO: A detaild michanical description of the WAL. Record framing: byte
-   stuffing, checksums, record-start discovery after torn records, and related
-   details. In memory rust structs, life cycle of the regions, etc. This should
-   build on the privouse high level discrition.
+TODO: Provide a detailed mechanical description of the main WAL and transaction
+logs. This includes:
 
-## 10. 
+1. Persistent record framing and codecs, including byte stuffing, checksums,
+   padding, record-start discovery, and torn-tail interpretation.
+2. The exact in-memory Rust structures and persistent layouts.
+3. Transaction-log segment continuation, retention, and region reclamation.
+4. Main-WAL continuation, rotation, and self-growth.
+5. The lifecycle and capacity bounds of WAL and transaction-log regions.
 
-TODO: Detaild discption of the michanical desing of the free list.
+This chapter should state the executable invariants for those mechanisms and
+build on the preceding high-level description.
+
+## 10.
+
+TODO: Provide a detailed mechanical description of the Region Free List. This
+includes its exact Rust state and persistent layouts, tail growth, backing-region
+retirement, erase maintenance, cursor recovery, capacity bounds, and executable
+invariants.
 
 ## 11.
 
- A percisc discriton of start up and WAL replay.
+TODO: Provide a precise mechanical description of startup discovery and WAL
+replay, including reconstruction of collection bases, allocator state,
+transaction decisions, incomplete cleanup, and every supported interrupted
+operation.
