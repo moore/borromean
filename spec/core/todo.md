@@ -42,12 +42,12 @@ Verification: <review or targeted checks required before completion>
 Previously agreed design decisions are not reopened by this queue unless a
 later contradiction requires it. In particular, the logical `FlashIo`
 semantics, relational rather than table-based ownership, transaction-only
-cross-owner transfers, free-list-local representation movement, and shared-read/
-exclusive-mutation access to the top-level storage object remain the working
-design. A top-level mutation of shared state is non-reentrant, while internal
-subsystem operations may compose under the same exclusive access without
-subsystem locks. Transaction-private preparation may occur without entering the
-top-level storage object.
+cross-owner transfers, free-list-internal representation movement, and
+shared-read/exclusive-mutation access to the top-level storage object remain the
+working design. A top-level mutation of shared state is non-reentrant, while
+internal subsystem operations may compose under the same exclusive access
+without subsystem locks. Transaction-private preparation may occur without
+entering the top-level storage object.
 
 ## Ordered design discussion queue
 
@@ -218,10 +218,10 @@ top-level storage object.
   Verification: Review the resulting definitions against this decision and run
   Markdown and diff checks. Leave D04A unchecked until that bounded patch has
   been reviewed.
-- [ ] **D04B1 — Durable authority and publication.** Agree the minimum
+- [x] **D04B1 — Durable authority and publication.** Agree the minimum
   cross-chapter meanings of durable operation record and publication. The
-  follow-up patch adds only these terms where the narrative first motivates
-  them.
+  follow-up patch aligns only their entries in the common vocabulary and records
+  the later owners of their mechanical treatment.
 
   Decision: An operation record is durable when its complete persistent
   representation will survive power loss under the logical storage contract.
@@ -243,16 +243,16 @@ top-level storage object.
   or formalizing ordinary words. The distinction is required by durable private
   transaction operations, which remain outside the committed view until commit.
 
-  Disposition: Do not add these definitions to the introductory narrative.
-  Preserve them here as input to D20 and the unwritten mechanical WAL chapter,
-  where concrete protocol ordering first motivates the distinction. Retain the
-  runtime-access wording cleanup, which does not depend on introducing these
-  terms early. Do not define exact carriers, sync sequences, retention,
-  reachability, or replay mechanics here.
+  Patch scope: Keep the minimum definitions in `001-vocabulary.md` and align
+  publication with the distinction above. Do not add standalone definitions to
+  the system narrative or define exact carriers, sync sequences, retention,
+  reachability, or replay mechanics. D20 and the mechanical WAL chapter own the
+  exact foreground and replay transitions.
 
-  Verification: Confirm no standalone durability/publication definition remains
-  in the introductory narrative, then run Markdown and diff checks. Leave D04B1
-  unchecked until its later mechanical treatment has been reviewed.
+  Verification: Review both vocabulary entries against this decision, confirm
+  no standalone durability or publication definition appears in the system
+  narrative, and run Markdown and diff checks. Leave D04B1 unchecked until this
+  bounded patch has been reviewed.
 - [x] **D04B2 — Reachability.** Agree the minimum cross-chapter meaning of
   reachable without implying an explicit ownership table.
 
@@ -271,11 +271,31 @@ top-level storage object.
   relational safety invariants, and D19 owns stale-link validation.
 
   Verification: The narrower treatment was reviewed in context.
-- [ ] **D04B3 — Retention.** Defer the definition of retained until the
-  mechanical WAL and recovery chapters establish which representations must
-  remain available despite not being reachable from a collection's current
-  root. Keep retention distinct from reachability and do not add it to the
-  introductory narrative.
+- [x] **D04B3 — Retention.** Agree the minimum cross-chapter meaning of retained
+  while deferring exact retention sets and release points to the mechanical WAL
+  and recovery chapters.
+
+  Decision: Data is retained while Borromean may still need it during recovery
+  or to finish work interrupted by power loss. Retained data, and any region
+  containing it, cannot be reclaimed or reused. Retaining a collection root also
+  retains every record and region reachable from that root. The mechanical WAL
+  and recovery chapters define what must be retained and when it may be
+  released.
+
+  Rationale: Reachability describes the data accessible from one collection
+  root. Retention says when Borromean must preserve that root and its reachable
+  data. This gives reclamation a clear safety rule without prematurely selecting
+  WAL boundaries, checkpoints, traversal rules, or replay mechanics.
+
+  Patch scope: Align only the `Retained` entry in `001-vocabulary.md`. Do not
+  change the reachability definition or add a standalone retention definition to
+  the system narrative. D21, D27, D35, and the recovery chapters own the exact
+  retention and release mechanics.
+
+  Verification: Review the vocabulary entry against this decision, confirm no
+  standalone retention definition appears in the system narrative, and run
+  Markdown and diff checks. Leave D04B3 unchecked until this bounded patch has
+  been reviewed.
 - [x] **D04C1 — Collection root.** Agree the minimum cross-chapter meaning of a
   collection root.
 
@@ -292,27 +312,99 @@ top-level storage object.
   the root moves between them.
 
   Verification: The definition was reviewed in its narrative context.
-- [ ] **D04C2 — Head terminology.** Agree qualified uses of head without
+- [x] **D04C3 — Basis, snapshot, and materialization.** Agree their minimum
+  cross-chapter meanings and their relationship to the current collection root.
+
+  Decision: A collection basis is an object representing a collection at one
+  point in its history. Interpreting the basis and following its
+  collection-defined references yields the complete logical state at that point.
+  Those references may lead to earlier bases, so the basis need not contain the
+  complete state in its own bytes.
+
+  An in-memory frontier is the newest basis currently held in RAM. A snapshot is
+  a basis stored in the WAL, and a region materialization is a basis rooted in a
+  region. Once published, either durable form can serve as the collection's
+  durable root. Applying later published operation records in order reconstructs
+  the in-memory frontier, which serves as the current root while resident.
+
+  Rationale: Logical completeness means the whole collection state can be found
+  by interpreting the basis, not that all of its bytes are stored together. The
+  three forms separate the role of a basis from where its starting object
+  resides, while the durable-root and frontier distinction explains how later
+  operations coexist with a published basis without being represented twice.
+
+  Patch scope: Align the four terms in `001-vocabulary.md`, add the basis
+  discussion alongside the separate operation-representation explanation in
+  section 4 of `000-system-narrative.md`, and move D04C3 before its dependent
+  D04C2. Do not change the meaning of an operation record or define head
+  terminology, snapshot/materialization equivalence, persistent layouts,
+  frontier admission, reread policy, or publication mechanics.
+
+  Verification: Review each form against the logical-but-not-physical
+  completeness rule, confirm section 4 explains operation records and collection
+  bases as separate concepts, confirm operation effects are not applied twice,
+  and run Markdown and diff checks. Leave D04C3 unchecked until this bounded
+  patch has been reviewed.
+- [x] **D04C2 — Head terminology.** Agree qualified uses of head without
   conflating a head record with the collection root it names.
 
-  Decision: A collection head record is a WAL-protocol record that names a
-  region as the collection root. Other positional uses of head must be
-  qualified by their structure; head has no unqualified cross-chapter meaning.
+  Decision: A collection head record is a WAL-protocol record that names the
+  root region of a region materialization as the collection root. The record is
+  not itself the root. The word head has no unqualified cross-chapter meaning. A
+  queue or log position uses its existing cursor name or identifies the
+  structure whose head is meant.
 
-  Patch scope: Introduce the definition in section 4 only when the narrative
-  explains how a region materialization becomes the collection root. Replace
-  mistaken uses of collection head with collection root, but leave the exact
-  main-WAL, transaction-log, and free-list positions to their mechanical
-  chapters.
+  Rationale: The collection head record publishes a reference to the collection
+  root; it is not the object from which collection data is read. Requiring a
+  cursor name or a qualified structure also prevents free-list, main-WAL, and
+  transaction-log positions from being confused with one another.
 
-  Verification: Review the definition after D04C3 supplies its narrative
-  context. Leave D04C2 unchecked until then.
-- [ ] **D04C3 — Basis, snapshot, and materialization.** Agree their minimum
-  cross-chapter meanings and their relationship to the current collection root.
-- [ ] **D04D — Log roles.** Agree provisional cross-chapter definitions of the
+  Patch scope: Align the vocabulary entry, add the distinction to section 4,
+  replace the mistaken committed-head use with committed root, and replace
+  ambiguous free-list head phrases with the existing allocation-cursor terms.
+  Apply the agreed `free-list-internal` terminology throughout the active core
+  documents. Leave the exact main-WAL and transaction-log positions and
+  mechanics to their later chapters.
+
+  Verification: Review every use of head in the system narrative. Collection
+  head record must mean the WAL-protocol record, collection root must mean the
+  basis it names, and free-list positions must use their cursor terms. Run
+  Markdown and diff checks, and leave D04C2 unchecked until this bounded patch
+  has been reviewed.
+- [x] **D04D — Log roles.** Agree provisional cross-chapter definitions of the
   main WAL and transaction log without deciding the detailed protocols owned by
   their later chapters. The follow-up patch adds only these terms to the common
   vocabulary.
+
+  Decision: The WAL is one internal collection with two roles. The main WAL is
+  its shared history and serves as the root of the whole database. It orders the
+  records recovery uses to reconstruct shared state, including collection
+  publications, allocator progress, transaction decisions, cleanup, and
+  references to transaction logs.
+
+  A transaction log is durable WAL storage assigned to one open transaction. It
+  holds the transaction's allocation entries, free intents, and collection
+  operation records. Collection operations and free intents remain private until
+  a main-WAL commit record publishes them. An allocation entry affects allocator
+  state when it becomes durable so recovery can account for every region removed
+  from the free list, even when the transaction has no durable decision.
+
+  Rationale: Transaction logs let a transaction prepare durable work without
+  placing each private operation directly in the shared history. The main WAL
+  still provides one shared order for publication and recovery. Allocation
+  entries take effect earlier than the transaction decision because otherwise a
+  crash could lose track of a region already removed from the free list.
+
+  Patch scope: Align the `Main WAL` entry and add the `Transaction log` entry in
+  `001-vocabulary.md`. Do not change the system narrative or define persistent
+  layouts, framing, log continuation, rotation, retention boundaries, commit
+  mechanics, cleanup mechanics, or replay order.
+
+  Verification: Review that transaction-log durability does not by itself
+  publish collection operations or free intents, while a durable allocation
+  entry does affect allocator recovery. Confirm the main WAL remains the shared
+  database root, then run Markdown and diff checks. Leave D04D unchecked until
+  this bounded patch has been reviewed.
 - [ ] **D05 — Exact chapter spine and dependency cycle.** Agree the chapter
   order and how the circular dependency among the main WAL, transaction logs,
   and free list is introduced through abstract contracts before concrete
@@ -396,8 +488,8 @@ top-level storage object.
   the runtime transition, retaining the old representation, and treating an
   unpublished target after a crash. Separately define a durable claim or
   retention fact that may create a recoverable initialization obligation before
-  target bytes are usable, as required by free-list-local growth. The follow-up
-  patch adds only these shared rules for later mechanical chapters.
+  target bytes are usable, as required by free-list-internal growth. The
+  follow-up patch adds only these shared rules for later mechanical chapters.
 - [ ] **D21 — Main-WAL root and retained-boundary model.** Agree the main WAL's
   role as database root, head/tail meanings, WAL sequence namespace, tail
   selection, and the facts replay must retain. The follow-up patch adds only the
@@ -443,7 +535,7 @@ top-level storage object.
   The follow-up patch is limited to the erase-maintenance operation.
 - [ ] **D31 — Allocator facts, checkpoints, and replay.** Replace “take the
   largest allocation record” with an agreed basis/preamble checkpoint, ordered
-  validation of all later transaction and free-list-local allocation facts,
+  validation of all later transaction and free-list-internal allocation facts,
   duplicate/gap/FIFO rejection, retention, and exhaustion behavior. The follow-
   up patch is limited to allocator recovery semantics.
 - [ ] **D32 — Cleanup and finish boundary.** Under exclusive top-level mutation,
@@ -575,15 +667,15 @@ later if other work remains more valuable.
 ### Free-list collection chapter (D28-D30)
 
 - [ ] Incorporate the agreed free-list self-growth rule into the chapter that
-  defines the free-list collection. Moving a region from the ready head into
-  the free-list backing structure does not change owners, so it is a
-  collection-local command rather than a transaction or privileged allocator
+  defines the free-list collection. Moving the region at the allocation cursor
+  into the free-list backing structure does not change owners, so it is a
+  free-list-internal command rather than a transaction or privileged allocator
   exception.
-- [ ] Define the exact free-list-local successor-allocation command. It consumes
-  the current ready-head region as reserved successor `n+1`, advances allocator
-  state without changing owners, and carries the global allocation sequence and
-  `allocation_head_after` needed to order it with transaction-log allocations
-  during replay.
+- [ ] Define the exact free-list-internal successor-allocation command. It
+  consumes the region at the allocation cursor as reserved successor `n+1`,
+  advances allocator state without changing owners, and carries the global
+  allocation sequence and `allocation_head_after` needed to order it with
+  transaction-log allocations during replay.
 - [ ] Define the exact materialization and tail-advance protocol. Free-list
   appends update the WAL and in-memory frontier rather than a materialized
   region. After reserving `n+1`, write and sync the frontier into already

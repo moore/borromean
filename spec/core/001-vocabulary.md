@@ -55,24 +55,25 @@ representation or can be located and interpreted by following
 collection-defined references from that representation.
 
 **Collection head record.** A collection head record is a WAL-protocol record
-that names a region as the collection root.
+that names the root region of a region materialization as the collection root.
+The record is not itself the collection root.
 
-**Collection basis.** A collection basis is the current
-collection-specific state produced by the ordered application of the
-collection's operation history, whether or not the records representing that
-history remain retained.
+**Collection basis.** A collection basis is an object representing a collection
+at one point in its history. Interpreting the basis and following its
+collection-defined references yields the complete logical state at that point.
+Those references may lead to earlier bases, so the basis need not contain the
+complete state in its own bytes.
 
-**In-memory frontier.** An in-memory frontier is a RAM-resident
-collection basis. It can be recovered from the collection's current durable
-root by applying, in order, the operation records for that collection that
-follow the root.
+**In-memory frontier.** An in-memory frontier is the newest collection basis
+currently held in RAM. It can be reconstructed from the collection's durable
+root by applying later published operation records in order.
 
-**Snapshot.** A snapshot is a compact encoding of an in-memory frontier stored
-in the WAL as a temporary durable collection basis.
+**Snapshot.** A snapshot is a collection basis stored in the WAL. Once
+published, it can serve as the collection's durable root.
 
-**Region materialization.** A region materialization is a collection-defined
-encoding of an in-memory frontier written into a region. A collection head
-record can select that materialization as the collection's durable basis.
+**Region materialization.** A region materialization is a collection basis
+rooted in a region. Once published, it can serve as the collection's durable
+root.
 
 ### Logs, durability, and transactions
 
@@ -84,10 +85,17 @@ record whose meaning is defined by the WAL protocol. Ordinary
 collection operation records are embedded in carrying WAL records, but the WAL
 logic does not interpret or impose structure on the carried collection records.
 
-**Main WAL.** The main WAL is the shared database WAL and serves as the root of
-the whole database. It orders shared collection records and snapshots,
-allocator records, transaction decisions, cleanup records, and other
-database-wide protocol records.
+**Main WAL.** The main WAL is the shared part of the WAL collection and serves
+as the root of the whole database. It orders the records recovery uses to
+reconstruct shared database state, including collection publications, allocator
+progress, transaction decisions, cleanup, and references to transaction logs.
+
+**Transaction log.** A transaction log is durable WAL storage assigned to one
+open transaction. It holds the transaction's allocation entries, free intents,
+and collection operation records. Collection operations and free intents remain
+private until a commit record in the main WAL publishes them. An allocation
+entry affects allocator state when it becomes durable, allowing recovery to
+account for a region even when the transaction has no durable decision.
 
 **Transaction region.** A transaction region is a region assigned exclusively
 to one transaction object at a time for writing transaction-log data. It
@@ -131,15 +139,16 @@ when its complete persistent representation will survive power loss. Durability
 alone does not make its effect visible, committed, or part of a particular
 logical view.
 
-**Publication.** Publication is the WAL-protocol-defined durability point after
-which recovery must include an operation's effect in the reconstructed logical
-state, whether or not recovery retains or replays the original operation
-record.
+**Publication.** Publication is the protocol-defined durability point after
+which recovery must include a specified effect in the relevant logical view.
+Publication may coincide with durability of the operation record, or a later
+record such as transaction commit may publish an already durable private
+effect.
 
-**Retained.** A record, representation, or reference is retained while recovery
-may still require its logical role or while another retained structure still
-references it. A region containing a retained record or representation cannot
-be reclaimed or reused until none of its retained contents are needed.
+**Retained.** Data is retained while Borromean may still need it during recovery
+or to finish work interrupted by power loss. Retained data, and any region
+containing it, cannot be reclaimed or reused. Retaining a collection root also
+retains every record and region reachable from that root.
 
 ### Free-list positions and relational lifecycle
 
@@ -190,6 +199,6 @@ records are ignored and ownership does not transfer.
 **Collection Owned.** A region is Collection Owned when it is
 reachable from the committed root of exactly one user or internal collection.
 
-**Free-list-local command.** A free-list-local command is a Free List protocol
-record that moves a region within the Region Free List without transferring it
-to a different owner.
+**Free-list-internal command.** A free-list-internal command is a Free List
+protocol record that moves a region within the Region Free List without
+transferring it to a different owner.

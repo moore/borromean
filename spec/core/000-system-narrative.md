@@ -187,37 +187,50 @@ collections.
 
 ## 4. 
 
-Each operation's effect is represented by exactly one of:
+A collection change begins as an operation represented by an operation record.
+When reconstructing a selected collection state, each operation's effect is
+accounted for exactly once. The effect is either:
 
-   1. An operation record in the WAL.
-   2. A snapshot in the WAL.
-   3. A region materialization.
+1. applied from a published operation record that follows the durable root;
+2. already represented by the selected snapshot; or
+3. already represented by the selected region materialization.
 
-The newest valid snapshot or head record for a collection establishes its
-current root. A snapshot stores the root in the WAL, while a head record points
-to a region materialization. A new root supersedes all earlier operation
-records, snapshots, and head records for that collection.
+These durable representations may coexist physically. Once a published basis
+represents an operation's effect, recovery starts from that basis and does not
+apply the earlier operation record separately. Published operation records that
+follow the durable root remain separate and are applied in order.
 
-Operation records written after the current root are applied in order. The
-current root and these later operation records coexist, but they never represent
-the same operation.
+A collection basis is an object representing a collection at one point in its
+history. Interpreting the basis and following its collection-defined references
+yields the complete logical state at that point. Those references may lead to
+earlier bases, so the basis need not contain the complete state in its own
+bytes.
 
-The write-ahead log (WAL) provides short-term durable storage for operation
-records and snapshots in append order. Operation records are read from the WAL
-only during startup replay. After replay, the effects of operation records
-following each collection's current root are held in RAM.
+Borromean uses three forms of collection basis:
 
-Each open collection maintines a RAM buffer with a size equal to a region. Once
-a opperation is persted in the WAL is is applied by the collection implmentation
-to this RAM buffer to update the state of the collection. When the RAM buffer is
-full it is meterlized in to a region in flash allowing new updates to be held in
-the RAM buffer.
+1. An **in-memory frontier** is the newest basis currently held in RAM.
+2. A **snapshot** is a basis stored in the WAL.
+3. A **region materialization** is a basis rooted in a region.
 
-When a region is not imeadeatly needed but it's RAM buffer is not filled a
-compact version of the buffer accounting for only the currently consumed buffer
-space can be stored as a snapshot in the WAL. This allow the collection to be
-closed, and its RAM buffer returned, without writing a partally filled region
-whiles still allowing effechent reads from flash.
+A snapshot or region materialization remains logically complete when its
+interpretation depends on earlier bases or other collection-defined references.
+
+While an in-memory frontier is resident, it serves as the collection's current
+root. For recovery, the newest valid snapshot or collection head record
+establishes the durable root. The snapshot is itself a root. A collection head
+record instead names the root region of a region materialization; the record is
+not itself the root. Published operation records following the durable root are
+applied in order to reconstruct the in-memory frontier.
+
+When a snapshot or region materialization of the frontier is published as the
+new durable root, it replaces the previous root as the selected starting basis.
+The new basis may contain earlier effects directly or reach them through
+references to earlier bases. An earlier basis or record remains retained
+whenever the new basis still depends on it.
+
+The later collection and runtime chapters define when a frontier must be
+snapshotted or materialized and which durable representations may be read after
+startup.
 
 ## 5.
 
@@ -253,13 +266,14 @@ sequence. Only after that entry is durable does the runtime allocation cursor
 advance and the transaction become responsible for the region.
 
 Every mutating top-level storage operation has exclusive access to allocator
-state. A head-consuming operation preflights the space needed for its durable
-command, selects the entry at `allocation`, assigns the next sequence and
-`allocation_head_after`, writes and syncs the command, and only then applies the
-runtime cursor advance. No other top-level mutation may interleave with that
+state. An operation that consumes the entry at `allocation` preflights the space
+needed for its durable command, selects that entry, assigns the next sequence
+and `allocation_head_after`, writes and syncs the command, and only then applies
+the runtime cursor advance. No other top-level mutation may interleave with that
 sequence. For an ordinary allocation the command is the transaction allocation
-entry; a free-list-local command that consumes the same head entry uses the same
-durable-apply ordering.
+entry. A transaction allocation and a free-list-internal allocation may both
+consume the region at the allocation cursor. Each writes and syncs its own
+allocation record before advancing the runtime allocation cursor.
 
 Different transactions store allocation entries in different transaction logs.
 The physically last allocation record observed in any one log is therefore not
@@ -271,7 +285,7 @@ ordered main-WAL cleanup range and advance the append cursor.
 Free-list appends update the WAL and the in-memory frontier; they do not modify
 a materialized region. Materialized free-list regions are immutable. When the
 current frontier must be materialized into its already reserved region `n`, the
-free list first uses a free-list-local allocation command to consume a Ready
+free list first uses a free-list-internal allocation command to consume a Ready
 Free region as reserved successor `n+1`. This does not transfer ownership. It
 then writes and syncs the complete frontier into region `n`, including the link
 to `n+1`, and writes and syncs a free-list tail-advance command in the WAL. The
@@ -286,14 +300,14 @@ materialization. Recovery erases region `n` before retrying the materialization 
 When the allocation cursor crosses into a new materialized free-list region, the
 old representation region is no longer needed as backing storage. Moving that
 region from free-list structure into the dirty range does not change owners, so
-it does not require transaction cleanup. A free-list-local WAL command can
+it does not require transaction cleanup. A free-list-internal WAL command can
 atomically unlink the old representation region, append it at the dirty tail,
 and advance the affected free-list cursors. A crash before that command leaves
 the old representation reachable; a crash after it leaves the region in the
 dirty range. Erase maintenance likewise changes only the boundary between dirty
 and ready entries inside the same free-list collection.
 
-The remaining details of free-list-local tail growth and representation
+The remaining details of free-list-internal tail growth and representation
 retirement are recorded in
 [todo.md](todo.md#free-list-collection-chapter-d28-d30). Transaction-log and
 main-WAL continuation questions remain in the recursive-allocation TODOs.
@@ -391,9 +405,10 @@ continuation regions may remain transaction-owned while retained transaction and
 WAL structures still reference them.
 
 Free-list backing regions have additional collection-local paths. A free-list
-command may move the ready-head region directly into Free-List Collection Owned
-backing storage, or move an obsolete backing region directly into Dirty Free,
-because neither operation transfers responsibility to a different owner.
+command may move the region at the allocation cursor directly into Free-List
+Collection Owned backing storage, or move an obsolete backing region directly
+into Dirty Free, because neither operation transfers responsibility to a
+different owner.
 
 Ready Free:
 
@@ -402,10 +417,10 @@ A region is Ready Free when it occurs at a logical free-queue position in
 ordinary cross-owner allocation becomes Transaction Owned after its transaction
 allocation entry is durable.
 
-A free-list-local growth command may instead consume that same entry and make it
-Free-List Collection Owned without passing through a transaction. This provieds
-a direct transition from Ready Free -> Collection Owned but only when moving the
-region internally to the Free Queue collection.
+A free-list-internal growth command may instead consume that same entry and make
+it Free-List Collection Owned without passing through a transaction. This
+provieds a direct transition from Ready Free -> Collection Owned but only when
+moving the region internally to the Free Queue collection.
 
 Transaction Owned:
 
@@ -425,7 +440,7 @@ region remains Transaction Owned until its ordered free record becomes durable.
 Collection Owned:
 
 A region is Collection Owned when it is reachable from the retained committed
-head of exactly one collection. The collection may be a user collection or an
+root of exactly one collection. The collection may be a user collection or an
 internal WAL or free-list collection. Transaction-log regions use the
 specialized Transaction Owned classification while retained transaction or WAL
 structures reach them. Region headers validate the expected encoding but do not
