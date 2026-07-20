@@ -413,6 +413,55 @@ entering the top-level storage object.
   or add outline sections in `000-system-narrative.md` and may reorder or split
   the remaining unchecked `Dxx` items here without changing their substantive
   questions; it must not fill in component protocols.
+
+  Decision: Use the following specification reading order:
+
+  1. `000-system-narrative.md`
+  2. `001-vocabulary.md`
+  3. `002-device-format-and-io.md`
+  4. `003-region-relations.md`
+  5. `004-main-wal.md`
+  6. `005-transactions.md`
+  7. `006-free-list.md`
+  8. `007-self-hosting-and-progress.md`
+  9. `008-storage-service-and-collections.md`
+  10. `009-runtime-and-maintenance.md`
+  11. `010-recovery.md`
+  12. `011-verification-and-refinement.md`
+
+  The first two chapters form the narrative pass. Chapters 002 through 006 are
+  component deep dives. Chapters 007 through 011 reconnect those components into
+  the self-hosting storage system, its collection service, runtime, recovery,
+  and verification argument.
+
+  The main WAL, transaction logs, and free list use the minimum contracts
+  introduced by the narrative and vocabulary while their component chapters are
+  read. `007-self-hosting-and-progress.md` then closes their dependency cycle
+  and establishes bootstrap, recursive allocation, log growth, reclamation, and
+  capacity progress. `008-storage-service-and-collections.md` defines the
+  collection contract only after the internal machinery supporting it has been
+  defined. Recovery follows the storage service and runtime because it composes
+  their durable transitions, maintenance work, memory bounds, and open-state
+  contract rather than defining a second set of component rules.
+
+  Rationale: The collection service is supported by the WAL, transactions, free
+  list, and in-memory runtime structures, so its complete contract belongs after
+  those internals. The internal components still need a small shared collection
+  language; the narrative and vocabulary supply it without prematurely defining
+  the user-facing service. Recovery is last among the operational composition
+  chapters because it reconstructs the already-defined runtime state by applying
+  the already-defined component transitions.
+
+  Patch scope: Record the chapter spine here, replace the system narrative's
+  drafting note with a short reading guide, and give its existing numbered
+  sections descriptive headings. Do not create chapter stubs, reorder narrative
+  content, reorder later design questions, or add component mechanics.
+
+  Verification: Confirm every planned specification chapter has one unique
+  three-digit reading-order prefix, the component and composition passes remain
+  distinct, the dependency cycle has an explicit later closure, and each new
+  narrative heading describes its existing content. Run Markdown and diff
+  checks, and leave D05 unchecked until this bounded patch has been reviewed.
 - [ ] **D06 — Append and copy-on-write scope.** Agree which core publications
   must append or replace immutably while leaving collection-specific update and
   deletion encodings, including tombstones, to each collection. The follow-up

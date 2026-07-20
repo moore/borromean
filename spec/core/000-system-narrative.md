@@ -2,12 +2,30 @@
 
 Common terms are collected in the [core vocabulary](001-vocabulary.md).
 
-I think we want to decompose this a little differently. The shape is not all
-wrong but I think the ordering of ideas and which to stress are a little off.
-Here is a ruff sequancing of how I would structure it. These chapters are not
-meant to nessarly be complete but to sketch out the core ideas.
+This narrative introduces the core subsystems in the order needed to understand
+how they work together. It states the minimum shared contracts needed by later
+chapters without defining all of their mechanics.
 
-## 1. 
+The remaining specification chapters are planned in this reading order:
+
+1. `002-device-format-and-io.md`
+2. `003-region-relations.md`
+3. `004-main-wal.md`
+4. `005-transactions.md`
+5. `006-free-list.md`
+6. `007-self-hosting-and-progress.md`
+7. `008-storage-service-and-collections.md`
+8. `009-runtime-and-maintenance.md`
+9. `010-recovery.md`
+10. `011-verification-and-refinement.md`
+
+The main WAL, transaction logs, and free list depend on one another. Their
+component chapters use the minimum contracts introduced here rather than
+pretending that one can be defined without the others. The self-hosting and
+progress chapter then reconnects their complete contracts and establishes that
+allocation, log growth, reclamation, and capacity reserves form a closed system.
+
+## 1. Raw flash constraints and design strategy
 
 Borromean is a database that is intended to run without the help of an
 undelying filesystem. Fallowing from that one of it's core conserns is how to
@@ -73,7 +91,7 @@ root of the database. To minimise this scan time larger regions are prefered
 thou as we will see later the size of the regions has a direct impact on memory
 useage so a traid must be made between start up effechency and required ram.
 
-## 2. 
+## 2. Device geometry and logical I/O
 
 The storage geometry of a Borromean database is constrained by four
 parameters:
@@ -160,7 +178,7 @@ violates its geometry returns an error.
 Later chapters define how Borromean orders the storage primitives to publish
 higher-level state safely.
 
-## 3
+## 3. Collections and roots
 
 In Borromean, records are grouped into logical collections. A collection may
 own zero or more regions, and its format may link those regions into a larger
@@ -185,7 +203,7 @@ transaction is reachable from its committed representation. Core assumes that
 contract for opaque collection types and must satisfy it for its own internal
 collections.
 
-## 4. 
+## 4. Operations and collection bases
 
 A collection change begins as an operation represented by an operation record.
 When reconstructing a selected collection state, each operation's effect is
@@ -232,7 +250,7 @@ The later collection and runtime chapters define when a frontier must be
 snapshotted or materialized and which durable representations may be read after
 startup.
 
-## 5.
+## 5. Region Free List
 
  The Region Free List is a cohesive internal collection represented by a
    logical FIFO queue with three cursor positions: allocation, ready, and
@@ -312,7 +330,7 @@ retirement are recorded in
 [todo.md](todo.md#free-list-collection-chapter-d28-d30). Transaction-log and
 main-WAL continuation questions remain in the recursive-allocation TODOs.
 
-## 6.
+## 6. Transactions
 
 Transactions are required whenever allocating or freeing a region moves
 responsibility between two objects. Allocation must remove a region from the
@@ -386,7 +404,7 @@ free intents, so those regions remain collection-owned. If replay ends after a
 commit or rollback but before transaction finish, it resumes the remaining
 cleanup and writes the finish record.
 
-## 7. 
+## 7. Region relationships and erase maintenance
 
 Region lifecycle names are derived relationships, not fields stored in a
    region table. Borromean keeps no persistent or runtime strcture containing
