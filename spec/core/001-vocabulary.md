@@ -99,9 +99,8 @@ account for a region even when the transaction has no durable decision.
 
 **Transaction region.** A transaction region is a region assigned exclusively
 to one transaction object at a time for writing transaction-log data. It
-contains one or more transaction segments and is logically part of the WAL. The
-transaction and WAL protocols determine when the records in those segments are
-retained, replayed, or included in committed collection state.
+contains one or more transaction segments and is logically part of the WAL. A
+transaction region remains retained while any retained WAL record refers to it.
 
 **Transaction.** A transaction groups private collection operations,
 allocations, and free intents under one commit or rollback decision.
@@ -171,33 +170,31 @@ position.
 increasing order assigned to durable records that consume the entry at the
 allocation cursor.
 
-**Ready Free.** A region is Ready Free when it occurs at a free-list position in
+**Ready Free.** A region is Ready Free when a free-list entry naming it lies in
 the half-open range `[allocation, ready)`. Only the entry at `allocation` may be
 consumed.
 
-**Dirty Free.** A region is Dirty Free when it occurs at a free-list position in
+**Dirty Free.** A region is Dirty Free when a free-list entry naming it lies in
 the half-open range `[ready, append)`. It is unavailable for allocation until a
-readiness record advances the ready cursor beyond it.
+readiness record advances the ready cursor beyond it. Erasing the region's bytes
+alone does not change this relationship.
 
 **Readiness record.** A readiness record is a Region Free List operation record
 that publishes a new ready cursor after erase maintenance has successfully
 erased every selected region. Its effect moves the erased free-list entries
 from Dirty Free to Ready Free.
 
-**Transaction Owned.** A region is Transaction Owned while
-retained transaction structures are responsible for its next safe outcome. On
-commit, every region allocated by the transaction atomically becomes Collection
-Owned. The collection implementation must guarantee that each such region is
-reachable from its committed representation. Core assumes this invariant for
-opaque collection formats and enforces it for internal collections. On
-rollback, an allocated region continues to be Transaction Owned until it is
-freed by an explicit durable free operation during transaction cleanup. On
-commit, every region named by a free-intent command becomes Transaction Owned
-between the commit and its free command during cleanup. On rollback, free-intent
-records are ignored and ownership does not transfer.
+**Transaction Owned.** A newly allocated region becomes Transaction Owned when
+its transaction allocation entry becomes durable. It remains Transaction Owned
+until a committed collection basis reaches it or cleanup returns it to the free
+list. A staged free intent leaves ownership unchanged. On commit, the detached
+region becomes Transaction Owned until cleanup returns it to the free list. On
+rollback, the region remains Collection Owned.
 
-**Collection Owned.** A region is Collection Owned when it is
-reachable from the committed root of exactly one user or internal collection.
+**Collection Owned.** A user collection owns every region reachable from its
+retained committed basis. Core relies on that collection's reachability
+contract. An internal collection owns each region its retained basis depends
+on. Core defines when that region may be reclaimed.
 
 **Free-list-internal command.** A free-list-internal command is a Free List
 protocol record that moves a region within the Region Free List without

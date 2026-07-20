@@ -35,11 +35,9 @@ The primary target for Borromean is flash storage connecte to mrico controlers.
 This added the complexity that the database must be responsible for ware
 leveling. To achieve this Boarroman combineds sevral key ideas.
 
-The first idea is that Borromean uses an append-only model. Every change to
-collection state is persisted as an append rather than an in-place update. When
-a collection value changes, a delta or replacement copy is stored without
-modifying its earlier persisted representation. When a value is deleted, a
-tombstone is recorded.
+Borromean is an append-only store. An update appends a new representation
+instead of overwriting the previous one. Each collection defines how updates and
+deletions are represented.
 
 The abstract form of one such state change is an **operation record**: a finite
 sequence of bytes representing one collection-defined mutation of a particular
@@ -57,19 +55,13 @@ Transaction-private preparation may occur without entering the top-level
 storage object. This access discipline is a runtime invariant and is not
 persisted.
 
-The second idea is that free regions are managed in a FIFO (First In First Out)
-queue where the oldes entry in the free queue is the first removed when neew
-space is needed. This promotes equal ware across all regions of flash.
+Free regions are kept in a FIFO queue. When space is needed, allocation takes
+the oldest ready entry. Using a FIFO guarantees that no region is returned to
+use before any free region that entered the queue earlier.
 
-> NOTE: This is not a perfict system as data which is rarly updated can hold on
-> to a allocation for an extended period of time while othere regons of storage
-> are cyceld many times. We will need to model real world useage but I suspect
-> that this will lead to a portion of the storage seeing serveal times the write
-> cycleing then the rest based on different records having very differet life
-> cycles. An aproach to hand this would be to perdiocally move very old
-> allocations to more heavelly used regions of storage but we have chosen not to
-> do that to maintain refererential intergrrty without adding a second level of
-> inderaction.
+This does not guarantee equal wear across the whole device. Regions holding
+long-lived data are not available for reuse and therefore do not take part in
+the FIFO cycle. Borromean does not move live data solely to balance wear.
 
 A second consideration for working with flash is accommodating its write-erase
 nature. Once a flash cell has been written, it cannot be updated to a new value
@@ -81,15 +73,20 @@ regions enter the dirty range and move to the ready range only through explicit
 caller-requested erase maintenance. Allocation, logical free, and writes to
 newly allocated space do not perform that erase work themselves.
 
-Lastly to encorage wareleveling there is no conistent location to look for the
-root of the database. If we picked one or a few location to conistangly store
-the root those regions would need to be update reguarlly likely causing them to
-fail befor the rest of the storage. Instead Borromean devides the avalible
-storage in to a sequance of equal sized regions, each with a standerd header
-format. At startup all of these regions headders will be scanned to find the
-root of the database. To minimise this scan time larger regions are prefered
-thou as we will see later the size of the regions has a direct impact on memory
-useage so a traid must be made between start up effechency and required ram.
+Repeatedly updating a fixed database-root location would wear out that part of
+the flash before the rest. Borromean therefore uses a rolling root location: the
+main-WAL tail moves through the region area as the database changes.
+
+The fixed database header contains only immutable facts, such as the database
+geometry and physical storage parameters. At startup, Borromean uses those
+facts to locate the region headers. It scans all region headers to find the
+current WAL tail, which points to the retained WAL head. The WAL range from the
+retained head through the current tail is the root of the database. Replaying
+that range recovers the current collection roots.
+
+Larger regions reduce the number of headers that must be scanned at startup,
+but region size also affects RAM use. Region size therefore trades startup scan
+time against required RAM.
 
 ## 2. Device geometry and logical I/O
 
@@ -109,6 +106,42 @@ is divided into equal-sized, non-overlapping **regions**:
 [Database header][Region 0]...[Region n]
 ```
 
+The database header is written when the database is formatted and does not
+change during normal operation. It contains only the immutable facts needed to
+interpret the store:
+
+1. A Borromean format marker, an explicitly supported format version, the
+   encoded metadata length, and an integrity check.
+2. The database-header span length, erase-block size, region size, region count,
+   logical write granule, and erased byte.
+3. Format-time capacity limits that recovery must know, such as the number of
+   transaction-log slots.
+4. Values needed to recognize encoded data, such as the WAL record marker.
+
+Runtime tuning settings are not stored in the database header because they do
+not change the meaning or layout of stored data.
+
+The header does not contain a mutable WAL head or tail, allocator cursor,
+collection root, or other changing database state. The configured database
+length is:
+
+```text
+database-header span + (region count * region size)
+```
+
+The logical storage range presented to Borromean must have exactly that length.
+A physical device may be larger, but bytes outside the presented range are not
+part of the database.
+
+On open, Borromean validates the header before scanning region headers. It first
+checks the format marker and metadata integrity, then uses only a decoder that
+explicitly supports the stored version. It does not guess compatibility or
+silently upgrade the format. It rejects zero or overflowing geometry, a range
+length mismatch, spans or starts that violate erase-block alignment, a logical
+write granule incompatible with the physical write size, an erased-byte
+mismatch, or fixed capacities that cannot fit in the configured region count.
+A validation failure does not modify storage.
+
 A region is Borromean's unit of storage allocation, reclamation, and reuse. A
 structure's responsibility covers an entire region, and erase operations cover
 one or more whole regions.
@@ -126,6 +159,13 @@ independent padding requirement. The configured region length includes that
 complete span. Geometry that violates these constraints is rejected during
 initialization.
 
+Each newly initialized region receives a monotonically increasing sequence
+number in its region header. Region sequence numbers never wrap or repeat. If
+an operation would require a value after the largest value the encoding can
+represent, it returns `SequenceExhausted` before issuing media I/O. Existing
+data remains readable; obtaining more sequence space requires an explicit
+migration or reformat.
+
 A region index names only the reusable byte range. Its current role and
 responsibility derive from retained structures, and its bytes are interpreted
 only after structure-specific validation.
@@ -135,7 +175,7 @@ operations:
 
 1. `write(address, data: &[u8]) -> Result<(), Error>`
 2. `sync(address, length) -> Result<(), Error>`
-3. `read(address, length) -> Result<[u8], Error>`
+3. `read(address, length, consume: FnOnce(&[u8]) -> R) -> Result<R, Error>`
 4. `erase(address, length) -> Result<(), Error>`
 
 The interface is logical rather than a direct representation of the physical
@@ -145,25 +185,61 @@ necessary, and performing any lower-level work needed to satisfy these
 guarantees.
 
 `write()` stages data beginning at `address` and spanning `data.len()` bytes.
-The address must be write-granule aligned and the length must be a multiple of
-the write granule. After `write()` succeeds, later reads under continuous power
-must observe the written data. The write is not guaranteed to survive power loss
-until a covering `sync()` succeeds, although an implementation is allowed to
-make it durable earlier.
+The address must be write-granule aligned, and the length must be a multiple of
+the write granule. Every granule in the requested range must still be erased:
+it must not have been programmed since its last erase. Alignment, bounds, and
+erased-range checks occur before any device program operation; if one fails,
+storage is unchanged.
 
-After `sync(address, length)` succeeds, every previously successful write fully
-covered by that range is durable. The requested range is a minimum guarantee: an
-implementation may synchronize a larger range or all storage, and callers must
-not depend on writes outside the requested range remaining non-durable. On
-directly programmed NOR flash the operation may be a no-op because successful
-writes may already be durable. The sync address and length must be write-granule
-aligned.
+After programming begins, an error may leave the requested range unchanged,
+completely written, or torn. A torn write consists of zero or more complete
+leading granules, followed by at most one partly programmed granule; later
+granules remain erased. The write granule is therefore an alignment unit, not
+an atomicity guarantee. Bytes outside the requested range do not change. A
+caller cannot assume that the requested range remains erased after such an
+error.
 
-`read()` has no logical alignment restriction. Under continuous power it returns
-bytes from the most recent successful writes. If power is lost before a covering
-sync, recovery may observe an unsynced write as absent, complete, or torn at an
-allowed underlying write boundary. Recovery produces one resulting storage
-image; repeated reads after restart observe that stable image.
+After `write()` succeeds, later reads under continuous power observe all the
+requested data. The write is not guaranteed to survive power loss until a
+covering `sync()` succeeds, although an implementation may make it durable
+earlier.
+
+The address and length passed to `sync()` must be write-granule aligned and
+within the configured storage range. A zero-length sync at an aligned, in-range
+address succeeds without invoking a backend barrier and adds no durability
+guarantee.
+
+After a nonempty `sync(address, length)` succeeds, every granule written by an
+earlier successful `write()` and covered by the requested range is durable.
+These guarantees compose across successful sync calls: once their ranges have
+covered every granule of a write, that complete write is durable. The requested
+range is a minimum guarantee. An implementation may synchronize a larger range
+or all storage, and callers must not depend on writes outside the requested
+range remaining non-durable. On directly programmed NOR flash the operation may
+be a no-op because successful writes may already be durable.
+
+Sync changes durability only; it does not change the bytes visible under
+continuous power. Alignment or bounds rejection occurs before invoking a
+backend barrier and adds no durability guarantee. Once a backend barrier is
+attempted, an error may leave none, some, or all earlier write effects durable,
+including effects outside the requested range if the implementation widened
+the operation. Previously durable data remains durable, but the error does not
+identify which additional effects became durable.
+
+`read()` accepts an unaligned range within either the fixed database-header span
+or one region. A successful read calls `consume` exactly once with a contiguous
+borrowed slice containing exactly the requested bytes and returns the value
+produced by `consume`. The slice is valid only during that call; the callback may
+copy or interpret the bytes, but it cannot retain the slice after returning. A
+zero-length read at an in-range address performs no device transfer and calls
+`consume` with an empty slice. A read cannot exceed the region size. A larger
+logical value must be processed through multiple reads.
+
+Under continuous power, the slice contains bytes from the most recent successful
+writes. If power is lost before a covering sync, recovery may observe an
+unsynced write as absent, complete, or torn at an allowed underlying write
+boundary. Recovery produces one resulting storage image; repeated reads after
+restart observe that stable image.
 
 `erase()` accepts only a region-aligned address and a nonzero length that is a
 multiple of the Borromean region size. A successful erase is immediately
@@ -188,20 +264,23 @@ The core is not responsible for interpreting collection-specific data after the
 region header. A header identifies the collection and encoding
 expected for the region's bytes.
 
-There are three internal collection types used by Borromean core to manage
-region and record lifecycles:
+There are two internal collection types used by Borromean core to manage region
+and record lifecycles:
 
 1. The Write Ahead Log (WAL)
-2. Region Free list
-3. Transacton buffers
+2. The Region Free List
+
+The WAL has two parts: the shared main WAL and transaction regions assigned to
+individual transactions.
 
 Other higher-level collection types are defined by consumers of Borromean core,
 each defining their own records, operations, region formats, and reachability
-rules. Core guarantees the atomic allocator and ownership transfer, while the
-collection implementation guarantees that every region allocated by a committing
-transaction is reachable from its committed representation. Core assumes that
-contract for opaque collection types and must satisfy it for its own internal
-collections.
+rules. Core defines and enforces the transitions that move responsibility for a
+whole region among the Region Free List, transactions, and collections. A user
+collection guarantees that each transaction allocation it incorporates is
+reachable from its committed basis. Core relies on that contract
+without interpreting the collection's data. Core defines which regions belong
+to its internal collections and when those regions may be reclaimed.
 
 ## 4. Operations and collection bases
 
@@ -387,10 +466,10 @@ ordered cleanup and the durable transaction-finish record.
 
 The durable commit atomically interprets the collection operations and free
 intents. A new allocation used by a collection becomes collection-owned because
-the committed collection representation reaches it. A committed free intent
+the committed collection basis reaches it. A committed free intent
 stops being collection-owned and becomes transaction-owned cleanup work. A
 collection implementation is responsible for ensuring that every allocation it
-uses is reachable from its committed representation; core assumes this for
+uses is reachable from its committed basis; core assumes this for
 opaque collection formats and must enforce it for its internal collections.
 
 Following commit, ordered free records move committed free-intent regions into
@@ -406,74 +485,69 @@ cleanup and writes the finish record.
 
 ## 7. Region relationships and erase maintenance
 
-Region lifecycle names are derived relationships, not fields stored in a
-   region table. Borromean keeps no persistent or runtime strcture containing
-   one lifecycle state per region. A region's classification follows from its
-   position in the free-list collection, the retained transaction structures
-   that name it, or the retained collection representation that reaches it.
+Region lifecycle names are relationships derived from durable structures, not
+values stored in a region table. Borromean keeps no persistent or runtime
+lifecycle state for every region. A region's relationship follows from a
+free-list entry, a retained transaction obligation, or a retained committed
+collection basis.
 
-The common recyclable collection-data path is:
+Retention is separate from ownership. A region is retained when recovery may
+still need its contents or may need to finish work that refers to it. A retained
+region cannot be reclaimed or reused.
+
+The common recyclable collection-data path is shown below. The collection may
+be a user collection or an internal collection.
 
 ```text
 Ready Free -> Transaction Owned -> Collection Owned -> Transaction Owned -> Dirty Free -> Ready Free
 ```
 
-Rollback skips the collection-owned state for new allocations. Transaction-log
-continuation regions may remain transaction-owned while retained transaction and
-WAL structures still reference them.
+Rollback may move a new allocation directly from Transaction Owned to Dirty
+Free. These arrows summarize common changes in derived relationships; they are
+not a stored state machine. Later invariants define when the relationships must
+be exclusive or complete.
 
 Free-list backing regions have additional collection-local paths. A free-list
-command may move the region at the allocation cursor directly into Free-List
-Collection Owned backing storage, or move an obsolete backing region directly
-into Dirty Free, because neither operation transfers responsibility to a
-different owner.
+command may use the region at the allocation cursor as new backing storage for
+the Region Free List, or move an obsolete backing region directly into Dirty
+Free. The Region Free List remains responsible for the region throughout either
+move.
 
 Ready Free:
 
-A region is Ready Free when it occurs at a logical free-queue position in
+A region is Ready Free when a free-list entry naming it lies in
 `[allocation, ready)`. Only the entry at `allocation` may be consumed. An
-ordinary cross-owner allocation becomes Transaction Owned after its transaction
-allocation entry is durable.
+ordinary allocation becomes Transaction Owned when its durable transaction
+allocation entry consumes that free-list entry.
 
-A free-list-internal growth command may instead consume that same entry and make
-it Free-List Collection Owned without passing through a transaction. This
-provieds a direct transition from Ready Free -> Collection Owned but only when
-moving the region internally to the Free Queue collection.
+A free-list-internal growth command may instead consume that same entry and use
+the region as new backing storage for the Region Free List. The Region Free List
+remains responsible for the region throughout this move.
 
 Transaction Owned:
 
-A region is Transaction Owned when retained transaction structures are
-responsible for its next safe outcome. This occurs in two principal cases:
+A newly allocated region becomes Transaction Owned when its transaction
+allocation entry becomes durable. It remains Transaction Owned until a
+committed collection basis reaches it or cleanup returns it to the free list.
 
-1. A durable transaction allocation entry has consumed the region, but no
-   committed collection operation yet owns it.
-2. A durable commit has removed a free-intent region from the logical collection
-   view, but ordered cleanup has not yet appended its free record.
-
-An allocation becomes Collection Owned at commit when the collection's committed
-representation reaches it. On rollback, allocation cleanup instead writes an
-ordered free record, which moves it to Dirty Free. A committed free-intent
-region remains Transaction Owned until its ordered free record becomes durable.
+A staged free intent leaves ownership unchanged. If the transaction commits,
+the detached region becomes Transaction Owned until cleanup returns it to the
+free list. If the transaction rolls back, the region remains Collection Owned.
 
 Collection Owned:
 
-A region is Collection Owned when it is reachable from the retained committed
-root of exactly one collection. The collection may be a user collection or an
-internal WAL or free-list collection. Transaction-log regions use the
-specialized Transaction Owned classification while retained transaction or WAL
-structures reach them. Region headers validate the expected encoding but do not
-create ownership. The collection implementation supplies the reachability
-guarantee.
-> TODO: This discription of transaction owned regions is not quite write.
+A user collection owns every region reachable from its retained committed
+basis. Core relies on the user collection's reachability contract.
 
-A staged free intent does not change collection ownership before the transaction
-decision. Durable rollback discards the intent and leaves the region Collection
-Owned. Durable commit applies the collection operation that detaches it and
-simultaneously makes it Transaction Owned cleanup work.
+An internal collection owns each region its retained basis depends on. Core
+defines when that region may be reclaimed.
+
+A transaction region remains retained while any retained WAL record refers to
+it.
 
 Dirty Free:
 
-A region is Dirty Free when it occurs at a logical free-queue position in
+A region is Dirty Free when a free-list entry naming it lies in
 `[ready, append)`. It remains unavailable for allocation even if a previous
 failed or interrupted maintenance call happened to erase its physical bytes.
 
