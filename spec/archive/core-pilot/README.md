@@ -9,7 +9,7 @@ incremental review process.
 
 Active work lives in:
 
-- [the system narrative](../../core/thoughts.md);
+- [the system narrative](../../core/000-system-narrative.md);
 - [the incremental design queue](../../core/todo.md); and
 - [the authoring guide](../../core/authoring.md).
 

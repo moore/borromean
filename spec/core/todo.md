@@ -1,8 +1,9 @@
 # Core specification design TODOs
 
 This file records unresolved design and specification work discovered while
-reviewing `thoughts.md`. Agreed decisions belong in the specification; this file
-is only for work that still needs to be resolved or propagated.
+reviewing `000-system-narrative.md` and `001-vocabulary.md`. Agreed decisions
+belong in the specification; this file is only for work that still needs to be
+resolved or propagated.
 
 ## Incremental review protocol
 
@@ -75,8 +76,8 @@ top-level storage object.
   provide an explicit refinement.
 
   Patch scope: Record this decision here and add `spec/core/authoring.md` as a
-  flexible checklist. Keep `thoughts.md` together as the system narrative and do
-  not alter its design content in this patch.
+  flexible checklist. Keep `000-system-narrative.md` together as the system
+  narrative and do not alter its design content in this patch.
 
   Verification: Review the guide against this decision, confirm that every
   template section is optional when inapplicable, and run Markdown/diff checks.
@@ -206,11 +207,12 @@ top-level storage object.
   whether concurrent operations are transformed is outside this definition.
 
   Patch scope: Add the operation-record definition to the opening state-change
-  discussion in `spec/core/thoughts.md`, add the region definition to its
-  geometry introduction, clarify the immediately related WAL terminology, and
-  replace the misleading residence list with the agreed current-root and later-
-  operation distinction. Do not decide exact geometry, routing fields,
-  persistent framing, stale-link validation, snapshot and materialization
+  discussion in `spec/core/000-system-narrative.md`, add the region definition
+  to its geometry introduction, clarify the immediately related WAL
+  terminology, and replace the misleading residence list with the agreed
+  current-root and later-operation distinction. Do not decide exact geometry,
+  routing fields, persistent framing, stale-link validation, snapshot and
+  materialization
   equivalence, or snapshot reread behavior.
 
   Verification: Review the resulting definitions against this decision and run
@@ -314,10 +316,11 @@ top-level storage object.
 - [ ] **D05 — Exact chapter spine and dependency cycle.** Agree the chapter
   order and how the circular dependency among the main WAL, transaction logs,
   and free list is introduced through abstract contracts before concrete
-  self-hosting mechanics. The follow-up patch may reorder or add outline
-  sections in `thoughts.md` and may reorder or split the remaining unchecked
-  `Dxx` items here without changing their substantive questions; it must not
-  fill in component protocols.
+  self-hosting mechanics. Every specification-chapter filename uses a
+  three-digit, zero-padded reading-order prefix. The follow-up patch may reorder
+  or add outline sections in `000-system-narrative.md` and may reorder or split
+  the remaining unchecked `Dxx` items here without changing their substantive
+  questions; it must not fill in component protocols.
 - [ ] **D06 — Append and copy-on-write scope.** Agree which core publications
   must append or replace immutably while leaving collection-specific update and
   deletion encodings, including tombstones, to each collection. The follow-up
