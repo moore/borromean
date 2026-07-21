@@ -157,23 +157,23 @@ independent padding requirement. The configured region length includes that
 complete span. Geometry that violates these constraints is rejected during
 initialization.
 
-Each allocation receives the global allocation sequence assigned when its
-free-list entry is consumed. When the allocated region is initialized, its
-header records that allocation sequence. Allocation sequences never wrap or
-repeat. If an allocation would require a value after the largest value the
-encoding can represent, it returns `SequenceExhausted` before issuing media
-I/O. Existing data remains readable; obtaining more sequence space requires an
-explicit migration or reformat.
+Every Region Free List command receives one global free-list sequence. When a
+command allocates a region, that sequence identifies the allocation. The
+initialized region header records it. Free-list sequences never wrap or repeat.
+If a command would require a value after the largest value the encoding can
+represent, it returns `SequenceExhausted` before issuing media I/O. Existing
+data remains readable; obtaining more sequence space requires an explicit
+migration or reformat.
 
 A region index names only the reusable byte range. Its current role and
 responsibility derive from retained structures, and its bytes are interpreted
 only after structure-specific validation.
 
-A logical region is a region index paired with the allocation sequence assigned
-to that use of the byte range. Every durable reference used to interpret a
-region's contents names a logical region. Before following the reference,
-Borromean validates the target header and requires its allocation sequence,
-collection, and format to match the reference's expectations. A mismatch makes
+A logical region is a region index paired with the free-list sequence of the
+command that allocated that use of the byte range. Every durable reference used
+to interpret a region's contents names a logical region. Before following the
+reference, Borromean validates the target header and requires its free-list
+sequence, collection, and format to match the reference's expectations. A mismatch makes
 the reference invalid: Borromean does not follow it, interpret the target, or
 use it as evidence that the target is reachable. Records that name a physical
 region only to allocate, free, erase, or perform cleanup need not interpret its
@@ -373,64 +373,81 @@ startup.
 
 ## 5. Region Free List
 
- The Region Free List is a cohesive internal collection represented by a
-   logical FIFO queue with three cursor positions: allocation, ready, and
-   append. Materialized free-list regions form a linked representation of the
-   queue. The current tail may instead be represented by WAL records and a
-   snapshot until it is materialized into a region and linked to a newly
-   prepared tail.
+The Region Free List is one logical FIFO queue with three positions:
 
-The allocation cursor identifies the first ready entry that may be consumed. The
-ready cursor identifies the first dirty entry. The append cursor identifies the
-first unused queue position:
+- The **allocation head** identifies the next Ready Free entry that may be
+  consumed.
+- The **ready boundary** identifies the first Dirty Free entry.
+- The **append tail** identifies the first unused queue position.
+
+The selected main-WAL tail prologue checkpoints all three positions under one
+free-list sequence. Every later free-list command carries a greater free-list
+sequence and records each position that it changes. Recovery determines the
+three positions independently:
+
+- The allocation head comes from the checkpoint or later command defining it
+  with the greatest free-list sequence.
+- The ready boundary comes from the checkpoint or later command defining it
+  with the greatest free-list sequence.
+- The append tail comes from the checkpoint or later command defining it with
+  the greatest free-list sequence.
+
+A command that changes more than one position supplies those values under the
+same free-list sequence. Recovery also uses the greatest retained free-list
+sequence to determine the next sequence.
+
+Immutable linked free-list regions and later retained WAL commands contain the
+queue entries addressed by the recovered positions. Together they represent
+one FIFO; they are not separate free lists. Materializing WAL-resident entries
+changes their representation without changing their logical positions or queue
+order. The already reserved materialization region and reserved successor are
+free-list backing storage, not entries available for allocation.
 
 ```text
 [consumed or stale][ready entries][dirty entries][unused capacity]
                    ^ allocation  ^ ready         ^ append
+                     head          boundary        tail
 ```
 
 The active ranges are half-open:
 
 ```text
-Ready Free = [allocation, ready)
-Dirty Free = [ready, append)
+Ready Free = [allocation head, ready boundary)
+Dirty Free = [ready boundary, append tail)
 ```
 
-Allocation consumes only the entry at `allocation`. Every allocation or free
-that transfers a region between the free-list collection, a transaction, and
-another collection is performed through the transaction protocol. A durable
-transaction allocation entry records the allocated region, the allocator
-position after the allocation, and a monotonically increasing allocation
-sequence. Only after that entry is durable does the runtime allocation cursor
-advance and the transaction become responsible for the region.
+Allocation consumes only the entry at the allocation head. Every allocation or
+free that transfers a region between the free-list collection, a transaction,
+and another collection is performed through the transaction protocol. A durable
+transaction allocation entry records the allocated logical region and the
+allocation head after consumption. Only after that entry is durable does the
+runtime allocation head advance and the transaction become responsible for the
+region.
 
 Every mutating top-level storage operation has exclusive access to allocator
-state. The allocation state includes the allocation cursor and the next
-allocation sequence. A command that consumes the entry at the allocation cursor
-records the resulting logical region, `allocation_head_after`, and
-`allocation_sequence_after`. The logical region pairs the consumed entry's
-region index with the current next allocation sequence. The sequence after is
-that value plus one.
+state. The allocation state includes the allocation head and the next free-list
+sequence. A command that consumes the entry at the allocation head records the
+resulting logical region and `allocation_head_after`. The logical region pairs
+the consumed entry's region index with that command's free-list sequence.
 
 The operation preflights space for the command and checks that the sequence can
 advance before issuing media I/O. It writes and syncs the command before
-applying both after-values to runtime state. Advancing the allocation cursor and
-the allocation sequence is one durable transition. No other top-level mutation
-may interleave with it.
+applying the new allocation head and next free-list sequence to runtime state.
+Those changes form one durable transition. No other top-level mutation may
+interleave with it.
 
 For an ordinary allocation the command is the transaction allocation entry. A
 transaction allocation and a free-list-internal allocation may both consume the
-region at the allocation cursor. Each follows the same transition and returns
+region at the allocation head. Each follows the same transition and returns
 or retains the logical region rather than a bare region index.
 
 Different transactions store allocation entries in different transaction logs.
 The physically last allocation record observed in any one log is therefore not
-necessarily the newest allocator state. Replay uses the retained
-allocation-consuming command with the largest valid
-`allocation_sequence_after` and restores both after-values recorded by that
-command. Transaction cleanup frees are written in their ordered main-WAL
-cleanup range and advance the append cursor; they do not advance the allocation
-sequence.
+necessarily the newest allocator state. Recovery uses the main-WAL tail
+prologue's free-list checkpoint and every later retained free-list command as
+described above. Transaction cleanup frees are written in their ordered
+main-WAL cleanup range and advance the append tail under their own free-list
+sequences.
 
 Free-list appends update the WAL and the in-memory frontier; they do not modify
 a materialized region. Materialized free-list regions are immutable. When the
@@ -452,7 +469,7 @@ tail-advance command, region `n` is an incomplete or unpublished
 materialization. Recovery erases region `n` before retrying the materialization,
 even if its bytes appear valid.
 
-When the allocation cursor crosses into a new materialized free-list region, the
+When the allocation head crosses into a new materialized free-list region, the
 old representation region is no longer needed as backing storage. Moving that
 region from free-list structure into the dirty range does not change owners, so
 it does not require transaction cleanup. A free-list-internal WAL command can
@@ -547,7 +564,7 @@ and contains:
 ```
 
 Allocation entries use WAL framing and contain the allocated logical region,
-`allocation_head_after`, and `allocation_sequence_after`. The containing
+`allocation_head_after`, and the command's free-list sequence. The containing
 transaction establishes initial transaction ownership; a durable next-segment
 link or committed collection operation establishes the region's later
 structural role. Free intents are a packed list of collection-owned regions
@@ -641,7 +658,7 @@ through their reachability contracts. Foreground operation and recovery replay
 derive the same accounting from the same durable records.
 
 Free-list backing regions have additional collection-local paths. A free-list
-command may use the region at the allocation cursor as new backing storage for
+command may use the region at the allocation head as new backing storage for
 the Region Free List, or move an obsolete backing region directly into Dirty
 Free. The Region Free List remains responsible for the region throughout either
 move.
@@ -649,7 +666,8 @@ move.
 Ready Free:
 
 A region is Ready Free when a free-list entry naming it lies in
-`[allocation, ready)`. Only the entry at `allocation` may be consumed. An
+`[allocation head, ready boundary)`. Only the entry at the allocation head may
+be consumed. An
 ordinary allocation becomes Transaction Owned when its durable transaction
 allocation entry consumes that free-list entry.
 
@@ -681,8 +699,9 @@ it.
 Dirty Free:
 
 A region is Dirty Free when a free-list entry naming it lies in
-`[ready, append)`. It remains unavailable for allocation even if a previous
-failed or interrupted maintenance call happened to erase its physical bytes.
+`[ready boundary, append tail)`. It remains unavailable for allocation even if
+a previous failed or interrupted maintenance call happened to erase its
+physical bytes.
 
 Erase maintenance accepts a caller-supplied maximum region count and selects
 `min(requested_count, dirty_count)` entries beginning at `ready`. If the
@@ -692,11 +711,11 @@ power-failure durable.
 
 If any erase returns an error, maintenance stops immediately, performs no
 further erase or WAL operation, publishes no readiness record, and leaves the
-runtime ready cursor unchanged. Any successfully erased prefix remains
+runtime ready boundary unchanged. Any successfully erased prefix remains
 relationally Dirty Free until the caller explicitly retries.
 
 After every selected erase succeeds, maintenance writes and syncs one readiness
-record containing the new ready cursor, then advances the runtime cursor. A
+record containing the new ready boundary, then advances the runtime boundary. A
 crash before that record is durable leaves the entire prefix Dirty Free and
 permits safe re-erase. A crash after the record is durable but before runtime
 apply is repaired by replay, which reconstructs the advanced cursor. Adjacent

@@ -65,15 +65,54 @@ internally accurate and complete at its intended level.
   starts reconstruction, how later WAL free-list operations extend it, and that
   allocation, ready, and append are logical queue positions independent of
   where their entries are stored. Do not reopen link or preallocation mechanics.
-  The follow-up patch changes only the free-list introduction in the narrative.
+  The follow-up patch changes the free-list introduction and aligns the shared
+  sequence terminology.
+
+  Decision: The selected main-WAL tail prologue checkpoints the free-list
+  allocation head, ready boundary, and append tail under one free-list sequence.
+  Each later retained free-list command has one greater free-list sequence and
+  records every position it changes. Recovery selects each position
+  independently from the checkpoint or applicable command with the greatest
+  free-list sequence. A command that changes several positions supplies them
+  under one sequence. The greatest retained sequence determines the next
+  sequence.
+
+  The allocation head identifies the next Ready Free entry that may be
+  consumed, the ready boundary identifies the first Dirty Free entry, and the
+  append tail identifies the first unused queue position. Immutable linked
+  regions and later retained WAL commands contain the entries addressed by
+  those positions and together represent one FIFO. Materialization changes
+  representation without changing logical positions or queue order. Reserved
+  materialization and successor regions are backing storage, not allocatable
+  queue entries.
+
+  One global free-list sequence orders every free-list command. When a command
+  allocates a region, its free-list sequence also identifies that use of the
+  physical region in logical-region references. Non-allocation commands may
+  create gaps in the sequences used by logical regions. This supersedes D19A's
+  separate allocation-sequence counter.
+
+  Rationale: Per-position selection allows commands to change different cursor
+  subsets while retaining one total order for recovery. Reusing that order for
+  logical-region incarnation preserves uniqueness without a second monotonic
+  counter. The main-WAL tail prologue supplies a bounded checkpoint, while the
+  linked regions remain storage for queue entries rather than an independent
+  source of cursor state.
+
+  Patch scope: Replace the free-list reconstruction summary and align logical-
+  region sequence terminology in `000-system-narrative.md` and
+  `001-vocabulary.md`. Remove the now-redundant D31A narrative correction. Do
+  not define exact prologue or command codecs, link mechanics, crash cuts,
+  implementation, or models.
+
+  Verification: Confirm independent recovery of allocation head, ready
+  boundary, and append tail; one free-list sequence for every command; logical-
+  region uniqueness despite sequence gaps; and one FIFO across linked regions
+  and WAL commands. Run Markdown and diff checks, and leave D24 unchecked until
+  that bounded patch has been reviewed.
 - [ ] **D30A — Zero-work erase maintenance.** Correct a zero selected count to
   success with no erase, WAL operation, or runtime change. The follow-up patch
   changes only that narrative result; readiness-record failures remain D30B.
-- [ ] **D31A — Allocator checkpoint and later-fact summary.** Replace the
-  provisional claim that replay takes only the greatest allocation command with
-  the minimum narrative contract: replay starts from a retained allocator
-  checkpoint and validates every later allocation-consuming fact in order. The
-  follow-up patch does not define exact replay mechanics, which remain D31B.
 - [ ] **D13A — Collection identity and bounded catalog.** Agree stable
   collection IDs and type identities, the format-time catalog bound, lookup,
   and whether an ID can be reused. Generation existence is already established
@@ -130,8 +169,8 @@ an item explicitly says otherwise.
   retention of enrollment and materialization-intent records; exclude bootstrap.
 - [ ] **D28A — Free-list tail-growth commands and ordering.** Preserve the
   collection-local ownership rule and reserved-successor/materialize/tail-
-  advance sequence. Define each command's logical-region, cursor, and allocation-
-  sequence fields and foreground ordering. Admission reserves remain D36.
+  advance sequence. Define each command's logical-region, position, and free-
+  list-sequence fields and foreground ordering. Admission reserves remain D36.
 - [ ] **D28B — Free-list tail-growth interruption.** Define replay validation,
   I/O-error outcomes, every crash cut, and erase-before-retry for an unmatched
   successor-allocation obligation. Do not reopen D28A command meaning.
@@ -143,8 +182,9 @@ an item explicitly says otherwise.
   write/sync failure, replay, retry, and runtime results. D30A owns the zero-work
   result.
 - [ ] **D31B — Allocator checkpoints and replay.** Define checkpoint contents,
-  ordered validation of all later transaction and free-list-internal allocation
-  facts, duplicate/gap/FIFO rejection, retention, and exhaustion behavior.
+  ordered validation of all later free-list commands across main and transaction
+  logs, per-position greatest-sequence selection, duplicate/gap/FIFO rejection,
+  retention, and exhaustion behavior.
 - [ ] **D32 — Cleanup and finish protocol.** Under exclusive top-level mutation,
   define the durable cleanup cursor, ordered and idempotent cleanup, finish
   publication, transaction-log release, and interruption recovery. D37 owns
@@ -281,14 +321,14 @@ later if other work remains more valuable.
 ### Free-list collection chapter (D28A-D30B)
 
 - [ ] Incorporate the agreed free-list self-growth rule into the chapter that
-  defines the free-list collection. Moving the region at the allocation cursor
+  defines the free-list collection. Moving the region at the allocation head
   into the free-list backing structure does not change owners, so it is a
   free-list-internal command rather than a transaction or privileged allocator
   exception.
 - [ ] Define the exact free-list-internal successor-allocation command. It
-  consumes the region at the allocation cursor as reserved successor `n+1`,
+  consumes the region at the allocation head as reserved successor `n+1`,
   advances allocator state without changing owners, and carries the successor
-  logical region, `allocation_head_after`, and `allocation_sequence_after`
+  logical region, `allocation_head_after`, and its free-list sequence
   needed to order it with transaction-log allocations during replay.
 - [ ] Define the exact materialization and tail-advance protocol. Free-list
   appends update the WAL and in-memory frontier rather than a materialized

@@ -19,7 +19,7 @@ header and the collection-defined data that follows it. Regions are allocated,
 reclaimed, and reused only as whole units. Every region can be located using a
 deterministic index.
 
-**Region header.** A region header identifies the allocation sequence,
+**Region header.** A region header identifies the allocating free-list sequence,
 collection, and encoding expected for the region's bytes.
 
 **Region index.** A region index identifies one region's reusable byte range.
@@ -27,9 +27,9 @@ It does not by itself identify the region's current role or the meaning of its
 bytes.
 
 **Logical region.** A logical region is a region index paired with the
-allocation sequence assigned to one use of that byte range. A durable reference
-used to interpret a region's contents names a logical region so that reuse of
-the same region index cannot make an old reference valid again.
+free-list sequence of the command that allocated one use of that byte range. A
+durable reference used to interpret a region's contents names a logical region
+so that reuse of the same region index cannot make an old reference valid again.
 
 **Write granule.** The write granule is the minimum write size exposed by the
 logical storage geometry. Write and sync addresses and lengths are aligned to
@@ -130,9 +130,9 @@ portion of a transaction region containing allocations, free intents, an
 optional next-segment link, and collection operations.
 
 **Transaction allocation entry.** A transaction allocation entry records the
-allocated logical region, `allocation_head_after`, and
-`allocation_sequence_after`. It becomes durable before either after-value is
-applied to runtime allocation state.
+allocated logical region, `allocation_head_after`, and the allocating command's
+free-list sequence. It becomes durable before the new allocation head and next
+free-list sequence are applied to runtime state.
 
 **Free intent.** A free intent is a transaction-private proposal to detach a
 collection-owned region and return it through transaction cleanup when the
@@ -163,30 +163,30 @@ list, transaction structures, and collection roots.
 represented as one logical FIFO queue. Its backing may include linked
 materialized regions and a WAL-resident tail.
 
-**Allocation cursor.** The allocation cursor identifies the first Ready Free
-entry that may be consumed.
+**Allocation head.** The allocation head identifies the first Ready Free entry
+that may be consumed.
 
-**Ready cursor.** The ready cursor identifies the first Dirty Free entry.
+**Ready boundary.** The ready boundary identifies the first Dirty Free entry.
 
-**Append cursor.** The append cursor identifies the first unused free-list
-position.
+**Append tail.** The append tail identifies the first unused free-list position.
 
-**Allocation sequence.** The allocation sequence is a global, non-repeating
-value assigned by the Region Free List to a region when a durable command
-consumes the entry at the allocation cursor. The allocation state retains the
-next value to assign.
+**Free-list sequence.** The free-list sequence is a global, non-repeating order
+assigned to every Region Free List command. The sequence of a command that
+allocates a region also identifies that use of the physical region. Non-
+allocation commands may therefore create gaps between sequences found in
+logical-region references.
 
 **Ready Free.** A region is Ready Free when a free-list entry naming it lies in
-the half-open range `[allocation, ready)`. Only the entry at `allocation` may be
-consumed.
+the half-open range `[allocation head, ready boundary)`. Only the entry at the
+allocation head may be consumed.
 
 **Dirty Free.** A region is Dirty Free when a free-list entry naming it lies in
-the half-open range `[ready, append)`. It is unavailable for allocation until a
-readiness record advances the ready cursor beyond it. Erasing the region's bytes
-alone does not change this relationship.
+the half-open range `[ready boundary, append tail)`. It is unavailable for
+allocation until a readiness record advances the ready boundary beyond it.
+Erasing the region's bytes alone does not change this relationship.
 
 **Readiness record.** A readiness record is a Region Free List operation record
-that publishes a new ready cursor after erase maintenance has successfully
+that publishes a new ready boundary after erase maintenance has successfully
 erased every selected region. Its effect moves the erased free-list entries
 from Dirty Free to Ready Free.
 
