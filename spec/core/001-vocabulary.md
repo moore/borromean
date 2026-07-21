@@ -19,12 +19,17 @@ header and the collection-defined data that follows it. Regions are allocated,
 reclaimed, and reused only as whole units. Every region can be located using a
 deterministic index.
 
-**Region header.** A region header identifies the collection and encoding
-expected for the region's bytes.
+**Region header.** A region header identifies the allocation sequence,
+collection, and encoding expected for the region's bytes.
 
 **Region index.** A region index identifies one region's reusable byte range.
 It does not by itself identify the region's current role or the meaning of its
 bytes.
+
+**Logical region.** A logical region is a region index paired with the
+allocation sequence assigned to one use of that byte range. A durable reference
+used to interpret a region's contents names a logical region so that reuse of
+the same region index cannot make an old reference valid again.
 
 **Write granule.** The write granule is the minimum write size exposed by the
 logical storage geometry. Write and sync addresses and lengths are aligned to
@@ -45,7 +50,7 @@ representing an operation. It describes what to apply, not where or how it is
 persisted, and its meaning does not depend on its storage location or persistent
 framing.
 
-**Collection root.** A collection root is a single region, snapshot, or
+**Collection root.** A collection root is a single logical region, snapshot, or
 in-memory frontier from which all live data in the collection can be accessed.
 
 **Reachability.** Reachability is a collection-defined relation between a
@@ -55,8 +60,8 @@ representation or can be located and interpreted by following
 collection-defined references from that representation.
 
 **Collection head record.** A collection head record is a WAL-protocol record
-that names the root region of a region materialization as the collection root.
-The record is not itself the collection root.
+that names the root logical region of a region materialization as the collection
+root. The record is not itself the collection root.
 
 **Collection basis.** A collection basis is an object representing a collection
 at one point in its history. Interpreting the basis and following its
@@ -125,9 +130,9 @@ portion of a transaction region containing allocations, free intents, an
 optional next-segment link, and collection operations.
 
 **Transaction allocation entry.** A transaction allocation entry records the
-allocated region, the global allocation sequence, and the allocation cursor
-after the entry is consumed. It becomes durable before the runtime allocation
-cursor advances.
+allocated logical region, `allocation_head_after`, and
+`allocation_sequence_after`. It becomes durable before either after-value is
+applied to runtime allocation state.
 
 **Free intent.** A free intent is a transaction-private proposal to detach a
 collection-owned region and return it through transaction cleanup when the
@@ -166,9 +171,10 @@ entry that may be consumed.
 **Append cursor.** The append cursor identifies the first unused free-list
 position.
 
-**Allocation sequence.** The allocation sequence is a global, monotonically
-increasing order assigned to durable records that consume the entry at the
-allocation cursor.
+**Allocation sequence.** The allocation sequence is a global, non-repeating
+value assigned by the Region Free List to a region when a durable command
+consumes the entry at the allocation cursor. The allocation state retains the
+next value to assign.
 
 **Ready Free.** A region is Ready Free when a free-list entry naming it lies in
 the half-open range `[allocation, ready)`. Only the entry at `allocation` may be

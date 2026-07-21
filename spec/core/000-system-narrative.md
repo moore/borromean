@@ -159,16 +159,27 @@ independent padding requirement. The configured region length includes that
 complete span. Geometry that violates these constraints is rejected during
 initialization.
 
-Each newly initialized region receives a monotonically increasing sequence
-number in its region header. Region sequence numbers never wrap or repeat. If
-an operation would require a value after the largest value the encoding can
-represent, it returns `SequenceExhausted` before issuing media I/O. Existing
-data remains readable; obtaining more sequence space requires an explicit
-migration or reformat.
+Each allocation receives the global allocation sequence assigned when its
+free-list entry is consumed. When the allocated region is initialized, its
+header records that allocation sequence. Allocation sequences never wrap or
+repeat. If an allocation would require a value after the largest value the
+encoding can represent, it returns `SequenceExhausted` before issuing media
+I/O. Existing data remains readable; obtaining more sequence space requires an
+explicit migration or reformat.
 
 A region index names only the reusable byte range. Its current role and
 responsibility derive from retained structures, and its bytes are interpreted
 only after structure-specific validation.
+
+A logical region is a region index paired with the allocation sequence assigned
+to that use of the byte range. Every durable reference used to interpret a
+region's contents names a logical region. Before following the reference,
+Borromean validates the target header and requires its allocation sequence,
+collection, and format to match the reference's expectations. A mismatch makes
+the reference invalid: Borromean does not follow it, interpret the target, or
+use it as evidence that the target is reachable. Records that name a physical
+region only to allocate, free, erase, or perform cleanup need not interpret its
+contents and may identify the region by index alone.
 
 Borromean uses a logical byte-oriented storage interface with four core
 operations:
@@ -363,32 +374,43 @@ sequence. Only after that entry is durable does the runtime allocation cursor
 advance and the transaction become responsible for the region.
 
 Every mutating top-level storage operation has exclusive access to allocator
-state. An operation that consumes the entry at `allocation` preflights the space
-needed for its durable command, selects that entry, assigns the next sequence
-and `allocation_head_after`, writes and syncs the command, and only then applies
-the runtime cursor advance. No other top-level mutation may interleave with that
-sequence. For an ordinary allocation the command is the transaction allocation
-entry. A transaction allocation and a free-list-internal allocation may both
-consume the region at the allocation cursor. Each writes and syncs its own
-allocation record before advancing the runtime allocation cursor.
+state. The allocation state includes the allocation cursor and the next
+allocation sequence. A command that consumes the entry at the allocation cursor
+records the resulting logical region, `allocation_head_after`, and
+`allocation_sequence_after`. The logical region pairs the consumed entry's
+region index with the current next allocation sequence. The sequence after is
+that value plus one.
+
+The operation preflights space for the command and checks that the sequence can
+advance before issuing media I/O. It writes and syncs the command before
+applying both after-values to runtime state. Advancing the allocation cursor and
+the allocation sequence is one durable transition. No other top-level mutation
+may interleave with it.
+
+For an ordinary allocation the command is the transaction allocation entry. A
+transaction allocation and a free-list-internal allocation may both consume the
+region at the allocation cursor. Each follows the same transition and returns
+or retains the logical region rather than a bare region index.
 
 Different transactions store allocation entries in different transaction logs.
 The physically last allocation record observed in any one log is therefore not
-necessarily the newest allocator state. Replay uses the retained allocation
-record with the largest valid allocation sequence and its
-`allocation_head_after` value. Transaction cleanup frees are written in their
-ordered main-WAL cleanup range and advance the append cursor.
+necessarily the newest allocator state. Replay uses the retained
+allocation-consuming command with the largest valid
+`allocation_sequence_after` and restores both after-values recorded by that
+command. Transaction cleanup frees are written in their ordered main-WAL
+cleanup range and advance the append cursor; they do not advance the allocation
+sequence.
 
 Free-list appends update the WAL and the in-memory frontier; they do not modify
 a materialized region. Materialized free-list regions are immutable. When the
 current frontier must be materialized into its already reserved region `n`, the
 free list first uses a free-list-internal allocation command to consume a Ready
-Free region as reserved successor `n+1`. This does not transfer ownership. It
-then writes and syncs the complete frontier into region `n`, including the link
-to `n+1`, and writes and syncs a free-list tail-advance command in the WAL. The
-tail-advance command publishes `n` as the materialized tail and `n+1` as the new
-reserved successor. Runtime tail state advances only after that command is
-durable.
+Free region as reserved successor `n+1`. The command retains `n+1` as a logical
+region. This does not transfer ownership. The free list then writes and syncs
+the complete frontier into region `n`, including the link to `n+1`, and writes
+and syncs a free-list tail-advance command in the WAL. The tail-advance command
+publishes `n` as the materialized tail and `n+1` as the new reserved successor.
+Runtime tail state advances only after that command is durable.
 
 If replay finds the successor allocation without its corresponding durable
 tail-advance command, region `n` is an incomplete or unpublished
@@ -442,13 +464,13 @@ and contains:
 [Allocations][Free intents][Optional next segment][Collection operations]
 ```
 
-Allocation entries use WAL framing and contain the region, global allocation
-sequence, and `allocation_head_after`. The containing transaction establishes
-initial transaction ownership; a durable next-segment link or committed
-collection operation establishes the region's later structural role. Free
-intents are a packed list of collection-owned regions proposed for transfer to
-transaction cleanup on commit. Collection operations describe the private
-collection changes.
+Allocation entries use WAL framing and contain the allocated logical region,
+`allocation_head_after`, and `allocation_sequence_after`. The containing
+transaction establishes initial transaction ownership; a durable next-segment
+link or committed collection operation establishes the region's later
+structural role. Free intents are a packed list of collection-owned regions
+proposed for transfer to transaction cleanup on commit. Collection operations
+describe the private collection changes.
 
 Before commit, collection operations and free intents may be buffered in memory,
 but every allocation is appended and synced immediately in the transaction log
@@ -504,8 +526,18 @@ Ready Free -> Transaction Owned -> Collection Owned -> Transaction Owned -> Dirt
 
 Rollback may move a new allocation directly from Transaction Owned to Dirty
 Free. These arrows summarize common changes in derived relationships; they are
-not a stored state machine. Later invariants define when the relationships must
-be exclusive or complete.
+not a stored state machine.
+
+Every region must be accounted for exactly once: it is either Ready Free, Dirty
+Free, owned by one transaction, or owned by one collection. A region must never
+be used in more than one of these ways, and no region may be left unaccounted
+for. Free-list backing regions are owned by the Region Free List.
+
+A transaction owns an allocated or detached region until a collection takes
+ownership or cleanup returns it to the free list. Core preserves exact-once
+accounting through its operations and replay. User collections preserve it
+through their reachability contracts. Foreground operation and recovery replay
+derive the same accounting from the same durable records.
 
 Free-list backing regions have additional collection-local paths. A free-list
 command may use the region at the allocation cursor as new backing storage for
