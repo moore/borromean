@@ -53,140 +53,171 @@ preparation may occur without entering the top-level storage object.
 
 ## Ordered design discussion queue
 
-- [ ] **D24 — Free-list durable representation abstraction.** Agree how a basis,
-  materialized backing regions, WAL-resident tail, and the allocation/ready/
-  append cursors together represent one logical FIFO. The follow-up patch
-  changes only the abstract free-list representation.
-- [ ] **D25 — Transaction decision semantics.** Agree begin, sealed private
-  range, atomic main-WAL commit import, rollback interpretation, free-intent
-  visibility, and the preconditions revalidated before a decision. The follow-up
-  patch excludes cleanup and segment continuation.
-- [ ] **D26 — Transaction-segment layout and sealing.** Agree allocation,
-  collection-operation, and free-intent areas; framing versus bounded encoding;
-  exact segment bounds; and the seal that commit imports. The follow-up patch is
-  limited to one segment format.
-- [ ] **D27 — Transaction-log continuation and retention.** Agree reserved
-  continuation capacity, successor allocation/link ordering, reuse of a region
-  for multiple segments, and the final retained WAL reference that permits log-
-  region reclamation. The follow-up patch excludes format bootstrap.
-- [ ] **D28 — Free-list tail growth.** Preserve the collection-local ownership
-  rule and the agreed reserved-successor/materialize/tail-advance sequence, then
-  define the commands' exact cursor and sequence fields, replay comparisons,
-  admission reserves, I/O-error results, and crash cuts. The follow-up patch is
-  limited to tail growth.
-- [ ] **D29 — Free-list backing retirement.** Agree the atomic
-  unlink-and-append- dirty command, its cursor fields, validation, and crash
-  cuts. The follow-up patch is limited to retirement of one obsolete backing
-  region.
-- [ ] **D30 — Erase maintenance completion and failure.** Preserve the agreed
-  bounded prefix and stop-on-erase-error behavior, correct a zero selected count
-  to success with no I/O, and decide readiness-record write/sync error handling.
-  The follow-up patch is limited to the erase-maintenance operation.
-- [ ] **D31 — Allocator facts, checkpoints, and replay.** Replace “take the
-  largest allocation record” with an agreed basis/preamble checkpoint, ordered
-  validation of all later transaction and free-list-internal allocation facts,
-  duplicate/gap/FIFO rejection, retention, and exhaustion behavior. The follow-
-  up patch is limited to allocator recovery semantics.
-- [ ] **D32 — Cleanup and finish boundary.** Under exclusive top-level mutation,
-  decide one-call versus resumable cleanup, durable cursor and idempotence,
-  transaction-log cleanup, Drop behavior, finish publication, admission of
-  later mutations after interruption, and the response to cleanup I/O failure.
-  The follow-up patch excludes the commit/rollback decision already covered by
-  D25.
-- [ ] **D33 — WAL record framing and torn-tail continuation.** Agree separator,
-  escaping, checksum, granule padding, candidate discovery, corrupt versus torn
-  interpretation, and any recovery-boundary command. The follow-up patch changes
-  only append framing and tail scanning.
-- [ ] **D34 — Main-WAL successor allocation and rotation.** Agree control
-  reserve, transaction-only successor allocation, link and target-preamble
-  ordering, tail switch, allocator checkpoint capture, and rotation crash cuts.
-  The follow-up patch excludes head reclaim.
-- [ ] **D35 — Main-WAL head advancement and reclaim.** Agree how a new retained
-  head is published, how collection, allocator, transaction, and cleanup facts
-  are preserved, and when excluded WAL regions become reclaimable. The follow-up
-  patch is limited to reclaim and its crash cuts.
-- [ ] **D36 — Recursive progress and admission reserves.** Derive the ready
-  regions and control bytes required for every admitted operation to extend the
-  main WAL, transaction log, and free list and still roll back, clean up, and
-  finish. Account for every simultaneously open transaction. The follow-up patch
-  states the capacity/progress contract before any numeric implementation.
-- [ ] **D13 — Collection catalog and lifecycle.** Agree stable collection IDs
-  and type identities, bounded catalog capacity, create/open/drop behavior,
-  whether IDs can be reused, dropped tombstones, and generation/conflict state.
-  The follow-up patch is limited to the collections chapter.
+Complete the system narrative before beginning mechanical component chapters.
+The first group contains only decisions needed to make `000-system-narrative.md`
+internally accurate and complete at its intended level.
+
+### Finish the system narrative
+
+- [ ] **D24 — Free-list basis and frontier reconstruction.** Preserve the
+  agreed linked immutable backing regions, reserved materialization region,
+  reserved successor, and WAL-resident frontier. Clarify which published basis
+  starts reconstruction, how later WAL free-list operations extend it, and that
+  allocation, ready, and append are logical queue positions independent of
+  where their entries are stored. Do not reopen link or preallocation mechanics.
+  The follow-up patch changes only the free-list introduction in the narrative.
+- [ ] **D30A — Zero-work erase maintenance.** Correct a zero selected count to
+  success with no erase, WAL operation, or runtime change. The follow-up patch
+  changes only that narrative result; readiness-record failures remain D30B.
+- [ ] **D31A — Allocator checkpoint and later-fact summary.** Replace the
+  provisional claim that replay takes only the greatest allocation command with
+  the minimum narrative contract: replay starts from a retained allocator
+  checkpoint and validates every later allocation-consuming fact in order. The
+  follow-up patch does not define exact replay mechanics, which remain D31B.
+- [ ] **D13A — Collection identity and bounded catalog.** Agree stable
+  collection IDs and type identities, the format-time catalog bound, lookup,
+  and whether an ID can be reused. Generation existence is already established
+  by D23. The follow-up patch changes only the collection introduction.
+- [ ] **D13B — Collection create, open, and drop lifecycle.** Agree publication
+  of creation, open/type validation, drop visibility, tombstones, and generation
+  effects. The follow-up patch changes only the collection lifecycle summary.
 - [ ] **D14 — Collection basis, retained deltas, and WAL rereads.** Replace the
   three exclusive residence states with an agreed basis-plus-later-WAL-deltas
-  model and decide when retained WAL snapshots and updates may be reread. The
-  follow-up patch replaces only the semantic residency section; cache allocation
-  and scaling remain D39.
+  model and decide when retained WAL snapshots and updates may be reread after
+  startup. The follow-up patch replaces only the semantic residency section;
+  cache allocation and scaling remain D39.
 
-  Agreed premise from D04A: Each operation's effect has one authoritative
-  representation. The newest valid snapshot or head record establishes the
-  current collection root and supersedes earlier representations for that
-  collection. Only operation records later than that root remain separately
-  represented. Operation records are read from the WAL only during startup
-  replay; before their reconstructed RAM effects can be discarded, a snapshot
-  or region materialization must incorporate them. D14 still owns the complete
-  basis model and snapshot reread rules.
+  Agreed premise from D04A: The newest valid snapshot or head record establishes
+  the current collection root, and only later published operation records are
+  applied separately. D04A deliberately did not decide whether retained WAL
+  records may be reread after startup; D14 owns that decision.
 - [ ] **D15 — Snapshot and materialization equivalence.** Agree what complete
   logical state a WAL snapshot represents, how later deltas apply, and the read-
   result equivalence required of an immutable collection materialization. The
   follow-up patch changes only representation semantics.
-- [ ] **D16 — Collection reachability and traversal contract.** Agree committed
-  reachability for possibly multi-region structures, deterministic traversal
-  bounds and cycle errors, flush/compaction publication hooks, and reclaim
-  enumeration. The follow-up patch changes only the abstract collection/core
-  integration contract.
-- [ ] **D37 — Reader/writer access and fail-stop behavior.** Starting from the
-  agreed shared-read/exclusive-mutation invariant, classify top-level
-  operations, define internal call composition and required revalidation, and
-  decide which access remains admissible after ambiguous I/O failure or an
-  interrupted mutation. The follow-up patch is limited to the shared access and
-  fail-stop contract, not exact Rust signatures.
-- [ ] **D38 — Format bootstrap publication.** Using the already agreed format,
+- [ ] **D16 — Collection reachability and reclaim enumeration.** Agree bounded
+  traversal of committed multi-region structures, cycle failure, reachability
+  enumeration, reclamation enumeration, and any collection recovery hook needed
+  for failed preallocated materialization. D19 already owns stale-link
+  validation and D20 owns publication ordering. The follow-up patch changes only
+  the abstract collection/core integration contract.
+- [ ] **D16A — System-narrative completion review.** Review every section of
+  `000-system-narrative.md` for contradictions, unresolved mechanical claims,
+  repeated definitions, and missing forward references. Move mechanical detail
+  out of the narrative rather than deciding it during this item. Completion
+  authorizes starting component-chapter design; it does not create a component
+  chapter or implementation task.
+
+### Later component and composition design
+
+The following items remain relevant after the system narrative is complete.
+Their patches belong to the planned component and composition chapters unless
+an item explicitly says otherwise.
+
+- [ ] **D25 — Transaction decision protocol.** Agree begin, the sealed private
+  range imported by commit, rollback interpretation, free-intent visibility,
+  and decision preconditions not already settled by D20, D22, and D23. Exclude
+  cleanup and segment continuation.
+- [ ] **D26 — Transaction-segment layout and sealing.** Define enrollment,
+  allocation, materialization-intent, collection-operation, and free-intent
+  records; exact segment bounds; framing versus bounded encoding; continuation
+  position; and the seal imported by commit. The follow-up patch is limited to
+  one segment format.
+- [ ] **D27 — Transaction-log continuation and retention.** Agree reserved
+  continuation capacity, logical-region successor references, allocation/link
+  ordering, placement of multiple segments in one allocation, and the final
+  retained WAL reference that permits transaction-region reclamation. Include
+  retention of enrollment and materialization-intent records; exclude bootstrap.
+- [ ] **D28A — Free-list tail-growth commands and ordering.** Preserve the
+  collection-local ownership rule and reserved-successor/materialize/tail-
+  advance sequence. Define each command's logical-region, cursor, and allocation-
+  sequence fields and foreground ordering. Admission reserves remain D36.
+- [ ] **D28B — Free-list tail-growth interruption.** Define replay validation,
+  I/O-error outcomes, every crash cut, and erase-before-retry for an unmatched
+  successor-allocation obligation. Do not reopen D28A command meaning.
+- [ ] **D29 — Free-list backing retirement.** Define the atomic unlink-and-
+  append-to-dirty command for one obsolete backing logical region, including its
+  cursor fields, validation, replay, and crash cuts.
+- [ ] **D30B — Erase-maintenance completion and failure.** Preserve the bounded
+  prefix and stop-on-erase-error behavior, then define readiness-record
+  write/sync failure, replay, retry, and runtime results. D30A owns the zero-work
+  result.
+- [ ] **D31B — Allocator checkpoints and replay.** Define checkpoint contents,
+  ordered validation of all later transaction and free-list-internal allocation
+  facts, duplicate/gap/FIFO rejection, retention, and exhaustion behavior.
+- [ ] **D32 — Cleanup and finish protocol.** Under exclusive top-level mutation,
+  define the durable cleanup cursor, ordered and idempotent cleanup, finish
+  publication, transaction-log release, and interruption recovery. D37 owns
+  ambiguous-I/O access, D40 owns `Drop` and public resumability, and D42 owns
+  maintenance exposure.
+- [ ] **D33 — WAL record framing and torn-tail scanning.** Agree separator or
+  escaping rules, checksum, granule padding, complete versus torn final records,
+  and any local recovery-boundary command. Startup candidate discovery remains
+  D43 and composed corruption policy remains D44.
+- [ ] **D34 — Main-WAL successor allocation and rotation.** Agree control
+  reserve, transaction-only successor allocation, predecessor link and target-
+  prologue ordering, the greatest-valid-prologue tail switch established by
+  D21, allocator checkpoint capture, and every rotation crash cut. Exclude head
+  reclaim.
+- [ ] **D35 — Main-WAL head advancement and reclaim.** Define publication of a
+  new retained head, restatement of every recovery fact listed by D21, and the
+  point at which excluded WAL logical regions become reclaimable.
+- [ ] **D36 — Recursive progress and admission reserves.** Derive the ready
+  regions and control bytes required for every admitted operation to extend the
+  main WAL, transaction log, and free list and still roll back, clean up, and
+  finish. Account for the maximum open transactions, maximum collections per
+  transaction, and their possible simultaneous control obligations.
+- [ ] **D37 — Ambiguous-I/O fail-stop behavior.** Starting from the access
+  boundaries already agreed in D23, complete the top-level operation inventory
+  and decide which reads, recovery, or mutations remain admissible after an
+  ambiguous I/O failure or interrupted mutation. Do not reopen ordinary access
+  classification or choose exact Rust signatures.
+- [ ] **D38 — Format bootstrap publication.** Using the agreed format,
   ownership, WAL, transaction-log, free-list, continuation, and progress rules,
   specify construction of the initial carriers, metadata-last publication, and
-  every interrupted-format outcome. The follow-up patch changes only format.
+  every interrupted-format outcome.
 - [ ] **D39 — Bounded runtime-memory model.** Agree which state is proportional
-  to region count, collection capacity, transaction capacity, retained WAL
-  frontier, and collection frontier slots; decide what is materialized, cached,
-  or read on demand. The follow-up patch defines memory ownership and scaling,
+  to region count, collection capacity, the D23 transaction-collection product
+  bound, retained WAL frontier, and collection frontier slots; decide what is
+  materialized, cached, or read on demand. Define memory ownership and scaling,
   not exact private Rust fields. Use the
   [frontier-capacity design question](design-questions/frontier-capacity-preflight.md)
   as discussion input and feed the result back into D14 and D41.
 - [ ] **D40 — Public execution surface and resumability.** Agree blocking versus
-  caller-driven step/future APIs, safe interruption, how open transactions are
-  represented between calls without retaining top-level storage access, and no
-  implicit I/O on Drop. The follow-up patch defines behavior only; exact Rust
-  borrowing and signatures are separate mechanical-design work.
+  caller-driven step/future behavior, safe interruption, representation of open
+  transactions between calls, cleanup exposure, and no implicit I/O on `Drop`.
+  D23 already establishes that private work does not retain top-level access;
+  exact Rust borrowing and signatures remain mechanical work.
 - [ ] **D41 — Result, error, and pressure model.** Agree backend-error
   propagation; typed geometry, corruption, capacity, conflict, and
-  ambiguous-I/O failures; preflight rejection before I/O; and
-  success-with-maintenance-pressure reporting. The follow-up patch changes
-  only result semantics.
+  ambiguous-I/O failures; duplicate enrollment; both transaction limits;
+  sequence exhaustion; failed materialization; preflight rejection before I/O;
+  and success-with-maintenance-pressure reporting.
 - [ ] **D42 — Maintenance task inventory and budgets.** Agree the explicit tasks
   for erase, snapshot/materialization, WAL rotation/reclaim, free-list work, and
   transaction cleanup; their budgets; remaining-work signaling; and which work
-  foreground calls must never hide. The follow-up patch changes only maintenance
-  API semantics.
-- [ ] **D43 — Startup discovery pass.** Agree metadata validation, exactly one
-  fixed-header read per region, candidate indexing, WAL-preamble validation,
-  duplicate-sequence handling, and the prohibition on a second whole-device
-  scan. The follow-up patch is limited to discovery.
+  foreground calls must never hide. Apply the D32 and D40 cleanup/resumability
+  decisions rather than reopening them.
+- [ ] **D43 — Startup discovery pass.** Define metadata validation, exactly one
+  fixed-prefix read per region, bounded candidate indexing, header and WAL-
+  prologue validation, enforcement of D21 greatest-sequence tail selection, and
+  the prohibition on a second whole-device scan. Do not reopen tail selection.
 - [ ] **D44 — Replay order and corruption policy.** Agree selected head-to-tail
-  traversal, root and basis selection, allocator-fact ordering, retained-object
-  validation, bounded/cyclic traversal failures, and the rule against guessing
-  through ambiguity. The follow-up patch excludes recovery writes.
+  traversal, collection-basis selection, D31B allocator-fact ordering, retained-
+  object validation, bounded/cyclic traversal failures, and the rule against
+  guessing through structural ambiguity. Do not require recovery to detect
+  global relational-ownership violations, and exclude recovery writes.
 - [ ] **D45 — Recovery completion before open.** Agree completion of a decided
   transaction, rollback order for undecided transactions, unfinished WAL/free-
-  list operations, recovery capacity, idempotence, and the point at which normal
-  operations become available. The follow-up patch is limited to recovery work.
+  list operations, failed materialization-intent notification, erase-before-
+  retry for committed preallocations, recovery capacity, idempotence, and the
+  point at which normal operations become available.
 - [ ] **D46 — Relational models and crash evidence.** Agree replacements for the
   ownership pilot, focused WAL/allocator/transaction/free-list models,
-  refinement bridges to Rust transitions, and the required
-  failure-before/after-write, sync, and erase scenarios. The follow-up patch
-  creates the verification plan; each model or code change receives its own
-  later item.
+  logical-region and allocation-sequence propagation, materialization intents,
+  optimistic generation conflicts, bounded transaction-collection views,
+  refinement bridges to Rust transitions, and required failure-before/after-
+  write, sync, and erase scenarios. This item creates only the verification plan.
 - [ ] **D47 — Generate the post-design migration queue.** Once the design
   decisions are stable, derive ordered, independently reviewable items for each
   normative chapter patch, exact Rust API and private-state slice, model change,
@@ -247,7 +278,7 @@ later if other work remains more valuable.
   Commit, rollback, cleanup, and finish must not discover that WAL rotation
   requires a transaction after the current transaction can no longer grow.
 
-### Free-list collection chapter (D28-D30)
+### Free-list collection chapter (D28A-D30B)
 
 - [ ] Incorporate the agreed free-list self-growth rule into the chapter that
   defines the free-list collection. Moving the region at the allocation cursor
@@ -256,9 +287,9 @@ later if other work remains more valuable.
   exception.
 - [ ] Define the exact free-list-internal successor-allocation command. It
   consumes the region at the allocation cursor as reserved successor `n+1`,
-  advances allocator state without changing owners, and carries the global
-  allocation sequence and `allocation_head_after` needed to order it with
-  transaction-log allocations during replay.
+  advances allocator state without changing owners, and carries the successor
+  logical region, `allocation_head_after`, and `allocation_sequence_after`
+  needed to order it with transaction-log allocations during replay.
 - [ ] Define the exact materialization and tail-advance protocol. Free-list
   appends update the WAL and in-memory frontier rather than a materialized
   region. After reserving `n+1`, write and sync the frontier into already
