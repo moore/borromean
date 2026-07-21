@@ -483,6 +483,17 @@ possible example is a large file streamed over a slow network connection. The
 exact representation of an open transaction between calls belongs to the
 mechanical design.
 
+Transaction operations remain private until commit. Ordinary reads continue to
+see committed collection state and never see an open transaction's private
+operations. A read through a transaction sees its committed collection view
+with that transaction's private operations applied in order. It does not see
+another transaction's private operations.
+
+A durable commit publishes all of the transaction's collection operations
+together. Runtime applies them only after the commit record is durable, and
+replay applies the same operations when it finds that record. Rollback discards
+the private operations, so they never become visible outside the transaction.
+
 Replay reconstructs allocator and transaction state from durable operation
 records.
 
