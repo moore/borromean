@@ -160,3 +160,54 @@ Verification: Review ordinary and free-list-internal allocation, replay,
 preallocated-region retention, initialization, cleanup, and exhaustion
 against the decision. Run Markdown and diff checks, and leave D19A unchecked
 until that bounded patch has been reviewed.
+
+## D20 — Publication and runtime-apply rule
+
+Agree the ordinary ordering for preparing immutable bytes, syncing them,
+publishing reachability, applying the runtime transition, retaining the old
+representation, and treating an unpublished target after a crash. Separately
+define a durable claim or retention fact that may create a recoverable
+initialization obligation before target bytes are usable, as required by
+free-list-internal growth. The follow-up patch adds only these shared rules for
+later mechanical chapters.
+
+Decision: A region materialization becomes live only through a durable WAL
+record written after the complete region has been written and synced. Runtime
+applies the publication only after that record is durable. Recovery ignores a
+region without its publishing record even when its bytes appear complete, and
+the previous materialization remains live until its replacement is published.
+
+A collection materializes a preallocated region only through a transaction.
+Before writing the region, the transaction writes and syncs a materialization
+intent in its immediately durable allocation area. The intent identifies the
+collection and logical region but does not make the region live. Commit is the
+successful outcome and is allowed only after every intended materialization is
+completely written and synced. Rollback, including recovery of an undecided
+transaction, is the failed outcome. Foreground processing and replay report the
+same outcome to the collection.
+
+A failed intent leaves a collection-owned preallocated logical region requiring
+erase. It must be successfully erased before another write or use as a completed
+materialization. A region allocated privately by the same transaction and not
+named by a committed reference instead returns to the dirty free-list tail
+through rollback cleanup. Free-list materialization does not use a transaction:
+its durable successor-allocation command establishes the obligation, its
+durable tail advance publishes completion, and an unmatched obligation requires
+erase before retry.
+
+Rationale: The transaction decision supplies the materialization outcome, so no
+checksum or separate completion record is needed. Recording intent before the
+first region write lets recovery conservatively identify a target that may have
+been partially programmed. A committed reference fixes the logical region, so
+failed preallocated materialization must retry that region rather than return it
+to the free list.
+
+Patch scope: Add only the shared publication rule, transactional preallocated-
+materialization rule, and free-list correspondence to
+`000-system-narrative.md`; add the deferred wear concern to the backlog. Do not
+define exact record codecs, transaction-area layout, notification APIs, retry
+scheduling, WAL sequence mechanics, implementation, or models.
+
+Verification: Review publication crash cuts, commit and rollback outcomes,
+committed and private target disposition, erase-before-retry, and the existing
+free-list interrupted-materialization path. Run Markdown and diff checks.

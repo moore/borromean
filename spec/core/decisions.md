@@ -9,7 +9,7 @@ work. Decision identifiers remain stable when records move between files.
 - [Shared vocabulary](decisions/shared-vocabulary.md) — D04A, D04B1, D04B2,
   D04B3, D04C1, D04C2, D04C3, and D04D.
 - [Storage, I/O, and format](decisions/storage-io-and-format.md) — D06–D12.
-- [Region lifecycle](decisions/region-lifecycle.md) — D17–D19A.
+- [Region lifecycle](decisions/region-lifecycle.md) — D17–D20.
 
 The specification remains authoritative for adopted behavior. These records
 retain the decision, rationale, bounded patch scope, and review history that

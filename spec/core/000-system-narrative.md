@@ -79,10 +79,8 @@ main-WAL tail moves through the region area as the database changes.
 
 The fixed database header contains only immutable facts, such as the database
 geometry and physical storage parameters. At startup, Borromean uses those
-facts to locate the region headers. It scans all region headers to find the
-current WAL tail, which points to the retained WAL head. The WAL range from the
-retained head through the current tail is the root of the database. Replaying
-that range recovers the current collection roots.
+facts to scan the region area and discover the rolling main-WAL root. The
+main-WAL introduction defines how startup selects that root.
 
 Larger regions reduce the number of headers that must be scanned at startup,
 but region size also affects RAM use. Region size therefore trades startup scan
@@ -284,6 +282,32 @@ and record lifecycles:
 The WAL has two parts: the shared main WAL and transaction regions assigned to
 individual transactions.
 
+The main WAL is an ordered chain of logical regions and is the root from which
+recovery reconstructs shared database state. The retained head is the first
+region recovery must replay. Startup validates each main-WAL region header and
+prologue and selects the valid prologue with the greatest WAL sequence as the
+current tail. A torn or invalid prologue is not a tail candidate. Two valid
+prologues with the same greatest sequence cause open to fail. The runtime append
+position is the first unused record position in the selected tail.
+
+Each main-WAL region prologue contains its WAL sequence and a checkpoint of the
+retained head current when that region was initialized. A later durable
+head-advance record in the selected tail may supersede that checkpoint.
+Recovery uses the latest valid retained head and follows the chain from that
+head through the selected tail.
+
+WAL sequences belong only to the WAL and are separate from free-list allocation
+sequences. A new main-WAL region receives the sequence in the current tail's
+prologue plus one. WAL sequences never repeat or wrap. If the sequence cannot
+advance, the operation returns `SequenceExhausted` before issuing media I/O.
+
+The retained head may advance past a main-WAL region only after every recovery
+fact still needed from that region has been superseded or restated at or after
+the new head. These facts include collection roots and later operations,
+allocator state, references to open transaction logs, transaction decisions,
+unfinished cleanup, and materialization intents. A region before the new head
+may be reclaimed only after publication of that head is durable.
+
 Other higher-level collection types are defined by consumers of Borromean core,
 each defining their own records, operations, region formats, and reachability
 rules. Core defines and enforces the transitions that move responsibility for a
@@ -335,6 +359,13 @@ new durable root, it replaces the previous root as the selected starting basis.
 The new basis may contain earlier effects directly or reach them through
 references to earlier bases. An earlier basis or record remains retained
 whenever the new basis still depends on it.
+
+A region materialization becomes live only through a durable WAL record.
+Borromean writes and syncs the complete region before writing that record.
+Runtime state changes only after the record is durable. If recovery does not
+find the publishing record, it does not use the region even if its bytes appear
+complete. The previous materialization remains live until its replacement is
+published.
 
 The later collection and runtime chapters define when a frontier must be
 snapshotted or materialized and which durable representations may be read after
@@ -412,9 +443,14 @@ and syncs a free-list tail-advance command in the WAL. The tail-advance command
 publishes `n` as the materialized tail and `n+1` as the new reserved successor.
 Runtime tail state advances only after that command is durable.
 
+Free-list materialization does not use a transaction. The durable successor-
+allocation command establishes the materialization obligation, and the durable
+tail-advance command publishes its completion.
+
 If replay finds the successor allocation without its corresponding durable
 tail-advance command, region `n` is an incomplete or unpublished
-materialization. Recovery erases region `n` before retrying the materialization even if its bytes appear valid.
+materialization. Recovery erases region `n` before retrying the materialization,
+even if its bytes appear valid.
 
 When the allocation cursor crosses into a new materialized free-list region, the
 old representation region is no longer needed as backing storage. Moving that
@@ -471,6 +507,25 @@ link or committed collection operation establishes the region's later
 structural role. Free intents are a packed list of collection-owned regions
 proposed for transfer to transaction cleanup on commit. Collection operations
 describe the private collection changes.
+
+A collection materializes a preallocated region through a transaction. Before
+writing the region, the transaction writes and syncs a materialization intent
+in its allocation area. The intent identifies the collection and logical region
+and does not make the region live.
+
+The transaction may commit only after every intended materialization has been
+completely written and synced. Commit means the materialization succeeded and
+makes the transaction's collection changes live. Rollback means the
+materialization failed. Recovery treats an undecided transaction as rolled
+back. Foreground decision processing and replay report the same outcome to the
+collection.
+
+A failed materialization intent leaves a preallocated logical region requiring
+erase. The region remains owned by its collection and is not Dirty Free. It must
+be successfully erased before it is written again or used as a completed
+materialization. If the region was allocated privately by the same transaction
+and no committed collection reference names it, rollback cleanup instead
+returns it to the dirty end of the free list.
 
 Before commit, collection operations and free intents may be buffered in memory,
 but every allocation is appended and synced immediately in the transaction log
