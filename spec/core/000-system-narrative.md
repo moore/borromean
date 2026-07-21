@@ -112,8 +112,8 @@ interpret the store:
    encoded metadata length, and an integrity check.
 2. The database-header span length, erase-block size, region size, region count,
    logical write granule, and erased byte.
-3. Format-time capacity limits that recovery must know, such as the number of
-   transaction-log slots.
+3. Format-time capacity limits that recovery must know, including the maximum
+   open transactions and maximum collections enrolled in one transaction.
 4. Values needed to recognize encoded data, such as the WAL record marker.
 
 Runtime tuning settings are not stored in the database header because they do
@@ -493,6 +493,41 @@ A durable commit publishes all of the transaction's collection operations
 together. Runtime applies them only after the commit record is durable, and
 replay applies the same operations when it finds that record. Rollback discards
 the private operations, so they never become visible outside the transaction.
+
+Before a transaction reads or changes a collection, it enrolls that collection.
+Enrollment captures the collection's committed view and generation under shared
+top-level access. A collection may be enrolled only once in a transaction. A
+second enrollment attempt fails without changing the transaction. Different
+transactions may enroll the same collection; enrollment does not lock the
+collection until commit.
+
+Commit enters the top-level storage object with exclusive access and compares
+the current generation of every modified collection with the generation
+captured at enrollment. It validates every modified collection before writing
+the commit record. If any generation differs, commit reports a conflict without
+writing a commit record or publishing any private operation. A successful
+commit advances the generation of every modified collection.
+
+The format fixes a maximum number of open transactions and a maximum number of
+collections enrolled in one transaction. Beginning a transaction at the first
+limit fails without writing a begin record. Enrolling a new collection at the
+second limit fails without changing the transaction.
+
+The number of transaction-collection view buffers required by runtime and
+recovery is bounded by:
+
+```text
+maximum open transactions * maximum collections per transaction
+```
+
+The later memory chapter defines each buffer's size and storage.
+
+Beginning a transaction, consuming a free-list allocation, committing, rolling
+back, cleanup, and finish change shared state and require exclusive top-level
+access. Capturing an enrollment view requires shared access. Transaction-private
+operations and transaction-log preparation may proceed without retaining
+top-level access. Commit revalidates the captured generations because shared
+state may change between those calls.
 
 Replay reconstructs allocator and transaction state from durable operation
 records.

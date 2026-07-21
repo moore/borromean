@@ -53,12 +53,6 @@ preparation may occur without entering the top-level storage object.
 
 ## Ordered design discussion queue
 
-- [ ] **D23 — Transaction enrollment and mutation serialization.** Starting
-  from shared-read/exclusive-mutation top-level access, agree collection
-  enrollment, generation validation, competing-writer rejection, bounded
-  simultaneous open transactions, and which work may occur between exclusive
-  mutating calls. The follow-up patch changes only concurrency rules and does
-  not choose exact Rust borrowing or transaction-handle types.
 - [ ] **D24 — Free-list durable representation abstraction.** Agree how a basis,
   materialized backing regions, WAL-resident tail, and the allocation/ready/
   append cursors together represent one logical FIFO. The follow-up patch

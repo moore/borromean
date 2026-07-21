@@ -11,7 +11,7 @@ work. Decision identifiers remain stable when records move between files.
 - [Storage, I/O, and format](decisions/storage-io-and-format.md) — D06–D12.
 - [Region lifecycle](decisions/region-lifecycle.md) — D17–D20.
 - [Main WAL](decisions/main-wal.md) — D21.
-- [Transactions](decisions/transactions.md) — D22.
+- [Transactions](decisions/transactions.md) — D22–D23.
 
 The specification remains authoritative for adopted behavior. These records
 retain the decision, rationale, bounded patch scope, and review history that
